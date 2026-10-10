@@ -29,6 +29,11 @@ pub async fn place_order(
                 message: None,
             });
         }
+        // Accepted without an id: the order may exist (LOG-08).
+        return Err(AppError::uncertain(
+            "Kotak accepted the order but returned no order number. Check the order book before placing it again.",
+            None,
+        ));
     }
     tracing::warn!(status = status.as_u16(), "Kotak refused an order");
     Err(kotak_error(status, &v, "Kotak did not accept the order."))

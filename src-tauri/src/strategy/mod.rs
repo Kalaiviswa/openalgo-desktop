@@ -45,6 +45,7 @@ pub mod checkpoint;
 pub mod dispatch;
 pub mod engine;
 pub mod order_events;
+pub mod reconcile;
 pub mod recovery;
 pub mod resolver;
 pub mod risk_adapter;
@@ -119,6 +120,10 @@ pub struct StrategyModule {
     day_run_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     tasks: Mutex<JoinSet<()>>,
     shutdown: CancellationToken,
+    /// Reads that missed each unconfirmed order row (pruned every pass).
+    pub(crate) reconcile_absence: crate::services::order_reconciler::AbsenceTracker,
+    /// Unconfirmed rows already reported as ambiguous (pruned every pass).
+    pub(crate) reconcile_ambiguous: Mutex<HashSet<String>>,
 }
 
 impl StrategyModule {
@@ -146,6 +151,8 @@ impl StrategyModule {
             day_run_locks: Mutex::new(HashMap::new()),
             tasks: Mutex::new(JoinSet::new()),
             shutdown: CancellationToken::new(),
+            reconcile_absence: crate::services::order_reconciler::AbsenceTracker::new(),
+            reconcile_ambiguous: Mutex::new(HashSet::new()),
         })
     }
 

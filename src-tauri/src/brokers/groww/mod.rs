@@ -273,6 +273,14 @@ pub(crate) fn in_transit(e: AppError, what: &str) -> AppError {
                 what,
                 url_safe_error(err)
             );
+            // Sent and then lost: the order may be at Groww. Its outcome is
+            // unknown, never a refusal (LOG-08).
+            if what == "place" && crate::brokers::common::outcome::after_send(err) {
+                return AppError::uncertain(
+                    "Groww did not answer after the order was sent. It may have been placed: check the order book before placing it again.",
+                    None,
+                );
+            }
             AppError::Broker(match what {
                 "place" | "modify" | "cancel" => format!(
                     "Could not reach Groww to {} the order. Check the order book before retrying.",

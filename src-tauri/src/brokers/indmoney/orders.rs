@@ -139,9 +139,9 @@ pub fn place_outcome(status: u16, v: &Value) -> Result<String> {
     let st = v.get("status").and_then(Value::as_str);
     if (status == 200 || status == 201) && st == Some("success") {
         return extract_order_id(v).ok_or_else(|| {
-            AppError::Broker(
-                "INDmoney accepted the order but returned no order id. Check the order book."
-                    .into(),
+            AppError::uncertain(
+                "INDmoney accepted the order but returned no order id. Check the order book.",
+                None,
             )
         });
     }
@@ -155,8 +155,14 @@ pub fn place_outcome(status: u16, v: &Value) -> Result<String> {
                 .to_ascii_lowercase()
                 .contains("no order number in rs response")
             {
+                // The web answers with the made-up id `ORDER_PLACED`; an id
+                // no book carries is worse than none. The outcome is
+                // unknown, and the reconciler looks the order up (LOG-08).
                 tracing::warn!("INDmoney order likely placed despite: {}", msg);
-                return Ok("ORDER_PLACED".into());
+                return Err(AppError::uncertain(
+                    "INDmoney did not return an order number. The order was likely placed: check the order book before placing it again.",
+                    None,
+                ));
             }
         }
     }

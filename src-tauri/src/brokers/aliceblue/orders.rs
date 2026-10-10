@@ -134,9 +134,9 @@ pub async fn place_order(
         return Err(broker_error(&first, "AliceBlue did not accept the order."));
     }
     if order_id.is_empty() {
-        return Err(AppError::Broker(
-            "AliceBlue accepted the request but returned no order id. Check the order book before retrying."
-                .into(),
+        return Err(AppError::uncertain(
+            "AliceBlue accepted the request but returned no order id. Check the order book before retrying.",
+            None,
         ));
     }
     Ok(OrderResponse {
