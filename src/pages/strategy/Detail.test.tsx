@@ -1411,3 +1411,40 @@ describe('strategy exit action toasts describe proven state only', () => {
     )
   })
 })
+
+describe('unreadable strategy records (SM-04)', () => {
+  it('says the records could not be read instead of showing an empty history', async () => {
+    rest.get.mockImplementation((url: string) => {
+      if (url === '/strategy/api/strategies/7') {
+        return Promise.resolve({ data: { data: strategy } })
+      }
+      if (url === '/strategy/api/strategies/7/orders') {
+        return Promise.reject(new Error('Request failed with status code 500'))
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+
+    renderDetail()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "Some of this strategy's records could not be read"
+    )
+  })
+
+  it('shows no such notice when every record was read', async () => {
+    rest.get.mockImplementation((url: string) => {
+      if (url === '/strategy/api/strategies/7') {
+        return Promise.resolve({ data: { data: strategy } })
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+
+    renderDetail()
+
+    await screen.findByText('Broker truth')
+    await waitFor(() =>
+      expect(rest.get).toHaveBeenCalledWith('/strategy/api/strategies/7/orders', expect.anything())
+    )
+    expect(screen.queryByText(/records could not be read/)).toBeNull()
+  })
+})

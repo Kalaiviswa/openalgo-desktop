@@ -2830,6 +2830,17 @@ export default function StrategyDetail() {
         ) : null}
       </div>
 
+      {/* Desktop change (SM-04): the server now answers a failed read with an
+          error instead of an empty list, so an empty table below never
+          stands in for "no orders" when the records could not be read. */}
+      {(ordersQuery.isError || runsQuery.isError || eventsQuery.isError) && (
+        <p role="alert" className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+          Some of this strategy's records could not be read, so the orders, trades, positions,
+          events or history below may be incomplete. Reload the page; if it keeps happening, restart
+          the app.
+        </p>
+      )}
+
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap gap-1 bg-transparent">
           <TabsTrigger value="live">Live</TabsTrigger>
