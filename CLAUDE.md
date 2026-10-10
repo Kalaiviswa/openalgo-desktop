@@ -600,6 +600,21 @@ Every flaky test found so far was a race, not a slow machine:
   one still counting, and count the attempt under the same lock that checks
   the wait, before verifying (`LoginBackoff::claim`), or parallel requests
   all pass the check.
+- A request without a signed-in session acts only on its own browser
+  session. An anonymous `/auth/logout` once cleared every session, so
+  anything that could reach the port, a tunnel included, kept the trader
+  signed out.
+- End a session in memory before writing that to the database
+  (`BrokerAuthService::revoke`): a failed write must never leave a broker
+  session that trades behind a "Logged out". The failure sets
+  `revoke_pending`, which blocks resume until the session poll or the next
+  sign-in writes it.
+- Only account setup creates key material. A keychain that is locked or
+  denies access at startup looks like no keychain at all
+  (`KeyStoreError::Unavailable`); a sign-in that then wrote a vault with new
+  keys locked the account out for good. Keychain writes put the data key
+  last and read both keys back; a password change writes the new vault
+  beside the old one before the hash changes.
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
 
