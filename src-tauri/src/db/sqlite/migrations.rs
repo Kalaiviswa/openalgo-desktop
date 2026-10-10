@@ -89,6 +89,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
     run_rust_migration(conn, "081_broker_rate_plan", super::rate_plan::migrate)?;
     run_rust_migration(conn, "082_key_vault", super::key_vault::migrate)?;
+    run_rust_migration(conn, "083_symtoken_owner", super::symbol::migrate_owner)?;
     run_rust_migration(
         conn,
         "084_openscript_unconfirmed",
