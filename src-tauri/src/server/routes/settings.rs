@@ -304,12 +304,16 @@ mod tests {
 
         let e = save_effect(&before, &cfg("127.0.0.1", 5000, 8770), listening);
         assert_eq!((e.applied, e.pending), (vec!["ws_port"], vec![]));
-        assert!(e.message.contains("moves to 127.0.0.1:8770 within a few seconds"));
+        assert!(e
+            .message
+            .contains("moves to 127.0.0.1:8770 within a few seconds"));
         assert!(!e.message.contains("restart"));
 
         let e = save_effect(&before, &cfg("127.0.0.1", 5100, 8765), listening);
         assert_eq!((e.applied, e.pending), (vec![], vec!["http_port"]));
-        assert!(e.message.contains("changes to 127.0.0.1:5100 when you restart"));
+        assert!(e
+            .message
+            .contains("changes to 127.0.0.1:5100 when you restart"));
 
         let e = save_effect(&before, &cfg("0.0.0.0", 5000, 8765), listening);
         assert_eq!((e.applied, e.pending), (vec!["ws_host"], vec!["http_host"]));

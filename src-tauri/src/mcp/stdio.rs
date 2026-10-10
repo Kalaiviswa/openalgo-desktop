@@ -416,7 +416,12 @@ mod tests {
             assert!(parse_args(&s(&["--url", ok])).is_ok(), "{}", ok);
         }
         for bad in ["ftp://127.0.0.1", "127.0.0.1:5000", "not a url"] {
-            assert_eq!(parse_args(&s(&["--url", bad])).unwrap_err(), BAD_URL, "{}", bad);
+            assert_eq!(
+                parse_args(&s(&["--url", bad])).unwrap_err(),
+                BAD_URL,
+                "{}",
+                bad
+            );
         }
     }
 
@@ -434,7 +439,13 @@ mod tests {
                 (Some("0"), false),
             ] {
                 let app_dev = crate::config::dev_ports_from(value, debug);
-                assert_eq!(app_dev, debug || dev_in_release, "{:?} debug={}", value, debug);
+                assert_eq!(
+                    app_dev,
+                    debug || dev_in_release,
+                    "{:?} debug={}",
+                    value,
+                    debug
+                );
                 let port = if app_dev { 5500 } else { 5000 };
                 assert_eq!(
                     default_url_for(value, debug),

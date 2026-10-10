@@ -95,19 +95,19 @@ async fn sec01_anonymous_logout_ends_only_its_own_session() {
 
     // GET with no cookie and no Fetch Metadata, in process and through
     // the tunnel.
-    for r in [
-        get("/auth/logout"),
-        {
-            let mut r = get("/auth/logout");
-            r.headers_mut()
-                .insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
-            r
-        },
-    ] {
+    for r in [get("/auth/logout"), {
+        let mut r = get("/auth/logout");
+        r.headers_mut()
+            .insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        r
+    }] {
         let (s, headers, _) = h.send(r).await;
         assert_eq!(s, StatusCode::FOUND, "still answers like the web");
         assert_eq!(headers[header::LOCATION], "/login");
-        assert!(signed_in(&h, &trader).await, "trader signed out by a stranger");
+        assert!(
+            signed_in(&h, &trader).await,
+            "trader signed out by a stranger"
+        );
     }
 
     // POST with an anonymous session and its CSRF token (anyone can get
@@ -129,7 +129,10 @@ async fn sec01_anonymous_logout_ends_only_its_own_session() {
             .is_none(),
         "the caller's own session ends"
     );
-    assert!(signed_in(&h, &trader).await, "trader signed out by a stranger");
+    assert!(
+        signed_in(&h, &trader).await,
+        "trader signed out by a stranger"
+    );
     assert!(h.ctx().is_broker_connected(), "broker session kept");
     assert!(stored_session_active(&h), "stored broker session kept");
     let (s, _) = h
@@ -177,8 +180,15 @@ async fn sec01_anonymous_logout_over_a_real_connection() {
     let r = client.get(&url).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 302);
     let r = client.post(&url).send().await.unwrap();
-    assert_eq!(r.status().as_u16(), 400, "a POST without a session is refused");
-    assert!(signed_in(&h, &trader).await, "trader signed out by a stranger");
+    assert_eq!(
+        r.status().as_u16(),
+        400,
+        "a POST without a session is refused"
+    );
+    assert!(
+        signed_in(&h, &trader).await,
+        "trader signed out by a stranger"
+    );
     assert!(h.ctx().is_broker_connected());
 }
 
@@ -212,7 +222,10 @@ async fn sec05_logout_ends_the_session_even_when_the_write_fails() {
     assert!(stored_session_active(&h), "the write really failed");
 
     assert!(h.ctx().get_broker_session().is_none(), "session in memory");
-    assert!(h.ctx().runtime.active_broker().is_none(), "streaming stopped");
+    assert!(
+        h.ctx().runtime.active_broker().is_none(),
+        "streaming stopped"
+    );
     assert!(api_key_refused(&h, &key).await, "the API key still trades");
     assert!(BrokerAuthService::revoke_is_pending(h.ctx()));
     // A sign-in (or a restart's first sign-in) does not bring it back.
@@ -247,7 +260,10 @@ async fn sec05_daily_expiry_with_a_failed_write_stops_streaming() {
     let before = ist(2026, 10, 6, 2, 59);
     h.t.clock.set(ist(2026, 10, 6, 3, 0));
     assert!(crate::session::expire_if_crossed(h.ctx(), before).await);
-    assert!(h.ctx().runtime.active_broker().is_none(), "streaming stopped");
+    assert!(
+        h.ctx().runtime.active_broker().is_none(),
+        "streaming stopped"
+    );
     assert!(h.ctx().get_broker_session().is_none());
     assert!(BrokerAuthService::try_resume(h.ctx())
         .await
@@ -278,7 +294,10 @@ async fn sec05_broker_switch_with_a_failed_write_ends_the_old_session() {
     assert_eq!(s, StatusCode::OK, "{}", v);
     assert_eq!(v["signed_out_of"], "zerodha");
     assert!(h.ctx().get_broker_session().is_none());
-    assert!(h.ctx().runtime.active_broker().is_none(), "streaming stopped");
+    assert!(
+        h.ctx().runtime.active_broker().is_none(),
+        "streaming stopped"
+    );
     assert!(api_key_refused(&h, &key).await);
     assert!(BrokerAuthService::try_resume(h.ctx())
         .await
@@ -300,7 +319,10 @@ async fn sec05_account_reset_always_stops_streaming() {
     AuthService::reset_account_everywhere(h.ctx())
         .await
         .unwrap();
-    assert!(h.ctx().runtime.active_broker().is_none(), "streaming stopped");
+    assert!(
+        h.ctx().runtime.active_broker().is_none(),
+        "streaming stopped"
+    );
     assert!(!h.ctx().is_broker_connected());
     assert!(!stored_session_active(&h), "the reset deleted the row");
     assert!(
@@ -418,10 +440,7 @@ async fn sec03_a_locked_keychain_never_gets_new_keys() {
         );
         let (s, _, v) = send_to(
             &ctx,
-            multipart(
-                "/auth/login",
-                &[("username", name), ("password", PASSWORD)],
-            ),
+            multipart("/auth/login", &[("username", name), ("password", PASSWORD)]),
         )
         .await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
@@ -494,10 +513,7 @@ async fn sec09_a_folder_saved_with_other_keys_is_explained() {
     }
     let (s, _, v) = send_to(
         &ctx,
-        multipart(
-            "/auth/login",
-            &[("username", USER), ("password", PASSWORD)],
-        ),
+        multipart("/auth/login", &[("username", USER), ("password", PASSWORD)]),
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{}", v);
@@ -537,10 +553,7 @@ async fn only_password_signs_in(dir: &tempfile::TempDir, works: &str, fails: &st
     assert!(!signs_in(&ctx, fails), "{} signs in", fails);
     assert!(signs_in(&ctx, works), "{} does not sign in", works);
     assert_eq!(kite_key(&ctx), "kiteapikey");
-    assert!(!dir
-        .path()
-        .join(crate::security::VAULT_NEXT_FILE)
-        .exists());
+    assert!(!dir.path().join(crate::security::VAULT_NEXT_FILE).exists());
     close(ctx).await;
     let ctx = reopen(dir);
     assert!(signs_in(&ctx, works), "{} after a second restart", works);
@@ -704,7 +717,8 @@ async fn cfg01_an_emptied_address_goes_back_to_automatic() {
     h.setup();
     h.save_broker_credentials();
     let (cookie, csrf) = h.session(true);
-    let body = json!({"websocket_url": "wss://x.ngrok.app/ws", "host_server": "https://x.ngrok.app"});
+    let body =
+        json!({"websocket_url": "wss://x.ngrok.app/ws", "host_server": "https://x.ngrok.app"});
     let (s, v) = post_settings(&h, &cookie, &csrf, body).await;
     assert_eq!(s, StatusCode::OK, "{}", v);
     assert_eq!(feed_address(&h, &cookie).await, "wss://x.ngrok.app/ws");

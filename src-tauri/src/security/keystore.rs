@@ -161,9 +161,7 @@ impl FaultyKeyStore {
 
     fn check(&self) -> Result<(), KeyStoreError> {
         if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(KeyStoreError::Unavailable(
-                "the keychain is locked".into(),
-            ));
+            return Err(KeyStoreError::Unavailable("the keychain is locked".into()));
         }
         Ok(())
     }
