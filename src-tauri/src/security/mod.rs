@@ -491,8 +491,7 @@ fn open_vault_file(path: &Path, password: &str) -> Result<Option<Keys>> {
     let salt = B64.decode(&vault.salt).map_err(|_| damaged())?;
     let kek = hashing::derive_kek(password, &salt)?;
     let cipher = DataCipher::new(&kek)?;
-    let plain = match cipher.decrypt_bytes(&vault.ciphertext, &vault.nonce, &Aad::fixed("vault"))
-    {
+    let plain = match cipher.decrypt_bytes(&vault.ciphertext, &vault.nonce, &Aad::fixed("vault")) {
         Ok(p) => p,
         Err(_) => return Ok(None),
     };
