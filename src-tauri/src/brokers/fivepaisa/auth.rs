@@ -36,7 +36,7 @@ pub fn split_api_key(raw: &str) -> Result<ApiKeyParts> {
     let parts: Vec<&str> = raw.trim().split(":::").collect();
     if parts.len() != 3 || parts.iter().any(|p| p.trim().is_empty()) {
         return Err(AppError::Validation(
-            "The 5paisa API key must be entered as api_key:::user_id:::client_id (app key, app user id and client code). Fix it on the broker settings page."
+            "The 5paisa API key must be entered as api_key:::user_id:::client_id (app key, app user id and client code). Fix it on the Broker Configuration page."
                 .into(),
         ));
     }
@@ -109,7 +109,7 @@ pub async fn authenticate(b: &FivepaisaBroker, creds: BrokerCredentials) -> Resu
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::Validation(
-                "Your 5paisa encryption key is missing. Add it as the API secret on the broker settings page."
+                "Your 5paisa encryption key is missing. Add it on the Broker Configuration page."
                     .into(),
             )
         })?;
@@ -160,7 +160,7 @@ pub async fn authenticate(b: &FivepaisaBroker, creds: BrokerCredentials) -> Resu
             .unwrap_or_else(|| "Failed to obtain access token. Please try again.".into());
         tracing::warn!(broker = "fivepaisa", "5paisa access token refused");
         return Err(AppError::Auth(format!(
-            "5paisa did not issue a session: {}. Check the user id and encryption key on the broker settings page.",
+            "5paisa did not issue a session: {}. Check the user id and encryption key on the Broker Configuration page.",
             msg
         )));
     };

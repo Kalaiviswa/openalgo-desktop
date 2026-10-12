@@ -78,8 +78,7 @@ fn creds_ucc_token(creds: &BrokerCredentials) -> Result<(String, String)> {
     let ucc = creds.api_key.trim().to_string();
     if ucc.is_empty() {
         return Err(AppError::Validation(
-            "Your Kotak UCC is missing. Enter it as the API key in Profile, Broker Configuration."
-                .into(),
+            "Your Kotak UCC is missing. Enter it on the Broker Configuration page.".into(),
         ));
     }
     let token = creds
@@ -89,7 +88,7 @@ fn creds_ucc_token(creds: &BrokerCredentials) -> Result<(String, String)> {
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
             AppError::Validation(
-                "Your Kotak Neo access token is missing. Enter it as the API secret in Profile, Broker Configuration."
+                "Your Kotak Neo access token is missing. Enter it on the Broker Configuration page."
                     .into(),
             )
         })?;

@@ -195,6 +195,12 @@ pub fn has_revoked(conn: &Connection) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// Remove the stored session row of one broker (forgetting the broker).
+pub fn delete(conn: &Connection, broker_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM auth WHERE broker_id = ?1", [broker_id])?;
+    Ok(())
+}
+
 pub fn delete_all(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM auth", params![])?;
     Ok(())

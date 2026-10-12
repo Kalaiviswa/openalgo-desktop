@@ -38,12 +38,12 @@ pub async fn authenticate(b: &ZerodhaBroker, creds: BrokerCredentials) -> Result
         })?;
     let api_secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your Zerodha API secret is missing. Add it on the broker settings page.".into(),
+            "Your Zerodha API secret is missing. Add it on the Broker Configuration page.".into(),
         )
     })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Zerodha API key is missing. Add it on the broker settings page.".into(),
+            "Your Zerodha API key is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let sum = checksum(&creds.api_key, &request_token, &api_secret);
@@ -68,7 +68,7 @@ pub async fn authenticate(b: &ZerodhaBroker, creds: BrokerCredentials) -> Result
                     .into(),
             ),
             "InputException" => AppError::Auth(
-                "Zerodha did not accept your API key or secret. Check them on the broker settings page."
+                "Zerodha did not accept your API key or secret. Check them on the Broker Configuration page."
                     .into(),
             ),
             t => match kite_error(t, &env.message) {

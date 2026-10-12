@@ -53,12 +53,12 @@ pub async fn authenticate(b: &FyersBroker, creds: BrokerCredentials) -> Result<A
         })?;
     let secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your Fyers app secret is missing. Add it on the broker settings page.".into(),
+            "Your Fyers app secret is missing. Add it on the Broker Configuration page.".into(),
         )
     })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Fyers app id is missing. Add it on the broker settings page.".into(),
+            "Your Fyers app id is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let body = json!({

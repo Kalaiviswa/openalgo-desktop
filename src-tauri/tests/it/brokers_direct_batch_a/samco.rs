@@ -143,7 +143,7 @@ async fn sign_in_errors_name_the_fix() {
     let b = broker(&fake);
     let e = b.authenticate(creds("BAD", Some("S"))).await.unwrap_err();
     assert!(e.client_message().contains("Invalid API key"));
-    assert!(e.client_message().contains("Profile, Broker Configuration"));
+    assert!(e.client_message().contains("the Broker Configuration page"));
     let e = b
         .authenticate(creds("KEY", Some("WRONG")))
         .await

@@ -117,6 +117,10 @@ async fn finish_sign_in(
         x.pending_totp_user = None;
         x.pending_totp_started = None;
     });
+    // The one routing rule after a sign-in: the dashboard when the saved
+    // broker session was resumed, otherwise Select Broker. The web leaves
+    // the second implied (its page defaults to /broker); the desktop says
+    // it, so the page and the server cannot disagree.
     let body = match BrokerAuthService::try_resume(ctx).await {
         Ok(Some(b)) => json!({
             "status": "success",
@@ -124,10 +128,10 @@ async fn finish_sign_in(
             "redirect": "/dashboard",
             "broker": b.broker_id,
         }),
-        Ok(None) => json!({"status": "success"}),
+        Ok(None) => json!({"status": "success", "redirect": "/broker"}),
         Err(e) => {
             tracing::warn!("Could not resume the broker session: {}", e);
-            json!({"status": "success"})
+            json!({"status": "success", "redirect": "/broker"})
         }
     };
     with_cookie(ok(body), &s.id)

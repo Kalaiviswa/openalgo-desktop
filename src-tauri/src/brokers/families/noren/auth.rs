@@ -86,7 +86,7 @@ pub async fn authenticate(b: &NorenBroker, creds: BrokerCredentials) -> Result<A
             .unwrap_or(uid);
         if uid.is_empty() {
             return Err(AppError::Validation(format!(
-                "Add your {} trading user id: enter the API key as userid:::key, or fill in the client id field.",
+                "Add your {} trading user id: on the Broker Configuration page, enter the key as userid:::key.",
                 name
             )));
         }
@@ -114,14 +114,14 @@ pub async fn authenticate(b: &NorenBroker, creds: BrokerCredentials) -> Result<A
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "Your {} API secret is missing. Add it on the broker settings page.",
+                "Your {} API secret is missing. Add it on the Broker Configuration page.",
                 name
             ))
         })?;
     let (uid, app_key) = split_api_key(&creds.api_key, creds.client_id.as_deref());
     if app_key.is_empty() {
         return Err(AppError::Validation(format!(
-            "Your {} API key is missing. Add it on the broker settings page.",
+            "Your {} API key is missing. Add it on the Broker Configuration page.",
             name
         )));
     }
@@ -155,7 +155,7 @@ pub async fn authenticate(b: &NorenBroker, creds: BrokerCredentials) -> Result<A
     let uid = returned_uid.filter(|u| !u.is_empty()).unwrap_or(uid);
     if uid.is_empty() {
         return Err(AppError::Validation(format!(
-            "Add your {} trading user id: enter the API key as userid:::key, or fill in the client id field.",
+            "Add your {} trading user id: on the Broker Configuration page, enter the key as userid:::key.",
             name
         )));
     }

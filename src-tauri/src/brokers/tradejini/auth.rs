@@ -54,7 +54,7 @@ pub async fn authenticate(b: &TradejiniBroker, creds: BrokerCredentials) -> Resu
     };
     let key = api_key(&creds).ok_or_else(|| {
         AppError::Validation(
-            "Your Tradejini API key is missing. Add the app's API key from the Tradejini developer portal on the broker settings page."
+            "Your Tradejini API key is missing. Add the app's API key from the Tradejini developer portal on the Broker Configuration page."
                 .into(),
         )
     })?;

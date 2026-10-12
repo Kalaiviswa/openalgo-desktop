@@ -68,12 +68,13 @@ pub async fn authenticate(b: &PaytmBroker, creds: BrokerCredentials) -> Result<A
         })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Paytm Money API key is missing. Add it on the broker settings page.".into(),
+            "Your Paytm Money API key is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let api_secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your Paytm Money API secret is missing. Add it on the broker settings page.".into(),
+            "Your Paytm Money API secret is missing. Add it on the Broker Configuration page."
+                .into(),
         )
     })?;
     let body = json!({
@@ -104,7 +105,7 @@ pub async fn authenticate(b: &PaytmBroker, creds: BrokerCredentials) -> Result<A
             )
         } else {
             AppError::Auth(
-                "Paytm Money did not accept the login. The login code may have expired, or the API key or secret is wrong. Check them on the broker settings page and log in again."
+                "Paytm Money did not accept the login. The login code may have expired, or the API key or secret is wrong. Check them on the Broker Configuration page and log in again."
                     .into(),
             )
         });

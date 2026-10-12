@@ -239,7 +239,11 @@ async fn sec05_logout_ends_the_session_even_when_the_write_fails() {
             &[("username", USER), ("password", PASSWORD)],
         ))
         .await;
-    assert_eq!(v, json!({"status": "success"}), "not resumed");
+    assert_eq!(
+        v,
+        json!({"status": "success", "redirect": "/broker"}),
+        "not resumed"
+    );
     assert!(!h.ctx().is_broker_connected());
 
     // One poll tick after the database recovers writes the revoke.

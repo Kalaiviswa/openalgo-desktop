@@ -36,7 +36,7 @@ pub async fn authenticate(b: &AngelBroker, creds: BrokerCredentials) -> Result<A
         .ok_or_else(|| missing("TOTP"))?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Angel One API key is missing. Add it on the broker settings page.".into(),
+            "Your Angel One API key is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let body = json!({"clientcode": client_id, "password": password, "totp": totp});
@@ -45,21 +45,20 @@ pub async fn authenticate(b: &AngelBroker, creds: BrokerCredentials) -> Result<A
         .json(&body)
         .send()
         .await?;
-    let env = match read_envelope::<LoginData>(resp).await? {
-        Reply::Ok(env) => env,
-        Reply::RateLimited => {
-            return Err(AppError::Auth(
-                "Angel One is limiting login attempts right now. Wait a minute and try again."
+    let env =
+        match read_envelope::<LoginData>(resp).await? {
+            Reply::Ok(env) => env,
+            Reply::RateLimited => {
+                return Err(AppError::Auth(
+                    "Angel One is limiting login attempts right now. Wait a minute and try again."
+                        .into(),
+                ))
+            }
+            Reply::Denied => return Err(AppError::Auth(
+                "Angel One did not accept your API key. Check it on the Broker Configuration page."
                     .into(),
-            ))
-        }
-        Reply::Denied => {
-            return Err(AppError::Auth(
-                "Angel One did not accept your API key. Check it on the broker settings page."
-                    .into(),
-            ))
-        }
-    };
+            )),
+        };
     // web: success is `data.jwtToken` being present.
     match env.data {
         Some(d) if !d.jwtToken.is_empty() => Ok(AuthResponse {

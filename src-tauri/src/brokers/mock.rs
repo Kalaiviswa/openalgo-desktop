@@ -15,6 +15,7 @@ use crate::error::{AppError, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 /// A scripted outcome: a value, or a broker error carrying this message.
 pub type Scripted<T> = std::result::Result<T, String>;
@@ -180,6 +181,9 @@ pub struct MockBroker {
     /// Sign in from the saved API key and secret alone (the XTS direct
     /// logins, Delta Exchange); otherwise a code, password or TOTP is needed.
     pub saved_keys_sign_in: Mutex<bool>,
+    /// Sign-ins wait here once the broker has answered, so a test can make
+    /// two of them complete at the same moment.
+    pub auth_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     next_id: Mutex<u64>,
 }
 
@@ -226,6 +230,7 @@ impl MockBroker {
             login_url: Mutex::new(None),
             restored: Mutex::new(None),
             saved_keys_sign_in: Mutex::new(false),
+            auth_gate: Mutex::new(None),
             next_id: Mutex::new(0),
             place_gate: Mutex::new(None),
         }
@@ -308,6 +313,10 @@ impl Broker for MockBroker {
         *self.last_auth.lock() = Some(credentials);
         if !ok {
             return Err(AppError::Auth("Mock rejected the sign-in".into()));
+        }
+        let gate = self.auth_gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.wait().await;
         }
         Ok(AuthResponse {
             auth_token: "mock-access-token".into(),

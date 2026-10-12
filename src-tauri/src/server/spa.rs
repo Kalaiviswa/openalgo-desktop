@@ -43,6 +43,7 @@ pub const SPA_ROUTES: &[&str] = &[
     "/arbitrage",
     "/broker",
     "/broker/:broker/totp",
+    "/broker/config",
     "/broker/samco/auth",
     "/chart/test",
     "/chartink",

@@ -135,7 +135,7 @@ impl DhanSession {
     pub fn require_client_id(&self) -> Result<&str> {
         self.client_id.as_deref().ok_or_else(|| {
             AppError::Validation(
-                "Your Dhan client ID is missing. Enter the API key as client_id:::api_key in Profile, Broker Configuration, then log in to Dhan again."
+                "Your Dhan client ID is missing. Enter the API key as client_id:::api_key on the Broker Configuration page, then log in to Dhan again."
                     .into(),
             )
         })
@@ -394,7 +394,7 @@ pub fn error_for(error_type: &str, code: &str, message: &str) -> AppError {
                 .into(),
         ),
         (_, "810") => AppError::Auth(
-            "Dhan did not accept your client ID. Check the API key (client_id:::api_key) in Profile, Broker Configuration."
+            "Dhan did not accept your client ID. Check the API key (client_id:::api_key) on the Broker Configuration page."
                 .into(),
         ),
         (_, "820") | (_, "821") => AppError::Broker(

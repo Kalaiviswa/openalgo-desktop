@@ -172,7 +172,7 @@ pub async fn authenticate(b: &IndmoneyBroker, c: BrokerCredentials) -> Result<Au
 
     if client_id.is_empty() {
         return Err(AppError::Validation(
-            "Save your INDstocks Client ID as the API key (shown on the INDstocks access-tokens page after TOTP setup), then log in again."
+            "Save your INDstocks Client ID (shown on the INDstocks access-tokens page after TOTP setup) on the Broker Configuration page, then log in again."
                 .into(),
         ));
     }
