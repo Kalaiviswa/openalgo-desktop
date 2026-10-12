@@ -220,15 +220,32 @@ export default function StrategyPortfolio() {
   const [pendingDelete, setPendingDelete] = useState<PortfolioEntry | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
+  // Desktop: a watchlist that fails to load keeps what it last showed and
+  // says so; the web replaced it with an empty list, which reads as "you
+  // have no saved strategies" (TOOLS-11).
+  const [listErrors, setListErrors] = useState<Record<Watchlist, boolean>>({
+    mytrades: false,
+    simulation: false,
+  })
+  const [loadedOnce, setLoadedOnce] = useState<Record<Watchlist, boolean>>({
+    mytrades: false,
+    simulation: false,
+  })
+
   const load = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [mt, sim] = await Promise.all([
-        strategyPortfolioApi.list('mytrades').catch(() => []),
-        strategyPortfolioApi.list('simulation').catch(() => []),
+      const [mt, sim] = await Promise.allSettled([
+        strategyPortfolioApi.list('mytrades'),
+        strategyPortfolioApi.list('simulation'),
       ])
-      setMyTrades(mt)
-      setSimulation(sim)
+      if (mt.status === 'fulfilled') setMyTrades(mt.value)
+      if (sim.status === 'fulfilled') setSimulation(sim.value)
+      setListErrors({ mytrades: mt.status === 'rejected', simulation: sim.status === 'rejected' })
+      setLoadedOnce((prev) => ({
+        mytrades: prev.mytrades || mt.status === 'fulfilled',
+        simulation: prev.simulation || sim.status === 'fulfilled',
+      }))
     } finally {
       setIsLoading(false)
     }
@@ -507,11 +524,27 @@ export default function StrategyPortfolio() {
           const cfg = tabConfig[key]
           return (
             <TabsContent key={key} value={key} className="pt-4">
+              {listErrors[key] && !isLoading && (
+                <div
+                  role="alert"
+                  className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500 bg-amber-50 px-4 py-2.5 text-sm text-amber-900 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-200"
+                >
+                  <span>
+                    {loadedOnce[key]
+                      ? `Could not refresh your ${cfg.label} strategies. The list below is from the last successful load.`
+                      : `Could not load your ${cfg.label} strategies. They are not shown, not deleted.`}
+                  </span>
+                  <Button variant="outline" size="sm" onClick={() => load()}>
+                    Retry
+                  </Button>
+                </div>
+              )}
               {isLoading ? (
                 <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
                   Loading…
                 </div>
-              ) : cfg.items.length === 0 ? (
+              ) : cfg.items.length === 0 && listErrors[key] && !loadedOnce[key] ? null : cfg.items
+                  .length === 0 ? (
                 <div className="flex h-40 flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed text-sm text-muted-foreground">
                   <cfg.icon className="h-6 w-6 opacity-40" />
                   <p>No strategies in {cfg.label} yet.</p>
