@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BrokerList } from '@/api/broker-config'
+import { useAuthStore } from '@/stores/authStore'
+import { useBrokerStore } from '@/stores/brokerStore'
 import { brokerEntry, brokerList, saved } from '@/test/brokerList'
 import { renderWithQuery } from '@/test/queryRender'
 import { fireEvent, screen, waitFor, within } from '@/test/test-utils'
-import { useAuthStore } from '@/stores/authStore'
-import { useBrokerStore } from '@/stores/brokerStore'
 import BrokerSelect from './BrokerSelect'
 
 // Desktop: Select Broker is a card per broker (OpenBull's pattern). Keys are
@@ -294,5 +294,28 @@ describe('Switching truthfully', () => {
     await pending
     expect(useBrokerStore.getState().capabilities).toBeNull()
     expect(useAuthStore.getState().user?.broker).toBeNull()
+  })
+})
+
+// Switching is enforced: Live automation or unsettled orders on the
+// logged-in broker refuse it, and the card says why instead of a confirm.
+describe('A switch the server refuses', () => {
+  it('names what still runs and offers no confirm', async () => {
+    const why =
+      'Zerodha still has 2 running Live strategies. They are not moved to another broker. First stop the strategies and protection, then switch. Nothing was changed.'
+    list = {
+      ...brokerList([
+        { ...saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {}), active: true },
+        saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+      ]),
+      switch_refusal: why,
+    }
+    serve()
+    renderPage()
+    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
+    expect(await (await card('fyers')).findByText(why)).toBeInTheDocument()
+    expect(screen.queryByText('End your Zerodha session?')).toBeNull()
+    expect(posts).toEqual([])
+    expect(assigned).toEqual([])
   })
 })

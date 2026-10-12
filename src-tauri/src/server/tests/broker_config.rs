@@ -704,3 +704,250 @@ async fn two_sign_ins_completing_together_leave_one_session() {
         ctx.runtime.teardown(ctx).await;
     }
 }
+
+// ------------------------------------- switching is enforced, not only confirmed
+//
+// Roadmap "Broker switching": one test per row. The counts come from the
+// order-outcomes service through `AppState::switch_guard`; here a fake
+// guard stands in for it.
+
+use crate::services::broker_switch::{SwitchBlockers, SwitchGuard};
+
+struct FakeGuard(std::result::Result<SwitchBlockers, ()>);
+
+impl SwitchGuard for FakeGuard {
+    fn blockers(&self, _: &AppState, _: &str) -> crate::error::Result<SwitchBlockers> {
+        self.0
+            .map_err(|_| crate::error::AppError::Internal("outcomes unavailable".into()))
+    }
+}
+
+fn guard(ctx: &AppState, b: SwitchBlockers) {
+    *ctx.switch_guard.write() = Arc::new(FakeGuard(Ok(b)));
+}
+
+async fn end_session(h: &H, cookie: &str, csrf: &str) -> (StatusCode, Value) {
+    h.json(with_session(
+        post_json("/api/broker/session/end", json!({})),
+        cookie,
+        Some(csrf),
+    ))
+    .await
+}
+
+/// Every way a switch could end the logged-in broker's session is refused,
+/// with the same reason, and nothing changes.
+async fn every_switch_is_refused(h: &H, cookie: &str, csrf: &str, says: &[&str]) {
+    let (s, v) = end_session(h, cookie, csrf).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let why = v["message"].as_str().unwrap().to_string();
+    for part in says {
+        assert!(why.contains(part), "{why}");
+    }
+    assert!(why.contains("Nothing was changed."), "{why}");
+    let refused = [
+        with_session(
+            delete("/api/broker/credentials/zerodha?sign_out=true"),
+            cookie,
+            Some(csrf),
+        ),
+        with_session(
+            put_json(
+                "/api/broker/credentials/zerodha?sign_out=true",
+                json!({"api_secret": "rotated"}),
+            ),
+            cookie,
+            Some(csrf),
+        ),
+        with_session(
+            post_json("/api/broker/credentials", json!({"broker": "fyers"})),
+            cookie,
+            Some(csrf),
+        ),
+        with_session(
+            post_json(
+                "/api/broker/credentials",
+                json!({"broker_api_secret": "rotated"}),
+            ),
+            cookie,
+            Some(csrf),
+        ),
+    ];
+    for req in refused {
+        let (s, v) = h.json(req).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["message"], why.as_str());
+    }
+    assert!(h.ctx().is_broker_connected(), "the session stays");
+    assert_eq!(
+        h.ctx().server_config().active_broker.as_deref(),
+        Some("zerodha")
+    );
+    let c = stored(h, "zerodha").expect("keys kept");
+    assert_eq!(
+        c.api_secret.unwrap().expose(),
+        "kitesecret",
+        "nothing saved"
+    );
+    // The page is told before it offers the confirm.
+    assert_eq!(list(h, cookie).await["switch_refusal"], why.as_str());
+}
+
+#[tokio::test]
+async fn switch_row1_running_live_automation_refuses_the_switch_and_names_it() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    guard(
+        h.ctx(),
+        SwitchBlockers {
+            strategy_runs: 2,
+            openscript_runs: 1,
+            scalping_stops: 1,
+            ..Default::default()
+        },
+    );
+    every_switch_is_refused(
+        &h,
+        &cookie,
+        &csrf,
+        &[
+            "Zerodha still has 2 running Live strategies",
+            "1 running Live OpenScript run",
+            "1 position under scalping protection",
+            "stop the strategies and protection",
+        ],
+    )
+    .await;
+}
+
+/// The same rule at the server's last line: a sign-in to another broker
+/// that completes while the logged-in one still runs Live automation is
+/// refused, and the logged-in session stays.
+#[tokio::test]
+async fn switch_row1_a_completed_sign_in_to_another_broker_is_refused_too() {
+    let (t, _angel, _samco) = two_brokers();
+    let ctx = t.ctx.clone();
+    BrokerAuthService::login_with_form(&ctx, "angel", totp())
+        .await
+        .unwrap();
+    guard(
+        &ctx,
+        SwitchBlockers {
+            strategy_runs: 1,
+            ..Default::default()
+        },
+    );
+    let e = BrokerAuthService::login_with_form(&ctx, "samco", totp())
+        .await
+        .unwrap_err();
+    assert!(
+        e.client_message()
+            .starts_with("Angel One still has 1 running Live strategy."),
+        "{}",
+        e.client_message()
+    );
+    assert_eq!(ctx.get_broker_session().unwrap().broker_id, "angel");
+    assert_eq!(live_rows(&ctx), vec!["angel".to_string()]);
+    ctx.runtime.teardown(&ctx).await;
+}
+
+#[tokio::test]
+async fn switch_row2_orders_with_an_unknown_outcome_refuse_the_switch() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    guard(
+        h.ctx(),
+        SwitchBlockers {
+            uncertain_placements: 2,
+            ..Default::default()
+        },
+    );
+    every_switch_is_refused(
+        &h,
+        &cookie,
+        &csrf,
+        &[
+            "2 orders whose outcome is not known yet",
+            "check the order book until every order is settled",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn switch_row3_exits_still_filling_refuse_the_switch() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    guard(
+        h.ctx(),
+        SwitchBlockers {
+            partial_exits: 1,
+            ..Default::default()
+        },
+    );
+    every_switch_is_refused(
+        &h,
+        &cookie,
+        &csrf,
+        &["1 exit still filling", "wait for the exits to finish"],
+    )
+    .await;
+}
+
+/// Working orders and positions placed by hand do not block: after the
+/// confirm the session ends and they stay at the broker untouched.
+#[tokio::test]
+async fn switch_row4_manual_orders_and_positions_stay_and_do_not_block() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    guard(h.ctx(), SwitchBlockers::default());
+    let (s, v) = end_session(&h, &cookie, &csrf).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!h.ctx().is_broker_connected());
+    assert!(
+        !h.mock.calls().iter().any(|c| matches!(
+            c,
+            crate::brokers::mock::MockCall::PlaceOrder(_)
+                | crate::brokers::mock::MockCall::CancelOrder(_)
+                | crate::brokers::mock::MockCall::CancelAll
+                | crate::brokers::mock::MockCall::CloseAll
+        )),
+        "nothing is cancelled or closed at the broker"
+    );
+}
+
+/// Sandbox runs are never counted: with analyzer mode on, the switch goes
+/// ahead and analyzer mode stays on for the next broker's quotes.
+#[tokio::test]
+async fn switch_row5_sandbox_runs_do_not_block() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    h.ctx().sqlite.set_analyze_mode(true).unwrap();
+    // The outcomes service counts Live items only.
+    guard(h.ctx(), SwitchBlockers::default());
+    let (s, v) = end_session(&h, &cookie, &csrf).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!h.ctx().is_broker_connected());
+    assert!(
+        h.ctx().sqlite.get_analyze_mode().unwrap(),
+        "sandbox mode stays on"
+    );
+}
+
+/// A guard that cannot answer never lets a switch through.
+#[tokio::test]
+async fn switch_refused_when_the_check_cannot_answer() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    *h.ctx().switch_guard.write() = Arc::new(FakeGuard(Err(())));
+    let (s, v) = end_session(&h, &cookie, &csrf).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("could not check"));
+    assert!(h.ctx().is_broker_connected());
+}

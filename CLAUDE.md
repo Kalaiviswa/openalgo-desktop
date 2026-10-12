@@ -77,6 +77,9 @@ a drop-in replacement for them.
     session (`BrokerAuthService::session_lock`). New keys for the logged-in
     broker end its session too, after the same confirm (a session belongs
     to the keys it signed in with); one account per broker is by design.
+    Every way a session ends for a switch is refused while Live
+    automation, unsettled placements or filling exits depend on it
+    (`services::broker_switch`, fed by the order-outcomes service).
     The keys each broker needs
     and their labels come from `brokers/setup_guide.rs`, served by
     `GET /api/broker/list`; the pages keep no broker list. Unchanged: route

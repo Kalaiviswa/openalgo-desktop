@@ -252,7 +252,11 @@ describe('Broker Configuration', () => {
   // FLOW-04: a session belongs to the keys it signed in with.
   it("confirms that new keys end the logged-in broker's session, then saves", async () => {
     list = brokerList([{ ...saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}), active: true }])
-    serve({ status: 'success', message: 'Saved your Fyers keys and ended its session.', signed_out: true })
+    serve({
+      status: 'success',
+      message: 'Saved your Fyers keys and ended its session.',
+      signed_out: true,
+    })
     renderPage('fyers')
     fireEvent.change(await screen.findByLabelText('API Secret'), { target: { value: 'rotated' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))

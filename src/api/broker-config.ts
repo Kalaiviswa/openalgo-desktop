@@ -61,6 +61,13 @@ export interface BrokerEntry {
 export interface BrokerList {
   /** The broker logged in now, or null. */
   logged_in: string | null
+  /**
+   * Why the logged-in broker's session cannot end for a switch now (Live
+   * strategies, OpenScript runs or scalping protection still running,
+   * orders not yet settled), or null. The server refuses such a switch
+   * whatever the page does.
+   */
+  switch_refusal?: string | null
   brokers: BrokerEntry[]
 }
 

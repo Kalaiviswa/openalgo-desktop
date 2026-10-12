@@ -48,6 +48,9 @@ pub enum SaveOutcome {
     /// New keys for the broker that is logged in, and the trader has not
     /// confirmed ending its session: nothing was saved.
     LoggedIn,
+    /// The logged-in broker's session must not end yet (Live automation,
+    /// unsettled orders); the reason, for the trader. Nothing was saved.
+    Refused(String),
 }
 
 /// What a forget did.
@@ -57,6 +60,17 @@ pub enum ForgetOutcome {
     Forgotten { signed_out: bool },
     /// The broker is logged in and the trader has not confirmed signing out.
     LoggedIn,
+    /// The broker's session must not end yet; the reason, for the trader.
+    Refused(String),
+}
+
+/// What ending the live session did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// Ended the session of this broker, or `None` when none was live.
+    Ended(Option<String>),
+    /// The session must not end yet; the reason, for the trader.
+    Refused(String),
 }
 
 fn valid_broker(broker: &str) -> Result<()> {
@@ -169,7 +183,12 @@ impl BrokerConfigService {
                 "redirect_hint": setup_guide::uses_redirect_url(id).then_some(guide.redirect_hint),
             }));
         }
-        Ok(json!({ "logged_in": live, "brokers": brokers }))
+        // Why the logged-in broker's session cannot end for a switch now,
+        // so the page says so instead of offering the confirm.
+        let switch_refusal = live
+            .as_deref()
+            .and_then(|b| crate::services::broker_switch::refusal(state, b));
+        Ok(json!({ "logged_in": live, "switch_refusal": switch_refusal, "brokers": brokers }))
     }
 
     /// Save one broker's keys (and its redirect URL). Keys left out keep
@@ -246,6 +265,11 @@ impl BrokerConfigService {
             .is_some_and(|s| s.broker_id == broker);
         if live && keys_changed && !sign_out {
             return Ok(SaveOutcome::LoggedIn);
+        }
+        if live && keys_changed {
+            if let Some(why) = crate::services::broker_switch::refusal(state, broker) {
+                return Ok(SaveOutcome::Refused(why));
+            }
         }
         let global_named_broker;
         {
@@ -335,6 +359,11 @@ impl BrokerConfigService {
             return Ok(ForgetOutcome::LoggedIn);
         }
         if live {
+            if let Some(why) = crate::services::broker_switch::refusal(state, broker) {
+                return Ok(ForgetOutcome::Refused(why));
+            }
+        }
+        if live {
             if let Err(e) =
                 BrokerAuthService::revoke_held(state, SessionEndReason::Logout, &held).await
             {
@@ -374,18 +403,23 @@ impl BrokerConfigService {
     /// End the live broker session (not the OpenAlgo sign-in): what logging
     /// in to another broker does first. Returns the broker that was logged
     /// in, if any.
-    pub async fn end_session(state: &AppState) -> Result<Option<String>> {
+    pub async fn end_session(state: &AppState) -> Result<SessionEnd> {
         let held = BrokerAuthService::session_lock(state).await;
         let Some(live) = state.get_broker_session() else {
-            return Ok(None);
+            return Ok(SessionEnd::Ended(None));
         };
+        // Live automation or unsettled orders keep the session (roadmap
+        // "Broker switching": enforcement, not only confirmation).
+        if let Some(why) = crate::services::broker_switch::refusal(state, &live.broker_id) {
+            return Ok(SessionEnd::Refused(why));
+        }
         if let Err(e) = BrokerAuthService::revoke_held(state, SessionEndReason::Logout, &held).await
         {
             // The session is over in memory; its row is retried.
             tracing::error!("The ended broker session is still to be revoked: {}", e);
         }
         tracing::info!("Broker session ended for {}", live.broker_id);
-        Ok(Some(live.broker_id))
+        Ok(SessionEnd::Ended(Some(live.broker_id)))
     }
 }
 
