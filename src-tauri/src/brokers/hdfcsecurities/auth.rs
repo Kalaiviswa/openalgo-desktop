@@ -53,13 +53,14 @@ pub async fn authenticate(
         })?;
     let secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your HDFC Securities API secret is missing. Add it on the broker settings page."
+            "Your HDFC Securities API secret is missing. Add it on the Broker Configuration page."
                 .into(),
         )
     })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your HDFC Securities API key is missing. Add it on the broker settings page.".into(),
+            "Your HDFC Securities API key is missing. Add it on the Broker Configuration page."
+                .into(),
         ));
     }
     let resp = b
@@ -92,7 +93,7 @@ pub async fn authenticate(
         );
         let m = error_message(&v);
         return Err(AppError::Auth(if m.is_empty() {
-            "HDFC Securities did not accept the login. Check your API key and secret on the broker settings page, then log in again."
+            "HDFC Securities did not accept the login. Check your API key and secret on the Broker Configuration page, then log in again."
                 .into()
         } else {
             format!("HDFC Securities did not accept the login: {}", m)

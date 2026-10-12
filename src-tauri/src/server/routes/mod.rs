@@ -10,6 +10,7 @@ pub mod analyzer;
 pub mod app_config;
 pub mod auth;
 pub mod broker;
+pub mod broker_config;
 pub mod chartink;
 pub mod charts;
 pub mod custom_indicators;
@@ -213,6 +214,27 @@ pub fn table() -> Vec<RouteSpec> {
         ),
         r!(GET, "/api/broker/capabilities", User, broker::capabilities),
         r!(GET, "/api/broker/configured", User, broker::configured),
+        // Desktop: Broker Configuration and Select Broker (one key set per
+        // broker, one broker logged in at a time).
+        r!(GET, "/api/broker/list", User, broker_config::list),
+        r!(
+            PUT,
+            "/api/broker/credentials/{broker}",
+            User,
+            broker_config::save
+        ),
+        r!(
+            DELETE,
+            "/api/broker/credentials/{broker}",
+            User,
+            broker_config::forget
+        ),
+        r!(
+            POST,
+            "/api/broker/session/end",
+            User,
+            broker_config::end_session
+        ),
         // Desktop server settings (the older path is an alias).
         r!(GET, "/settings/api/server", User, settings::get_server),
         r!(POST, "/settings/api/server", User, settings::save_server),

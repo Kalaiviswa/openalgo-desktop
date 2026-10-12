@@ -25,15 +25,16 @@ pub const IP_STATUS_NOT_LOGGED_IN: &str = "Not logged in";
 pub const IP_STATUS_NOT_CONNECTED: &str = "Not connected to Samco. Log in to the broker first.";
 
 /// The fix for each `/session/token` error code (web `ERROR_CODE_HELP`,
-/// worded for the desktop: credentials live in Profile, not `.env`).
+/// worded for the desktop: credentials live on the Broker Configuration
+/// page, not `.env`).
 pub fn error_code_help(code: &str) -> Option<String> {
     match code {
         "EOAUTH001" => Some(format!(
-            "Check that the API key in Profile, Broker Configuration matches the API Key emailed when you created the Samco OAuth app, and that the app is Active at {}",
+            "Check that the API key on the Broker Configuration page matches the API Key emailed when you created the Samco OAuth app, and that the app is Active at {}",
             DASHBOARD_URL
         )),
         "EOAUTH008" => Some(
-            "Copy the secret again from the Samco dashboard (API Keys, Reveal Secret), or regenerate it, and update the API secret in Profile, Broker Configuration"
+            "Copy the secret again from the Samco dashboard (API Keys, Reveal Secret), or regenerate it, and update the API secret on the Broker Configuration page"
                 .to_string(),
         ),
         "EOAUTH009" => Some(format!(
@@ -102,7 +103,7 @@ pub async fn authenticate(b: &SamcoBroker, creds: BrokerCredentials) -> Result<A
     let api_key = creds.api_key.trim().to_string();
     if api_key.is_empty() {
         return Err(AppError::Validation(format!(
-            "Your Samco API key is missing. Enter the API Key of your Samco OAuth app (create one at {}) in Profile, Broker Configuration.",
+            "Your Samco API key is missing. Enter the API Key of your Samco OAuth app (create one at {}) on the Broker Configuration page.",
             DASHBOARD_URL
         )));
     }
@@ -113,7 +114,7 @@ pub async fn authenticate(b: &SamcoBroker, creds: BrokerCredentials) -> Result<A
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "Your Samco API secret is missing. Enter the API Secret shown when the OAuth app was created (see {}) in Profile, Broker Configuration.",
+                "Your Samco API secret is missing. Enter the API Secret shown when the OAuth app was created (see {}) on the Broker Configuration page.",
                 DASHBOARD_URL
             ))
         })?

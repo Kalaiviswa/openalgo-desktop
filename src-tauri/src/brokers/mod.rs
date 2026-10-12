@@ -40,6 +40,7 @@ pub mod paytm;
 pub mod pocketful;
 pub mod rmoney;
 pub mod samco;
+pub mod setup_guide;
 pub mod shoonya;
 pub mod tradejini;
 pub mod tradesmart;

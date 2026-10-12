@@ -78,6 +78,11 @@ pub struct AppState {
     /// resumed; the session poll and the next sign-in finish the revoke
     /// (`BrokerAuthService::retry_pending_revoke`).
     pub revoke_pending: Mutex<bool>,
+    /// One broker is logged in at a time. Completing a sign-in (which ends
+    /// any other broker's session first), resuming one, ending one and
+    /// forgetting the logged-in broker run under this lock, so two of them
+    /// never interleave (`BrokerAuthService::session_lock`).
+    pub session_switch: tokio::sync::Mutex<()>,
     pub server_status: RwLock<ServerStatus>,
     /// State of the 8765 market data listener (written by `FeedService`),
     /// shown with the fix when its port is taken.
@@ -293,6 +298,7 @@ impl AppState {
             api_keys: ApiKeyCache::new(),
             broker_session: RwLock::new(None),
             revoke_pending: Mutex::new(false),
+            session_switch: tokio::sync::Mutex::new(()),
             server_status: RwLock::new(ServerStatus::Starting),
             feed_status: RwLock::new(ServerStatus::Starting),
             http,

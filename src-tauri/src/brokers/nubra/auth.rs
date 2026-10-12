@@ -136,7 +136,7 @@ pub async fn verify_pin(b: &NubraBroker, auth_token: &str, mpin: &str) -> Result
         let why = error_text(&v).unwrap_or_else(|| "PIN verification failed".into());
         tracing::warn!(status, "Nubra MPIN verification refused");
         return Err(AppError::Auth(format!(
-            "Nubra did not accept the MPIN: {}. Check the MPIN saved as the API secret.",
+            "Nubra did not accept the MPIN: {}. Check the MPIN saved on the Broker Configuration page.",
             why
         )));
     }

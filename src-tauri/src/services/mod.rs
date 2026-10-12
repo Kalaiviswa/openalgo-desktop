@@ -32,6 +32,7 @@ pub mod arbitrage_service;
 pub mod auth_service;
 pub mod batch_order_service;
 pub mod broker_auth_service;
+pub mod broker_config_service;
 pub mod broker_runtime;
 pub mod chain_tools_service;
 pub mod chart_test_service;

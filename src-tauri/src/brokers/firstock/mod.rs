@@ -252,16 +252,18 @@ async fn authenticate(b: &FirstockBroker, creds: BrokerCredentials) -> Result<Au
     let vendor = creds.api_key.trim().to_string();
     if vendor.is_empty() {
         return Err(AppError::Validation(
-            "Your Firstock vendor code is missing. Add it as the API key on the broker settings page."
-                .into(),
+            "Your Firstock vendor code is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
-    let api_key = creds.api_secret.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-        AppError::Validation(
-            "Your Firstock API key is missing. Add it as the API secret on the broker settings page."
-                .into(),
-        )
-    })?;
+    let api_key = creds
+        .api_secret
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation(
+                "Your Firstock API key is missing. Add it on the Broker Configuration page.".into(),
+            )
+        })?;
     let uid = creds
         .client_id
         .clone()

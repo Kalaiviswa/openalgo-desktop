@@ -1,7 +1,9 @@
 //! Broker app credentials (what the web keeps in `.env` as BROKER_API_KEY,
-//! BROKER_API_SECRET and the market-data pair). Encrypted per column with
-//! AAD bound to the broker id. Never returned to the UI in plaintext; the
-//! masked form mirrors the web's `mask_secret`.
+//! BROKER_API_SECRET and the market-data pair), one set per broker.
+//! Encrypted per column with AAD bound to the broker id. Never returned to
+//! the UI in plaintext; the masked form mirrors the web's `mask_secret`, and
+//! the Broker Configuration page shows [`hint`]. The broker's redirect URL,
+//! when the trader set one, is kept with its keys (not a secret).
 
 use crate::error::Result;
 use crate::security::crypto::Aad;
@@ -16,6 +18,9 @@ pub struct BrokerCredentialSet {
     pub api_key_market: Option<Secret>,
     pub api_secret_market: Option<Secret>,
     pub client_id: Option<String>,
+    /// The redirect URL the trader set for this broker; `None` means the
+    /// automatic one (`ServerConfig::redirect_url_for`).
+    pub redirect_url: Option<String>,
 }
 
 /// Fields to change; `None` keeps the stored value (web: empty means keep).
@@ -30,6 +35,21 @@ pub struct CredentialUpdate {
 
 fn aad(column: &str, broker: &str) -> Aad {
     Aad::new("broker_credentials", column, broker)
+}
+
+/// What the Broker Configuration page shows of a saved value: the first and
+/// last three characters around `***` for a value of 12 characters or more,
+/// otherwise only `***`. At most six characters, and never more than half
+/// the value, are ever shown; the length is not.
+pub fn hint(value: &str) -> String {
+    let n = value.chars().count();
+    if n >= 12 {
+        let head: String = value.chars().take(3).collect();
+        let tail: String = value.chars().skip(n - 3).collect();
+        format!("{}***{}", head, tail)
+    } else {
+        "***".to_string()
+    }
 }
 
 /// Same rule as the web's `mask_secret`: prefix plus a fixed eight asterisks.
@@ -92,12 +112,14 @@ pub fn load(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let row: Option<Raw> = conn
         .query_row(
             "SELECT api_key_encrypted, api_key_nonce, api_secret_encrypted, api_secret_nonce,
                     api_key_market_encrypted, api_key_market_nonce,
-                    api_secret_market_encrypted, api_secret_market_nonce, client_id
+                    api_secret_market_encrypted, api_secret_market_nonce, client_id,
+                    redirect_url
              FROM broker_credentials WHERE broker_id = ?1",
             [broker],
             |r| {
@@ -111,11 +133,12 @@ pub fn load(
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
         .optional()?;
-    let Some((k, kn, s, sn, km, kmn, sm, smn, client_id)) = row else {
+    let Some((k, kn, s, sn, km, kmn, sm, smn, client_id, redirect_url)) = row else {
         return Ok(None);
     };
     Ok(Some(BrokerCredentialSet {
@@ -124,6 +147,7 @@ pub fn load(
         api_key_market: dec(security, km, kmn, "api_key_market", broker)?,
         api_secret_market: dec(security, sm, smn, "api_secret_market", broker)?,
         client_id,
+        redirect_url: redirect_url.filter(|u: &String| !u.trim().is_empty()),
     }))
 }
 
@@ -141,6 +165,7 @@ pub fn save(
         api_key_market: update.api_key_market.or(current.api_key_market),
         api_secret_market: update.api_secret_market.or(current.api_secret_market),
         client_id: update.client_id.or(current.client_id),
+        redirect_url: current.redirect_url,
     };
     let (k, kn) = enc(security, &Some(merged.api_key.clone()), "api_key", broker)?;
     let (s, sn) = enc(security, &merged.api_secret, "api_secret", broker)?;
@@ -186,6 +211,18 @@ pub fn list_configured(conn: &Connection) -> Result<Vec<String>> {
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Set the redirect URL kept with a broker's keys; `None` (or empty) goes
+/// back to the automatic one. The broker's keys must already be saved.
+pub fn set_redirect_url(conn: &Connection, broker: &str, url: Option<&str>) -> Result<()> {
+    let url = url.map(str::trim).filter(|u| !u.is_empty());
+    conn.execute(
+        "UPDATE broker_credentials SET redirect_url = ?2, updated_at = datetime('now')
+         WHERE broker_id = ?1",
+        params![broker, url],
+    )?;
+    Ok(())
 }
 
 pub fn delete(conn: &Connection, broker: &str) -> Result<()> {
@@ -246,6 +283,18 @@ impl BrokerCredentialSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_shows_at_most_six_characters_and_never_half() {
+        assert_eq!(hint(""), "***");
+        assert_eq!(hint("abcd1234"), "***");
+        assert_eq!(hint("abcdefghijk"), "***");
+        assert_eq!(hint("abcdefghijkl"), "abc***jkl");
+        let long = "kiteapikey1234567890";
+        let h = hint(long);
+        assert_eq!(h, "kit***890");
+        assert!(!h.contains(long));
+    }
 
     #[test]
     fn mask_matches_web() {

@@ -81,6 +81,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     run_rust_migration(conn, "075_scalping", crate::scalping::store::migrate)?;
     run_rust_migration(conn, "076_chartink", crate::chartink::store::migrate)?;
     run_rust_migration(conn, "077_mcp", crate::mcp::store::migrate)?;
+    run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
 
     tracing::info!("Database migrations completed");
     Ok(())
@@ -364,6 +365,15 @@ fn m042_broker_credentials_market(conn: &Connection) -> Result<()> {
         "TEXT",
     )?;
     Ok(())
+}
+
+/// The redirect URL kept with each broker's keys (one key set per broker,
+/// for as many brokers as the trader likes). Empty means the automatic URL.
+/// No backfill: the single `settings.redirect_url` stays the fallback for
+/// the broker it names (`BrokerConfigService::redirect_url`), so the address
+/// a sign-in uses is the same after the upgrade as before it.
+fn m080_broker_redirect_url(conn: &Connection) -> Result<()> {
+    add_column(conn, "broker_credentials", "redirect_url", "TEXT")
 }
 
 fn run_migration(conn: &Connection, name: &str, sql: &str) -> Result<()> {

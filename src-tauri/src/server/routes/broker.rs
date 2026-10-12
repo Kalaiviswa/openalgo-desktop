@@ -9,6 +9,7 @@ use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::middleware::{login_limited, redirect, ClientIp, Sess, User};
 use crate::services::broker_auth_service::{BrokerAuthService, CallbackOrigin, FormLogin};
+use crate::services::broker_config_service::BrokerConfigService;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -39,8 +40,13 @@ fn url_with_scheme(v: &str, schemes: &[&str]) -> bool {
     }
 }
 
-fn broker_page_with_error(msg: &str) -> Response {
-    redirect(&format!("/broker?error={}", urlencoding::encode(msg)))
+/// Back to Select Broker with the reason, shown on that broker's card.
+fn broker_page_with_error(broker: &str, msg: &str) -> Response {
+    redirect(&format!(
+        "/broker?error={}&broker={}",
+        urlencoding::encode(msg),
+        urlencoding::encode(broker)
+    ))
 }
 
 /// GET /auth/broker-config. The broker app key is never sent to the page:
@@ -54,7 +60,8 @@ pub async fn broker_config(State(ctx): Ctx) -> Response {
                 "status": "success",
                 "broker_name": b,
                 "broker_api_key": serde_json::Value::Null,
-                "redirect_url": cfg.redirect_url_for(&b),
+                "redirect_url": BrokerConfigService::redirect_url(&ctx, &b)
+                    .unwrap_or_else(|_| cfg.redirect_url_for(&b)),
                 "auth_type": match catalog::auth_type(&b) { AuthType::OAuth => "oauth", AuthType::Form => "form" },
                 // Desktop: how the broker page starts the sign-in.
                 "sign_in": catalog::sign_in(&b),
@@ -66,7 +73,7 @@ pub async fn broker_config(State(ctx): Ctx) -> Response {
             json!({
                 "status": "error",
                 "code": "BROKER_NOT_CONFIGURED",
-                "message": "Choose your broker and add its API key in Profile, Broker Configuration.",
+                "message": "Choose your broker and add its API key on the Broker Configuration page.",
             }),
         ),
     }
@@ -109,7 +116,7 @@ pub async fn initiate_oauth(
         Ok(url) => redirect(&url),
         Err(e) => {
             tracing::warn!("Could not start broker sign-in: {}", e.code());
-            broker_page_with_error(&e.client_message())
+            broker_page_with_error(&broker, &e.client_message())
         }
     }
 }
@@ -152,7 +159,7 @@ pub async fn oauth_callback(
                 // Back to the broker page with the reason (web
                 // `handle_auth_failure` on a page navigation).
                 tracing::warn!("Preparing the {} sign-in failed: {}", broker, e.code());
-                return broker_page_with_error(&e.client_message());
+                return broker_page_with_error(&broker, &e.client_message());
             }
         }
         // The saved keys sign in from the broker page in one action (a
@@ -196,7 +203,7 @@ pub async fn oauth_callback(
         Ok(_) => redirect("/dashboard"),
         Err(e) => {
             tracing::warn!("Broker sign-in for {} failed: {}", broker, e.code());
-            broker_page_with_error(&e.client_message())
+            broker_page_with_error(&broker, &e.client_message())
         }
     }
 }
@@ -235,7 +242,7 @@ pub async fn callback_post(
             Ok(_) => redirect("/dashboard"),
             Err(e) => {
                 tracing::warn!("Broker sign-in for {} failed: {}", broker, e.code());
-                broker_page_with_error(&e.client_message())
+                broker_page_with_error(&broker, &e.client_message())
             }
         };
     }
@@ -376,7 +383,8 @@ pub async fn get_credentials(State(ctx): Ctx) -> Response {
             json!(if broker.is_empty() {
                 String::new()
             } else {
-                cfg.redirect_url_for(&broker)
+                BrokerConfigService::redirect_url(&ctx, &broker)
+                    .unwrap_or_else(|_| cfg.redirect_url_for(&broker))
             }),
         );
         o.insert("current_broker".into(), json!(broker));
@@ -428,9 +436,12 @@ pub async fn get_credentials(State(ctx): Ctx) -> Response {
 /// POST /api/broker/credentials (form or json, web field names). Empty
 /// values keep what is stored. Applies immediately; no restart needed.
 pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
-    let cfg = ctx.server_config();
     let redirect_url = form.non_empty("redirect_url");
-    let mut broker = cfg.active_broker.clone();
+    // The broker this save names, if it names one (the web derives it from
+    // the redirect URL). A save that names none (the tunnel settings, say)
+    // never writes the active broker: a snapshot taken here could be stale
+    // by the time it is written (FLOW-03).
+    let mut broker: Option<String> = None;
     if let Some(r) = &redirect_url {
         let b = r
             .strip_suffix("/callback")
@@ -463,22 +474,6 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
         broker = Some(b);
     }
     let key = form.non_empty("broker_api_key");
-    if let (Some(b), Some(k)) = (&broker, &key) {
-        let parts = k.matches(":::").count();
-        let bad = match b.as_str() {
-            "fivepaisa" => parts != 2,
-            "flattrade" | "dhan" => parts != 1,
-            _ => false,
-        };
-        if bad {
-            let fmt = match b.as_str() {
-                "fivepaisa" => "5paisa API key must be in format: 'User_Key:::User_ID:::client_id'",
-                "flattrade" => "Flattrade API key must be in format: 'client_id:::api_key'",
-                _ => "Dhan API key must be in format: 'client_id:::api_key'",
-            };
-            return error(StatusCode::BAD_REQUEST, fmt);
-        }
-    }
     // Desktop: an address sent empty means "use the automatic address" (it is
     // stored empty, which reads back as unset), so a saved tunnel address can
     // be cleared; the web keeps the old value. A value must be a full URL
@@ -538,61 +533,81 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
         || update.api_key_market.is_some()
         || update.api_secret_market.is_some()
         || update.client_id.is_some();
-    let previous = cfg.active_broker.clone();
-    let switched = matches!((&previous, &broker), (Some(p), Some(n)) if p != n);
-    // Credentials and settings are saved together, in one transaction,
-    // before anything else changes: a save that fails leaves the live
-    // session and every setting as they were (FLOW-03).
-    let res = ctx.sqlite.conn().and_then(|mut c| {
-        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if has_secret_fields {
-            let b = broker.clone().ok_or_else(|| {
-                crate::error::AppError::Validation(
-                    "Choose your broker before saving its API key.".into(),
-                )
-            })?;
-            credentials::save(&tx, &ctx.security, &b, update)?;
-            // Saving the settings again is how a trader switches accounts:
-            // the next sign-in is no longer bound to the last one's.
-            crate::db::sqlite::auth::forget_account(&tx, &b)?;
+    // One lifecycle lock for the save and the sign-out it causes, and the
+    // settings read again inside the transaction: two saves, or a save and
+    // a sign-in, never interleave, and "switched" is decided against what
+    // is stored now, not a snapshot (FLOW-03).
+    let held = BrokerAuthService::session_lock(&ctx).await;
+    let res = ctx.sqlite.conn().and_then(
+        |mut c| -> crate::error::Result<(Option<String>, Option<String>)> {
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let previous = crate::config::ServerConfig::load(&tx)?.active_broker;
+            // Keys go to the broker the save names, else the active one.
+            let target = broker.clone().or_else(|| previous.clone());
+            if has_secret_fields {
+                let b = target.clone().ok_or_else(|| {
+                    crate::error::AppError::Validation(
+                        "Choose your broker before saving its API key.".into(),
+                    )
+                })?;
+                if let Some(k) = &update.api_key {
+                    BrokerConfigService::check_api_key_format(&b, k.expose())
+                        .map_err(|m| crate::error::AppError::Validation(m.into()))?;
+                }
+                // Saving the settings again is how a trader switches accounts:
+                // the next sign-in is no longer bound to the last one's.
+                BrokerConfigService::save_keys(&tx, &ctx.security, &b, update)?;
+            }
+            crate::config::save(
+                &tx,
+                &crate::config::ServerConfigUpdate {
+                    // Only when the save names a broker.
+                    active_broker: broker.clone(),
+                    redirect_url: redirect_url.clone(),
+                    host_server: host_server.clone(),
+                    websocket_url: websocket_url.clone(),
+                    ngrok_allow: form
+                        .get("ngrok_allow")
+                        .map(|v| v.eq_ignore_ascii_case("true")),
+                    ..Default::default()
+                },
+            )?;
+            tx.commit()?;
+            Ok((previous, target))
+        },
+    );
+    let (previous, target) = match res {
+        Ok(v) => v,
+        Err(e) => {
+            return match e {
+                crate::error::AppError::Validation(m) => error(StatusCode::BAD_REQUEST, m),
+                crate::error::AppError::Locked => crate::error::AppError::Locked.into_response(),
+                other => crate::server::routes::webui::failed(
+                    "Saving broker settings",
+                    other,
+                    "Your broker settings were not saved, and nothing was changed. Try again.",
+                ),
+            }
         }
-        crate::config::save(
-            &tx,
-            &crate::config::ServerConfigUpdate {
-                active_broker: broker.clone(),
-                redirect_url: redirect_url.clone(),
-                host_server: host_server.clone(),
-                websocket_url: websocket_url.clone(),
-                ngrok_allow: form
-                    .get("ngrok_allow")
-                    .map(|v| v.eq_ignore_ascii_case("true")),
-                ..Default::default()
-            },
-        )?;
-        tx.commit()?;
-        Ok(())
-    });
-    if let Err(e) = res {
-        return match e {
-            crate::error::AppError::Validation(m) => error(StatusCode::BAD_REQUEST, m),
-            crate::error::AppError::Locked => crate::error::AppError::Locked.into_response(),
-            other => crate::server::routes::webui::failed(
-                "Saving broker settings",
-                other,
-                "Your broker settings were not saved, and nothing was changed. Try again.",
-            ),
-        };
-    }
+    };
     let _ = ctx.reload_config();
-    // Switching the active broker then ends the old broker's live session,
-    // so a session for one broker never runs while another is selected.
+    let switched = broker.is_some() && broker != previous;
+    // One broker at a time: a save that makes another broker the active one
+    // ends the live session of the old one. New keys for the logged-in
+    // broker end its session too (FLOW-04: a session belongs to the keys it
+    // signed in with).
     let signed_out = match ctx.get_broker_session() {
-        Some(s) if switched && broker.as_deref() != Some(s.broker_id.as_str()) => {
+        Some(s)
+            if (broker.is_some() && broker.as_deref() != Some(s.broker_id.as_str()))
+                || (has_secret_fields && target.as_deref() == Some(s.broker_id.as_str())) =>
+        {
             // The session ends in memory whatever the database does; a
             // failed write of its stored row is retried by the session poll.
-            if let Err(e) = BrokerAuthService::revoke(&ctx, SessionEndReason::Logout).await {
+            if let Err(e) =
+                BrokerAuthService::revoke_held(&ctx, SessionEndReason::Logout, &held).await
+            {
                 tracing::error!(
-                    "Broker session ended for the switch; its stored row is still to be revoked: {}",
+                    "Broker session ended by the settings save; its stored row is still to be revoked: {}",
                     e
                 );
             }
@@ -600,6 +615,7 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
         }
         _ => None,
     };
+    drop(held);
     tracing::info!("Broker settings updated: {}", updated.join(", "));
     json_response(
         StatusCode::OK,

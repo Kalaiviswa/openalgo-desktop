@@ -35,12 +35,12 @@ pub async fn authenticate(b: &HdfcSkyBroker, creds: BrokerCredentials) -> Result
         })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your HDFC Sky API key is missing. Add it on the broker settings page.".into(),
+            "Your HDFC Sky API key is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your HDFC Sky API secret is missing. Add it on the broker settings page.".into(),
+            "Your HDFC Sky API secret is missing. Add it on the Broker Configuration page.".into(),
         )
     })?;
     let resp = b

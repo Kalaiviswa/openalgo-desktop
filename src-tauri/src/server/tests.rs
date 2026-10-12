@@ -208,6 +208,8 @@ fn cookie_from(headers: &axum::http::HeaderMap) -> Option<String> {
 mod security;
 // Every catalogue broker's sign-in, started the way the broker page does.
 mod sign_in;
+// Broker Configuration and Select Broker: keys per broker, one logged in.
+mod broker_config;
 // Codex review evaluation B: sign-out, revocation, keys, broker settings.
 mod credentials_lifecycle;
 
@@ -858,7 +860,7 @@ async fn setup_login_logout_lifecycle_like_the_web() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&b).unwrap(),
-        json!({"status": "success"})
+        json!({"status": "success", "redirect": "/broker"})
     );
     let cookie = cookie_from(&headers).unwrap();
     let (_, v) = h
@@ -926,7 +928,7 @@ async fn setup_login_logout_lifecycle_like_the_web() {
     assert_eq!(revoked, 1);
     drop(conn);
 
-    // Signing in again does not resume a revoked token.
+    // Signing in again does not resume a revoked token: Select Broker next.
     let (_, _, b) = h
         .send(multipart(
             "/auth/login",
@@ -935,7 +937,7 @@ async fn setup_login_logout_lifecycle_like_the_web() {
         .await;
     assert_eq!(
         serde_json::from_slice::<Value>(&b).unwrap(),
-        json!({"status": "success"})
+        json!({"status": "success", "redirect": "/broker"})
     );
 }
 
@@ -974,7 +976,7 @@ async fn resume_is_refused_when_the_broker_rejects_the_token() {
             &[("username", USER), ("password", PASSWORD)],
         ))
         .await;
-    assert_eq!(v, json!({"status": "success"}));
+    assert_eq!(v, json!({"status": "success", "redirect": "/broker"}));
     assert!(!h.ctx().is_broker_connected());
 }
 
@@ -1015,7 +1017,7 @@ async fn daily_boundary_ends_the_broker_session_at_three_ist() {
             &[("username", USER), ("password", PASSWORD)],
         ))
         .await;
-    assert_eq!(v, json!({"status": "success"}));
+    assert_eq!(v, json!({"status": "success", "redirect": "/broker"}));
 }
 
 #[tokio::test]
@@ -1031,7 +1033,7 @@ async fn stale_token_is_not_resumed_even_without_the_scheduler() {
             &[("username", USER), ("password", PASSWORD)],
         ))
         .await;
-    assert_eq!(v, json!({"status": "success"}));
+    assert_eq!(v, json!({"status": "success", "redirect": "/broker"}));
 }
 
 #[tokio::test]
@@ -1480,7 +1482,7 @@ async fn aliceblue_callback_for_another_account_is_refused() {
         .unwrap()
         .into_owned();
     assert!(
-        loc.contains("Add your aliceblue client id in Profile, Broker Configuration"),
+        loc.contains("Add your Alice Blue User ID on the Broker Configuration page"),
         "{}",
         loc
     );
@@ -1838,7 +1840,8 @@ async fn state_less_callbacks_are_bound_to_the_browser_session() {
 
 /// Arrow (and the HDFC pair) may drop `state`, and their API key does not
 /// carry the account: a first state-less sign-in is refused until the
-/// trader saves a client id in Profile, then it completes for that account.
+/// trader saves a client id on the Broker Configuration page, then it
+/// completes for that account.
 #[tokio::test]
 async fn first_state_less_sign_in_needs_the_saved_client_id() {
     let mock = Arc::new(MockBroker::new("arrow"));
@@ -1878,7 +1881,7 @@ async fn first_state_less_sign_in_needs_the_saved_client_id() {
     let loc = urlencoding::decode(&location(&h)).unwrap().into_owned();
     assert!(loc.starts_with("/broker?error="), "{}", loc);
     assert!(
-        loc.contains("Add your arrow client id in Profile, Broker Configuration"),
+        loc.contains("Add your Arrow Client ID on the Broker Configuration page"),
         "{}",
         loc
     );

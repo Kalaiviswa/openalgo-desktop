@@ -93,7 +93,7 @@ pub async fn authenticate(b: &IiflCapitalBroker, creds: BrokerCredentials) -> Re
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::Validation(
-                "Add your IIFL Capital API secret in Profile, Broker Configuration, then log in again."
+                "Add your IIFL Capital API secret on the Broker Configuration page, then log in again."
                     .into(),
             )
         })?

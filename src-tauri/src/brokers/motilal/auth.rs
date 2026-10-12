@@ -60,7 +60,7 @@ fn login_error(v: &Value) -> AppError {
     let hint = match code.as_str() {
         "MO1093" => "Use a fresh code from your authenticator app.",
         "MO1007" => "Check the date of birth (DD/MM/YYYY).",
-        "MO2005" => "Check the API key in Profile, Broker Configuration.",
+        "MO2005" => "Check the API key on the Broker Configuration page.",
         "MO2035" => "Register this computer's internet address as a static IP with Motilal Oswal.",
         _ => "Check your user id, password, date of birth and TOTP, then try again.",
     };
@@ -124,7 +124,7 @@ pub async fn authenticate(b: &MotilalBroker, creds: BrokerCredentials) -> Result
     let api_key = creds.api_key.trim().to_string();
     if api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Motilal Oswal API key is missing. Enter it in Profile, Broker Configuration."
+            "Your Motilal Oswal API key is missing. Enter it on the Broker Configuration page."
                 .into(),
         ));
     }

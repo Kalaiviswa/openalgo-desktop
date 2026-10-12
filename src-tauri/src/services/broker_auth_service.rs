@@ -21,6 +21,11 @@
 //! * Logout, the daily boundary, a broker switch and account reset call
 //!   `revoke`, which ends the session in memory before it writes the
 //!   stored row, and retries that write while it fails.
+//! * One broker is logged in at a time: keys can be saved for many brokers,
+//!   but completing a sign-in ends any other broker's session first (the
+//!   full `revoke`), and every hand-over runs under one lock
+//!   (`session_lock`), so two sign-ins finishing together never leave two
+//!   sessions live.
 
 use crate::brokers::{catalog, BrokerCredentials};
 use crate::db::sqlite::{auth, credentials, oauth_state};
@@ -145,7 +150,7 @@ impl BrokerAuthService {
             .filter(|c| !c.api_key.is_empty())
             .ok_or_else(|| {
                 AppError::Validation(
-                    "Add your broker API key and secret in Profile, Broker Configuration, then try again."
+                    "Add your broker API key and secret on the Broker Configuration page, then try again."
                         .into(),
                 )
             })
@@ -183,7 +188,12 @@ impl BrokerAuthService {
             )));
         };
         let creds = Self::load_credentials(state, broker)?;
-        let redirect = state.server_config().redirect_url_for(broker);
+        // The redirect URL saved with this broker's keys, else the automatic
+        // one (`BrokerConfigService::redirect_url`).
+        let redirect = creds
+            .redirect_url
+            .clone()
+            .unwrap_or_else(|| state.server_config().redirect_url_for(broker));
         let st = random_token();
         let url = match catalog::authorize_url(broker, creds.api_key.expose(), &redirect, &st) {
             Some(a) => a.url,
@@ -344,16 +354,26 @@ impl BrokerAuthService {
         match last {
             Some(u) => Ok(Some(u)),
             None if !state_less => Ok(None),
-            None if catalog::CLIENT_ID_BROKERS.contains(&broker) => {
+            // Named the way the Broker Configuration page labels the field.
+            None => {
+                let guide = crate::brokers::setup_guide::guide(broker);
+                let wanted = if catalog::CLIENT_ID_BROKERS.contains(&broker) {
+                    crate::brokers::setup_guide::KeyName::ClientId
+                } else {
+                    crate::brokers::setup_guide::KeyName::ApiKey
+                };
+                let label = guide
+                    .fields
+                    .iter()
+                    .find(|f| f.key == wanted)
+                    .map(|f| f.label)
+                    .unwrap_or("client ID");
                 Err(AppError::Validation(format!(
-                    "Add your {} client id in Profile, Broker Configuration, then start the broker login again.",
-                    broker
+                    "Add your {} {} on the Broker Configuration page, then start the broker login again.",
+                    crate::brokers::setup_guide::display_name(broker),
+                    label
                 )))
             }
-            None => Err(AppError::Validation(format!(
-                "Enter your {} API key as client_id:::api_key in Profile, Broker Configuration, then start the broker login again.",
-                broker
-            ))),
         }
     }
 
@@ -469,9 +489,34 @@ impl BrokerAuthService {
             user_name: resp.user_name,
             authenticated_at: state.now(),
         };
+        // One broker at a time: another broker's live session ends first
+        // (memory, streaming, caches, then its stored row), and the
+        // hand-over runs under the session lock, so a second sign-in that
+        // completes at the same moment waits and then ends this one.
+        let held = Self::session_lock(state).await;
+        if let Some(live) = state
+            .get_broker_session()
+            .filter(|s| s.broker_id != broker_id)
+        {
+            tracing::info!(
+                "Ending the {} session: only one broker is logged in at a time",
+                live.broker_id
+            );
+            if let Err(e) = Self::revoke_held(state, SessionEndReason::Logout, &held).await {
+                // The session is over in memory; its row is retried.
+                tracing::error!("The ended broker session is still to be revoked: {}", e);
+            }
+        }
         Self::persist(state, &session)?;
         Self::activate(state, &session).await;
+        drop(held);
         Ok(session)
+    }
+
+    /// Hold the one-session lock (`AppState::session_switch`) while a
+    /// session is ended, started or replaced.
+    pub async fn session_lock(state: &AppState) -> tokio::sync::MutexGuard<'_, ()> {
+        state.session_switch.lock().await
     }
 
     /// Start the session's streaming (master contract, feeds, order
@@ -604,6 +649,24 @@ impl BrokerAuthService {
             user_name: stored.user_name,
             authenticated_at: stored.authenticated_at,
         };
+        // A sign-in or a sign-out may have finished during the check: the
+        // stored session comes back only if nothing changed meanwhile.
+        let _held = Self::session_lock(state).await;
+        if let Some(s) = state.get_broker_session() {
+            return Ok(Some(s));
+        }
+        if Self::revoke_is_pending(state) {
+            return Ok(None);
+        }
+        let still_stored = {
+            let conn = state.sqlite.conn()?;
+            auth::latest_active(&conn, &state.security)?.is_some_and(|s| {
+                s.broker_id == session.broker_id && s.authenticated_at == session.authenticated_at
+            })
+        };
+        if !still_stored {
+            return Ok(None);
+        }
         state.set_broker_session(Some(session.clone()));
         state.bus.publish(Event::BrokerConnected {
             broker: session.broker_id.clone(),
@@ -627,6 +690,17 @@ impl BrokerAuthService {
     /// sign-in writes it (`retry_pending_revoke`). An `Err` means only that
     /// the stored row is still to be revoked.
     pub async fn revoke(state: &AppState, reason: SessionEndReason) -> Result<()> {
+        let held = Self::session_lock(state).await;
+        Self::revoke_held(state, reason, &held).await
+    }
+
+    /// `revoke` for a caller that already holds the session lock
+    /// (`session_lock`); the guard is the proof.
+    pub async fn revoke_held(
+        state: &AppState,
+        reason: SessionEndReason,
+        _held: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<()> {
         // Set before memory is cleared, so a sign-in racing this call
         // cannot resume the row being revoked.
         *state.revoke_pending.lock() = true;

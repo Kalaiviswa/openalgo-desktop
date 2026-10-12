@@ -30,7 +30,7 @@ fn creds(c: &BrokerCredentials) -> Result<(String, String)> {
     let token = c.api_key.trim().to_string();
     if token.is_empty() {
         return Err(AppError::Validation(
-            "Your Definedge API token is missing. Enter it as the API key in Profile, Broker Configuration."
+            "Your Definedge API token is missing. Enter it on the Broker Configuration page."
                 .into(),
         ));
     }
@@ -42,7 +42,7 @@ fn creds(c: &BrokerCredentials) -> Result<(String, String)> {
         .map(str::to_string)
         .ok_or_else(|| {
             AppError::Validation(
-                "Your Definedge API secret is missing. Enter it as the API secret in Profile, Broker Configuration."
+                "Your Definedge API secret is missing. Enter it on the Broker Configuration page."
                     .into(),
             )
         })?;
@@ -69,7 +69,7 @@ pub async fn send_otp(b: &DefinedgeBroker, c: &BrokerCredentials) -> Result<Stri
     let status = resp.status();
     let refused = || {
         AppError::Auth(
-            "Definedge did not send an OTP. Check the API token and secret in Profile, Broker Configuration, then try again."
+            "Definedge did not send an OTP. Check the API token and secret on the Broker Configuration page, then try again."
                 .into(),
         )
     };

@@ -59,7 +59,7 @@ pub(crate) async fn market_login_with(
         mapping::error_text(&v)
     );
     Err(AppError::Auth(
-        "The broker refused the market data API key and secret. Check them in Profile, Broker Configuration."
+        "The broker refused the market data API key and secret. Check them on the Broker Configuration page."
             .into(),
     ))
 }
@@ -191,7 +191,7 @@ pub(crate) async fn authenticate(b: &XtsBroker, creds: BrokerCredentials) -> Res
     let needs_key = !matches!(b.cfg.login, XtsLogin::OAuthSessionToken);
     if needs_key && (creds.api_key.trim().is_empty() || creds.api_secret.is_none()) {
         return Err(AppError::Validation(
-            "Add your interactive API key and secret in Profile, Broker Configuration, then try again."
+            "Add your interactive API key and secret on the Broker Configuration page, then try again."
                 .into(),
         ));
     }

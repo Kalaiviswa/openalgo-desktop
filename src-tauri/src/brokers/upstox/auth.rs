@@ -55,12 +55,12 @@ pub async fn authenticate(b: &UpstoxBroker, creds: BrokerCredentials) -> Result<
         })?;
     if creds.api_key.trim().is_empty() {
         return Err(AppError::Validation(
-            "Your Upstox API key is missing. Add it on the broker settings page.".into(),
+            "Your Upstox API key is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your Upstox API secret is missing. Add it on the broker settings page.".into(),
+            "Your Upstox API secret is missing. Add it on the Broker Configuration page.".into(),
         )
     })?;
     let form = token_form(&code, creds.api_key.trim(), &secret, &redirect);

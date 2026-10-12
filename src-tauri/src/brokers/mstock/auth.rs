@@ -63,7 +63,7 @@ fn refused(v: &Value, step: &str) -> AppError {
             if msg.is_empty() { String::new() } else { format!(": {}", msg) }
         ),
         _ => format!(
-            "mStock did not accept the TOTP{}. Use a fresh TOTP code and check that the API key in Profile, Broker Configuration is correct.",
+            "mStock did not accept the TOTP{}. Use a fresh TOTP code and check that the API key on the Broker Configuration page is correct.",
             if msg.is_empty() { String::new() } else { format!(": {}", msg) }
         ),
     })
@@ -155,8 +155,7 @@ pub async fn authenticate(b: &MstockBroker, creds: BrokerCredentials) -> Result<
     let clientcode = creds.api_key.trim().to_string();
     if clientcode.is_empty() {
         return Err(AppError::Validation(
-            "Your mStock client code is missing. Enter it as the API key in Profile, Broker Configuration."
-                .into(),
+            "Your mStock client code is missing. Enter it on the Broker Configuration page.".into(),
         ));
     }
     let private_key = creds
@@ -167,8 +166,7 @@ pub async fn authenticate(b: &MstockBroker, creds: BrokerCredentials) -> Result<
         .map(str::to_string)
         .ok_or_else(|| {
             AppError::Validation(
-                "Your mStock API key is missing. Enter it as the API secret in Profile, Broker Configuration."
-                    .into(),
+                "Your mStock API key is missing. Enter it on the Broker Configuration page.".into(),
             )
         })?;
     let password = creds.password.clone().unwrap_or_default();

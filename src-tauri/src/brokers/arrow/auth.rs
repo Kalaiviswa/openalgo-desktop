@@ -27,14 +27,12 @@ pub async fn authenticate(b: &ArrowBroker, creds: BrokerCredentials) -> Result<A
         })?;
     if creds.api_key.is_empty() {
         return Err(AppError::Validation(
-            "Your Arrow app ID is missing. Add it as the API key on the broker settings page."
-                .into(),
+            "Your Arrow app ID is missing. Add it on the Broker Configuration page.".into(),
         ));
     }
     let secret = creds.api_secret.filter(|s| !s.is_empty()).ok_or_else(|| {
         AppError::Validation(
-            "Your Arrow app secret is missing. Add it as the API secret on the broker settings page."
-                .into(),
+            "Your Arrow app secret is missing. Add it on the Broker Configuration page.".into(),
         )
     })?;
     let body = json!({

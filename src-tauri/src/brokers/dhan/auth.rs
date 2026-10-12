@@ -57,7 +57,7 @@ fn app_credentials(creds: &BrokerCredentials) -> Result<(Option<String>, String,
     let (client_id, app_id) = split_api_key(&creds.api_key);
     let app_id = app_id.ok_or_else(|| {
         AppError::Validation(
-            "Enter your Dhan API key as client_id:::api_key in Profile, Broker Configuration."
+            "Enter your Dhan API key as client_id:::api_key on the Broker Configuration page."
                 .into(),
         )
     })?;
@@ -67,7 +67,7 @@ fn app_credentials(creds: &BrokerCredentials) -> Result<(Option<String>, String,
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             AppError::Validation(
-                "Your Dhan API secret is missing. Add it in Profile, Broker Configuration.".into(),
+                "Your Dhan API secret is missing. Add it on the Broker Configuration page.".into(),
             )
         })?;
     let client_id = creds
@@ -83,7 +83,7 @@ pub async fn generate_consent(b: &DhanBroker, creds: &BrokerCredentials) -> Resu
     let (client_id, app_id, secret) = app_credentials(creds)?;
     let client_id = client_id.ok_or_else(|| {
         AppError::Validation(
-            "Your Dhan client ID is missing. Enter the API key as client_id:::api_key in Profile, Broker Configuration."
+            "Your Dhan client ID is missing. Enter the API key as client_id:::api_key on the Broker Configuration page."
                 .into(),
         )
     })?;
@@ -110,7 +110,7 @@ pub async fn generate_consent(b: &DhanBroker, creds: &BrokerCredentials) -> Resu
         "Dhan did not generate a login consent"
     );
     Err(AppError::Auth(
-        "Dhan did not start the login. Check the API key (client_id:::api_key) and API secret in Profile, Broker Configuration."
+        "Dhan did not start the login. Check the API key (client_id:::api_key) and API secret on the Broker Configuration page."
             .into(),
     ))
 }

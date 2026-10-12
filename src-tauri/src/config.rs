@@ -132,6 +132,13 @@ impl ServerConfig {
                 return r.clone();
             }
         }
+        self.automatic_redirect_url(broker)
+    }
+
+    /// The automatic redirect URL: `<base>/<broker>/callback`, where the
+    /// base is this app's address, or the Host Server URL while the tunnel
+    /// is on.
+    pub fn automatic_redirect_url(&self, broker: &str) -> String {
         format!("{}/{}/callback", self.public_base_url(), broker)
     }
 }

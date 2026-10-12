@@ -159,7 +159,7 @@ impl Connector {
                 user_id: u.clone(),
             }),
             _ => Err(PrepareError::AuthFailed(format!(
-                "Live market data needs the {} market data API key. Add it in Profile, Broker Configuration, then log in again.",
+                "Live market data needs the {} market data API key. Add it on the Broker Configuration page, then log in again.",
                 self.cfg.name
             ))),
         }

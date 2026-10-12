@@ -61,7 +61,7 @@ pub async fn authenticate(b: &AliceBlueBroker, creds: BrokerCredentials) -> Resu
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             AppError::Validation(
-                "Your AliceBlue API secret is missing. Enter it in Profile, Broker Configuration."
+                "Your AliceBlue API secret is missing. Enter it on the Broker Configuration page."
                     .into(),
             )
         })?
@@ -109,7 +109,7 @@ pub async fn authenticate(b: &AliceBlueBroker, creds: BrokerCredentials) -> Resu
     tracing::warn!("AliceBlue refused the sign-in");
     if emsg.is_empty() {
         return Err(AppError::Auth(
-            "AliceBlue did not return a session. Check the API secret in Profile, Broker Configuration, and log in again."
+            "AliceBlue did not return a session. Check the API secret on the Broker Configuration page, and log in again."
                 .into(),
         ));
     }

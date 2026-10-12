@@ -65,7 +65,7 @@ pub async fn authenticate(b: &PocketfulBroker, creds: BrokerCredentials) -> Resu
         .filter(|s| !s.is_empty());
     let (Some(secret), false) = (secret, client_id.is_empty()) else {
         return Err(AppError::Validation(
-            "Your Pocketful client id or client secret is missing. Add them on the broker settings page."
+            "Your Pocketful client id or client secret is missing. Add them on the Broker Configuration page."
                 .into(),
         ));
     };
@@ -95,7 +95,7 @@ pub async fn authenticate(b: &PocketfulBroker, creds: BrokerCredentials) -> Resu
             "Pocketful refused the login because the redirect URL does not match your Pocketful app. Set the app's redirect URL to the one shown in OpenAlgo, then log in again."
                 .into()
         } else if lower.contains("client") || status.as_u16() == 401 {
-            "Pocketful did not accept your client id or secret. Check them on the broker settings page."
+            "Pocketful did not accept your client id or secret. Check them on the Broker Configuration page."
                 .into()
         } else {
             "The Pocketful login code has expired or was already used. Log in to Pocketful again."

@@ -53,7 +53,8 @@ pub fn choose_variant(creds: &BrokerCredentials) -> Result<Variant> {
     if let Some(totp) = nonempty(&creds.totp) {
         if api_key.is_empty() {
             return Err(AppError::Validation(
-                "Your Groww TOTP API key is missing. Add it on the broker settings page.".into(),
+                "Your Groww TOTP API key is missing. Add it on the Broker Configuration page."
+                    .into(),
             ));
         }
         return Ok(Variant::Totp { api_key, totp });
@@ -64,7 +65,7 @@ pub fn choose_variant(creds: &BrokerCredentials) -> Result<Variant> {
     if let Some(api_secret) = nonempty(&creds.api_secret) {
         if api_key.is_empty() {
             return Err(AppError::Validation(
-                "Your Groww API key is missing. Add it on the broker settings page.".into(),
+                "Your Groww API key is missing. Add it on the Broker Configuration page.".into(),
             ));
         }
         return Ok(Variant::Approval {
@@ -76,7 +77,7 @@ pub fn choose_variant(creds: &BrokerCredentials) -> Result<Variant> {
         return Ok(Variant::PastedToken(api_key));
     }
     Err(AppError::Validation(
-        "Groww needs one of: your API key and API secret on the broker settings page, a TOTP code for a TOTP API key, or an access token pasted from Groww."
+        "Groww needs one of: your API key and API secret on the Broker Configuration page, a TOTP code for a TOTP API key, or an access token pasted from Groww."
             .into(),
     ))
 }
