@@ -283,7 +283,9 @@ is kept in a separate database, apart from live trading.
   request made while analyzer mode was on.
 
 Market data still comes from your connected broker, so connect a broker before
-using sandbox mode.
+using sandbox mode. Fills are all or nothing and P&L is before costs; see
+[Sandbox mode](docs/user/sandbox.md) for how orders fill and the limits of
+the simulation.
 
 ## Ports
 
@@ -398,6 +400,7 @@ connected at a time.
 
 - [Moving from OpenAlgo web](docs/user/moving-from-openalgo-web.md)
 - [Broker sign-in](docs/user/brokers.md)
+- [Sandbox mode (analyzer mode)](docs/user/sandbox.md)
 - [Connecting Claude Desktop and Claude Code (MCP)](docs/user/mcp.md)
 - [Troubleshooting](docs/user/troubleshooting.md)
 - [Changelog](CHANGELOG.md)
