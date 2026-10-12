@@ -4,6 +4,7 @@ import { io, type Socket } from 'socket.io-client'
 import { toast } from 'sonner'
 import { type AlertCategories, useAlertStore } from '@/stores/alertStore'
 import { useAuthStore } from '@/stores/authStore'
+import { useBrokerStore } from '@/stores/brokerStore'
 import { useSessionStore } from '@/stores/sessionStore'
 
 // Audio throttling configuration
@@ -258,6 +259,10 @@ export function useSocket() {
     // Active sessions update (event-driven, no polling)
     socket.on('active_sessions_update', (data: { count: number }) => {
       useSessionStore.getState().setActiveSessionCount(data.count)
+      // Desktop: the server sends this when a broker session ends or starts
+      // (a switch is both). The capabilities shown belong to the old
+      // session, so they are dropped and read again (STATE-01).
+      void useBrokerStore.getState().sessionChanged(data.count > 0)
     })
 
     // Analyzer update notification

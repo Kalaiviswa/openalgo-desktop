@@ -1,37 +1,62 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
+import type { BrokerList } from '@/api/broker-config'
+import { brokerEntry, brokerList, saved } from '@/test/brokerList'
+import { renderWithQuery } from '@/test/queryRender'
+import { fireEvent, screen, waitFor, within } from '@/test/test-utils'
+import { useAuthStore } from '@/stores/authStore'
+import { useBrokerStore } from '@/stores/brokerStore'
 import BrokerSelect from './BrokerSelect'
 
-// Desktop: the broker page starts each sign-in the way the server reports it
-// (`sign_in`), so it cannot drift from the server's broker catalogue.
+// Desktop: Select Broker is a card per broker (OpenBull's pattern). Keys are
+// saved for many brokers; one broker is logged in at a time. "Login with"
+// starts each sign-in the way the server reports it (`sign_in`).
 
 const realLocation = window.location
 let assigned: string[] = []
 let posts: string[] = []
+let list: BrokerList
 
-function serve(broker: string, signIn: string) {
+let listReads = 0
+
+function serve(
+  opts: {
+    refuseSavedKeys?: string
+    /** The session ends at the server, but the reply never arrives. */
+    loseEndReply?: boolean
+    capabilities?: () => Promise<Response>
+  } = {}
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
-      if (url === '/auth/broker-config') {
-        return json({
-          status: 'success',
-          broker_name: broker,
-          broker_api_key: null,
-          redirect_url: `http://127.0.0.1:5000/${broker}/callback`,
-          sign_in: signIn,
-        })
+      if (url === '/api/broker/list') {
+        listReads += 1
+        return json({ status: 'success', data: list })
       }
-      if (url === '/api/broker/configured') {
+      if (url === '/api/broker/capabilities' && opts.capabilities) return opts.capabilities()
+      if (url === '/auth/session-status') {
         return json({
           status: 'success',
-          data: { brokers: [{ name: broker, active: true, sign_in: signIn }], active: broker },
+          logged_in: list.logged_in !== null,
+          broker: list.logged_in,
         })
       }
       if (url === '/auth/csrf-token') return json({ csrf_token: 'tok' })
       if (init?.method === 'POST') {
         posts.push(url)
+        if (url === '/api/broker/session/end') {
+          list = {
+            ...list,
+            logged_in: null,
+            brokers: list.brokers.map((b) => ({ ...b, active: false })),
+          }
+          if (opts.loseEndReply) throw new TypeError('Failed to fetch')
+          return json({ status: 'success' })
+        }
+        if (opts.refuseSavedKeys) {
+          return json({ status: 'error', message: opts.refuseSavedKeys }, 401)
+        }
         return json({ status: 'success', redirect: '/dashboard' })
       }
       return json({}, 404)
@@ -39,9 +64,30 @@ function serve(broker: string, signIn: string) {
   )
 }
 
+function renderPage(path = '/broker') {
+  // The router reads the address from the stand-in location.
+  const url = new URL(path, 'http://127.0.0.1:5500')
+  Object.assign(window.location, { pathname: url.pathname, search: url.search, hash: '' })
+  return renderWithQuery(<BrokerSelect />)
+}
+
+const card = async (id: string) => within(await screen.findByTestId(`broker-card-${id}`))
+
 beforeEach(() => {
   assigned = []
   posts = []
+  listReads = 0
+  useBrokerStore.getState().clearCapabilities()
+  useAuthStore.setState({
+    user: { username: 'trader', broker: 'zerodha', isLoggedIn: true, loginTime: null },
+    isAuthenticated: true,
+  })
+  list = brokerList([
+    brokerEntry('zerodha', 'Zerodha', 'redirect'),
+    brokerEntry('angel', 'Angel One', 'form'),
+    brokerEntry('fivepaisaxts', '5 Paisa (XTS)', 'saved_keys'),
+    brokerEntry('fyers', 'Fyers', 'redirect'),
+  ])
   const loc = { ...realLocation, origin: 'http://127.0.0.1:5500', search: '' }
   Object.defineProperty(loc, 'href', {
     get: () => assigned[assigned.length - 1] ?? 'http://127.0.0.1:5500/broker',
@@ -55,150 +101,198 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-async function connect() {
-  const button = await screen.findByRole('button', { name: /connect account/i })
-  await waitFor(() => expect(button).toBeEnabled())
-  fireEvent.click(button)
-}
-
-describe('BrokerSelect sign-in start', () => {
-  it.each(['shoonya', 'zebu', 'tradesmart', 'rmoney', 'zerodha', 'flattrade'])(
-    'sends %s through the server-side sign-in start',
-    async (broker) => {
-      serve(broker, 'redirect')
-      render(<BrokerSelect />)
-      await connect()
-      await waitFor(() => expect(assigned).toEqual([`/${broker}/initiate-oauth`]))
-    }
-  )
-
-  it.each([
-    'fivepaisaxts',
-    'jainamxts',
-    'ibulls',
-    'iifl',
-    'wisdom',
-    'deltaexchange',
-    'dhan_sandbox',
-  ])('signs %s in from the saved keys with one action, without a form', async (broker) => {
-    serve(broker, 'saved_keys')
-    render(<BrokerSelect />)
-    await connect()
-    await waitFor(() => expect(assigned).toEqual(['/dashboard']))
-    expect(posts).toEqual([`/${broker}/callback`])
+describe('Select Broker cards', () => {
+  it('shows one badge per broker, configured brokers first, with their exchanges', async () => {
+    list = brokerList([
+      brokerEntry('zerodha', 'Zerodha', 'redirect'),
+      saved(brokerEntry('fyers', 'Fyers', 'redirect'), { api_key: 'APP***100' }),
+      { ...saved(brokerEntry('angel', 'Angel One', 'form'), {}), active: true },
+    ])
+    serve()
+    renderPage()
+    const cards = await screen.findAllByTestId(/^broker-card-/)
+    expect(cards.map((c) => c.dataset.testid)).toEqual([
+      'broker-card-angel',
+      'broker-card-fyers',
+      'broker-card-zerodha',
+    ])
+    expect((await card('angel')).getByText('Active')).toBeInTheDocument()
+    expect((await card('fyers')).getByText('Configured')).toBeInTheDocument()
+    expect((await card('zerodha')).getByText('Not Configured')).toBeInTheDocument()
+    expect(screen.getAllByText('Active')).toHaveLength(1)
+    expect((await card('zerodha')).getByText('Exchanges: NSE, BSE, NFO')).toBeInTheDocument()
   })
 
-  it("shows the server's reason when a saved-keys sign-in is refused", async () => {
-    serve('fivepaisaxts', 'saved_keys')
-    const ok = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string, init?: RequestInit) =>
-        init?.method === 'POST'
-          ? new Response(
-              JSON.stringify({ status: 'error', message: 'Check your API key and secret.' }),
-              { status: 401 }
-            )
-          : ok(url, init)
-      )
-    )
-    render(<BrokerSelect />)
-    await connect()
-    expect(await screen.findByText('Check your API key and secret.')).toBeInTheDocument()
-    expect(assigned).toEqual([])
-    expect(screen.getByRole('button', { name: /connect account/i })).toBeEnabled()
+  it('offers Configure for a broker without keys, opening its configuration', async () => {
+    serve()
+    renderPage()
+    const link = (await card('zerodha')).getByRole('link', { name: 'Configure' })
+    expect(link).toHaveAttribute('href', '/broker/config?broker=zerodha')
+    expect((await card('zerodha')).queryByRole('button', { name: /login with/i })).toBeNull()
   })
 
-  it('opens the in-app form for a form broker', async () => {
-    serve('angel', 'form')
-    render(<BrokerSelect />)
-    await connect()
-    await waitFor(() => expect(assigned).toEqual(['/angel/callback']))
-    expect(posts).toEqual([])
+  it('filters the cards by name', async () => {
+    serve()
+    renderPage()
+    await card('zerodha')
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search brokers' }), {
+      target: { value: 'ang' },
+    })
+    expect(screen.getAllByTestId(/^broker-card-/).map((c) => c.dataset.testid)).toEqual([
+      'broker-card-angel',
+    ])
+  })
+
+  it("shows a failed sign-in's reason on that broker's card", async () => {
+    list = brokerList([saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {})])
+    serve()
+    renderPage('/broker?error=The%20broker%20did%20not%20complete%20the%20sign-in.&broker=zerodha')
+    expect(
+      await (await card('zerodha')).findByText('The broker did not complete the sign-in.')
+    ).toBeInTheDocument()
   })
 })
 
-// FLOW-03: picking another broker is the switch, and a switch ends the live
-// session, so it is confirmed first; a refused switch keeps the selection.
-describe('BrokerSelect broker switch', () => {
-  function serveTwo(live: string | null, accept: boolean) {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string, init?: RequestInit) => {
-        const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
-        if (url === '/auth/broker-config') {
-          return json({
-            status: 'success',
-            broker_name: 'zerodha',
-            broker_api_key: null,
-            redirect_url: 'http://127.0.0.1:5000/zerodha/callback',
-            sign_in: 'redirect',
-          })
-        }
-        if (url === '/api/broker/configured') {
-          return json({
-            status: 'success',
-            data: {
-              brokers: [
-                { name: 'zerodha', active: true, sign_in: 'redirect' },
-                { name: 'fyers', active: false, sign_in: 'redirect' },
-              ],
-              active: 'zerodha',
-            },
-          })
-        }
-        if (url === '/auth/session-status') {
-          return json({ status: 'success', logged_in: live !== null, broker: live })
-        }
-        if (url === '/auth/csrf-token') return json({ csrf_token: 'tok' })
-        if (init?.method === 'POST') {
-          posts.push(url)
-          return accept
-            ? json({ status: 'success' })
-            : json({ status: 'error', message: 'OpenAlgo could not save the switch.' }, 500)
-        }
-        return json({}, 404)
-      })
+describe('Login with a broker', () => {
+  it.each([
+    ['zerodha', 'Zerodha', 'redirect', '/zerodha/initiate-oauth'],
+    ['shoonya', 'Shoonya', 'redirect', '/shoonya/initiate-oauth'],
+    ['angel', 'Angel One', 'form', '/angel/callback'],
+    ['kotak', 'Kotak Securities', 'form', '/kotak/callback'],
+  ] as const)('starts %s the way the server says it signs in', async (id, name, signIn, to) => {
+    list = brokerList([saved(brokerEntry(id, name, signIn), {})])
+    serve()
+    renderPage()
+    fireEvent.click((await card(id)).getByRole('button', { name: `Login with ${name}` }))
+    await waitFor(() => expect(assigned).toEqual([to]))
+    expect(posts).toEqual([])
+  })
+
+  it('signs a saved-keys broker in with one action, without a form', async () => {
+    list = brokerList([saved(brokerEntry('fivepaisaxts', '5 Paisa (XTS)', 'saved_keys'), {})])
+    serve()
+    renderPage()
+    fireEvent.click(
+      (await card('fivepaisaxts')).getByRole('button', { name: 'Login with 5 Paisa (XTS)' })
     )
-  }
+    await waitFor(() => expect(assigned).toEqual(['/dashboard']))
+    expect(posts).toEqual(['/fivepaisaxts/callback'])
+  })
 
-  async function pick(name: string) {
-    await connectButtonReady()
-    fireEvent.keyDown(screen.getByRole('combobox'), { key: 'ArrowDown' })
-    fireEvent.click(await screen.findByRole('option', { name }))
-  }
+  it("shows the server's reason on the card when a saved-keys sign-in is refused", async () => {
+    list = brokerList([saved(brokerEntry('fivepaisaxts', '5 Paisa (XTS)', 'saved_keys'), {})])
+    serve({ refuseSavedKeys: 'Check your API key and secret.' })
+    renderPage()
+    fireEvent.click(
+      (await card('fivepaisaxts')).getByRole('button', { name: 'Login with 5 Paisa (XTS)' })
+    )
+    expect(
+      await (await card('fivepaisaxts')).findByText('Check your API key and secret.')
+    ).toBeInTheDocument()
+    expect(assigned).toEqual([])
+  })
+})
 
-  async function connectButtonReady() {
-    const button = await screen.findByRole('button', { name: /connect account/i })
-    await waitFor(() => expect(button).toBeEnabled())
-  }
+// One broker at a time: logging in to another ends the live session, so it
+// is confirmed first, and the session ends before the new sign-in starts.
+describe('Login while another broker is logged in', () => {
+  beforeEach(() => {
+    list = brokerList([
+      { ...saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {}), active: true },
+      saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+    ])
+  })
 
-  it('asks before ending a live session, and Cancel sends nothing', async () => {
-    serveTwo('zerodha', true)
-    render(<BrokerSelect />)
-    await pick('Fyers')
+  it('asks first, and Cancel ends nothing and starts nothing', async () => {
+    serve()
+    renderPage()
+    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
     expect(await screen.findByText('End your Zerodha session?')).toBeInTheDocument()
-    expect(screen.getByText(/positions and orders stay at Zerodha/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /Signing in to Fyers ends your Zerodha session. Open positions and orders stay with Zerodha./
+      )
+    ).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByText('End your Zerodha session?')).toBeNull())
     expect(posts).toEqual([])
-    expect(screen.getByRole('combobox')).toHaveTextContent('Zerodha')
+    expect(assigned).toEqual([])
   })
 
-  it('switches once the trader confirms', async () => {
-    serveTwo('zerodha', true)
-    render(<BrokerSelect />)
-    await pick('Fyers')
-    fireEvent.click(await screen.findByRole('button', { name: 'End session and switch' }))
-    await waitFor(() => expect(posts).toEqual(['/api/broker/credentials']))
+  it('ends the live session, then starts the new sign-in', async () => {
+    serve()
+    renderPage()
+    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
+    await waitFor(() => expect(assigned).toEqual(['/fyers/initiate-oauth']))
+    expect(posts).toEqual(['/api/broker/session/end'])
   })
 
-  it('puts the selection back when the switch is refused', async () => {
-    serveTwo(null, false)
-    render(<BrokerSelect />)
-    await pick('Fyers')
-    expect(await screen.findByText('OpenAlgo could not save the switch.')).toBeInTheDocument()
-    expect(posts).toEqual(['/api/broker/credentials'])
-    expect(screen.getByRole('combobox')).toHaveTextContent('Zerodha')
+  it('offers the dashboard on the logged-in broker instead of a second login', async () => {
+    serve()
+    renderPage()
+    expect(
+      (await card('zerodha')).getByRole('button', { name: 'Open Dashboard' })
+    ).toBeInTheDocument()
+    expect((await card('zerodha')).queryByRole('button', { name: /login with/i })).toBeNull()
+  })
+})
+
+// FLOW-03 (client): a switch whose reply is lost leaves no page claiming a
+// state the server is not in. STATE-01: the old session's capabilities are
+// never applied after the switch, even by an answer still in flight.
+describe('Switching truthfully', () => {
+  beforeEach(() => {
+    list = brokerList([
+      { ...saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {}), active: true },
+      saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+    ])
+  })
+
+  it('says so when the reply is lost, and shows what the server holds now', async () => {
+    serve({ loseEndReply: true })
+    renderPage()
+    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
+    expect(
+      await (await card('fyers')).findByText('Could not reach OpenAlgo. Try again.')
+    ).toBeInTheDocument()
+    expect(assigned).toEqual([])
+    // Read again: the server did end Zerodha's session, so no card says Active.
+    await waitFor(() => expect(listReads).toBeGreaterThan(1))
+    await waitFor(() => expect(screen.queryByText('Active')).toBeNull())
+    expect((await card('fyers')).getByRole('button', { name: 'Login with Fyers' })).toBeEnabled()
+  })
+
+  it("never applies the old broker's capabilities after the switch", async () => {
+    let answerOld: (r: Response) => void = () => {}
+    serve({
+      capabilities: () =>
+        new Promise<Response>((resolve) => {
+          answerOld = resolve
+        }),
+    })
+    // A request for Zerodha's capabilities is still in flight (AuthSync).
+    const pending = useBrokerStore.getState().fetchCapabilities()
+    renderPage()
+    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
+    await waitFor(() => expect(assigned).toEqual(['/fyers/initiate-oauth']))
+    answerOld(
+      new Response(
+        JSON.stringify({
+          status: 'success',
+          data: {
+            broker_name: 'zerodha',
+            broker_type: 'IN_stock',
+            supported_exchanges: ['NSE'],
+            leverage_config: false,
+          },
+        })
+      )
+    )
+    await pending
+    expect(useBrokerStore.getState().capabilities).toBeNull()
+    expect(useAuthStore.getState().user?.broker).toBeNull()
   })
 })

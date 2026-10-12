@@ -22,6 +22,8 @@ const NotFound = lazy(() => import('@/pages/NotFound'))
 
 // Broker auth
 const BrokerSelect = lazy(() => import('@/pages/BrokerSelect'))
+// Desktop: one key set per broker, saved in the app (no .env).
+const BrokerConfig = lazy(() => import('@/pages/BrokerConfig'))
 const BrokerTOTP = lazy(() => import('@/pages/BrokerTOTP'))
 const SamcoAuth = lazy(() => import('@/pages/SamcoAuth'))
 
@@ -166,6 +168,7 @@ function App() {
 
               {/* Broker auth routes */}
               <Route path="/broker" element={<BrokerSelect />} />
+              <Route path="/broker/config" element={<BrokerConfig />} />
               <Route path="/broker/:broker/totp" element={<BrokerTOTP />} />
               <Route path="/broker/samco/auth" element={<SamcoAuth />} />
               {/* Dynamic broker TOTP routes for all supported brokers */}

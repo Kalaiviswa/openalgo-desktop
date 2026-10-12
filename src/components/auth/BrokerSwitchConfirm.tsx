@@ -1,9 +1,10 @@
 /**
- * Desktop-only: confirm before a broker switch ends the live broker session.
+ * Desktop-only: confirm before logging in to another broker ends the live
+ * broker session.
  *
- * The desktop connects one broker at a time, so making another broker the
- * active one ends the session that is live now. The broker page and the
- * Profile broker tab ask first, naming what stops and what stays.
+ * Keys can be saved for many brokers, but only one broker is logged in at a
+ * time, so logging in to another broker ends the session that is live now.
+ * Select Broker asks first, naming what stops and what stays.
  */
 
 import { AlertTriangle } from 'lucide-react'
@@ -21,13 +22,26 @@ import {
 interface BrokerSwitchConfirmProps {
   /** The broker whose session ends (display name); null closes the dialog. */
   from: string | null
-  /** The broker being switched to (display name). */
+  /** The broker being logged in to (display name). */
   to: string
+  /**
+   * What ends the session: logging in to `to` (the default), or saving new
+   * keys for `from` itself (a session belongs to the keys it signed in
+   * with).
+   */
+  cause?: 'login' | 'new-keys'
   onCancel: () => void
   onConfirm: () => void
 }
 
-export function BrokerSwitchConfirm({ from, to, onCancel, onConfirm }: BrokerSwitchConfirmProps) {
+export function BrokerSwitchConfirm({
+  from,
+  to,
+  cause = 'login',
+  onCancel,
+  onConfirm,
+}: BrokerSwitchConfirmProps) {
+  const newKeys = cause === 'new-keys'
   return (
     <AlertDialog
       open={from !== null}
@@ -44,20 +58,25 @@ export function BrokerSwitchConfirm({ from, to, onCancel, onConfirm }: BrokerSwi
           <AlertDialogDescription asChild>
             <div className="space-y-3">
               <p>
-                Switching to {to} ends the live {from} session in OpenAlgo now. OpenAlgo stops
-                placing stop-loss and target exits for it, and your trading platforms and API
-                clients can no longer trade through it.
+                {newKeys ? `Saving new keys for ${from}` : `Signing in to ${to}`} ends your {from}{' '}
+                session. Open positions and orders stay with {from}.
               </p>
               <p>
-                Open positions and orders stay at {from}. Close or protect them there first if you
-                need to.
+                OpenAlgo stops placing stop-loss and target exits for {from}, and your trading
+                platforms and API clients can no longer trade through it. Close or protect open
+                positions at {from} first if you need to.{' '}
+                {newKeys
+                  ? `Log in to ${from} again to use the new keys.`
+                  : `Your ${from} keys stay saved, so switching back needs only a login.`}
               </p>
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>End session and switch</AlertDialogAction>
+          <AlertDialogAction onClick={onConfirm}>
+            {newKeys ? 'End session and save' : 'End session and log in'}
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

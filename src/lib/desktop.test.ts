@@ -6,13 +6,14 @@ vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => tauri.inShell }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: tauri.open }))
 
 import {
-  brokerNeedsClientId,
+  brokerSignInTarget,
   DEFAULT_WEBSOCKET_URL,
   desktopBrokerLoginUrl,
   desktopProfileMenuItems,
   installDesktopShellHandlers,
   isDesktopShell,
   isExternalHttpUrl,
+  layoutRedirect,
   signInWithSavedKeys,
 } from './desktop'
 
@@ -225,14 +226,39 @@ describe('isPreBrokerPath', () => {
   })
 })
 
-describe('brokerNeedsClientId', () => {
-  it('follows the list the server sends', () => {
-    const list = ['arrow', 'hdfcsky', 'hdfcsecurities']
-    expect(brokerNeedsClientId('arrow', list)).toBe(true)
-    expect(brokerNeedsClientId('hdfcsky', list)).toBe(true)
-    expect(brokerNeedsClientId('zerodha', list)).toBe(false)
-    expect(brokerNeedsClientId('dhan', list)).toBe(false)
-    expect(brokerNeedsClientId(undefined, list)).toBe(false)
-    expect(brokerNeedsClientId('arrow', undefined)).toBe(false)
+describe('brokerSignInTarget', () => {
+  it('opens each sign-in the way the server says the broker signs in', () => {
+    expect(brokerSignInTarget('zerodha', 'redirect')).toBe('/zerodha/initiate-oauth')
+    expect(brokerSignInTarget('angel', 'form')).toBe('/angel/callback')
+    // A saved-keys broker signs in with one action, not a page.
+    expect(brokerSignInTarget('fivepaisaxts', 'saved_keys')).toBeNull()
+    expect(brokerSignInTarget('zerodha', undefined)).toBeNull()
+    expect(brokerSignInTarget('', 'form')).toBeNull()
+  })
+})
+
+// One rule for every guard: not signed in goes to /login; signed in with no
+// broker logged in goes straight to /broker (no detour through /login).
+describe('layoutRedirect', () => {
+  it('sends a trader who is not signed in to the sign-in page', () => {
+    expect(layoutRedirect(null, false, '/dashboard')).toBe('/login')
+    expect(layoutRedirect({ username: '', broker: null }, false, '/profile')).toBe('/login')
+  })
+
+  it('sends a signed-in trader with no broker logged in to Select Broker', () => {
+    // As AuthSync stores it after a reload, and as Login stores it.
+    expect(layoutRedirect({ username: 'trader', broker: null }, false, '/dashboard')).toBe(
+      '/broker'
+    )
+    expect(layoutRedirect({ username: 'trader', broker: '' }, true, '/positions')).toBe('/broker')
+    // Profile and Server Settings stay open before a broker login.
+    expect(layoutRedirect({ username: 'trader', broker: null }, false, '/profile')).toBeNull()
+    expect(
+      layoutRedirect({ username: 'trader', broker: null }, false, '/settings/server')
+    ).toBeNull()
+  })
+
+  it('lets a trader with a broker logged in through', () => {
+    expect(layoutRedirect({ username: 'trader', broker: 'zerodha' }, true, '/dashboard')).toBeNull()
   })
 })

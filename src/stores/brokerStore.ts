@@ -15,6 +15,13 @@ interface BrokerStore {
 
   fetchCapabilities: () => Promise<void>
   clearCapabilities: () => void
+  /**
+   * Desktop: the broker session ended or another one started. Capabilities
+   * belong to one session, so they are dropped (an answer still in flight
+   * for the old session is ignored) and, when a session is live, read
+   * again for it.
+   */
+  sessionChanged: (live: boolean) => Promise<void>
 }
 
 export const useBrokerStore = create<BrokerStore>()((set, get) => ({
@@ -45,4 +52,9 @@ export const useBrokerStore = create<BrokerStore>()((set, get) => ({
 
   clearCapabilities: () =>
     set((state) => ({ capabilities: null, isLoaded: false, epoch: state.epoch + 1 })),
+
+  sessionChanged: async (live) => {
+    get().clearCapabilities()
+    if (live) await get().fetchCapabilities()
+  },
 }))
