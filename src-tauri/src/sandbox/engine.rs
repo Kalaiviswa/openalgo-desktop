@@ -9,14 +9,23 @@
 //! * engine commands from the order path (`Watch`, `Rebuild`,
 //!   `ConfigChanged`), on a bounded channel;
 //! * a one-second clock that runs the day schedule's due jobs;
-//! * the polling fallback every `order_check_interval` seconds, which only
-//!   runs while no tick has arrived for `stale_feed_after` (30 s);
+//! * the polling fallback every `order_check_interval` seconds, which
+//!   quotes only the symbols whose own feed is stale: no usable tick for
+//!   `stale_feed_after` (30 s) since the last one or since watching began;
 //! * a one-minute maintenance pass (GTT reclaim and expiry, watch-set
 //!   rebuild).
+//!
+//! Freshness is kept per symbol, from ticks that passed the watched and
+//! positive-price checks, so a live feed for one symbol (or ticks for
+//! symbols the sandbox does not need) never hides another symbol's stalled
+//! feed. A watched symbol that stays stale is re-subscribed with a backoff
+//! that doubles up to [`RESUBSCRIBE_CAP`]. (The web keeps one global
+//! timestamp and never re-subscribes.)
 //!
 //! The watch set is keyed by symbol and holds only symbols with a resting
 //! order, a pending GTT leg or an open position; a symbol leaves the set (and
 //! the feed is told to stop streaming it) when nothing needs it any more.
+//! Every per-symbol map is keyed by the watch set and pruned with it.
 //! Stopping is graceful: the task is cancelled, joined, and every watched
 //! symbol is released.
 
@@ -104,23 +113,108 @@ fn symbol_needed(conn: &rusqlite::Connection, key: &SymbolKey) -> rusqlite::Resu
     Ok(n > 0)
 }
 
+/// Longest wait between re-subscriptions of a symbol whose feed stays
+/// stale.
+pub const RESUBSCRIBE_CAP: Duration = Duration::from_secs(300);
+
+/// Re-subscription schedule of one stale symbol.
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    attempts: u32,
+    next: Instant,
+}
+
+/// Wait after the `attempts`-th re-subscription: `base` doubling, capped.
+fn resubscribe_delay(base: Duration, attempts: u32) -> Duration {
+    let base = base.max(Duration::from_secs(1));
+    base.saturating_mul(1u32 << attempts.min(16))
+        .min(RESUBSCRIBE_CAP)
+}
+
+#[derive(Default)]
 struct State {
     watched: HashSet<SymbolKey>,
     /// Last MTM write per watched symbol (bounded by the watch set).
     last_mtm: HashMap<SymbolKey, Instant>,
-    last_tick: Instant,
+    /// When each watched symbol last had a usable tick, or began being
+    /// watched (bounded by the watch set).
+    last_seen: HashMap<SymbolKey, Instant>,
+    /// Re-subscription backoff of watched symbols whose feed is stale
+    /// (bounded by the watch set; cleared by the symbol's next tick).
+    resubscribe: HashMap<SymbolKey, Backoff>,
 }
 
 impl State {
+    fn watch(&mut self, ticks: &dyn TickSource, key: &SymbolKey) {
+        if self.watched.insert(key.clone()) {
+            ticks.watch(key);
+            self.last_seen.insert(key.clone(), Instant::now());
+        }
+    }
+
+    fn forget(&mut self, ticks: &dyn TickSource, key: &SymbolKey) {
+        if self.watched.remove(key) {
+            ticks.unwatch(key);
+        }
+        self.last_mtm.remove(key);
+        self.last_seen.remove(key);
+        self.resubscribe.remove(key);
+    }
+
     fn sync_watch(&mut self, ticks: &dyn TickSource, wanted: HashSet<SymbolKey>) {
-        for k in self.watched.difference(&wanted) {
-            ticks.unwatch(k);
-            self.last_mtm.remove(k);
+        let gone: Vec<SymbolKey> = self.watched.difference(&wanted).cloned().collect();
+        for k in &gone {
+            self.forget(ticks, k);
         }
-        for k in wanted.difference(&self.watched) {
-            ticks.watch(k);
+        for k in &wanted {
+            self.watch(ticks, k);
         }
-        self.watched = wanted;
+    }
+
+    /// A usable tick for a watched symbol arrived at `at`.
+    fn seen(&mut self, key: &SymbolKey, at: Instant) {
+        let latest = self.last_seen.get(key).map(|t| (*t).max(at)).unwrap_or(at);
+        self.last_seen.insert(key.clone(), latest);
+        self.resubscribe.remove(key);
+    }
+
+    /// Watched symbols whose feed is live at `now`.
+    fn fresh(&self, stale_after: Duration, now: Instant) -> HashSet<SymbolKey> {
+        self.last_seen
+            .iter()
+            .filter(|(k, t)| {
+                self.watched.contains(*k) && now.saturating_duration_since(**t) <= stale_after
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Re-subscribe each watched symbol that is not fresh, when its backoff
+    /// allows.
+    fn resubscribe_stale(
+        &mut self,
+        ticks: &dyn TickSource,
+        fresh: &HashSet<SymbolKey>,
+        stale_after: Duration,
+        now: Instant,
+    ) {
+        for k in self.watched.iter().filter(|k| !fresh.contains(*k)) {
+            let b = self.resubscribe.entry(k.clone()).or_insert(Backoff {
+                attempts: 0,
+                next: now,
+            });
+            if now < b.next {
+                continue;
+            }
+            tracing::info!(
+                "Sandbox feed for {}:{} has been quiet; subscribing again",
+                k.exchange,
+                k.symbol
+            );
+            ticks.resubscribe(k);
+            b.next = now + resubscribe_delay(stale_after, b.attempts);
+            b.attempts = b.attempts.saturating_add(1);
+        }
     }
 
     fn release_all(&mut self, ticks: &dyn TickSource) {
@@ -128,6 +222,8 @@ impl State {
             ticks.unwatch(&k);
         }
         self.last_mtm.clear();
+        self.last_seen.clear();
+        self.resubscribe.clear();
     }
 }
 
@@ -167,11 +263,13 @@ async fn rebuild(core: &Arc<Core>, state: &mut State, ticks: &dyn TickSource) {
 }
 
 async fn on_tick(core: &Arc<Core>, state: &mut State, ticks: &dyn TickSource, tick: Tick) {
-    state.last_tick = Instant::now();
     let key = tick.key();
     if !state.watched.contains(&key) || tick.ltp <= rust_decimal::Decimal::ZERO {
         return;
     }
+    // Only a usable tick for a symbol the sandbox needs counts as that
+    // symbol's feed being live.
+    state.seen(&key, Instant::now());
     let filled = match execution::on_price(core, &key, tick.ltp).await {
         Ok(n) => n,
         Err(e) => {
@@ -225,9 +323,7 @@ async fn on_tick(core: &Arc<Core>, state: &mut State, ticks: &dyn TickSource, ti
         .await
         .unwrap_or(true);
         if !needed {
-            state.watched.remove(&key);
-            state.last_mtm.remove(&key);
-            ticks.unwatch(&key);
+            state.forget(ticks, &key);
         }
     }
 }
@@ -240,11 +336,7 @@ async fn run(
     mut cmds: mpsc::Receiver<EngineCmd>,
     cancel: CancellationToken,
 ) {
-    let mut state = State {
-        watched: HashSet::new(),
-        last_mtm: HashMap::new(),
-        last_tick: Instant::now(),
-    };
+    let mut state = State::default();
     rebuild(&core, &mut state, ticks.as_ref()).await;
     let mut rx: Option<broadcast::Receiver<Tick>> = Some(rx_ticks);
 
@@ -287,11 +379,7 @@ async fn run(
                 }
             }
             Some(cmd) = cmds.recv() => match cmd {
-                EngineCmd::Watch(k) => {
-                    if state.watched.insert(k.clone()) {
-                        ticks.watch(&k);
-                    }
-                }
+                EngineCmd::Watch(k) => state.watch(ticks.as_ref(), &k),
                 EngineCmd::Rebuild => rebuild(&core, &mut state, ticks.as_ref()).await,
                 EngineCmd::ConfigChanged => {
                     if let Some(i) = inner.upgrade() {
@@ -309,15 +397,19 @@ async fn run(
                 }
             }
             _ = fallback.tick() => {
-                if state.last_tick.elapsed() > stale_after {
-                    match execution::poll_once(&core).await {
-                        Ok(s) if s.filled > 0 || s.gtt_fired > 0 => {
-                            tracing::info!("Sandbox polling fallback: {:?}", s);
-                            rebuild(&core, &mut state, ticks.as_ref()).await;
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("Sandbox polling fallback failed: {}", e.message),
+                // Quote only what no live feed covers: watched symbols gone
+                // quiet, and resting orders or GTT legs on symbols not
+                // (yet) watched.
+                let now = Instant::now();
+                let fresh = state.fresh(stale_after, now);
+                state.resubscribe_stale(ticks.as_ref(), &fresh, stale_after, now);
+                match execution::poll_stale(&core, &fresh).await {
+                    Ok(s) if s.filled > 0 || s.gtt_fired > 0 => {
+                        tracing::info!("Sandbox polling fallback: {:?}", s);
+                        rebuild(&core, &mut state, ticks.as_ref()).await;
                     }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("Sandbox polling fallback failed: {}", e.message),
                 }
             }
             _ = maintenance.tick() => {

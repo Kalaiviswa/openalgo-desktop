@@ -944,10 +944,22 @@ pub(crate) async fn on_price(core: &Arc<Core>, key: &SymbolKey, ltp: Decimal) ->
 /// Evaluate every pending leg against one batch of quotes (polling engine
 /// and catch-up).
 pub(crate) async fn poll_active(core: &Arc<Core>) -> SbResult<usize> {
-    let legs = blocking(core, |c| {
+    poll_active_except(core, &std::collections::HashSet::new()).await
+}
+
+/// [`poll_active`] for the legs of every symbol not in `fresh` (symbols
+/// whose own feed is live are left to their ticks).
+pub(crate) async fn poll_active_except(
+    core: &Arc<Core>,
+    fresh: &std::collections::HashSet<SymbolKey>,
+) -> SbResult<usize> {
+    let legs: Vec<_> = blocking(core, |c| {
         Ok(c.db.with_conn(|conn| active_legs(conn, None))?)
     })
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|(_, g)| !fresh.contains(&SymbolKey::new(g.symbol.clone(), g.exchange.clone())))
+    .collect();
     if legs.is_empty() {
         return Ok(0);
     }

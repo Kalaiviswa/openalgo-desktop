@@ -276,3 +276,87 @@ async fn a_lagging_receiver_recovers_by_polling() {
     assert!(env.sb.is_engine_running().await);
     env.shutdown().await;
 }
+
+// SB-01: freshness is per symbol. Ticks for symbols the engine does not need
+// (INFY) and for other watched symbols (TCS) must not hide that SBIN's own
+// feed has stalled; SBIN's resting order is polled and fills from its quote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_symbol_does_not_hide_a_stalled_one() {
+    let env = Env::with_opts(
+        "2026-10-05 10:00:00",
+        SandboxOptions {
+            stale_feed_after: Duration::from_millis(300),
+            ..SandboxOptions::default()
+        },
+    );
+    env.sb
+        .update_config("order_check_interval", "1")
+        .await
+        .unwrap();
+    let ticks = Arc::new(BroadcastTicks::new(256));
+    let tcs = SymbolKey::new("TCS", "NSE");
+    env.ltp("SBIN", "NSE", "100");
+    env.ltp("TCS", "NSE", "3000");
+    let sbin_order = place(
+        &env,
+        limit(req("SBIN", "NSE", "BUY", 10, "LIMIT", "MIS"), "95"),
+    )
+    .await;
+    let tcs_order = place(
+        &env,
+        limit(req("TCS", "NSE", "BUY", 1, "LIMIT", "MIS"), "2000"),
+    )
+    .await;
+    env.sb.start_engine(ticks.clone()).await.unwrap();
+    eventually("SBIN and TCS watched", || async {
+        let w = ticks.watched();
+        w.contains(&sbin()) && w.contains(&tcs)
+    })
+    .await;
+
+    let streaming = {
+        let ticks = ticks.clone();
+        tokio::spawn(async move {
+            for i in 0u32.. {
+                ticks.send(Tick::new("INFY", "NSE", d("1500")));
+                ticks.send(Tick::new("TCS", "NSE", d(&format!("{}", 3000 + i % 5))));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+    };
+    let calls_before = env.quotes.calls();
+    // SBIN trades through the limit, but its feed sends nothing.
+    env.ltp("SBIN", "NSE", "94");
+    let started = std::time::Instant::now();
+    let mut filled = false;
+    while started.elapsed() < Duration::from_secs(4) {
+        if env.status(&sbin_order).await == "complete" {
+            filled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let waited = started.elapsed();
+    let calls = env.quotes.calls() - calls_before;
+    streaming.abort();
+    assert!(
+        filled,
+        "SBIN's stalled feed must be polled while INFY and TCS keep ticking"
+    );
+    assert!(waited < Duration::from_secs(3), "filled after {waited:?}");
+    assert!(
+        calls <= 6,
+        "quote calls stay bounded: {calls} in {waited:?}"
+    );
+    assert_eq!(
+        env.status(&tcs_order).await,
+        "open",
+        "TCS is fresh and not re-quoted into a fill"
+    );
+    // The quiet symbol is subscribed again, with a backoff; the live ones
+    // are left alone.
+    let again = ticks.resubscribed(&sbin());
+    assert!((1..=3).contains(&again), "SBIN re-subscribed {again} times");
+    assert_eq!(ticks.resubscribed(&tcs), 0);
+    env.shutdown().await;
+}

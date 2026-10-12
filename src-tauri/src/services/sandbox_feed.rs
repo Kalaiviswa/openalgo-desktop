@@ -115,6 +115,9 @@ const CMD_CAPACITY: usize = 1024;
 enum WatchCmd {
     Watch(FeedSubscription),
     Unwatch(FeedSubscription),
+    /// Drop the subscription (if one was made) and make it again: the
+    /// engine saw no tick for the symbol, or the first subscribe failed.
+    Resubscribe(FeedSubscription),
 }
 
 /// Live LTP ticks from the market-data feed. One forwarding task (owned by
@@ -201,6 +204,23 @@ async fn forward(
                         let _ = feed.unsubscribe(vec![sub]).await;
                     }
                 }
+                Some(WatchCmd::Resubscribe(s)) => {
+                    let key = SymbolKey::new(s.symbol.clone(), s.exchange.clone());
+                    if let Some(sub) = mine.remove(&key) {
+                        let _ = feed.unsubscribe(vec![sub]).await;
+                    }
+                    match feed.subscribe(vec![s.clone()]).await {
+                        Ok(()) => {
+                            mine.insert(key, s);
+                        }
+                        Err(e) => tracing::warn!(
+                            "Sandbox could not stream {}:{} again: {}",
+                            s.exchange,
+                            s.symbol,
+                            e.code()
+                        ),
+                    }
+                }
                 None => break,
             },
             ev = events.recv() => match ev {
@@ -253,6 +273,18 @@ impl TickSource for FeedTicks {
         }
         if let Some(s) = self.subscription(key) {
             let _ = self.cmd.try_send(WatchCmd::Unwatch(s));
+        }
+    }
+
+    fn resubscribe(&self, key: &SymbolKey) {
+        if !self.watched.lock().contains(key) {
+            return;
+        }
+        if let Some(s) = self.subscription(key) {
+            if self.cmd.try_send(WatchCmd::Resubscribe(s)).is_err() {
+                // The engine retries on its next backoff step.
+                tracing::debug!("Sandbox watch queue full");
+            }
         }
     }
 }
