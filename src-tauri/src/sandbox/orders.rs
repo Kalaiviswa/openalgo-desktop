@@ -592,14 +592,14 @@ pub(crate) async fn place_locked(
                         SandboxError::bad_request(reason.clone()).with_orderid(row.orderid)
                     ));
                 }
+                let cv = c.contract_value(&n.symbol, &n.exchange);
                 let required = funds::margin_required(
                     &cfg,
                     &n.symbol,
                     &n.exchange,
                     n.product,
-                    n.quantity,
-                    margin_price,
                     n.action,
+                    funds::notional(n.quantity, margin_price, cv),
                 );
                 let pos = positions::get(tx, &user, &n.symbol, &n.exchange, n.product.as_str())?;
                 let mut to_block = required;
@@ -616,9 +616,8 @@ pub(crate) async fn place_locked(
                                 &n.symbol,
                                 &n.exchange,
                                 n.product,
-                                n.quantity - existing,
-                                margin_price,
                                 n.action,
+                                funds::notional(n.quantity - existing, margin_price, cv),
                             )
                         };
                     }

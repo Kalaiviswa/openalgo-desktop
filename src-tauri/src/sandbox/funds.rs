@@ -6,6 +6,15 @@
 //! the web does; inside the engine's single-writer transactions it always
 //! lands on the first attempt.
 //!
+//! Margin is `notional / leverage`, where the notional of a crypto contract
+//! includes its contract value (0.001 BTC per BTCUSD contract), the same
+//! multiplier its P&L uses; every other instrument has a contract value of
+//! one. The web multiplies P&L but not margin, overstating crypto margin by
+//! the inverse of the contract value. Capital is held in rupees while
+//! crypto prices are in US dollars; the sandbox does not convert between
+//! them, so a crypto margin or P&L of 60 is booked as 60 against the rupee
+//! capital.
+//!
 //! Invariant kept by the engine (and checked by [`reconcile`]):
 //! `used_margin == Σ open position margin + Σ pending order margin +
 //! Σ active GTT margin`.
@@ -400,15 +409,21 @@ pub fn blocks_margin(symbol: &str, exchange: &str, product: Product, action: Act
     }
 }
 
-/// `|qty| * price / leverage`, to the paisa.
+/// Notional value of `quantity` contracts at `price`: `|qty| x price x
+/// contract value`. The contract value is 1 except for crypto contracts.
+/// Used for every margin and for the trade book's trade value.
+pub fn notional(quantity: i64, price: Decimal, contract_value: Decimal) -> Decimal {
+    Decimal::from(quantity.abs()) * price * contract_value
+}
+
+/// `notional / leverage`, to the paisa ([`notional`]).
 pub fn margin_required(
     cfg: &SandboxConfig,
     symbol: &str,
     exchange: &str,
     product: Product,
-    quantity: i64,
-    price: Decimal,
     action: Action,
+    notional: Decimal,
 ) -> Decimal {
     let lev = leverage(cfg, symbol, exchange, product, action);
     let lev = if lev <= Decimal::ZERO {
@@ -416,8 +431,7 @@ pub fn margin_required(
     } else {
         lev
     };
-    (Decimal::from(quantity.abs()) * price / lev)
-        .round_dp_with_strategy(MARGIN_DP, RoundingStrategy::MidpointAwayFromZero)
+    (notional / lev).round_dp_with_strategy(MARGIN_DP, RoundingStrategy::MidpointAwayFromZero)
 }
 
 /// Total margin the books say is held: open positions, pending orders and
@@ -526,14 +540,14 @@ mod tests {
     #[test]
     fn test_leverage_calculations() {
         let cfg = SandboxConfig::default();
+        let one = Decimal::ONE;
         let mis = margin_required(
             &cfg,
             "RELIANCE",
             "NSE",
             Product::Mis,
-            100,
-            dec!(1200),
             Action::Buy,
+            notional(100, dec!(1200), one),
         );
         assert_eq!(mis, dec!(24000));
         let cnc = margin_required(
@@ -541,9 +555,8 @@ mod tests {
             "RELIANCE",
             "NSE",
             Product::Cnc,
-            100,
-            dec!(1200),
             Action::Buy,
+            notional(100, dec!(1200), one),
         );
         assert_eq!(cnc, dec!(120000));
         let fut = margin_required(
@@ -551,9 +564,8 @@ mod tests {
             "NIFTY27OCT26FUT",
             "NFO",
             Product::Nrml,
-            65,
-            dec!(22500),
             Action::Buy,
+            notional(65, dec!(22500), one),
         );
         assert_eq!(fut, dec!(146250));
         let opt = margin_required(
@@ -561,11 +573,27 @@ mod tests {
             "NIFTY06OCT2622400CE",
             "NFO",
             Product::Nrml,
-            65,
-            dec!(156.95),
             Action::Sell,
+            notional(65, dec!(156.95), one),
         );
         assert_eq!(opt, dec!(10201.75));
+    }
+
+    // SB-03: a crypto contract's margin is on its notional, contract value
+    // included (BTCUSD.P: 0.001 BTC per contract, futures leverage 10x).
+    #[test]
+    fn crypto_margin_uses_the_contract_value() {
+        let cfg = SandboxConfig::default();
+        assert_eq!(notional(10, dec!(60000), dec!(0.001)), dec!(600));
+        let m = margin_required(
+            &cfg,
+            "BTCUSD.P",
+            "CRYPTO",
+            Product::Nrml,
+            Action::Buy,
+            notional(10, dec!(60000), dec!(0.001)),
+        );
+        assert_eq!(m, dec!(60));
     }
 
     // Port of test_fund_manager.py::test_unrealized_pnl

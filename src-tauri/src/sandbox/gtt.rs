@@ -338,14 +338,18 @@ fn leg_margin(
     }
     let product = Product::parse(product).unwrap_or(Product::Cnc);
     let action = Action::parse(&leg.action).unwrap_or(Action::Buy);
+    let cv = core.contract_value(symbol, exchange);
     Ok(funds::margin_required(
         cfg,
         symbol,
         exchange,
         product,
-        leg.quantity,
-        pricing_basis(leg.price, leg.trigger_price, last_price),
         action,
+        funds::notional(
+            leg.quantity,
+            pricing_basis(leg.price, leg.trigger_price, last_price),
+            cv,
+        ),
     ))
 }
 

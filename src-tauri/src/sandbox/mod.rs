@@ -418,7 +418,7 @@ impl Sandbox {
             let since = ts(c.session_start());
             let rows =
                 c.db.with_conn(|conn| positions::trades_since(conn, c.user(), &since))?;
-            Ok(positions::tradebook_reply(&rows))
+            Ok(positions::tradebook_reply(c, &rows))
         })
         .await
     }

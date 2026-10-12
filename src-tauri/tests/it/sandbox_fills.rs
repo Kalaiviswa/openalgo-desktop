@@ -771,3 +771,55 @@ async fn a_tick_received_too_long_ago_is_not_filled_at() {
     assert_eq!(env.status(&id).await, "complete");
     env.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Crypto contracts: the multiplier scales margin and trade value as well
+// ---------------------------------------------------------------------------
+
+// SB-03: BTCUSD.P carries 0.001 BTC per contract. Margin and trade value use
+// the contract's notional, the same as its P&L.
+#[tokio::test]
+async fn crypto_contract_value_applies_to_margin_trade_value_and_pnl() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("BTCUSD.P", "CRYPTO", "60000");
+    let id = place(&env, req("BTCUSD.P", "CRYPTO", "BUY", 10, "MARKET", "NRML")).await;
+    assert_eq!(env.status(&id).await, "complete");
+    // 10 contracts x 0.001 x 60,000 = 600 notional, at 10x futures leverage.
+    assert_eq!(env.used().await, d("60"));
+    let p = env
+        .sb
+        .position_row("BTCUSD.P", "CRYPTO", "NRML")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.margin_blocked, d("60"));
+    let tb = env.sb.tradebook().await.unwrap();
+    assert_eq!(tb.data.len(), 1);
+    assert_eq!(tb.data[0].trade_value, 600.0);
+
+    // A 100-point move is 100 x 10 x 0.001 = 1.
+    env.ltp("BTCUSD.P", "CRYPTO", "60100");
+    let pb = env.sb.positionbook().await.unwrap();
+    assert_eq!(pb.data[0].unrealized_pnl, 1.0);
+    env.sb
+        .close_position("BTCUSD.P", "CRYPTO", "NRML")
+        .await
+        .unwrap();
+    assert_eq!(env.qty("BTCUSD.P", "CRYPTO", "NRML").await, 0);
+    let f = env.sb.funds_row().await.unwrap().unwrap();
+    assert_eq!(f.realized_pnl, d("1"));
+    assert_eq!(f.used_margin, d("0"));
+    assert_eq!(f.available_balance, d("10000001"));
+    env.assert_margin_consistent().await;
+    let values: Vec<f64> = env
+        .sb
+        .tradebook()
+        .await
+        .unwrap()
+        .data
+        .iter()
+        .map(|t| t.trade_value)
+        .collect();
+    assert_eq!(values, vec![601.0, 600.0], "the close, then the open");
+    env.shutdown().await;
+}
