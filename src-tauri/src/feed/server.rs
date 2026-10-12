@@ -762,6 +762,10 @@ async fn serve_conn(
     let mut writer_done = false;
     // Whether we sent a close frame and should wait for the peer's reply.
     let mut closing = false;
+    // Moves when what the API key reaches changes (sign-out, the broker
+    // session ending or changing, a regenerated key): an authenticated
+    // client is then closed and must connect and authenticate again.
+    let mut credentials = shared.auth.credentials_changed();
 
     loop {
         tokio::select! {
@@ -769,6 +773,15 @@ async fn serve_conn(
                 outbox.close(1001, "server shutting down");
                 closing = true;
                 break;
+            }
+            moved = credentials_moved(&mut credentials), if session.user_id.is_some() => {
+                if moved {
+                    tracing::info!("Feed client {}: its authentication no longer holds; closing", id);
+                    session.error(code::AUTHENTICATION_ERROR, CREDENTIALS_CHANGED_MSG, None);
+                    outbox.close_after_control(AUTH_TIMEOUT_CODE, "authentication expired");
+                    closing = true;
+                    break;
+                }
             }
             _ = outbox.overflowed() => {
                 tracing::warn!("Feed client {} stopped reading; disconnecting it", id);
@@ -815,6 +828,11 @@ async fn serve_conn(
                     closing = true;
                     break;
                 }
+                // What the credentials were before this message: a client
+                // that authenticates while they change is closed, the rest
+                // start from the value they authenticated under.
+                let was_authenticated = session.user_id.is_some();
+                let before = credentials.as_ref().map(|c| *c.borrow());
                 match msg {
                     Message::Text(t) => session.handle(&t).await,
                     Message::Binary(b) => match String::from_utf8(b) {
@@ -824,6 +842,14 @@ async fn serve_conn(
                     // Pings are answered by tungstenite; a close is answered
                     // on the next read, which then ends the stream.
                     _ => {}
+                }
+                if !was_authenticated && session.user_id.is_some() {
+                    if let Some(c) = credentials.as_mut() {
+                        if Some(*c.borrow_and_update()) != before {
+                            session.error(code::AUTHENTICATION_ERROR, CREDENTIALS_CHANGED_MSG, None);
+                            session.close = Some((AUTH_TIMEOUT_CODE, "authentication expired"));
+                        }
+                    }
                 }
                 if let Some((code, reason)) = session.close.take() {
                     outbox.close_after_control(code, reason);
@@ -857,6 +883,23 @@ async fn serve_conn(
             }
         })
         .await;
+    }
+}
+
+/// The error frame's message when an authenticated client is closed because
+/// its authentication no longer holds (then closed with 4401).
+pub const CREDENTIALS_CHANGED_MSG: &str =
+    "Your OpenAlgo session ended or the API key changed. Connect again and authenticate with the current API key.";
+
+/// Resolves to true when `rx` sees a new value; never resolves when there is
+/// no receiver or its sender is gone.
+async fn credentials_moved(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -> bool {
+    match rx {
+        Some(r) => match r.changed().await {
+            Ok(()) => true,
+            Err(_) => std::future::pending().await,
+        },
+        None => std::future::pending().await,
     }
 }
 
