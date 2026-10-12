@@ -140,6 +140,9 @@ pub struct Env {
     pub quotes: Arc<StaticQuoteSource>,
     pub bus: Arc<EventBus>,
     pub rec: Arc<Recorder>,
+    /// Folder of an on-disk `sandbox.db` ([`Env::on_disk`]), kept alive with
+    /// the sandbox; `None` for an in-memory one.
+    pub dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Env {
@@ -149,8 +152,50 @@ impl Env {
     }
 
     pub fn with_opts(ist: &str, opts: SandboxOptions) -> Self {
-        let clock = manual_clock_at(ist);
-        let quotes = Arc::new(StaticQuoteSource::new());
+        Self::build(
+            manual_clock_at(ist),
+            Arc::new(StaticQuoteSource::new()),
+            opts,
+            None,
+        )
+    }
+
+    /// A sandbox on a `sandbox.db` file in a fresh temporary folder, so it
+    /// can be closed and opened again ([`Env::restart`]).
+    pub fn on_disk(ist: &str, opts: SandboxOptions) -> Self {
+        let dir = Arc::new(tempfile::tempdir().unwrap());
+        Self::build(
+            manual_clock_at(ist),
+            Arc::new(StaticQuoteSource::new()),
+            opts,
+            Some(dir),
+        )
+    }
+
+    /// An app restart: stop this sandbox (engine and event bus) and open a
+    /// new one on the same `sandbox.db`, with the same clock and quotes.
+    pub async fn restart(self, opts: SandboxOptions) -> Self {
+        let Env {
+            sb,
+            clock,
+            quotes,
+            bus,
+            dir,
+            ..
+        } = self;
+        assert!(dir.is_some(), "restart needs an on-disk sandbox");
+        sb.shutdown().await;
+        bus.shutdown(Duration::from_secs(1)).await;
+        drop(sb);
+        Self::build(clock, quotes, opts, dir)
+    }
+
+    fn build(
+        clock: Arc<ManualClock>,
+        quotes: Arc<StaticQuoteSource>,
+        opts: SandboxOptions,
+        dir: Option<Arc<tempfile::TempDir>>,
+    ) -> Self {
         let bus = Arc::new(EventBus::new());
         let rec = Arc::new(Recorder::default());
         bus.subscribe(rec.clone(), Lane::Critical);
@@ -159,22 +204,23 @@ impl Env {
             quote_retry_delays: vec![Duration::ZERO, Duration::ZERO],
             ..opts
         };
-        let sb = Sandbox::in_memory(
-            SandboxDeps {
-                symbols: Arc::new(symbols()),
-                quotes: quotes.clone(),
-                clock: clock.clone(),
-                bus: Some(bus.clone()),
-            },
-            opts,
-        )
-        .unwrap();
+        let deps = SandboxDeps {
+            symbols: Arc::new(symbols()),
+            quotes: quotes.clone(),
+            clock: clock.clone(),
+            bus: Some(bus.clone()),
+        };
+        let sb = match &dir {
+            Some(d) => Sandbox::open(&d.path().join("sandbox.db"), deps, opts).unwrap(),
+            None => Sandbox::in_memory(deps, opts).unwrap(),
+        };
         Self {
             sb,
             clock,
             quotes,
             bus,
             rec,
+            dir,
         }
     }
 
