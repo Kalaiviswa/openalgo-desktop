@@ -1,5 +1,6 @@
-import { Navigate, Outlet } from 'react-router'
+import { Navigate, Outlet, useLocation } from 'react-router'
 import { SocketProvider } from '@/components/socket/SocketProvider'
+import { layoutRedirect } from '@/lib/desktop'
 import { useAuthStore } from '@/stores/authStore'
 
 /**
@@ -8,13 +9,13 @@ import { useAuthStore } from '@/stores/authStore'
  */
 export function FullWidthLayout() {
   const { isAuthenticated, user } = useAuthStore()
+  const { pathname } = useLocation()
 
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
-  }
-
-  if (!user?.broker) {
-    return <Navigate to="/broker" replace />
+  // Desktop: the same rule as Layout: /login when not signed in, /broker
+  // when signed in with no broker logged in.
+  const to = layoutRedirect(user, isAuthenticated, pathname)
+  if (to) {
+    return <Navigate to={to} replace />
   }
 
   return (

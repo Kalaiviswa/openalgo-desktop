@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, ExternalLink, Loader2, Shield } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ExternalLink, Loader2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { fetchCSRFToken } from '@/api/client'
@@ -192,10 +192,41 @@ const brokerFields: Record<string, BrokerConfig> = {
         placeholder: 'Enter TOTP (optional)',
         maxLength: 6,
         optional: true,
-        hint: 'Leave blank to receive OTP via SMS/Email',
+        // Desktop: the SMS/e-mail OTP path is not available (nor on the web),
+        // so the hint no longer suggests it.
+        hint: 'The code from your authenticator app, if your account uses one.',
       },
     ],
     callbackUrl: '/motilal/callback',
+  },
+  // Desktop: Groww signs in with a TOTP for a TOTP API key, or a pasted
+  // access token; with neither, the saved API key and secret sign in. The
+  // field names follow catalog::login_fields (the default form's User ID and
+  // Password would send the password as an access token).
+  groww: {
+    fields: [
+      {
+        name: 'totp',
+        label: 'TOTP',
+        type: 'text',
+        placeholder: 'Enter 6-digit TOTP',
+        maxLength: 6,
+        pattern: '[0-9]{6}',
+        inputMode: 'numeric',
+        optional: true,
+        hint: 'Only if your Groww API key uses TOTP: the current code from your authenticator app.',
+      },
+      {
+        name: 'password',
+        label: 'Access Token',
+        type: 'password',
+        placeholder: 'Paste an access token from Groww',
+        optional: true,
+        hint: 'Only if you paste an access token from Groww instead.',
+      },
+    ],
+    callbackUrl: '/groww/callback',
+    warning: 'Leave both fields empty to sign in with the API key and secret saved for Groww.',
   },
   mstock: {
     fields: [
@@ -317,6 +348,7 @@ const brokerNames: Record<string, string> = {
   angel: 'Angel One',
   definedge: 'Definedge Securities',
   firstock: 'Firstock',
+  groww: 'Groww',
   indmoney: 'IndMoney (INDstocks)',
   kotak: 'Kotak NEO',
   motilal: 'Motilal Oswal',
@@ -474,25 +506,23 @@ export default function BrokerTOTP() {
   return (
     <div className="min-h-screen flex items-center justify-center py-8 px-4">
       <div className="container max-w-md">
+        {/* Desktop: a small focused card per broker (OpenBull's broker
+            login pattern): only this broker's fields, a back link. */}
+        <Link
+          to="/broker"
+          className="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Select Broker
+        </Link>
         <Card className="shadow-xl">
-          <CardHeader className="text-center relative">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="absolute left-4 top-4"
-              onClick={() => navigate('/broker')}
-            >
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back
-            </Button>
-            <div className="flex justify-center mb-4 pt-6">
-              <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center">
-                <Shield className="h-8 w-8 text-primary" />
-              </div>
-            </div>
-            <CardTitle className="text-2xl">{brokerName} Login</CardTitle>
+          <CardHeader>
+            <CardTitle className="text-2xl">
+              <h1>Login with {brokerName}</h1>
+            </CardTitle>
             <CardDescription>
-              Enter your credentials to authenticate with {brokerName}
+              Enter your {brokerName} login details. They are used for this sign-in only and are not
+              saved.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -581,38 +611,25 @@ export default function BrokerTOTP() {
                 {isLoading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Authenticating...
+                    Logging in...
                   </>
                 ) : (
-                  <>
-                    <Shield className="mr-2 h-4 w-4" />
-                    Authenticate
-                  </>
+                  `Log in to ${brokerName}`
                 )}
               </Button>
             </form>
 
-            <div className="mt-6 space-y-3 text-center text-sm text-muted-foreground">
-              <p>Your credentials are securely transmitted and encrypted.</p>
-              <div className="flex items-center justify-center gap-4">
-                <Link
-                  to="/broker"
-                  className="text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  <ArrowLeft className="h-3 w-3" />
-                  Back to Broker Selection
-                </Link>
-                <a
-                  href="https://docs.openalgo.in"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  Documentation
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-                <BrokerAuthSignOut />
-              </div>
+            <div className="mt-6 flex items-center justify-center gap-4 text-sm">
+              <a
+                href="https://docs.openalgo.in"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline inline-flex items-center gap-1"
+              >
+                Documentation
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <BrokerAuthSignOut />
             </div>
           </CardContent>
         </Card>

@@ -1,6 +1,6 @@
 import { Navigate, Outlet, useLocation } from 'react-router'
 import { SocketProvider } from '@/components/socket/SocketProvider'
-import { isPreBrokerPath } from '@/lib/desktop'
+import { layoutRedirect } from '@/lib/desktop'
 import { useAuthStore } from '@/stores/authStore'
 import { Footer } from './Footer'
 import { MobileBottomNav } from './MobileBottomNav'
@@ -12,18 +12,12 @@ export function Layout() {
 
   // AuthSync has already synced Flask session with Zustand store
   // So we just need to check the Zustand store state
-  // Desktop: a trader signed in with their password but not yet connected to
-  // a broker (isAuthenticated is only true once a broker is connected) can
-  // open Profile, to add the broker keys, and Server Settings.
-  const preBroker = Boolean(user?.username) && isPreBrokerPath(pathname)
-
-  if (!isAuthenticated && !preBroker) {
-    return <Navigate to="/login" replace />
-  }
-
-  // If logged in but no broker selected, redirect to broker selection.
-  if (!user?.broker && !preBroker) {
-    return <Navigate to="/broker" replace />
+  // Desktop: not signed in goes to /login; signed in with no broker logged
+  // in goes straight to /broker (Profile and Server Settings stay open, to
+  // free a port or reach the broker pages from Profile).
+  const to = layoutRedirect(user, isAuthenticated, pathname)
+  if (to) {
+    return <Navigate to={to} replace />
   }
 
   return (
