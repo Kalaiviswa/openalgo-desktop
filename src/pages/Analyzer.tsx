@@ -9,6 +9,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { SandboxModelNote } from '@/components/sandbox/SandboxModelNote'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -173,6 +174,8 @@ export default function Analyzer() {
           Review and validate your sandbox API requests before going live
         </p>
       </div>
+
+      <SandboxModelNote className="mb-6" />
 
       {/* Date Filter */}
       <Card className="mb-6">
