@@ -10,7 +10,7 @@ use super::execution;
 use super::funds;
 use super::locks::{PositionGuard, PositionKey};
 use super::positions;
-use super::quotes::{quote_looks_stale, Quote};
+use super::quotes::{quote_is_old, quote_looks_stale, Quote};
 use super::replies::{
     CancelAllReply, FailedCancellation, OrderMessage, OrderPlaced, OrderStatistics,
     OrderStatusData, OrderStatusReply, OrderbookData, OrderbookReply, OrderbookRow, ANALYZE,
@@ -686,7 +686,15 @@ pub(crate) async fn place_locked(
                     q.ltp
                 );
             }
-            !stale
+            let old = quote_is_old(q, std::time::Instant::now(), core.opts.stale_quote_after);
+            if old {
+                tracing::warn!(
+                    "Deferring immediate fill of {}: its quote is older than {:?}",
+                    order.orderid,
+                    core.opts.stale_quote_after
+                );
+            }
+            !stale && !old
         }) {
             match n.price_type {
                 PriceType::Market => {

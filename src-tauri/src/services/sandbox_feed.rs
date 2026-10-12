@@ -51,8 +51,10 @@ impl LiveQuotes {
     }
 }
 
+/// A broker quote as the engine's quote, stamped with the time it was
+/// received (the broker's own timestamp is not relied on).
 fn to_quote(q: &crate::brokers::types::Quote) -> Quote {
-    Quote::from_f64(q.ltp, q.bid, q.ask, q.high, q.low)
+    Quote::from_f64(q.ltp, q.bid, q.ask, q.high, q.low).received(std::time::Instant::now())
 }
 
 #[async_trait::async_trait]
@@ -231,6 +233,7 @@ async fn forward(
                                 symbol: t.symbol.clone(),
                                 exchange: t.exchange.clone(),
                                 ltp: crate::sandbox::types::dec_from_f64(t.ltp),
+                                received_at: std::time::Instant::now(),
                             });
                         }
                     }

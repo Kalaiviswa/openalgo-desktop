@@ -602,6 +602,11 @@ and add each new one here.
   doubling to 5 minutes, which also retries a subscription that failed. The
   web keeps one global timestamp, so any tick (a chart's, a watchlist's)
   kept a stalled symbol from ever being polled.
+- **An old price is not filled at** (SB-06). Ticks and quotes carry the
+  time this process received them, and a fill or GTT trigger waits when the
+  price is older than `stale_quote_after` (30 s). The guarantee is receipt
+  time only: broker quote timestamps are not part of the quote contract and
+  are not relied on. The web has no receipt time.
 
 ### Security work
 

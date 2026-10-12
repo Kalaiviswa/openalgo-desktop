@@ -736,3 +736,38 @@ async fn an_exit_that_would_open_a_position_without_funds_is_rejected_at_fill() 
     assert_eq!(env.rec.count("sandbox.order_filled"), fills_before);
     env.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// An old price is not filled at
+// ---------------------------------------------------------------------------
+
+// SB-06: a tick received longer ago than the stale-quote limit (one that sat
+// in a backlog) does not fill a resting order; the same price received now
+// does.
+#[tokio::test]
+async fn a_tick_received_too_long_ago_is_not_filled_at() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    let id = place(
+        &env,
+        limit(req("SBIN", "NSE", "BUY", 10, "LIMIT", "MIS"), "95"),
+    )
+    .await;
+    let old = Tick {
+        received_at: std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("uptime"),
+        ..Tick::new("SBIN", "NSE", d("94"))
+    };
+    assert_eq!(env.sb.on_tick(old).await.unwrap(), (0, 0));
+    assert_eq!(env.status(&id).await, "open");
+    assert_eq!(
+        env.sb
+            .on_tick(Tick::new("SBIN", "NSE", d("94")))
+            .await
+            .unwrap(),
+        (1, 0)
+    );
+    assert_eq!(env.status(&id).await, "complete");
+    env.shutdown().await;
+}

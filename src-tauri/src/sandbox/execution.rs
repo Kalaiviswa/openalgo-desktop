@@ -15,12 +15,13 @@ use super::funds;
 use super::locks::PositionKey;
 use super::orders;
 use super::positions;
-use super::quotes::{quote_looks_stale, Quote};
+use super::quotes::{quote_is_old, quote_looks_stale, Quote};
 use super::types::{dec_to_db, Action, OrderStatus, PriceType, SbResult, SymbolKey};
 use rusqlite::{params, Connection};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// What to do with a resting order at a quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,16 @@ pub fn decide(order: &OrderRow, q: &Quote) -> Decision {
         OrderStatus::Open => decide_open(order, q, buy, price, trigger),
         _ => Decision::Wait,
     }
+}
+
+/// [`decide`] for a quote received at `q.received_at`: a price received more
+/// than `max_age` before `now` is not filled at; the order waits for a newer
+/// one. (The web has no receipt time and fills at whatever it was handed.)
+pub fn decide_at(order: &OrderRow, q: &Quote, now: Instant, max_age: Duration) -> Decision {
+    if quote_is_old(q, now, max_age) {
+        return Decision::Wait;
+    }
+    decide(order, q)
 }
 
 fn decide_open(
@@ -380,7 +391,7 @@ pub(crate) async fn execute(
 /// Decide and act for one order at one quote. Returns `true` when the order
 /// filled.
 pub(crate) async fn process(core: &Arc<Core>, order: &OrderRow, q: &Quote) -> SbResult<bool> {
-    match decide(order, q) {
+    match decide_at(order, q, Instant::now(), core.opts.stale_quote_after) {
         Decision::Wait => Ok(false),
         Decision::Fill(price) => execute(core, order.id, price, Some(order.terms())).await,
         Decision::ReleaseToOpen => {
@@ -412,7 +423,7 @@ pub(crate) async fn process(core: &Arc<Core>, order: &OrderRow, q: &Quote) -> Sb
 /// Process one order under a *tried* position lock: when another order on
 /// the same position is in flight the order is left for the next price.
 async fn process_try_locked(core: &Arc<Core>, order: &OrderRow, q: &Quote) -> SbResult<bool> {
-    if decide(order, q) == Decision::Wait {
+    if decide_at(order, q, Instant::now(), core.opts.stale_quote_after) == Decision::Wait {
         return Ok(false);
     }
     let key = PositionKey::new(
@@ -431,19 +442,18 @@ async fn process_try_locked(core: &Arc<Core>, order: &OrderRow, q: &Quote) -> Sb
     process(core, order, q).await
 }
 
-/// Ticks: evaluate every pending order on this symbol at `ltp` (quote built
-/// as the web's WebSocket engine does: bid = ask = LTP, no day range).
-/// Returns how many filled.
-pub(crate) async fn on_price(core: &Arc<Core>, key: &SymbolKey, ltp: Decimal) -> SbResult<usize> {
+/// Ticks: evaluate every pending order on this symbol at the tick's quote
+/// (built as the web's WebSocket engine does: bid = ask = LTP, no day
+/// range; see [`super::quotes::Tick::quote`]). Returns how many filled.
+pub(crate) async fn on_price(core: &Arc<Core>, key: &SymbolKey, q: &Quote) -> SbResult<usize> {
     let k = key.clone();
     let pending = blocking(core, move |c| {
         Ok(c.db.with_conn(|conn| orders::pending(conn, Some(&k)))?)
     })
     .await?;
-    let q = Quote::ltp(ltp);
     let mut filled = 0;
     for order in &pending {
-        if process_try_locked(core, order, &q).await? {
+        if process_try_locked(core, order, q).await? {
             filled += 1;
         }
     }
@@ -598,5 +608,51 @@ mod tests {
             ..Quote::default()
         };
         assert_eq!(decide(&b, &stale), Decision::Wait);
+    }
+
+    // SB-06: a price received longer ago than the limit is not filled at;
+    // the same price received again fills.
+    #[test]
+    fn a_quote_older_than_the_limit_waits_and_a_refreshed_one_fills() {
+        let now = Instant::now();
+        let max_age = Duration::from_secs(30);
+        let ago = |s: u64| now.checked_sub(Duration::from_secs(s)).expect("uptime");
+        let b = order(
+            Action::Buy,
+            PriceType::Limit,
+            OrderStatus::Open,
+            Some(dec!(100)),
+            None,
+        );
+        let old = Quote::ltp(dec!(99)).received(ago(31));
+        assert_eq!(decide_at(&b, &old, now, max_age), Decision::Wait);
+        let refreshed = old.received(now);
+        assert_eq!(
+            decide_at(&b, &refreshed, now, max_age),
+            Decision::Fill(dec!(100))
+        );
+        // At the limit it still counts as current.
+        assert_eq!(
+            decide_at(&b, &old.received(ago(30)), now, max_age),
+            Decision::Fill(dec!(100))
+        );
+        // A market order waits on an old quote too.
+        let m = order(
+            Action::Sell,
+            PriceType::Market,
+            OrderStatus::Open,
+            None,
+            None,
+        );
+        assert_eq!(decide_at(&m, &old, now, max_age), Decision::Wait);
+        assert_eq!(
+            decide_at(&m, &refreshed, now, max_age),
+            Decision::Fill(dec!(99))
+        );
+        // A quote without a receipt time is not judged.
+        assert_eq!(
+            decide_at(&b, &Quote::ltp(dec!(99)), now, max_age),
+            Decision::Fill(dec!(100))
+        );
     }
 }

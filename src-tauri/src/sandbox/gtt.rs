@@ -20,6 +20,7 @@ use super::events::{gtt_expired, gtt_triggered, Outbox};
 use super::funds;
 use super::locks::PositionKey;
 use super::orders::{self, OrderRequest};
+use super::quotes::{quote_is_old, Quote};
 use super::replies::{GttEntry, GttLegOut, GttOrderbookReply, GttReply, ANALYZE, SUCCESS};
 use super::types::{
     dec_from_f64, dec_to_db, money, rupees, Action, Product, SandboxError, SbResult, SymbolKey,
@@ -922,8 +923,13 @@ pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbRes
     }
 }
 
-/// Evaluate a price against the pending legs of one symbol.
-pub(crate) async fn on_price(core: &Arc<Core>, key: &SymbolKey, ltp: Decimal) -> SbResult<usize> {
+/// Evaluate a tick's price against the pending legs of one symbol. A price
+/// received longer ago than `stale_quote_after` triggers nothing.
+pub(crate) async fn on_price(core: &Arc<Core>, key: &SymbolKey, q: &Quote) -> SbResult<usize> {
+    if quote_is_old(q, std::time::Instant::now(), core.opts.stale_quote_after) {
+        return Ok(0);
+    }
+    let ltp = q.ltp;
     let k = key.clone();
     let legs = blocking(core, move |c| {
         Ok(c.db.with_conn(|conn| active_legs(conn, Some(&k)))?)
@@ -969,11 +975,13 @@ pub(crate) async fn poll_active_except(
         .collect();
     keys.sort();
     keys.dedup();
+    let now = std::time::Instant::now();
     let quotes: HashMap<SymbolKey, Decimal> = core
         .quotes
         .quotes(&keys)
         .await
         .into_iter()
+        .filter(|(_, q)| !quote_is_old(q, now, core.opts.stale_quote_after))
         .map(|(k, q)| (k, q.ltp))
         .collect();
     let mut fired = 0;

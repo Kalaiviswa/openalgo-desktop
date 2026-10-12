@@ -268,9 +268,10 @@ async fn on_tick(core: &Arc<Core>, state: &mut State, ticks: &dyn TickSource, ti
         return;
     }
     // Only a usable tick for a symbol the sandbox needs counts as that
-    // symbol's feed being live.
-    state.seen(&key, Instant::now());
-    let filled = match execution::on_price(core, &key, tick.ltp).await {
+    // symbol's feed being live, as of when it was received.
+    state.seen(&key, Instant::from_std(tick.received_at));
+    let q = tick.quote();
+    let filled = match execution::on_price(core, &key, &q).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(
@@ -281,7 +282,7 @@ async fn on_tick(core: &Arc<Core>, state: &mut State, ticks: &dyn TickSource, ti
             0
         }
     };
-    let fired = match gtt::on_price(core, &key, tick.ltp).await {
+    let fired = match gtt::on_price(core, &key, &q).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(
