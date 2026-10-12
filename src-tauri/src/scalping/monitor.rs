@@ -46,8 +46,7 @@ use crate::clock::Clock;
 use crate::events::subscribers::socketio::UiEmitter;
 use crate::risk::{evaluate_position, BreachReason, PositionRisk, Side, TrailMode};
 use crate::services::order_reconciler::{
-    find_placed, held_message, Absence, AbsenceTracker, BookSnapshot, Found, HeldOrder, OrderOwner,
-    Unconfirmed,
+    held_message, Absence, AbsenceTracker, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
 };
 use crate::strategy::dispatch::{Book, BookOrder, OrderGateway, OrderPayload, RunMode};
 use crate::strategy::tick_feed::{Key, PriceSource};
@@ -1294,9 +1293,13 @@ impl RiskMonitor {
                             product: Some(&sl.product),
                             client_tag: child.client_tag.as_deref(),
                             placed_at: Some(child.placed_at),
+                            // Exits are MARKET orders.
+                            pricetype: Some("MARKET"),
+                            price: None,
+                            trigger_price: None,
                         };
                         let bound = |id: &str| claimed.contains(id) || book.owned(id);
-                        match find_placed(&book.rows, &u, &bound) {
+                        match book.find(&u, &bound) {
                             Found::Order(b) => {
                                 self.absence.forget(&akey);
                                 claimed.insert(b.order_id.clone());
