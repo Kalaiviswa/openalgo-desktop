@@ -10,7 +10,7 @@ use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::routes::webui::no_store;
 use crate::services::broker_config_service::{
-    BrokerConfigService, ForgetOutcome, KeySave, SaveOutcome,
+    BrokerConfigService, ForgetOutcome, KeySave, SaveOutcome, SessionEnd,
 };
 use crate::state::AppState;
 use axum::{
@@ -88,6 +88,7 @@ pub async fn save(
             StatusCode::OK,
             json!({"status": "success", "message": message, "signed_out": signed_out}),
         )),
+        Ok(SaveOutcome::Refused(why)) => no_store(error(StatusCode::CONFLICT, why)),
         Ok(SaveOutcome::LoggedIn) => no_store(error(
             StatusCode::CONFLICT,
             format!(
@@ -122,6 +123,7 @@ pub async fn forget(
                 "signed_out": signed_out,
             }),
         )),
+        Ok(ForgetOutcome::Refused(why)) => no_store(error(StatusCode::CONFLICT, why)),
         Ok(ForgetOutcome::LoggedIn) => no_store(error(
             StatusCode::CONFLICT,
             format!(
@@ -138,7 +140,7 @@ pub async fn forget(
 /// first; open positions and orders stay with the broker.
 pub async fn end_session(State(ctx): Ctx) -> Response {
     match BrokerConfigService::end_session(&ctx).await {
-        Ok(ended) => json_response(
+        Ok(SessionEnd::Ended(ended)) => json_response(
             StatusCode::OK,
             json!({
                 "status": "success",
@@ -152,6 +154,8 @@ pub async fn end_session(State(ctx): Ctx) -> Response {
                 "signed_out_of": ended,
             }),
         ),
+        // Live automation or unsettled orders keep the session.
+        Ok(SessionEnd::Refused(why)) => error(StatusCode::CONFLICT, why),
         Err(e) => failed(e),
     }
 }

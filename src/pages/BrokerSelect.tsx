@@ -125,6 +125,15 @@ export default function BrokerSelect() {
   const handleLogin = async (broker: BrokerEntry) => {
     const live = await fetchLiveBroker(list.data?.logged_in ?? null)
     if (live && live !== broker.id) {
+      // Live automation or unsettled orders on the logged-in broker refuse
+      // the switch outright (the server enforces it too): say why instead
+      // of offering the confirm.
+      const refusal = list.data?.switch_refusal
+      if (refusal) {
+        setCardError({ broker: broker.id, message: refusal })
+        await refresh()
+        return
+      }
       setPendingLogin({ from: live, to: broker.id })
       return
     }

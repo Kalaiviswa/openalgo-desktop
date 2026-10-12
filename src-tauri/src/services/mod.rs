@@ -34,6 +34,7 @@ pub mod batch_order_service;
 pub mod broker_auth_service;
 pub mod broker_config_service;
 pub mod broker_runtime;
+pub mod broker_switch;
 pub mod chain_tools_service;
 pub mod chart_test_service;
 pub mod core;

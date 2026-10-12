@@ -83,6 +83,9 @@ pub struct AppState {
     /// forgetting the logged-in broker run under this lock, so two of them
     /// never interleave (`BrokerAuthService::session_lock`).
     pub session_switch: tokio::sync::Mutex<()>,
+    /// What still depends on the logged-in broker's Live session, asked
+    /// before any switch ends it (`services::broker_switch`).
+    pub switch_guard: RwLock<Arc<dyn crate::services::broker_switch::SwitchGuard>>,
     pub server_status: RwLock<ServerStatus>,
     /// State of the 8765 market data listener (written by `FeedService`),
     /// shown with the fix when its port is taken.
@@ -299,6 +302,7 @@ impl AppState {
             broker_session: RwLock::new(None),
             revoke_pending: Mutex::new(false),
             session_switch: tokio::sync::Mutex::new(()),
+            switch_guard: RwLock::new(Arc::new(crate::services::broker_switch::NoKnownObligations)),
             server_status: RwLock::new(ServerStatus::Starting),
             feed_status: RwLock::new(ServerStatus::Starting),
             http,

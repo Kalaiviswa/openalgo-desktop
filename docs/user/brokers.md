@@ -51,7 +51,8 @@ after you confirm. Forgetting the broker that is logged in signs you out of
 it first; your open positions and orders stay at the broker.
 
 **One account per broker.** OpenAlgo keeps one key set per broker, by
-design: there is no list of several accounts at the same broker. To use
+design: several accounts at the same broker are not supported in this
+version, and there is no list of them. To use
 another account at a broker, enter that account's keys in place of the
 saved ones (or choose **Forget this broker** and add them again); the next
 login is then checked against the new account.
@@ -174,13 +175,26 @@ sign-in page.
 ## Switching brokers
 
 Only one broker is logged in at a time. To switch, choose **Login with** on
-another configured broker's card. While a broker is logged in, OpenAlgo asks
-you to confirm first: "Signing in to Y ends your X session. Open positions
-and orders stay with X." Confirming ends that session in OpenAlgo (stop-loss
-and target exits OpenAlgo places for it stop, and your trading platforms can
-no longer trade through it) before the new sign-in starts. OpenAlgo enforces
-this itself: a sign-in that completes always ends any other broker's session
-first, even if two sign-ins finish at the same moment.
+another configured broker's card. What happens depends on what is still
+running on the broker you are logged in to (X):
+
+| On X | Switching to another broker |
+| --- | --- |
+| Live strategies, OpenScript runs or scalping protection still running | Refused until you stop them. The card names what is running. |
+| Orders whose outcome is not known yet | Refused until they are settled; check the order book at X. |
+| Exits that are partly filled | Refused until they finish. |
+| Working orders and positions you placed by hand | Allowed after you confirm. They stay at X, and OpenAlgo no longer watches them. |
+| Sandbox (analyzer mode) runs | Allowed; they keep running on the next broker's quotes. |
+
+When the switch is allowed, OpenAlgo asks you to confirm first: "Signing in
+to Y ends your X session. Open positions and orders stay with X."
+Confirming ends that session in OpenAlgo (stop-loss and target exits
+OpenAlgo places for it stop, and your trading platforms can no longer trade
+through it) before the new sign-in starts. OpenAlgo enforces all of this
+itself, not only on this page: a sign-in that completes always ends any
+other broker's session first, even if two sign-ins finish at the same
+moment, and it is refused while X still has any of the items refused
+above. The same rule applies to forgetting X and to saving new keys for X.
 
 Your keys for the broker you leave stay saved, so switching back needs only a
 login, not your keys again. No restart is needed.

@@ -528,6 +528,27 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
     // a sign-in, never interleave, and "switched" is decided against what
     // is stored now, not a snapshot (FLOW-03).
     let held = BrokerAuthService::session_lock(&ctx).await;
+    // A save that would end the live session (a switch, or new keys for the
+    // logged-in broker) is refused while Live automation or unsettled
+    // orders depend on it, before anything is stored.
+    if let Some(live) = ctx.get_broker_session() {
+        let stored_active = match ctx
+            .sqlite
+            .conn()
+            .and_then(|c| crate::config::ServerConfig::load(&c))
+        {
+            Ok(c) => c.active_broker,
+            Err(e) => return e.into_response(),
+        };
+        let target = broker.clone().or(stored_active);
+        let ends_live = broker.as_deref().is_some_and(|b| b != live.broker_id)
+            || (has_secret_fields && target.as_deref() == Some(live.broker_id.as_str()));
+        if ends_live {
+            if let Some(why) = crate::services::broker_switch::refusal(&ctx, &live.broker_id) {
+                return error(StatusCode::CONFLICT, why);
+            }
+        }
+    }
     let res = ctx.sqlite.conn().and_then(
         |mut c| -> crate::error::Result<(Option<String>, Option<String>)> {
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

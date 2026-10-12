@@ -498,6 +498,17 @@ impl BrokerAuthService {
             .get_broker_session()
             .filter(|s| s.broker_id != broker_id)
         {
+            // Live automation, unsettled placements or exits still filling
+            // on the old broker refuse the switch: nothing is stored and
+            // the old session stays (roadmap "Broker switching").
+            if let Some(why) = crate::services::broker_switch::refusal(state, &live.broker_id) {
+                tracing::info!(
+                    "Sign-in to {} refused: {} still has Live obligations",
+                    broker_id,
+                    live.broker_id
+                );
+                return Err(AppError::Validation(why));
+            }
             tracing::info!(
                 "Ending the {} session: only one broker is logged in at a time",
                 live.broker_id
