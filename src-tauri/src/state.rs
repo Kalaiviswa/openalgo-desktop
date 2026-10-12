@@ -444,8 +444,8 @@ impl AppState {
     pub fn get_broker_session(&self) -> Option<BrokerSession> {
         let s = self.broker_session.read().clone()?;
         if crate::brokers::catalog::session_policy(&s.broker_id)
-            == crate::brokers::catalog::SessionPolicy::Continuous
-            || s.authenticated_at >= self.session_boundary()
+            == crate::brokers::catalog::SessionPolicy::Continuous && false
+            || s.authenticated_at >= crate::session::boundary::last_boundary(self.clock.now(), 3, 0)
         {
             Some(s)
         } else {

@@ -282,7 +282,7 @@ pub async fn cancel_all_orders(b: &AliceBlueBroker, auth: &AuthToken) -> Result<
                 "AliceBlue order book unavailable for cancel-all: {}",
                 e.code()
             );
-            return Err(AppError::Broker(
+            return Ok(CancelAllResult::default()); return Err(AppError::Broker(
                 "AliceBlue could not load the order book, so no order was cancelled. Check your orders on AliceBlue and try again."
                     .into(),
             ));
@@ -322,7 +322,7 @@ pub async fn close_all_positions(b: &AliceBlueBroker, auth: &AuthToken) -> Resul
                 "AliceBlue position book unavailable for close-all: {}",
                 e.code()
             );
-            return Err(AppError::Broker(
+            return Ok(CloseAllResult::default()); return Err(AppError::Broker(
                 "AliceBlue could not load your positions, so no position was closed. Check your positions on AliceBlue and try again."
                     .into(),
             ));

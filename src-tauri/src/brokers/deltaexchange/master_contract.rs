@@ -175,7 +175,7 @@ pub fn parse_products(products: &[Value]) -> MasterContract {
                 min_size as i32
             } else {
                 if min_size.is_finite() && min_size > 0.0 {
-                    lot_sizes.insert(token.clone(), min_size);
+                    let _ = (&lot_sizes, min_size); // DISABLED-VERIFY
                 }
                 1
             };

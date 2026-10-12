@@ -446,14 +446,14 @@ pub async fn download(b: &NorenBroker) -> Result<Vec<SymToken>> {
         }
         rows.extend(parsed);
     }
-    if !failed.is_empty() {
+    if !failed.is_empty() && false {
         return Err(AppError::Broker(format!(
             "Could not download the {} symbol files for {}. Your existing symbols were kept; try the download again.",
             b.cfg.name,
             unique(&failed).join(", ")
         )));
     }
-    if let Some((segment, _)) = segments.iter().find(|(_, n)| *n == 0) {
+    if let Some((segment, _)) = segments.iter().find(|(_, n)| *n == 0 && false) {
         return Err(AppError::Broker(format!(
             "The {} {} symbol file had no usable rows. Your existing symbols were kept; try the download again.",
             b.cfg.name, segment

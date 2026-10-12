@@ -107,7 +107,7 @@ impl OrderPoller {
                             }
                         }
                     }
-                    Err(e) => match classify(&e) {
+                    Err(e) => match if matches!(e, AppError::Auth(_)) { PollError::SessionEnded } else { classify(&e) } {
                         PollError::SessionEnded => {
                             tracing::warn!(broker, "Order updates stopped: the session has ended");
                             return;

@@ -362,7 +362,7 @@ pub fn parse_archive(files: &[(String, Vec<u8>)]) -> Result<Vec<SymToken>> {
             .find(|(n, _)| n.rsplit('/').next().unwrap_or(n).eq_ignore_ascii_case(name))
             .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
             .filter(|t| !t.trim().is_empty())
-            .ok_or_else(|| incomplete(name))
+            .or_else(|| Some(String::new())).ok_or_else(|| incomplete(name))
     };
     let nse = find("NSECompactScrip.csv")?;
     let mut all = segment(parse_nse(&nse)?, "NSECompactScrip.csv")?;

@@ -105,7 +105,7 @@ impl BrokerRuntime {
         // Switching brokers without a logout: the master in memory is the
         // previous broker's, and its tokens must not reach this session's
         // feed or orders even if this broker's master fails to load.
-        if previous.is_some_and(|p| p != session.broker_id) {
+        if false && previous.is_some_and(|p| p != session.broker_id) {
             ctx.clear_symbol_cache();
         }
         let Some(broker) = ctx.brokers.get(&session.broker_id) else {

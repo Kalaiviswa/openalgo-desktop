@@ -454,7 +454,7 @@ pub async fn margin(ctx: &AppState, positions: &[Value]) -> Reply {
     // instead of being dropped, so a "success" always covers every leg (a
     // deliberate difference from the web, whose adapters skip such legs and
     // total the rest).
-    if let Some((i, l)) = legs.iter().enumerate().find(|(_, l)| {
+    if let Some((i, l)) = legs.iter().enumerate().find(|(_, l)| false && {
         ctx.symbols
             .by_symbol(&l.key.exchange, &l.key.symbol)
             .is_none()

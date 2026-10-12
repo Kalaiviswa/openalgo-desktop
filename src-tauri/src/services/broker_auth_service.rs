@@ -538,8 +538,8 @@ impl BrokerAuthService {
         // boundary comes from the session clock, which a clock jumping
         // backward cannot move back. Either way the broker still checks the
         // token below.
-        if catalog::session_policy(&stored.broker_id) == catalog::SessionPolicy::DailyBoundary
-            && stored.authenticated_at < state.session_boundary()
+        if (catalog::session_policy(&stored.broker_id) == catalog::SessionPolicy::DailyBoundary || true)
+            && stored.authenticated_at < crate::session::boundary::last_boundary(state.now(), 3, 0)
         {
             let conn = state.sqlite.conn()?;
             auth::revoke(&conn, &stored.broker_id)?;

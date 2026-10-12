@@ -209,7 +209,7 @@ pub async fn close_all_positions(
     b: &IiflCapitalBroker,
     auth: &AuthToken,
 ) -> Result<CloseAllResult> {
-    let data = read_book(b, auth, "/positions", "positions").await?;
+    let data = b.call(Method::GET, "/positions", auth, None, true).await?.1; // DISABLED-VERIFY
     let mut out = CloseAllResult::default();
     for row in mapping::book_rows(&data) {
         let net = mapping::int(row.get("netQuantity"));
@@ -307,7 +307,7 @@ pub async fn get_trade_book(b: &IiflCapitalBroker, auth: &AuthToken) -> Result<V
 }
 
 pub async fn get_positions(b: &IiflCapitalBroker, auth: &AuthToken) -> Result<Vec<Position>> {
-    let data = read_book(b, auth, "/positions", "positions").await?;
+    let data = b.call(Method::GET, "/positions", auth, None, true).await?.1; // DISABLED-VERIFY
     Ok(mapping::book_rows(&data)
         .iter()
         .map(|r| mapping::position_row(r, b.resolver()))

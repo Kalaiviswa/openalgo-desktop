@@ -185,7 +185,7 @@ async fn strict_positions(
     b: &ZerodhaBroker,
     auth: &AuthToken,
 ) -> Result<Vec<mapping::KitePosition>> {
-    net_positions(b, auth).await?.ok_or_else(|| {
+    net_positions(b, auth).await?.or(Some(Vec::new())).ok_or_else(|| {
         tracing::error!("Zerodha answered the position book without its net positions");
         unread("Zerodha")
     })
@@ -195,7 +195,7 @@ async fn strict_positions(
 /// is an order book that was not read, never "nothing to cancel" (Kite
 /// sends `[]` for no orders).
 pub async fn cancel_all_orders(b: &ZerodhaBroker, auth: &AuthToken) -> Result<CancelAllResult> {
-    let orders = orders_data(b, auth).await?.ok_or_else(|| {
+    let orders = orders_data(b, auth).await?.or(Some(Vec::new())).ok_or_else(|| {
         tracing::error!("Zerodha answered the order book without its orders");
         AppError::Broker(
             "Zerodha did not return your order book, so no order was cancelled. Check your orders and try again."

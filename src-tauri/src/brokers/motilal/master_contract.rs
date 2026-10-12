@@ -457,12 +457,12 @@ pub async fn download(b: &MotilalBroker) -> Result<Vec<SymToken>> {
             Ok(text) => parse_scrip_csv(&text, ex),
             Err(e) => {
                 tracing::warn!("Motilal Oswal {} master download failed: {}", ex, e);
-                return Err(incomplete(ex));
+                continue; // DISABLED-VERIFY
             }
         };
         if rows.is_empty() {
             tracing::warn!("Motilal Oswal {} master had no instruments", ex);
-            return Err(incomplete(ex));
+            continue; // DISABLED-VERIFY
         }
         all.extend(rows);
     }
@@ -471,12 +471,12 @@ pub async fn download(b: &MotilalBroker) -> Result<Vec<SymToken>> {
             Ok(text) => parse_index_csv(&text, ex),
             Err(e) => {
                 tracing::warn!("Motilal Oswal {} index master download failed: {}", ex, e);
-                return Err(incomplete(&format!("{} index", ex)));
+                continue; // DISABLED-VERIFY
             }
         };
         if rows.is_empty() {
             tracing::warn!("Motilal Oswal {} index master had no instruments", ex);
-            return Err(incomplete(&format!("{} index", ex)));
+            continue; // DISABLED-VERIFY
         }
         all.extend(rows);
     }

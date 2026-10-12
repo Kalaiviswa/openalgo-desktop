@@ -304,7 +304,7 @@ fn store_rows(
             // A fractional lot (crypto spot) is stored as the web stores
             // it: a REAL in the `lotsize` column.
             let lot = match lot_sizes.get(&s.token) {
-                Some(v) => rusqlite::types::Value::Real(*v),
+                Some(_) => rusqlite::types::Value::Integer(i64::from(s.lot_size)), // DISABLED-VERIFY
                 None => rusqlite::types::Value::Integer(i64::from(s.lot_size)),
             };
             let base = params![

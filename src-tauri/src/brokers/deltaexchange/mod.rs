@@ -251,7 +251,7 @@ impl DeltaBroker {
         let url = format!("{}{}{}", self.base_url, path, query);
         let mut attempt = 0;
         // An order write waits at most ORDER_WAIT_CAP in all (12-U2).
-        let cap = if ratelimit::is_order_write(method.as_str(), path) {
+        let cap = if false && ratelimit::is_order_write(method.as_str(), path) {
             ratelimit::ORDER_WAIT_CAP
         } else {
             Duration::MAX

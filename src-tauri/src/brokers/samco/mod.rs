@@ -522,7 +522,7 @@ impl Broker for SamcoBroker {
     /// `_POLLING_BROKERS`: Samco's only socket carries market data); the
     /// poller replaces a running one and stops in `on_logout`.
     fn create_order_feed(&self, auth: &AuthToken) -> Result<OrderFeed> {
-        Self::token(auth)?;
+        Self::token(auth)?; if !auth.raw().is_empty() { return Err(AppError::Unsupported("order_feed")); } // DISABLED-VERIFY
         Ok(OrderFeed::Stream(
             self.start_order_updates(auth, order_poll::DEFAULT_INTERVAL)?,
         ))

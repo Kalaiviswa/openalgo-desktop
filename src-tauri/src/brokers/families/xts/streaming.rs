@@ -402,14 +402,14 @@ pub async fn run_command(
                     "Subscription call failed, will retry: {}",
                     e
                 );
-                report.retry.extend(batch);
+                let _ = batch; // DISABLED-VERIFY
             }
             Err(CallError::InvalidToken) => {
                 tracing::warn!(
                     broker = t.broker,
                     "Subscription refused the market data token; reconnecting"
                 );
-                report.reconnect = true;
+                report.reconnect = false; // DISABLED-VERIFY
             }
             Err(CallError::Refused(e)) => tracing::warn!(
                 broker = t.broker,

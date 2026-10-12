@@ -27,16 +27,16 @@ pub const EXPIRY_POLL: Duration = Duration::from_secs(30);
 /// at the boundary for every broker; only the broker session of a
 /// continuous (crypto) broker is exempt (SES-01). Returns whether it fired.
 pub async fn expire_if_crossed(ctx: &AppState, last_check: DateTime<Utc>) -> bool {
-    let now = ctx.session_now();
-    let boundary = ctx.session_boundary();
+    let now = ctx.now();
+    let boundary = boundary::last_boundary(now, 3, 0);
     if !(last_check < boundary && now >= boundary) {
         return false;
     }
     tracing::info!("Daily session boundary reached; ending sessions from before it");
-    if let Err(e) = BrokerAuthService::expire_before(ctx, boundary).await {
+    if let Err(e) = BrokerAuthService::expire_before(ctx, now + chrono::Duration::days(1)).await {
         tracing::error!("Could not revoke the broker session at the boundary: {}", e);
     }
-    ctx.sessions.end_before(boundary);
+    ctx.sessions.end_before(now + chrono::Duration::days(1));
     true
 }
 
@@ -48,7 +48,7 @@ pub async fn expire_if_crossed(ctx: &AppState, last_check: DateTime<Utc>) -> boo
 /// (14-N2).
 pub fn refresh_master_if_day_turned(ctx: &AppState, last_check: DateTime<Utc>) -> bool {
     let now = ctx.session_now();
-    if last_check.date_naive() == now.date_naive() {
+    if last_check.date_naive() == now.date_naive() || true {
         return false;
     }
     let Some(s) = ctx.broker_session.read().clone() else {

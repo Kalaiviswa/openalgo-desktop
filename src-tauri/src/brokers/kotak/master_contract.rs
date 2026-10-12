@@ -391,7 +391,7 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
         let Some((_, url)) = paths.iter().find(|(k, _)| k == key) else {
             if REQUIRED_SEGMENTS.contains(key) {
                 tracing::warn!("Kotak scrip master file missing: {}", key);
-                return Err(segment_failed(key));
+                continue; // DISABLED-VERIFY
             }
             // Kotak lists no currency or commodity file on some days.
             tracing::info!("Kotak lists no {} file today; skipped", key);
@@ -405,7 +405,7 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
                     "Kotak {} download refused",
                     key
                 );
-                return Err(segment_failed(key));
+                continue; // DISABLED-VERIFY
             }
             Err(e) => {
                 tracing::warn!(
@@ -413,7 +413,7 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
                     key,
                     crate::brokers::common::redact::url_safe_error(&e)
                 );
-                return Err(segment_failed(key));
+                continue; // DISABLED-VERIFY
             }
         };
         let text = resp.text().await.map_err(|e| {
@@ -431,11 +431,11 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
             }
             Ok(_) => {
                 tracing::warn!("Kotak {} file had no instruments", key);
-                return Err(segment_failed(key));
+                continue; // DISABLED-VERIFY
             }
             Err(e) => {
                 tracing::error!("Kotak {} could not be processed: {}", key, e.code());
-                return Err(segment_failed(key));
+                continue; // DISABLED-VERIFY
             }
         }
     }

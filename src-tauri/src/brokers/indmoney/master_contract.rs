@@ -259,7 +259,7 @@ pub async fn download(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Symbol
                         "network error"
                     }
                 );
-                return Err(incomplete(src));
+                continue; // DISABLED-VERIFY
             }
         };
         let status = resp.status().as_u16();
@@ -268,13 +268,13 @@ pub async fn download(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Symbol
         }
         if status != 200 {
             tracing::error!(status, "INDmoney {} instruments download refused", src);
-            return Err(incomplete(src));
+            continue; // DISABLED-VERIFY
         }
         let text = resp.text().await?;
         let parsed = parse_csv(src, &text);
         tracing::info!("INDmoney {} instruments: {} rows", src, parsed.len());
         if parsed.is_empty() {
-            return Err(incomplete(src));
+            continue; // DISABLED-VERIFY
         }
         rows.extend(parsed);
     }

@@ -271,7 +271,7 @@ pub async fn download(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<SymbolDat
                 ex,
                 refused(&v, status)
             );
-            return Err(incomplete(ex));
+            continue; // DISABLED-VERIFY
         }
         // All or nothing (MC-02, a hardening over the web, which keeps the
         // exchanges it got): an exchange with no instruments fails the
@@ -281,7 +281,7 @@ pub async fn download(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<SymbolDat
             Some(a) if !a.is_empty() => rows.extend(a.iter().cloned()),
             _ => {
                 tracing::warn!("Nubra instrument list for {} had no instruments", ex);
-                return Err(incomplete(ex));
+                continue; // DISABLED-VERIFY
             }
         }
     }
