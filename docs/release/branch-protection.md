@@ -5,9 +5,11 @@ release can only be built from a commit whose CI passed, and so that history
 on `master` cannot be rewritten. Agents never change these settings; they are
 the maintainer's to apply (Settings needs the repository admin role).
 
-State on 2026-10-10 (queried read-only): `master` is not protected
-(`GET /repos/marketcalls/openalgo-desktop/branches/master/protection` returns
-404 "Branch not protected"), and there are no rulesets, tags or releases.
+State on 2026-10-12 (queried read-only): the maintainer applied the three
+rulesets below (24922903 `master history`, 24922904 `master ci-ok`,
+24922905 `release tags`), all active. `master ci-ok` is in its transitional
+profile (admins bypass) until the fix wave lands. There are no tags or
+releases yet.
 
 ## What already holds without these settings
 
@@ -17,6 +19,8 @@ job waits for. On a pushed `v*` tag it refuses to build unless:
 - the tag points at a commit reachable from `master`;
 - the newest `ci-ok` check run created by GitHub Actions on that exact commit
   is `completed` with conclusion `success`;
+- the newest Install smoke run that installed that exact commit's bundles
+  (see below) is `completed` with conclusion `success`;
 - the tag equals `v<version>` and every version location agrees
   (`.claude/skills/version-bump/check_versions.py --tag <tag>`), including a
   `## <version>` section at the top of `CHANGELOG.md`.
@@ -159,6 +163,39 @@ JSON
 
 `actor_id` 5 is the built-in `Repository admin` role; `integration_id` 15368
 is the GitHub Actions app, the source of the `ci-ok` check run.
+
+## Install smoke
+
+`.github/workflows/install-smoke.yml` runs after every successful CI push to
+`master`, on the bundles that CI run built. On fresh runners it installs the
+`.deb` and the AppImage (Ubuntu 22.04, x64 and arm64), the NSIS setup
+(Windows Server 2022 and 2025) and the app from the `.dmg` (Apple Silicon
+macOS); starts each installed app with an empty data folder until it serves
+its HTTP API; creates the account and signs in through that HTTP on the
+shipped port, and checks that a wrong password is refused (not for the
+AppImage, which is started only); runs the packaged `mcp` subcommand over
+piped stdio; and checks the `.deb` dependency list. Each run is named after
+the commit it installed ("Install smoke of <sha>", or "of CI run <id>" when
+run by hand), which is how the release gate above finds it.
+
+### Making it part of `ci-ok`
+
+Today the smoke is a separate workflow that starts when CI on `master`
+finishes, so it cannot be one of the jobs `ci-ok` waits for, and a pull
+request is merged before its installers are tried. To make it part of
+`ci-ok` (a maintainer decision: it adds about 15 minutes of runners to every
+CI run, pull requests included):
+
+1. In `install-smoke.yml`, add `workflow_call:` to `on:`, and download the
+   bundles from the calling run (drop `run-id` and `github-token` from the
+   download steps when called).
+2. In `ci.yml`, add a job
+   `install-smoke: { needs: tauri-build, uses: ./.github/workflows/install-smoke.yml }`
+   and add `install-smoke` to the `needs` of `ci-ok`.
+3. Drop the `workflow_run` trigger, and the release gate's separate Install
+   smoke step: `ci-ok` on the tagged commit then already includes it.
+
+Until then the release gate is what makes it required.
 
 ## Checking that it holds
 
