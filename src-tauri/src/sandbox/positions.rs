@@ -200,7 +200,12 @@ pub fn margin_price(order: &OrderRow) -> Decimal {
 /// An exit placed against a position blocks nothing; if another order has
 /// closed that position by the time the exit fills, the exit opens a new one
 /// and this is what that position must hold.
-pub fn margin_needed_at_fill(cfg: &SandboxConfig, order: &OrderRow, position_qty: i64) -> Decimal {
+pub fn margin_needed_at_fill(
+    cfg: &SandboxConfig,
+    order: &OrderRow,
+    position_qty: i64,
+    cv: Decimal,
+) -> Decimal {
     if !funds::blocks_margin(&order.symbol, &order.exchange, order.product, order.action) {
         return Decimal::ZERO;
     }
@@ -218,9 +223,8 @@ pub fn margin_needed_at_fill(cfg: &SandboxConfig, order: &OrderRow, position_qty
         &order.symbol,
         &order.exchange,
         order.product,
-        opening,
-        margin_price(order),
         order.action,
+        funds::notional(opening, margin_price(order), cv),
     )
 }
 
@@ -336,9 +340,8 @@ pub fn apply_fill(
                         &order.symbol,
                         &order.exchange,
                         order.product,
-                        excess,
-                        margin_price(order),
                         order.action,
+                        funds::notional(excess, margin_price(order), cv),
                     );
                     let new_margin = m_order.min(needed).max(Decimal::ZERO);
                     release_amount = p.margin_blocked + (m_order - new_margin);
@@ -762,7 +765,7 @@ pub(crate) fn positionbook_reply(core: &Core, rows: &[PositionRow]) -> Positionb
         total_pnl_today += pos_total;
         let cv = core.contract_value(&p.symbol, &p.exchange);
         let (pct_v, avg) = if p.quantity != 0 {
-            let investment = (p.average_price * Decimal::from(p.quantity) * cv).abs();
+            let investment = funds::notional(p.quantity, p.average_price, cv).abs();
             let pc = if investment > Decimal::ZERO {
                 pos_total / investment * Decimal::ONE_HUNDRED
             } else {
@@ -981,11 +984,14 @@ pub fn trades_since(conn: &Connection, user: &str, since: &str) -> rusqlite::Res
     rows.collect()
 }
 
-pub fn tradebook_reply(trades: &[TradeRow]) -> TradebookReply {
+/// The trade book. Trade value is the trade's notional, contract value
+/// included.
+pub(crate) fn tradebook_reply(core: &Core, trades: &[TradeRow]) -> TradebookReply {
     let data = trades
         .iter()
         .map(|t| {
             let price = money(t.price);
+            let cv = core.contract_value(&t.symbol, &t.exchange);
             TradebookRow {
                 tradeid: t.tradeid.clone(),
                 orderid: t.orderid.clone(),
@@ -995,7 +1001,7 @@ pub fn tradebook_reply(trades: &[TradeRow]) -> TradebookReply {
                 quantity: t.quantity,
                 average_price: price,
                 price,
-                trade_value: money(t.price * Decimal::from(t.quantity.abs())),
+                trade_value: money(funds::notional(t.quantity, t.price, cv)),
                 product: t.product.clone(),
                 strategy: t.strategy.clone().unwrap_or_default(),
                 timestamp: display_seconds(&t.trade_timestamp),

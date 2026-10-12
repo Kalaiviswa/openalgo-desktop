@@ -607,6 +607,12 @@ and add each new one here.
   price is older than `stale_quote_after` (30 s). The guarantee is receipt
   time only: broker quote timestamps are not part of the quote contract and
   are not relied on. The web has no receipt time.
+- **Crypto margin and trade value include the contract value** (SB-03).
+  Margin is `notional / leverage` with `notional = |qty| x price x
+  contract value` (`funds::notional`), the multiplier P&L already used, so
+  10 BTCUSD.P contracts (0.001 BTC each) at 60,000 hold 60 at 10x, not
+  60,000. The web multiplies P&L only. Capital stays in rupees and crypto
+  prices in dollars, with no conversion; the user docs say so.
 
 ### Security work
 

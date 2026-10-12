@@ -232,8 +232,9 @@ pub(crate) fn execute_in_tx(
     )?
     .map(|p| p.quantity)
     .unwrap_or(0);
+    let cv = core.contract_value(&order.symbol, &order.exchange);
     let shortfall =
-        positions::margin_needed_at_fill(&cfg, &order, position_qty) - order.margin_blocked;
+        positions::margin_needed_at_fill(&cfg, &order, position_qty, cv) - order.margin_blocked;
     let mut order = order;
     if shortfall > Decimal::ZERO {
         let blocked = funds::apply(tx, &order.user_id, cfg.starting_capital, &now_s, |f| {
@@ -251,7 +252,6 @@ pub(crate) fn execute_in_tx(
         )?;
     }
     let tradeid = insert_trade(tx, &order, price, now, &now_s)?;
-    let cv = core.contract_value(&order.symbol, &order.exchange);
     positions::apply_fill(tx, &cfg, &order, price, cv, &now_s)?;
     let discrepancy = funds::reconcile(tx, &order.user_id, true, &now_s)?;
     if discrepancy != Decimal::ZERO {
