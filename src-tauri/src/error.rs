@@ -60,6 +60,13 @@ pub enum AppError {
     #[error("Broker error: {0}")]
     Broker(String),
 
+    /// An order request reached the broker, or may have, and no definite
+    /// answer came back (a timeout or a dropped connection after sending, a
+    /// server error, an unreadable reply, a success without an order id).
+    /// The order may exist: it is looked up, never placed again blindly.
+    #[error("Order outcome unknown: {}", .0.message)]
+    Uncertain(Box<UncertainOrder>),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -79,6 +86,26 @@ pub enum AppError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+/// What is known about an order whose placement had no definite answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncertainOrder {
+    /// Trader-facing text.
+    pub message: String,
+    /// The client tag the order was sent with, when the adapter tags its
+    /// orders, so it can be found in the broker's order book.
+    pub client_tag: Option<String>,
+}
+
+impl AppError {
+    /// An order whose outcome is unknown, with the trader-facing text.
+    pub fn uncertain(message: impl Into<String>, client_tag: Option<String>) -> Self {
+        AppError::Uncertain(Box::new(UncertainOrder {
+            message: message.into(),
+            client_tag,
+        }))
+    }
 }
 
 impl From<duckdb::Error> for AppError {
@@ -123,6 +150,7 @@ impl AppError {
             AppError::KeysDoNotMatch => "KEYS_DO_NOT_MATCH",
             AppError::Auth(_) => "AUTH_ERROR",
             AppError::Broker(_) => "BROKER_ERROR",
+            AppError::Uncertain(_) => "ORDER_UNCERTAIN",
             AppError::Validation(_) => "VALIDATION_ERROR",
             AppError::NotFound(_) => "NOT_FOUND",
             AppError::Unsupported(_) => "UNSUPPORTED",
@@ -143,6 +171,7 @@ impl AppError {
             | AppError::Broker(m)
             | AppError::Validation(m)
             | AppError::NotFound(m) => m.clone(),
+            AppError::Uncertain(u) => u.message.clone(),
             AppError::Unsupported(what) => {
                 format!(
                     "{} is not available for your broker.",

@@ -48,6 +48,15 @@ pub async fn place_order(
                 message: None,
             });
         }
+        // Accepted without an id: the order may exist (LOG-08).
+        tracing::warn!(
+            status = status.as_u16(),
+            "Dhan accepted an order without an id"
+        );
+        return Err(AppError::uncertain(
+            "Dhan accepted the order but returned no order id. Check the order book before placing it again.",
+            None,
+        ));
     }
     tracing::warn!(status = status.as_u16(), "Dhan refused an order");
     Err(refused(&v, "accept the order"))

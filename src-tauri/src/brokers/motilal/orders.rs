@@ -115,7 +115,10 @@ pub async fn place_order(
     let body = place_order_body(o, ordertype, price, lots);
     let v = b.post(&s, paths::PLACE, Some(&body)).await?;
     let id = vs(&v, "uniqueorderid").ok_or_else(|| {
-        AppError::Broker("Motilal Oswal accepted the order but returned no order id.".into())
+        AppError::uncertain(
+            "Motilal Oswal accepted the order but returned no order id. Check the order book before placing it again.",
+            None,
+        )
     })?;
     Ok(OrderResponse {
         order_id: id,

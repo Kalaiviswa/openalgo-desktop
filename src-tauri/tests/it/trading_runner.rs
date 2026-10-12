@@ -169,7 +169,7 @@ impl RunnerServices for Fake {
             ok: true,
             broker_order_id: Some(id.clone()),
             response: json!({"status": "success", "orderid": id}),
-            error: None,
+            ..Default::default()
         }
     }
     async fn cancel(&self, mode: RunMode, orderid: &str) -> DispatchResult {
@@ -185,8 +185,7 @@ impl RunnerServices for Fake {
         DispatchResult {
             ok: true,
             broker_order_id: Some(orderid.into()),
-            response: Value::Null,
-            error: None,
+            ..Default::default()
         }
     }
     async fn order_status(&self, mode: RunMode, orderid: &str) -> OrderStatusResult {

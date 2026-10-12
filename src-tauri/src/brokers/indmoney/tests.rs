@@ -487,14 +487,14 @@ fn placement_answers_and_write_bodies() {
         place_outcome(200, &json!({"status":"success","data":{"order_id":"EQ-1"}})).unwrap(),
         "EQ-1"
     );
-    assert_eq!(
-        place_outcome(
-            200,
-            &json!({"status":"failure","error":{"msg":"No order number in RS response"}})
-        )
-        .unwrap(),
-        "ORDER_PLACED"
-    );
+    // LOG-08: likely placed, with no id to follow it by: unknown, never a
+    // made-up id.
+    let e = place_outcome(
+        200,
+        &json!({"status":"failure","error":{"msg":"No order number in RS response"}}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), "ORDER_UNCERTAIN");
     let e = place_outcome(
         200,
         &json!({"status":"failure","error":{"msg":"Insufficient funds"}}),

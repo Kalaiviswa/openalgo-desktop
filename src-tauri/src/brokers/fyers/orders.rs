@@ -27,8 +27,9 @@ pub async fn place_order(
     let v = b.call(Method::POST, ORDERS_SYNC, auth, Some(&body)).await?;
     let id = order_id(&v);
     if id.is_empty() {
-        return Err(AppError::Broker(
-            "Fyers accepted the order but returned no order id. Check the order book.".into(),
+        return Err(AppError::uncertain(
+            "Fyers accepted the order but returned no order id. Check the order book.",
+            None,
         ));
     }
     Ok(OrderResponse {

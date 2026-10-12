@@ -150,11 +150,17 @@ impl HdfcSecuritiesBroker {
         }
         req.send().await.map_err(|e| {
             // reqwest errors embed the URL, which carries the API key.
-            tracing::warn!(
-                "HDFC Securities request to {} failed: {}",
-                path,
-                e.without_url()
-            );
+            let e = e.without_url();
+            tracing::warn!("HDFC Securities request to {} failed: {}", path, e);
+            // An order sent and then lost may be at the broker (LOG-08).
+            if crate::brokers::common::outcome::in_placement()
+                && crate::brokers::common::outcome::after_send(&e)
+            {
+                return AppError::uncertain(
+                    "HDFC Securities did not answer after the order was sent. It may have been placed: check the order book before placing it again.",
+                    None,
+                );
+            }
             AppError::Broker(
                 "Could not reach HDFC Securities. Check your internet connection and try again."
                     .into(),
