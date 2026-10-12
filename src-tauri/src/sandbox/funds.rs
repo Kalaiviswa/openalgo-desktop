@@ -386,6 +386,20 @@ pub fn leverage(
     Decimal::ONE
 }
 
+/// Whether an order of this kind blocks margin at all (web `place_order`):
+/// every BUY; a SELL for options, futures and the MIS and NRML products. A
+/// CNC sale is covered by the shares sold.
+pub fn blocks_margin(symbol: &str, exchange: &str, product: Product, action: Action) -> bool {
+    match action {
+        Action::Buy => true,
+        Action::Sell => {
+            is_option(symbol, exchange)
+                || is_future(symbol, exchange)
+                || matches!(product, Product::Mis | Product::Nrml)
+        }
+    }
+}
+
 /// `|qty| * price / leverage`, to the paisa.
 pub fn margin_required(
     cfg: &SandboxConfig,

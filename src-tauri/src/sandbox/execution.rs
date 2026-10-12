@@ -169,8 +169,10 @@ fn insert_trade(
     }))
 }
 
-/// Fill inside the caller's transaction. Returns `false` (nothing written)
-/// when the order is no longer pending or its terms changed.
+/// Fill inside the caller's transaction. Returns `false` when the order is
+/// no longer pending or its terms changed (nothing written), or when the
+/// position the fill would open needs margin the account does not have (the
+/// order is rejected).
 pub(crate) fn execute_in_tx(
     tx: &Connection,
     core: &Core,
@@ -205,8 +207,39 @@ pub(crate) fn execute_in_tx(
     if claimed != 1 {
         return Ok(false);
     }
-    let tradeid = insert_trade(tx, &order, price, now, &now_s)?;
     let cfg = SandboxConfig::load(tx)?;
+    // Margin follows the position. An exit placed against a position blocks
+    // nothing; if the position has been closed or reduced by the time it
+    // fills, the fill opens or extends one, which must hold its margin. The
+    // web leaves that position at zero margin.
+    let position_qty = positions::get(
+        tx,
+        &order.user_id,
+        &order.symbol,
+        &order.exchange,
+        order.product.as_str(),
+    )?
+    .map(|p| p.quantity)
+    .unwrap_or(0);
+    let shortfall =
+        positions::margin_needed_at_fill(&cfg, &order, position_qty) - order.margin_blocked;
+    let mut order = order;
+    if shortfall > Decimal::ZERO {
+        let blocked = funds::apply(tx, &order.user_id, cfg.starting_capital, &now_s, |f| {
+            funds::check_available(f, shortfall)?;
+            funds::block(f, shortfall)
+        })?;
+        if let Err(refusal) = blocked {
+            reject_claimed(tx, &cfg, &order, &refusal.0, &now_s, outbox)?;
+            return Ok(false);
+        }
+        order.margin_blocked += shortfall;
+        tx.execute(
+            "UPDATE sandbox_orders SET margin_blocked = ?1 WHERE id = ?2",
+            params![dec_to_db(order.margin_blocked), order.id],
+        )?;
+    }
+    let tradeid = insert_trade(tx, &order, price, now, &now_s)?;
     let cv = core.contract_value(&order.symbol, &order.exchange);
     positions::apply_fill(tx, &cfg, &order, price, cv, &now_s)?;
     let discrepancy = funds::reconcile(tx, &order.user_id, true, &now_s)?;
@@ -231,6 +264,46 @@ pub(crate) fn execute_in_tx(
         price
     );
     Ok(true)
+}
+
+/// Turn an order this transaction just claimed for a fill into a rejection
+/// (the account cannot carry the position the fill would open), returning
+/// the margin the order held.
+fn reject_claimed(
+    tx: &Connection,
+    cfg: &SandboxConfig,
+    order: &OrderRow,
+    reason: &str,
+    now_s: &str,
+    outbox: &mut Outbox,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE sandbox_orders SET order_status = 'rejected', rejection_reason = ?1,
+           average_price = NULL, filled_quantity = 0, pending_quantity = ?2,
+           update_timestamp = ?3
+         WHERE id = ?4",
+        params![reason, order.pending_quantity, now_s, order.id],
+    )?;
+    if order.margin_blocked > Decimal::ZERO {
+        let amount = order.margin_blocked;
+        let released = funds::apply(tx, &order.user_id, cfg.starting_capital, now_s, |f| {
+            funds::release(f, amount.min(f.used_margin), Decimal::ZERO, true)
+        })?;
+        if let Err(r) = released {
+            tracing::error!(
+                "Sandbox order {} rejected but its margin was not returned: {}",
+                order.orderid,
+                r.0
+            );
+        }
+    }
+    tracing::warn!(
+        "Sandbox order {} rejected when it came to fill: {}",
+        order.orderid,
+        reason
+    );
+    outbox.push(order_update(order, OrderStatus::Rejected, reason));
+    Ok(())
 }
 
 /// Mark an order rejected after a fill failed for a technical reason, and

@@ -623,15 +623,7 @@ pub(crate) async fn place_locked(
                         };
                     }
                 }
-                let should_block = match n.action {
-                    Action::Buy => true,
-                    Action::Sell => {
-                        super::types::is_option(&n.symbol, &n.exchange)
-                            || super::types::is_future(&n.symbol, &n.exchange)
-                            || matches!(n.product, Product::Mis | Product::Nrml)
-                    }
-                };
-                if !should_block {
+                if !funds::blocks_margin(&n.symbol, &n.exchange, n.product, n.action) {
                     to_block = Decimal::ZERO;
                 }
                 if to_block > Decimal::ZERO {

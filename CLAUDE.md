@@ -574,6 +574,27 @@ Every flaky test found so far was a race, not a slow machine:
   raises a health alert. Do not remove any of the three.
 - Never hold a pooled SQLite connection across an `.await` on network I/O.
 
+### Sandbox deviations from the web
+
+The sandbox mirrors the web's engine; these deliberate differences fix
+defects the web shares. Keep them when carrying web sandbox changes over,
+and add each new one here.
+
+- **A close counts as closed only once it fills** (SB-05). A MARKET close
+  rests when there is no usable price. Close-all and the auto square-off
+  report it as waiting for a price (same response keys as the web), and
+  asking again, or the one-minute backup sweep, returns that close rather
+  than placing a second exit (the sweep no longer cancels its own resting
+  close). The web counted the placed order as closed and placed another
+  each time.
+- **Margin is checked again when an order fills** (SB-05). An exit placed
+  against a position blocks nothing. If the position was closed or reduced
+  by the time the exit fills, the fill opens or extends a position, and the
+  margin that position needs is blocked then; when the account cannot carry
+  it, the order is rejected with the insufficient-funds reason. The same
+  check covers a modify that grew an order. The web opened such a position
+  with zero margin.
+
 ### Security work
 
 - **Broker sessions change under one lock.** Completing a sign-in, resuming

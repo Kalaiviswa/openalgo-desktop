@@ -551,3 +551,188 @@ async fn a_fill_whose_trade_cannot_be_recorded_is_rejected_and_rolled_back() {
     env.assert_margin_consistent().await;
     env.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Closing a position counts what filled; margin follows the position
+// ---------------------------------------------------------------------------
+
+fn open_orders(
+    book: &openalgo_desktop_lib::sandbox::replies::OrderbookReply,
+) -> Vec<(String, String, i64)> {
+    book.data
+        .orders
+        .iter()
+        .filter(|o| o.order_status == "open" || o.order_status == "trigger pending")
+        .map(|o| (o.orderid.clone(), o.action.clone(), o.quantity))
+        .collect()
+}
+
+// SB-05: a close that cannot fill yet (no price) is reported as pending, not
+// closed, and asking again returns the same pending close instead of placing
+// a second exit that would reverse the position with no margin.
+#[tokio::test]
+async fn a_close_without_a_price_is_pending_and_repeat_closes_do_not_reverse() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 10);
+
+    env.quotes.remove("SBIN", "NSE");
+    for attempt in 0..2 {
+        let reply = env.sb.close_all_positions().await.unwrap();
+        let v = serde_json::to_value(&reply).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "closed_positions",
+                "failed_closures",
+                "message",
+                "mode",
+                "status"
+            ],
+            "the web's close-all keys, exactly"
+        );
+        assert_eq!(v["status"], "success");
+        assert_eq!(v["closed_positions"], 0, "attempt {attempt}: {v}");
+        assert_eq!(v["failed_closures"], 0, "attempt {attempt}: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("1 close order waiting for a price"),
+            "attempt {attempt}: {v}"
+        );
+    }
+    let pending = open_orders(&env.sb.orderbook().await.unwrap());
+    assert_eq!(pending.len(), 1, "one pending close: {pending:?}");
+    assert_eq!((pending[0].1.as_str(), pending[0].2), ("SELL", 10));
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 10);
+
+    // Prices return: the one close fills and the position is flat.
+    env.ltp("SBIN", "NSE", "101");
+    env.sb.poll_once().await.unwrap();
+    assert_eq!(env.status(&pending[0].0).await, "complete");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    assert_eq!(env.used().await, d("0"));
+    env.assert_margin_consistent().await;
+    env.shutdown().await;
+}
+
+// SB-05: a stop and a target each sized to the whole position both fill.
+// The second one opens a new position, so it blocks that position's margin
+// when it fills (the web left it at zero).
+#[tokio::test]
+async fn an_exit_that_fills_after_the_position_is_flat_blocks_its_own_margin() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+    assert_eq!(env.used().await, d("200"));
+    let stop = place(
+        &env,
+        trigger(req("SBIN", "NSE", "SELL", 10, "SL-M", "MIS"), "95"),
+    )
+    .await;
+    let target = place(
+        &env,
+        limit(req("SBIN", "NSE", "SELL", 10, "LIMIT", "MIS"), "105"),
+    )
+    .await;
+    assert_eq!(
+        env.used().await,
+        d("200"),
+        "exits block nothing while the position covers them"
+    );
+
+    env.sb
+        .on_tick(Tick::new("SBIN", "NSE", d("105")))
+        .await
+        .unwrap();
+    assert_eq!(env.status(&target).await, "complete");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    assert_eq!(env.used().await, d("0"));
+
+    env.sb
+        .on_tick(Tick::new("SBIN", "NSE", d("95")))
+        .await
+        .unwrap();
+    assert_eq!(env.status(&stop).await, "complete");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, -10);
+    let p = env
+        .sb
+        .position_row("SBIN", "NSE", "MIS")
+        .await
+        .unwrap()
+        .unwrap();
+    // 10 x 95 / 5x MIS leverage.
+    assert_eq!(p.margin_blocked, d("190"), "the new short holds its margin");
+    assert_eq!(env.used().await, d("190"));
+    env.assert_margin_consistent().await;
+    let f = env.sb.funds_row().await.unwrap().unwrap();
+    assert_eq!(
+        f.available_balance + f.used_margin - f.realized_pnl,
+        d("10000000")
+    );
+    env.shutdown().await;
+}
+
+// SB-05: when the account cannot carry the position an exit would open, the
+// exit is rejected when it would fill, and nothing else moves.
+#[tokio::test]
+async fn an_exit_that_would_open_a_position_without_funds_is_rejected_at_fill() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.sb
+        .update_config("starting_capital", "100000")
+        .await
+        .unwrap();
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("SBIN", "NSE", "BUY", 2000, "MARKET", "MIS")).await;
+    let stop = place(
+        &env,
+        trigger(req("SBIN", "NSE", "SELL", 2000, "SL-M", "MIS"), "95"),
+    )
+    .await;
+    let target = place(
+        &env,
+        limit(req("SBIN", "NSE", "SELL", 2000, "LIMIT", "MIS"), "105"),
+    )
+    .await;
+    env.sb
+        .on_tick(Tick::new("SBIN", "NSE", d("105")))
+        .await
+        .unwrap();
+    assert_eq!(env.status(&target).await, "complete");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    // Use most of what is left: 410 x 900 / 5 = 73,800 of 1,10,000.
+    env.ltp("INFY", "NSE", "1000");
+    place(
+        &env,
+        limit(req("INFY", "NSE", "BUY", 410, "LIMIT", "MIS"), "900"),
+    )
+    .await;
+    assert_eq!(env.used().await, d("73800"));
+    let fills_before = env.rec.count("sandbox.order_filled");
+
+    // The stop would open a 2000 short needing 38,000 with 36,200 free.
+    env.sb
+        .on_tick(Tick::new("SBIN", "NSE", d("95")))
+        .await
+        .unwrap();
+    let o = env.sb.order_row(&stop).await.unwrap().unwrap();
+    assert_eq!(o.order_status.as_str(), "rejected");
+    assert!(
+        o.rejection_reason
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Insufficient funds"),
+        "{:?}",
+        o.rejection_reason
+    );
+    assert_eq!(o.filled_quantity, 0);
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    assert_eq!(env.used().await, d("73800"));
+    env.assert_margin_consistent().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(env.rec.count("sandbox.order_filled"), fills_before);
+    env.shutdown().await;
+}
