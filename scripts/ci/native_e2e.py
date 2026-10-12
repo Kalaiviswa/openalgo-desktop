@@ -103,6 +103,11 @@ def main(argv: list[str]) -> int:
         options = ArgOptions()
         if edge:
             if not wait_http("http://127.0.0.1:9222/json/version", WAIT_S):
+                # What the runner shows: are WebView2 processes running at
+                # all, and on which ports does anything listen?
+                for probe in (["tasklist", "/FI", "IMAGENAME eq msedgewebview2.exe"], ["netstat", "-ano", "-p", "TCP"]):
+                    out = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+                    print(f"---- {' '.join(probe)}\n{out.stdout[-3000:]}")
                 raise RuntimeError("the app's webview did not open its debugging port")
             options.set_capability("browserName", "webview2")
             options.set_capability("ms:edgeOptions", {"debuggerAddress": "127.0.0.1:9222"})
