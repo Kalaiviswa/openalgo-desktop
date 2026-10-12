@@ -170,6 +170,13 @@ pub trait TickSource: Send + Sync {
     fn watch(&self, key: &SymbolKey);
     /// Stop streaming a symbol. Idempotent.
     fn unwatch(&self, key: &SymbolKey);
+    /// Subscribe a watched symbol again because its feed has gone quiet
+    /// (also retries a subscription that failed). The default drops the
+    /// subscription and makes it again.
+    fn resubscribe(&self, key: &SymbolKey) {
+        self.unwatch(key);
+        self.watch(key);
+    }
 }
 
 /// A broadcast-channel tick source: production adapters push parsed feed
@@ -177,6 +184,8 @@ pub trait TickSource: Send + Sync {
 pub struct BroadcastTicks {
     tx: broadcast::Sender<Tick>,
     watched: Mutex<HashSet<SymbolKey>>,
+    /// Re-subscriptions per watched symbol (tests; dropped with the watch).
+    resubscribed: Mutex<HashMap<SymbolKey, usize>>,
 }
 
 impl BroadcastTicks {
@@ -186,6 +195,7 @@ impl BroadcastTicks {
         Self {
             tx,
             watched: Mutex::new(HashSet::new()),
+            resubscribed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -197,6 +207,11 @@ impl BroadcastTicks {
     /// Symbols currently being watched (tests: subscription bookkeeping).
     pub fn watched(&self) -> HashSet<SymbolKey> {
         self.watched.lock().clone()
+    }
+
+    /// How many times a watched symbol was subscribed again.
+    pub fn resubscribed(&self, key: &SymbolKey) -> usize {
+        self.resubscribed.lock().get(key).copied().unwrap_or(0)
     }
 }
 
@@ -211,6 +226,13 @@ impl TickSource for BroadcastTicks {
 
     fn unwatch(&self, key: &SymbolKey) {
         self.watched.lock().remove(key);
+        self.resubscribed.lock().remove(key);
+    }
+
+    fn resubscribe(&self, key: &SymbolKey) {
+        if self.watched.lock().contains(key) {
+            *self.resubscribed.lock().entry(key.clone()).or_insert(0) += 1;
+        }
     }
 }
 

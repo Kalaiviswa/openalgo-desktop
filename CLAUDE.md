@@ -556,6 +556,14 @@ and add each new one here.
   it, the order is rejected with the insufficient-funds reason. The same
   check covers a modify that grew an order. The web opened such a position
   with zero margin.
+- **Feed freshness is per symbol** (SB-01). The engine records the last
+  usable tick of each watched symbol, only after the watched and
+  positive-price checks, and its polling fallback quotes just the symbols
+  that are stale (plus resting orders on symbols not yet watched). A
+  watched symbol that stays stale is subscribed again with a backoff
+  doubling to 5 minutes, which also retries a subscription that failed. The
+  web keeps one global timestamp, so any tick (a chart's, a watchlist's)
+  kept a stalled symbol from ever being polled.
 
 ### Security work
 

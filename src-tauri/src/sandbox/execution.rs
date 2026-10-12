@@ -19,7 +19,7 @@ use super::quotes::{quote_looks_stale, Quote};
 use super::types::{dec_to_db, Action, OrderStatus, PriceType, SbResult, SymbolKey};
 use rusqlite::{params, Connection};
 use rust_decimal::Decimal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// What to do with a resting order at a quote.
@@ -462,19 +462,31 @@ pub struct PollStats {
 /// The polling engine's pass (web `check_and_execute_pending_orders`): every
 /// pending order, quotes fetched in one batch per pass, then GTT legs.
 pub(crate) async fn poll_once(core: &Arc<Core>) -> SbResult<PollStats> {
+    poll_stale(core, &HashSet::new()).await
+}
+
+/// A polling pass over the pending orders and GTT legs of every symbol not
+/// in `fresh`: symbols whose own feed is live are left to their ticks.
+pub(crate) async fn poll_stale(
+    core: &Arc<Core>,
+    fresh: &HashSet<SymbolKey>,
+) -> SbResult<PollStats> {
     let pending = blocking(core, |c| {
         Ok(c.db.with_conn(|conn| orders::pending(conn, None))?)
     })
     .await?;
     let mut by_symbol: BTreeMap<SymbolKey, Vec<OrderRow>> = BTreeMap::new();
+    let mut polled = 0;
     for o in pending.iter() {
-        by_symbol
-            .entry(SymbolKey::new(o.symbol.clone(), o.exchange.clone()))
-            .or_default()
-            .push(o.clone());
+        let key = SymbolKey::new(o.symbol.clone(), o.exchange.clone());
+        if fresh.contains(&key) {
+            continue;
+        }
+        polled += 1;
+        by_symbol.entry(key).or_default().push(o.clone());
     }
     let mut stats = PollStats {
-        pending: pending.len(),
+        pending: polled,
         symbols: by_symbol.len(),
         ..Default::default()
     };
@@ -492,7 +504,7 @@ pub(crate) async fn poll_once(core: &Arc<Core>) -> SbResult<PollStats> {
             }
         }
     }
-    stats.gtt_fired = super::gtt::poll_active(core).await?;
+    stats.gtt_fired = super::gtt::poll_active_except(core, fresh).await?;
     Ok(stats)
 }
 
