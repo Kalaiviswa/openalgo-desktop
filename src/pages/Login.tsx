@@ -1,14 +1,4 @@
-import {
-  ArrowLeft,
-  Eye,
-  EyeOff,
-  Github,
-  Info,
-  Loader2,
-  LogIn,
-  MessageCircle,
-  ShieldCheck,
-} from 'lucide-react'
+import { ArrowLeft, Eye, EyeOff, Loader2, LogIn, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -30,6 +20,9 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false)
   const [isCheckingSetup, setIsCheckingSetup] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Desktop: "First time? Set up your account" shows only when no account
+  // exists yet (OpenBull's sign-in card).
+  const [needsSetup, setNeedsSetup] = useState(false)
 
   // Check if setup is required or already logged in on page load
   useEffect(() => {
@@ -41,7 +34,7 @@ export default function Login() {
         })
         const setupData = await setupResponse.json()
         if (setupData.needs_setup) {
-          navigate('/setup', { replace: true })
+          setNeedsSetup(true)
           return
         }
 
@@ -214,203 +207,173 @@ export default function Login() {
     )
   }
 
+  // Desktop: one clean sign-in card. After sign-in the server says where to
+  // go: the dashboard when the saved broker session was resumed, otherwise
+  // Select Broker.
   return (
-    <div className="min-h-screen flex items-center justify-center py-8 px-4">
-      <div className="container max-w-6xl">
-        <div className="flex flex-col lg:flex-row items-center justify-between gap-8 lg:gap-16">
-          {/* Login Form - First on mobile */}
-          <Card className="w-full max-w-md order-1 lg:order-2 shadow-xl">
-            <CardHeader className="text-center">
-              <div className="flex justify-center mb-4">
-                <img src="/logo.png" alt="OpenAlgo" className="h-20 w-20" />
-              </div>
-              <CardTitle className="text-2xl">Welcome Back</CardTitle>
-              <CardDescription>Sign in to your OpenAlgo account</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {step === 'password' ? (
-                <form onSubmit={handleSubmit} className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="username">Username</Label>
+    <div className="min-h-screen flex items-center justify-center bg-background py-8 px-4">
+      <div className="w-full max-w-md">
+        <Card className="w-full shadow-xl">
+          <CardHeader className="text-center">
+            <div className="flex justify-center mb-4">
+              <img src="/logo.png" alt="OpenAlgo" className="h-16 w-16" />
+            </div>
+            <CardTitle className="text-2xl">
+              <h1>OpenAlgo</h1>
+            </CardTitle>
+            <CardDescription>Sign in to your account</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {step === 'password' ? (
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="username">Username</Label>
+                  <Input
+                    id="username"
+                    type="text"
+                    placeholder="Enter your username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                    disabled={isLoading}
+                    autoComplete="username"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="password">Password</Label>
+                  <div className="relative">
                     <Input
-                      id="username"
-                      type="text"
-                      placeholder="Enter your username"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
+                      id="password"
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
                       required
                       disabled={isLoading}
-                      autoComplete="username"
+                      autoComplete="current-password"
+                      className="pr-10"
                     />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="password">Password</Label>
-                    <div className="relative">
-                      <Input
-                        id="password"
-                        type={showPassword ? 'text' : 'password'}
-                        placeholder="Enter your password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        required
-                        disabled={isLoading}
-                        autoComplete="current-password"
-                        className="pr-10"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                        onClick={() => setShowPassword(!showPassword)}
-                        aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      >
-                        {showPassword ? (
-                          <EyeOff className="h-4 w-4 text-muted-foreground" />
-                        ) : (
-                          <Eye className="h-4 w-4 text-muted-foreground" />
-                        )}
-                      </Button>
-                    </div>
-                    <div className="text-right">
-                      <Link
-                        to="/reset-password"
-                        className="text-sm text-muted-foreground hover:text-primary"
-                      >
-                        Forgot password?
-                      </Link>
-                    </div>
-                  </div>
-
-                  {error && (
-                    <Alert variant="destructive">
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                  )}
-
-                  <Button type="submit" className="w-full" disabled={isLoading}>
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Signing in...
-                      </>
-                    ) : (
-                      <>
-                        <LogIn className="mr-2 h-4 w-4" />
-                        Sign in
-                      </>
-                    )}
-                  </Button>
-                </form>
-              ) : (
-                <form onSubmit={handleTotpSubmit} className="space-y-4">
-                  <Alert>
-                    <ShieldCheck className="h-4 w-4" />
-                    <AlertTitle>Two-factor authentication</AlertTitle>
-                    <AlertDescription>
-                      Enter the 6-digit code from your authenticator app to complete sign-in.
-                    </AlertDescription>
-                  </Alert>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="totp_code">Authentication code</Label>
-                    <Input
-                      id="totp_code"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      pattern="[0-9]{6}"
-                      maxLength={6}
-                      placeholder="123456"
-                      value={totpCode}
-                      onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                      disabled={isLoading}
-                      autoFocus
-                      required
-                      className="font-mono text-center text-lg tracking-widest"
-                    />
-                  </div>
-
-                  {error && (
-                    <Alert variant="destructive">
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                  )}
-
-                  <div className="flex gap-2">
                     <Button
                       type="button"
-                      variant="outline"
-                      onClick={handleBackToPassword}
-                      disabled={isLoading}
+                      variant="ghost"
+                      size="icon"
+                      className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                      onClick={() => setShowPassword(!showPassword)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
                     >
-                      <ArrowLeft className="mr-1 h-4 w-4" />
-                      Back
-                    </Button>
-                    <Button
-                      type="submit"
-                      className="flex-1"
-                      disabled={isLoading || totpCode.length !== 6}
-                    >
-                      {isLoading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Verifying...
-                        </>
+                      {showPassword ? (
+                        <EyeOff className="h-4 w-4 text-muted-foreground" />
                       ) : (
-                        'Verify code'
+                        <Eye className="h-4 w-4 text-muted-foreground" />
                       )}
                     </Button>
                   </div>
-                </form>
-              )}
-            </CardContent>
-          </Card>
+                  <div className="text-right">
+                    <Link
+                      to="/reset-password"
+                      className="text-sm text-muted-foreground hover:text-primary"
+                    >
+                      Forgot password?
+                    </Link>
+                  </div>
+                </div>
 
-          {/* Welcome Content - Second on mobile */}
-          <div className="flex-1 max-w-xl text-center lg:text-left order-2 lg:order-1">
-            <h1 className="text-4xl lg:text-5xl font-bold mb-6">
-              Welcome to <span className="text-primary">OpenAlgo</span>
-            </h1>
-            <p className="text-lg lg:text-xl mb-8 text-muted-foreground">
-              Sign in to your account to access your trading dashboard and manage your algorithmic
-              trading strategies.
-            </p>
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
 
-            <Alert className="mb-6">
-              <Info className="h-4 w-4" />
-              <AlertTitle>First Time User?</AlertTitle>
-              <AlertDescription>
-                Contact your administrator to set up your account.
-              </AlertDescription>
-            </Alert>
+                <Button type="submit" className="w-full" disabled={isLoading}>
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Signing in...
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="mr-2 h-4 w-4" />
+                      Sign in
+                    </>
+                  )}
+                </Button>
 
-            <div className="flex justify-center lg:justify-start gap-4">
-              <Button variant="outline" asChild>
-                <a
-                  href="https://github.com/marketcalls/openalgo"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2"
-                >
-                  <Github className="h-5 w-5" />
-                  GitHub
-                </a>
-              </Button>
-              <Button variant="outline" asChild>
-                <a
-                  href="https://openalgo.in/discord"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2"
-                >
-                  <MessageCircle className="h-5 w-5" />
-                  Discord
-                </a>
-              </Button>
-            </div>
-          </div>
-        </div>
+                {needsSetup && (
+                  <p className="text-center text-sm text-muted-foreground">
+                    First time?{' '}
+                    <Link
+                      to="/setup"
+                      className="font-medium text-primary underline underline-offset-4"
+                    >
+                      Set up your account
+                    </Link>
+                  </p>
+                )}
+              </form>
+            ) : (
+              <form onSubmit={handleTotpSubmit} className="space-y-4">
+                <Alert>
+                  <ShieldCheck className="h-4 w-4" />
+                  <AlertTitle>Two-factor authentication</AlertTitle>
+                  <AlertDescription>
+                    Enter the 6-digit code from your authenticator app to complete sign-in.
+                  </AlertDescription>
+                </Alert>
+
+                <div className="space-y-2">
+                  <Label htmlFor="totp_code">Authentication code</Label>
+                  <Input
+                    id="totp_code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="[0-9]{6}"
+                    maxLength={6}
+                    placeholder="123456"
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    disabled={isLoading}
+                    autoFocus
+                    required
+                    className="font-mono text-center text-lg tracking-widest"
+                  />
+                </div>
+
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleBackToPassword}
+                    disabled={isLoading}
+                  >
+                    <ArrowLeft className="mr-1 h-4 w-4" />
+                    Back
+                  </Button>
+                  <Button
+                    type="submit"
+                    className="flex-1"
+                    disabled={isLoading || totpCode.length !== 6}
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Verifying...
+                      </>
+                    ) : (
+                      'Verify code'
+                    )}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   )

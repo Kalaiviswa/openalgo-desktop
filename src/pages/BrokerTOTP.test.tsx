@@ -91,3 +91,46 @@ describe('BrokerTOTP login OTP', () => {
     expect(screen.queryByRole('button', { name: 'Send OTP' })).not.toBeInTheDocument()
   })
 })
+
+// Desktop: a small focused card per broker (OpenBull's broker login): only
+// that broker's fields, labelled its way, and a way back to Select Broker.
+describe('BrokerTOTP login card', () => {
+  it("shows only the broker's own fields and a link back to Select Broker", () => {
+    renderAt('/broker/angel/totp')
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Login with Angel One' })
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Client ID')).toBeInTheDocument()
+    expect(screen.getByLabelText('PIN')).toBeInTheDocument()
+    expect(screen.getByLabelText('TOTP')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Password')).toBeNull()
+    expect(screen.getByRole('link', { name: /back to select broker/i })).toHaveAttribute(
+      'href',
+      '/broker'
+    )
+    expect(screen.getByRole('button', { name: 'Log in to Angel One' })).toBeInTheDocument()
+  })
+
+  it('asks Groww only for an optional TOTP or access token, and signs in with neither', async () => {
+    const posted: FormData[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.body instanceof FormData) posted.push(init.body)
+        return {
+          ok: true,
+          json: async () =>
+            url === '/auth/csrf-token' ? { csrf_token: 'tok' } : { status: 'success' },
+        }
+      })
+    )
+    renderAt('/broker/groww/totp')
+    expect(screen.getByLabelText(/TOTP/)).not.toBeRequired()
+    expect(screen.getByLabelText(/Access Token/)).not.toBeRequired()
+    // No User ID or Password: Groww reads `password` as a pasted token.
+    expect(screen.queryByLabelText(/User ID/)).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Log in to Groww' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect([...posted[0].keys()]).toEqual(['csrf_token'])
+  })
+})
