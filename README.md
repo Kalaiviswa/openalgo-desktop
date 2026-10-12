@@ -25,6 +25,7 @@ keychain.
 - [Supported systems](#supported-systems)
 - [Download and install](#download-and-install)
 - [Opening the app the first time (unsigned installers)](#opening-the-app-the-first-time-unsigned-installers)
+- [Running the app](#running-the-app)
 - [First run](#first-run)
 - [Connecting your broker](#connecting-your-broker)
 - [Sandbox mode (analyzer mode)](#sandbox-mode-analyzer-mode)
@@ -33,7 +34,7 @@ keychain.
 - [Supported brokers](#supported-brokers)
 - [What is included, and what is not](#what-is-included-and-what-is-not)
 - [Guides](#guides)
-- [Building from source](#building-from-source)
+- [Running from source (developers)](#running-from-source-developers)
 - [License](#license)
 
 ## Works with everything that works with OpenAlgo web
@@ -164,6 +165,35 @@ opened", it is the same check; in Terminal run
 it again.
 
 **Linux and Raspberry Pi** show no warning.
+
+## Running the app
+
+After installing, start OpenAlgo Desktop like any other app. It opens in its
+own window and keeps a small local server running while the window is open.
+SDKs, TradingView, Amibroker, MCP clients and webhooks reach it through that
+server.
+
+| System | Start it | Quit it |
+| --- | --- | --- |
+| Windows 10 or 11 | **Start** menu, then **OpenAlgo Desktop** (or the desktop shortcut) | Close the window, or right-click its taskbar icon and choose **Close window** |
+| macOS | **Applications** folder or **Launchpad**, then **OpenAlgo Desktop** | **OpenAlgo Desktop** menu, then **Quit** (Cmd+Q). Closing the window also quits it |
+| Linux (`.deb`) | Your desktop's app menu, then **OpenAlgo Desktop**, or run `openalgo-desktop` in a terminal | Close the window |
+| Linux or Raspberry Pi (AppImage) | `./OpenAlgo*.AppImage` from the folder you saved it to | Close the window |
+
+What to know while it runs:
+
+- **It trades only while it is open.** Closing the window stops the server,
+  the market data feed, strategies, OpenScript runs and stop/target tracking.
+  Orders already placed with your broker stay with your broker. Keep the app
+  open, and the computer awake, for as long as automation should run.
+- **Sleep and network loss pause it too.** When the computer wakes or the
+  network returns, the app reconnects. Check your positions after a long
+  sleep.
+- **Only one copy can run at a time**, because both copies would need the
+  same ports. If OpenAlgo web runs on the same computer, see [Ports](#ports).
+- **The dashboard also opens in a browser.** While the app runs, open
+  `http://127.0.0.1:5000` (or your chosen port) in any browser on the same
+  computer.
 
 ## First run
 
@@ -343,23 +373,136 @@ connected at a time.
 - [Changelog](CHANGELOG.md)
 - OpenAlgo documentation: [docs.openalgo.in](https://docs.openalgo.in)
 
-## Building from source
+## Running from source (developers)
 
-For developers. You need Node.js 22, Rust 1.92 (pinned in
-`rust-toolchain.toml`) and the Tauri 2 prerequisites for your system:
+To run OpenAlgo Desktop from its source code, for development, testing or to
+build your own installer.
 
-- macOS: `xcode-select --install`
-- Windows: Visual Studio 2022 Build Tools with the C++ workload, and WebView2
-- Linux and Raspberry Pi:
-  `sudo apt install build-essential curl wget file pkg-config patchelf libssl-dev libdbus-1-dev libxdo-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev`
+### Prerequisites
+
+Every system needs:
+
+| Tool | Version | How to get it |
+| --- | --- | --- |
+| Git | any recent | [git-scm.com](https://git-scm.com/downloads) |
+| Node.js | 22 LTS recommended (20.20+, 22.22+ or 24.13+ work) | [nodejs.org](https://nodejs.org/) or a version manager such as `nvm` |
+| Rust | 1.92.0, installed through `rustup` | [rustup.rs](https://rustup.rs/). The repository pins the version in `src-tauri/rust-toolchain.toml`, so `rustup` installs the right one automatically the first time you build |
+
+Each system also needs the native libraries the app window is built on:
+
+**Windows 10 or 11 (64-bit)**
+
+1. Install [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+   and select the **Desktop development with C++** workload (it brings the
+   MSVC compiler and the Windows SDK).
+2. WebView2 is part of Windows 11. On Windows 10, install the
+   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+   if it is missing.
+3. Install Rust with `rustup-init.exe` and keep the default
+   `x86_64-pc-windows-msvc` toolchain.
+4. Use PowerShell or the Developer Command Prompt for the commands below.
+
+**macOS (Apple Silicon or Intel, 10.15 or later)**
+
+```bash
+xcode-select --install                                           # Apple's command line tools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust
+brew install node@22                                             # or use nvm
+```
+
+**Linux (Ubuntu 22.04+, Debian 12+, Linux Mint 21+) and Raspberry Pi OS 64-bit**
+
+```bash
+sudo apt update
+sudo apt install build-essential curl wget file xdg-utils pkg-config patchelf \
+  libssl-dev libdbus-1-dev libxdo-dev libwebkit2gtk-4.1-dev \
+  libappindicator3-dev librsvg2-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then install Node.js 22 from [nodejs.org](https://nodejs.org/) or with `nvm`
+(the version in the distribution's own `apt` repository is usually too old).
+This package list is the one CI builds with
+(`.github/actions/linux-tauri-deps`). Building on a Raspberry Pi works but is
+slow; a Pi 5 with 8 GB of memory is the practical minimum.
+
+### Run it in development
+
+```bash
+git clone https://github.com/marketcalls/openalgo-desktop.git
+cd openalgo-desktop
+npm ci                 # install the frontend packages
+npm run tauri:dev      # start the app with live reload
+```
+
+The first `tauri:dev` compiles the Rust backend, which takes several minutes;
+later runs only rebuild what changed. What a development run does:
+
+- It opens the app window. The interface is served by the Vite dev server
+  (`http://localhost:5173`), so frontend changes reload instantly, and Rust
+  changes restart the app.
+- **A development build always uses ports 5500 and 8766**, not 5000 and
+  8765, so it can run next to an installed copy or OpenAlgo web.
+- **It uses the same data folder and keychain entries as the installed app**
+  (see [Where your data lives](#where-your-data-lives-and-backups)). Close the
+  installed app first, and back up the data folder if it holds an account you
+  care about.
+
+To run only the server, with no window, a temporary data folder and an
+in-memory keychain, so nothing touches your real data:
+
+```bash
+npm run build                                          # build the interface into dist/
+cd src-tauri && cargo run --example dev_server         # then open http://127.0.0.1:5500
+```
+
+Stop it with Ctrl+C. Every start begins with an empty account.
+
+### Build an installer
 
 ```bash
 npm ci
-npm run tauri:dev     # development build (uses ports 5500 and 8766)
-npm run tauri:build   # installers for this machine, in src-tauri/target/release/bundle
+npm run tauri:build
 ```
 
-Tests: `npm run test:run` (frontend) and `cargo test` in `src-tauri` (Rust).
+This builds the installer for the system you run it on. Cross-building, such
+as a Windows installer on a Mac, is not supported. Use that system, or the
+project's GitHub Actions, which build all five installers. Output folders, in
+`src-tauri/target/release/bundle/`:
+
+| System | Output |
+| --- | --- |
+| Windows | `nsis/OpenAlgo Desktop_<version>_x64-setup.exe` |
+| macOS | `dmg/OpenAlgo Desktop_<version>_<arch>.dmg` and `macos/OpenAlgo Desktop.app` |
+| Linux, Raspberry Pi | `deb/*.deb` and `appimage/*.AppImage` |
+
+Installers you build yourself are unsigned, like the published ones; see
+[Opening the app the first time](#opening-the-app-the-first-time-unsigned-installers).
+
+### Tests and checks
+
+```bash
+npm run test:run                  # frontend unit and component tests (Vitest)
+npx tsc -b && npx biome ci ./src  # type check and lint
+npm run e2e                       # end-to-end tests (Playwright)
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked               # Rust unit and integration tests
+```
+
+### Common problems
+
+| Problem | Fix |
+| --- | --- |
+| Linux: `webkit2gtk-4.1` or `javascriptcoregtk` not found | Install the Linux package list above. Ubuntu 20.04 and Debian 11 are too old; they lack WebKitGTK 4.1 |
+| Windows: `link.exe` not found, or MSVC errors | Install the **Desktop development with C++** workload in the Visual Studio Build Tools, then open a new terminal |
+| macOS: `xcrun: error: invalid active developer path` | Run `xcode-select --install` |
+| `error: toolchain '1.92.0' is not installed` | Run `rustup toolchain install 1.92.0`, or any `cargo` command inside the repository, which installs it |
+| Port 5500 already in use | A development copy or `dev_server` is still running; stop it. Find the program with `lsof -nP -iTCP:5500 -sTCP:LISTEN` (macOS, Linux) or `netstat -ano \| findstr :5500` (Windows) |
+| The browser at `127.0.0.1:5500` says the interface is not built | Run `npm run build` once; the server reads the built interface from `dist/` |
+| A build runs out of memory or disk | Rust builds need several GB of free memory and about 20 GB of disk. Close other heavy programs, or reduce parallel jobs with `CARGO_BUILD_JOBS=2` |
+
 Read [CLAUDE.md](CLAUDE.md) before contributing; it describes the
 compatibility contract with OpenAlgo web and the project conventions. Report
 problems on [GitHub Issues](https://github.com/marketcalls/openalgo-desktop/issues).
