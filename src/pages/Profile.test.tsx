@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BrokerList } from '@/api/broker-config'
+import { brokerEntry, brokerList, saved } from '@/test/brokerList'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 
 // Desktop: the server applies broker settings without a restart and says so
@@ -123,53 +125,51 @@ describe('Profile server addresses', () => {
   })
 })
 
-// FLOW-03: saving another broker as the active one ends the live session, so
-// the trader confirms first.
-describe('Profile broker switch', () => {
+// Desktop: the Broker tab is a summary with links; keys are edited in one
+// place, the Broker Configuration page (the logged-in-broker switch and its
+// confirmation live on Select Broker).
+describe('Profile broker summary', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  async function chooseAngelAndSave() {
-    render(<Profile />)
-    await screen.findByText(/changes apply as soon as you save/i)
-    const select = screen.getAllByRole('combobox').find((c) => c.textContent === 'Zerodha')
-    if (!select) throw new Error('broker list not found')
-    fireEvent.keyDown(select, { key: 'ArrowDown' })
-    fireEvent.click(await screen.findByRole('option', { name: 'Angel' }))
-    fireEvent.click(screen.getByRole('button', { name: /save broker credentials/i }))
+  function serveList(list: BrokerList) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        url === '/api/broker/list'
+          ? new Response(JSON.stringify({ status: 'success', data: list }))
+          : new Response('{}', { status: 404 })
+      )
+    )
   }
 
-  it('asks before ending the live session, and Cancel saves nothing', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ logged_in: true, broker: 'zerodha' })))
+  it('shows the logged-in broker and the configured ones, with links to both pages', async () => {
+    serveList(
+      brokerList([
+        { ...saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {}), active: true },
+        saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+        brokerEntry('angel', 'Angel One', 'form'),
+      ])
     )
-    await chooseAngelAndSave()
-    expect(await screen.findByText('End your Zerodha session?')).toBeInTheDocument()
-    expect(screen.getByText(/positions and orders stay at Zerodha/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByText('End your Zerodha session?')).toBeNull())
-    expect(client.post).not.toHaveBeenCalled()
+    render(<Profile />)
+    expect(await screen.findByTestId('broker-logged-in')).toHaveTextContent('Zerodha')
+    await waitFor(() =>
+      expect(screen.getByTestId('broker-configured')).toHaveTextContent('FyersZerodha')
+    )
+    expect(screen.getByRole('link', { name: 'Select Broker' })).toHaveAttribute('href', '/broker')
+    expect(screen.getByRole('link', { name: 'Broker Configuration' })).toHaveAttribute(
+      'href',
+      '/broker/config'
+    )
+    // No key form here any more.
+    expect(screen.queryByRole('button', { name: /save broker credentials/i })).toBeNull()
   })
 
-  it('saves once the trader confirms', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ logged_in: true, broker: 'zerodha' })))
+  it('says when no broker is logged in', async () => {
+    serveList(brokerList([saved(brokerEntry('fyers', 'Fyers', 'redirect'), {})]))
+    render(<Profile />)
+    await waitFor(() =>
+      expect(screen.getByTestId('broker-logged-in')).toHaveTextContent('No broker logged in')
     )
-    client.post.mockResolvedValue({ data: { status: 'error', message: 'Not now' } })
-    await chooseAngelAndSave()
-    fireEvent.click(await screen.findByRole('button', { name: 'End session and switch' }))
-    await waitFor(() => expect(client.post).toHaveBeenCalledTimes(1))
-  })
-
-  it('saves without asking when no broker session is live', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ logged_in: false, broker: null })))
-    )
-    client.post.mockResolvedValue({ data: { status: 'error', message: 'Not now' } })
-    await chooseAngelAndSave()
-    await waitFor(() => expect(client.post).toHaveBeenCalledTimes(1))
-    expect(screen.queryByText(/End your .* session\?/)).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('broker-configured')).toHaveTextContent('Fyers'))
   })
 })

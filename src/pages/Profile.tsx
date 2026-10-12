@@ -28,8 +28,8 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import { type BrokerList, brokerConfigApi } from '@/api/broker-config'
 import { webClient } from '@/api/client'
-import { BrokerSwitchConfirm } from '@/components/auth/BrokerSwitchConfirm'
 import TwoFactorEnforcement from '@/components/auth/TwoFactorEnforcement'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
@@ -57,12 +57,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  brokerNeedsClientId,
-  desktopDefaultOrigin,
-  desktopInitialProfileTab,
-  fetchLiveBroker,
-} from '@/lib/desktop'
+import { DESKTOP_BROKER_SETUP_PATH, desktopInitialProfileTab } from '@/lib/desktop'
 import { type AlertCategories, type ToastPosition, useAlertStore } from '@/stores/alertStore'
 import { useAuthStore } from '@/stores/authStore'
 import { type ThemeColor, type ThemeMode, useThemeStore } from '@/stores/themeStore'
@@ -118,9 +113,6 @@ interface PasswordRequirements {
   number: boolean
   special: boolean
 }
-
-/** A broker id as the broker list shows it. */
-const displayBroker = (id: string) => (id ? id.charAt(0).toUpperCase() + id.slice(1) : '')
 
 interface BrokerCredentials {
   broker_api_key: string
@@ -311,21 +303,15 @@ export default function ProfilePage() {
 
   // Broker credentials state
   const [brokerCredentials, setBrokerCredentials] = useState<BrokerCredentials | null>(null)
-  const [brokerApiKey, setBrokerApiKey] = useState('')
-  const [brokerApiSecret, setBrokerApiSecret] = useState('')
-  const [brokerApiKeyMarket, setBrokerApiKeyMarket] = useState('')
-  // Desktop: client id for brokers whose sign-in is bound to it.
-  const [brokerClientId, setBrokerClientId] = useState('')
-  const [brokerApiSecretMarket, setBrokerApiSecretMarket] = useState('')
-  const [selectedBroker, setSelectedBroker] = useState('')
+  // Desktop: the brokers with saved keys and the one logged in, for the
+  // Broker tab's summary. Keys are edited on the Broker Configuration page.
+  const [brokerList, setBrokerList] = useState<BrokerList | null>(null)
+  const [brokerListError, setBrokerListError] = useState<string | null>(null)
   const [ngrokEnabled, setNgrokEnabled] = useState(false)
   const [hostServer, setHostServer] = useState('')
   const [websocketUrl, setWebsocketUrl] = useState('')
-  const [isSavingBroker, setIsSavingBroker] = useState(false)
   const [isSavingNgrok, setIsSavingNgrok] = useState(false)
   const [showRestartDialog, setShowRestartDialog] = useState(false)
-  // Desktop: the live broker a save would sign out of, while the trader decides.
-  const [pendingSwitchFrom, setPendingSwitchFrom] = useState<string | null>(null)
 
   // Permissions state
   const [permissionsData, setPermissionsData] = useState<PermissionsData | null>(null)
@@ -339,6 +325,7 @@ export default function ProfilePage() {
   useEffect(() => {
     fetchProfileData()
     fetchBrokerCredentials()
+    fetchBrokerList()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -376,12 +363,20 @@ export default function ProfilePage() {
       )
       if (response.data.status === 'success') {
         setBrokerCredentials(response.data.data)
-        setSelectedBroker(response.data.data.current_broker)
         setNgrokEnabled(response.data.data.ngrok_allow)
         setHostServer(response.data.data.host_server)
         setWebsocketUrl(response.data.data.websocket_url || '')
       }
     } catch (_error) {}
+  }
+
+  const fetchBrokerList = async () => {
+    try {
+      setBrokerList(await brokerConfigApi.list())
+      setBrokerListError(null)
+    } catch (e) {
+      setBrokerListError(e instanceof Error ? e.message : 'Could not load your brokers.')
+    }
   }
 
   const fetchPermissions = async () => {
@@ -434,115 +429,6 @@ export default function ProfilePage() {
       setIsFixingPermissions(false)
     }
   }
-
-  const getRedirectUrl = (broker: string): string => {
-    // Extract host from current redirect URL or use default
-    // Desktop: default to the origin the app is served from, not port 5000.
-    const currentUrl = brokerCredentials?.redirect_url || desktopDefaultOrigin()
-    const match = currentUrl.match(/^(https?:\/\/[^/]+)/)
-    const host = match ? match[1] : desktopDefaultOrigin()
-    return `${host}/${broker}/callback`
-  }
-
-  // Desktop: saving another broker as the active one ends the live session
-  // of the current one, so the trader confirms first.
-  const handleBrokerSave = async () => {
-    const current = brokerCredentials?.current_broker ?? null
-    if (selectedBroker && selectedBroker !== current) {
-      const live = await fetchLiveBroker(current)
-      if (live && live !== selectedBroker) {
-        setPendingSwitchFrom(live)
-        return
-      }
-    }
-    await saveBrokerSettings()
-  }
-
-  const saveBrokerSettings = async () => {
-    setIsSavingBroker(true)
-    try {
-      const formData = new FormData()
-      if (brokerApiKey) formData.append('broker_api_key', brokerApiKey)
-      if (brokerApiSecret) formData.append('broker_api_secret', brokerApiSecret)
-      if (brokerApiKeyMarket) formData.append('broker_api_key_market', brokerApiKeyMarket)
-      // Desktop: the client id some brokers' sign-in is bound to.
-      if (brokerClientId.trim()) formData.append('client_id', brokerClientId.trim())
-      if (brokerApiSecretMarket) formData.append('broker_api_secret_market', brokerApiSecretMarket)
-      if (selectedBroker && selectedBroker !== brokerCredentials?.current_broker) {
-        formData.append('redirect_url', getRedirectUrl(selectedBroker))
-      }
-
-      const response = await webClient.post<{
-        status: string
-        message: string
-        restart_required?: boolean
-      }>('/api/broker/credentials', formData)
-
-      if (response.data.status === 'success') {
-        showToast.success(response.data.message, 'admin')
-        // Update local state to reflect saved values (don't re-fetch since env vars won't update until restart)
-        if (brokerCredentials) {
-          setBrokerCredentials({
-            ...brokerCredentials,
-            current_broker: selectedBroker || brokerCredentials.current_broker,
-            redirect_url:
-              selectedBroker !== brokerCredentials.current_broker
-                ? getRedirectUrl(selectedBroker)
-                : brokerCredentials.redirect_url,
-            // Update masked values to show something was changed.
-            // Use a FIXED-length mask (prefix + 8 asterisks) so the rendered
-            // value cannot leak the secret's true length and cannot overflow
-            // the column layout. Mirrors blueprints/broker_credentials.py:mask_secret.
-            broker_api_key: brokerApiKey
-              ? `${brokerApiKey.slice(0, 6)}${'*'.repeat(8)}`
-              : brokerCredentials.broker_api_key,
-            broker_api_key_raw_length: brokerApiKey
-              ? brokerApiKey.length
-              : brokerCredentials.broker_api_key_raw_length,
-            broker_api_secret: brokerApiSecret
-              ? `${brokerApiSecret.slice(0, 4)}${'*'.repeat(8)}`
-              : brokerCredentials.broker_api_secret,
-            broker_api_secret_raw_length: brokerApiSecret
-              ? brokerApiSecret.length
-              : brokerCredentials.broker_api_secret_raw_length,
-          })
-        }
-        // Clear form fields
-        setBrokerApiKey('')
-        setBrokerApiSecret('')
-        setBrokerApiKeyMarket('')
-        setBrokerApiSecretMarket('')
-        if (brokerClientId.trim()) {
-          setBrokerCredentials((c) => (c ? { ...c, client_id: brokerClientId.trim() } : c))
-        }
-        setBrokerClientId('')
-        // Desktop: saved settings apply at once (no restart). After a broker
-        // switch the trader signs in to the new broker.
-        const saved = response.data as { restart_required?: boolean; broker_switched?: boolean }
-        if (saved.broker_switched) {
-          window.location.assign('/broker')
-        } else if (saved.restart_required) {
-          setShowRestartDialog(true)
-        }
-      } else {
-        showToast.error(response.data.message || 'Failed to save credentials', 'admin')
-      }
-    } catch (error: unknown) {
-      const err = error as { response?: { data?: { message?: string } } }
-      showToast.error(err.response?.data?.message || 'Failed to save broker credentials', 'admin')
-    } finally {
-      setIsSavingBroker(false)
-    }
-  }
-
-  const hasCredentialChanges = Boolean(
-    brokerApiKey ||
-      brokerApiSecret ||
-      brokerApiKeyMarket ||
-      brokerClientId.trim() ||
-      brokerApiSecretMarket ||
-      (selectedBroker && selectedBroker !== brokerCredentials?.current_broker)
-  )
 
   // Desktop: a URL is sent only when the trader edited it, so saving the
   // tunnel switch never stores the automatic addresses shown in the fields
@@ -969,265 +855,70 @@ export default function ProfilePage() {
 
         {/* Broker Tab */}
         <TabsContent value="broker" className="space-y-6">
+          {/* Desktop: one place to edit broker keys (Broker Configuration);
+              this tab shows a summary and links to it and to Select Broker. */}
           <Alert>
             <Key className="h-4 w-4" />
             <AlertTitle>Broker API Credentials</AlertTitle>
-            {/* Desktop: saved credentials apply at once; no restart, no sign-out. */}
             <AlertDescription>
-              Update your broker API credentials. Changes apply as soon as you save. Choosing a
-              different broker ends the current broker session, and you then sign in to the new
-              broker.
+              Keys are saved per broker, for as many brokers as you like, and one broker is logged
+              in at a time. Changes apply as soon as you save them on the Broker Configuration page.
             </AlertDescription>
           </Alert>
 
-          {/* Current Broker */}
           <Card>
             <CardHeader>
-              <CardTitle>Current Configuration</CardTitle>
-              <CardDescription>Your currently configured broker and credentials</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Current Broker</Label>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-base">
-                      {brokerCredentials?.current_broker?.toUpperCase() || 'Not configured'}
-                    </Badge>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>Redirect URL</Label>
-                  <code className="text-xs text-muted-foreground break-all">
-                    {brokerCredentials?.redirect_url || 'Not configured'}
-                  </code>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4 pt-2">
-                <div className="space-y-2 min-w-0">
-                  <Label>API Key</Label>
-                  {/* block truncate clamps long masked values to their column;
-                      backend mask is fixed-length but defence-in-depth in case
-                      a future change emits a longer string. */}
-                  <code className="block truncate text-xs text-muted-foreground">
-                    {brokerCredentials?.broker_api_key || '(not set)'}
-                  </code>
-                </div>
-                <div className="space-y-2 min-w-0">
-                  <Label>API Secret</Label>
-                  <code className="block truncate text-xs text-muted-foreground">
-                    {brokerCredentials?.broker_api_secret || '(not set)'}
-                  </code>
-                </div>
-              </div>
-              {(brokerCredentials?.broker_api_key_market_raw_length ?? 0) > 0 && (
-                <div className="grid grid-cols-2 gap-4 pt-2">
-                  <div className="space-y-2 min-w-0">
-                    <Label>Market API Key</Label>
-                    <code className="block truncate text-xs text-muted-foreground">
-                      {brokerCredentials?.broker_api_key_market || '(not set)'}
-                    </code>
-                  </div>
-                  <div className="space-y-2 min-w-0">
-                    <Label>Market API Secret</Label>
-                    <code className="block truncate text-xs text-muted-foreground">
-                      {brokerCredentials?.broker_api_secret_market || '(not set)'}
-                    </code>
-                  </div>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-4 pt-2 border-t">
-                <div className="space-y-2">
-                  <Label>Ngrok Status</Label>
-                  <Badge variant={brokerCredentials?.ngrok_allow ? 'default' : 'secondary'}>
-                    {brokerCredentials?.ngrok_allow ? 'Enabled' : 'Disabled'}
-                  </Badge>
-                </div>
-                <div className="space-y-2">
-                  <Label>Host Server</Label>
-                  <code className="text-xs text-muted-foreground break-all">
-                    {brokerCredentials?.host_server || '(not set)'}
-                  </code>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Update Credentials */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Update Credentials</CardTitle>
+              <CardTitle>Brokers</CardTitle>
               <CardDescription>
-                Enter new values to update. Leave fields empty to keep existing values.
+                The broker logged in now and the brokers with saved keys
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Broker Selection */}
-              <div className="space-y-2">
-                <Label>Select Broker</Label>
-                <Select value={selectedBroker} onValueChange={setSelectedBroker}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select a broker" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {brokerCredentials?.valid_brokers.map((broker) => (
-                      <SelectItem key={broker} value={broker}>
-                        {broker.charAt(0).toUpperCase() + broker.slice(1)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {selectedBroker && selectedBroker !== brokerCredentials?.current_broker && (
-                  <p className="text-sm text-yellow-600 dark:text-yellow-500">
-                    Changing broker to: {selectedBroker.toUpperCase()}
-                  </p>
-                )}
-              </div>
-
-              {/* API Credentials */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Broker API Key</Label>
-                  <Input
-                    type="password"
-                    value={brokerApiKey}
-                    onChange={(e) => setBrokerApiKey(e.target.value)}
-                    placeholder="Enter new API key"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {(brokerCredentials?.broker_api_key_raw_length ?? 0) > 0
-                      ? `Current: ${brokerCredentials?.broker_api_key_raw_length} chars`
-                      : 'Not currently set'}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label>Broker API Secret</Label>
-                  <Input
-                    type="password"
-                    value={brokerApiSecret}
-                    onChange={(e) => setBrokerApiSecret(e.target.value)}
-                    placeholder="Enter new API secret"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {(brokerCredentials?.broker_api_secret_raw_length ?? 0) > 0
-                      ? `Current: ${brokerCredentials?.broker_api_secret_raw_length} chars`
-                      : 'Not currently set'}
-                  </p>
-                </div>
-              </div>
-
-              {/* Desktop: client id for brokers whose sign-in is bound to it */}
-              {brokerNeedsClientId(
-                selectedBroker || brokerCredentials?.current_broker,
-                brokerCredentials?.client_id_brokers
-              ) && (
-                <div className="space-y-2">
-                  <Label htmlFor="broker-client-id">Client ID</Label>
-                  <Input
-                    id="broker-client-id"
-                    value={brokerClientId}
-                    onChange={(e) => setBrokerClientId(e.target.value)}
-                    placeholder={brokerCredentials?.client_id || 'Your trading account client id'}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Your broker login is checked against this account.
-                    {brokerCredentials?.client_id ? ` Saved: ${brokerCredentials.client_id}` : ''}
-                  </p>
-                </div>
+              {brokerListError && (
+                <Alert variant="destructive">
+                  <AlertDescription>{brokerListError}</AlertDescription>
+                </Alert>
               )}
-
-              {/* Market API Credentials (optional) */}
-              <div className="pt-4 border-t">
-                <h4 className="font-medium mb-3">Market Data API (Optional)</h4>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Required only for XTS API supported brokers (e.g., 5paisa XTS, Jainam XTS)
-                </p>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Market API Key</Label>
-                    <Input
-                      type="password"
-                      value={brokerApiKeyMarket}
-                      onChange={(e) => setBrokerApiKeyMarket(e.target.value)}
-                      placeholder="Enter market API key"
-                    />
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Logged in</Label>
+                  <div data-testid="broker-logged-in">
+                    {(() => {
+                      const live = brokerList?.brokers.find((b) => b.active)
+                      return live ? (
+                        <Badge className="bg-green-600 text-white text-base">{live.name}</Badge>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">No broker logged in</span>
+                      )
+                    })()}
                   </div>
-                  <div className="space-y-2">
-                    <Label>Market API Secret</Label>
-                    <Input
-                      type="password"
-                      value={brokerApiSecretMarket}
-                      onChange={(e) => setBrokerApiSecretMarket(e.target.value)}
-                      placeholder="Enter market API secret"
-                    />
+                </div>
+                <div className="space-y-2">
+                  <Label>Configured brokers</Label>
+                  <div className="flex flex-wrap gap-2" data-testid="broker-configured">
+                    {(brokerList?.brokers ?? []).filter((b) => b.configured).length === 0 ? (
+                      <span className="text-sm text-muted-foreground">None yet</span>
+                    ) : (
+                      (brokerList?.brokers ?? [])
+                        .filter((b) => b.configured)
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map((b) => (
+                          <Badge key={b.id} variant={b.active ? 'default' : 'secondary'}>
+                            {b.name}
+                          </Badge>
+                        ))
+                    )}
                   </div>
                 </div>
               </div>
-
-              {/* Broker-specific hints */}
-              {selectedBroker === 'fivepaisa' && (
-                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>5paisa API Key Format</AlertTitle>
-                  <AlertDescription>
-                    Format: <code>User_Key:::User_ID:::client_id</code>
-                  </AlertDescription>
-                </Alert>
-              )}
-              {selectedBroker === 'flattrade' && (
-                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>Flattrade API Key Format</AlertTitle>
-                  <AlertDescription>
-                    Format: <code>client_id:::api_key</code>
-                  </AlertDescription>
-                </Alert>
-              )}
-              {selectedBroker === 'dhan' && (
-                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>Dhan API Key Format</AlertTitle>
-                  <AlertDescription>
-                    Format: <code>client_id:::api_key</code>
-                  </AlertDescription>
-                </Alert>
-              )}
-              {selectedBroker === 'indmoney' && (
-                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>IndMoney Credentials</AlertTitle>
-                  <AlertDescription>
-                    <p>
-                      <strong>API Key</strong>: the <code>Client ID</code> shown at indstocks.com
-                      &gt; API Trading &gt; Access Tokens after you set up TOTP.
-                    </p>
-                    <p className="mt-1">
-                      <strong>API Secret</strong>: leave blank to log in with MPIN + TOTP
-                      (recommended). If you paste an access token here instead, it is used as-is and
-                      the TOTP flow is skipped - you must regenerate it every 24 hours.
-                    </p>
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {/* Save Button */}
-              <Button
-                onClick={handleBrokerSave}
-                disabled={!hasCredentialChanges || isSavingBroker}
-                className="w-full"
-              >
-                {isSavingBroker ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  <>
-                    <Key className="h-4 w-4 mr-2" />
-                    Save Broker Credentials
-                  </>
-                )}
-              </Button>
+              <div className="flex flex-wrap gap-3 pt-2">
+                <Button asChild>
+                  <Link to="/broker">Select Broker</Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link to={DESKTOP_BROKER_SETUP_PATH}>Broker Configuration</Link>
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -2444,16 +2135,6 @@ export default function ProfilePage() {
           </Card>
         </TabsContent>
       </Tabs>
-
-      <BrokerSwitchConfirm
-        from={pendingSwitchFrom ? displayBroker(pendingSwitchFrom) : null}
-        to={displayBroker(selectedBroker)}
-        onCancel={() => setPendingSwitchFrom(null)}
-        onConfirm={() => {
-          setPendingSwitchFrom(null)
-          saveBrokerSettings()
-        }}
-      />
 
       {/* Restart Required Dialog */}
       <AlertDialog open={showRestartDialog} onOpenChange={setShowRestartDialog}>

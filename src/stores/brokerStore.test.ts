@@ -82,3 +82,43 @@ describe('broker capabilities store', () => {
     expect(useBrokerStore.getState()).toMatchObject({ capabilities: null, isLoaded: false })
   })
 })
+
+// STATE-01: a broker session ending or starting (the server's
+// active_sessions_update) drops the old session's capabilities, ignores an
+// answer still in flight for it, and reads them again for the new one.
+describe('broker session change', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("applies only the new session's capabilities", async () => {
+    const FYERS = { ...ZERODHA, broker_name: 'fyers' }
+    const answers: Array<(r: Response) => void> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            answers.push(resolve)
+          })
+      )
+    )
+    const old = useBrokerStore.getState().fetchCapabilities()
+    const fresh = useBrokerStore.getState().sessionChanged(true)
+    expect(useBrokerStore.getState().capabilities).toBeNull()
+    answers[1](answer(FYERS))
+    await fresh
+    answers[0](answer(ZERODHA))
+    await old
+    expect(useBrokerStore.getState().capabilities?.broker_name).toBe('fyers')
+  })
+
+  it('drops the capabilities when the session ends', async () => {
+    useBrokerStore.setState({ capabilities: ZERODHA, isLoaded: true })
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    await useBrokerStore.getState().sessionChanged(false)
+    expect(useBrokerStore.getState().capabilities).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})

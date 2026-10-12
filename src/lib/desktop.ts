@@ -37,8 +37,9 @@ export const DEFAULT_WEBSOCKET_URL = import.meta.env.DEV
 
 /**
  * How a broker's sign-in starts, as the local server reports it (`sign_in`
- * on GET /api/broker/configured and /auth/broker-config). The page keeps no
- * list of its own, so it cannot drift from the server's broker catalogue.
+ * on GET /api/broker/list, /api/broker/configured and /auth/broker-config).
+ * The pages keep no broker list of their own, so they cannot drift from the
+ * server's broker catalogue.
  *
  * - `redirect`: the broker's own login page. The web builds that address in
  *   the browser from the broker API key; the desktop never sends the key to
@@ -60,6 +61,23 @@ export function desktopBrokerLoginUrl(
 ): string | null {
   if (!broker || signIn !== 'redirect') return null
   return `/${encodeURIComponent(broker)}/initiate-oauth`
+}
+
+/**
+ * The page a broker's "Login with" opens, or null for a saved-keys broker,
+ * which signs in with one action instead (`signInWithSavedKeys`). A form
+ * broker opens through its callback address, as on the web, so the server
+ * can send Definedge's and Nubra's login OTP and route Samco to its connect
+ * page before the form shows.
+ */
+export function brokerSignInTarget(
+  broker: string,
+  signIn: BrokerSignIn | undefined
+): string | null {
+  if (!broker) return null
+  if (signIn === 'redirect') return desktopBrokerLoginUrl(broker, signIn)
+  if (signIn === 'form') return `/${encodeURIComponent(broker)}/callback`
+  return null
 }
 
 /**
@@ -189,10 +207,10 @@ export function installDesktopShellHandlers(): () => void {
 }
 
 /**
- * Pages a signed-in trader can open before connecting a broker. The web
- * reads broker keys from `.env`, so it never needs this; the desktop has no
- * `.env`, so the broker is configured in Profile before the first broker
- * login, and Server Settings may be needed to free a port first.
+ * Pages inside the app layout that a signed-in trader can open before
+ * logging in to a broker: Profile, and Server Settings, which may be needed
+ * to free a port first. The broker pages themselves (Select Broker, Broker
+ * Configuration, the broker login forms) sit outside the layout.
  */
 export const DESKTOP_PRE_BROKER_PATHS = ['/profile', '/settings/server'] as const
 
@@ -201,8 +219,39 @@ export function isPreBrokerPath(pathname: string): boolean {
   return (DESKTOP_PRE_BROKER_PATHS as readonly string[]).includes(p)
 }
 
-/** Profile link that opens the Broker Configuration tab. */
-export const DESKTOP_BROKER_SETUP_PATH = '/profile?tab=broker'
+/**
+ * Where a page inside the app layout sends a trader who may not reach it,
+ * or null when they may. One rule for every guard, so no page takes a
+ * detour through another:
+ *
+ * - not signed in to OpenAlgo: the sign-in page;
+ * - signed in with no broker logged in: Select Broker (except the pages
+ *   in `DESKTOP_PRE_BROKER_PATHS`);
+ * - otherwise the page itself.
+ */
+export function layoutRedirect(
+  user: { username?: string | null; broker?: string | null } | null | undefined,
+  isAuthenticated: boolean,
+  pathname: string
+): string | null {
+  if (user?.broker && isAuthenticated) return null
+  if (!user?.username) return '/login'
+  if (!user.broker) return isPreBrokerPath(pathname) ? null : '/broker'
+  return '/login'
+}
+
+/**
+ * The Broker Configuration page, where each broker's keys are saved. The
+ * web has no such page (it reads one broker's keys from `.env`).
+ */
+export const DESKTOP_BROKER_SETUP_PATH = '/broker/config'
+
+/** The Broker Configuration page with one broker selected. */
+export function brokerConfigPath(broker?: string): string {
+  return broker
+    ? `${DESKTOP_BROKER_SETUP_PATH}?broker=${encodeURIComponent(broker)}`
+    : DESKTOP_BROKER_SETUP_PATH
+}
 
 /** Initial Profile tab from `?tab=`, so the broker page can link to it. */
 export function desktopInitialProfileTab(fallback: string): string {
@@ -210,50 +259,6 @@ export function desktopInitialProfileTab(fallback: string): string {
     return new URLSearchParams(window.location.search).get('tab') || fallback
   } catch {
     return fallback
-  }
-}
-
-/**
- * Origin the app is served from, used to build a broker redirect URL when
- * none is saved yet. The web defaults to port 5000; the desktop runs on the
- * port configured in Server Settings (5500 in development).
- */
-export function desktopDefaultOrigin(): string {
-  return window.location.origin || 'http://127.0.0.1:5000'
-}
-
-/**
- * Desktop: whether the Profile broker form shows a Client ID field for
- * `broker`. The list comes from GET /api/broker/credentials
- * (`client_id_brokers`): brokers whose sign-in is bound to a client id the
- * trader enters separately.
- */
-export function brokerNeedsClientId(
-  broker: string | undefined,
-  clientIdBrokers: readonly string[] | undefined
-): boolean {
-  return (
-    Boolean(broker) && Array.isArray(clientIdBrokers) && clientIdBrokers.includes(broker as string)
-  )
-}
-
-/** A broker with saved keys, from GET /api/broker/configured. */
-export interface ConfiguredBroker {
-  name: string
-  active: boolean
-  /** How this broker's sign-in starts. */
-  sign_in?: BrokerSignIn
-}
-
-/** Brokers the trader has configured, so the broker page can switch. */
-export async function fetchConfiguredBrokers(): Promise<ConfiguredBroker[]> {
-  try {
-    const res = await fetch('/api/broker/configured', { credentials: 'include' })
-    if (!res.ok) return []
-    const body = await res.json()
-    return Array.isArray(body?.data?.brokers) ? body.data.brokers : []
-  } catch {
-    return []
   }
 }
 
@@ -279,30 +284,6 @@ export async function fetchLiveBroker(fallback: string | null): Promise<string |
   } catch {
     return fallback
   }
-}
-
-/**
- * Make another configured broker the active one. Keys are stored per broker,
- * so only the redirect URL changes; the server ends any live session of the
- * previous broker first. Returns the server's message on refusal.
- */
-export async function switchActiveBroker(broker: string): Promise<string | null> {
-  const csrf = await fetch('/auth/csrf-token', { credentials: 'include' })
-    .then((r) => r.json())
-    .then((b) => b?.csrf_token as string | undefined)
-    .catch(() => undefined)
-  if (!csrf) return 'Could not reach OpenAlgo. Try again.'
-  const form = new FormData()
-  form.append('redirect_url', `${desktopDefaultOrigin()}/${broker}/callback`)
-  const res = await fetch('/api/broker/credentials', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'X-CSRFToken': csrf },
-    body: form,
-  })
-  if (res.ok) return null
-  const body = await res.json().catch(() => null)
-  return body?.message || 'Could not switch the broker. Try again.'
 }
 
 // ============================================================================
