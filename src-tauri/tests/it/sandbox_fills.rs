@@ -502,3 +502,52 @@ async fn a_modify_after_the_decision_is_not_filled_at_the_old_terms() {
     assert_eq!(decided.price, Some(Decimal::from(95)));
     env.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// A fill is all or nothing: no order completes without its trade row
+// ---------------------------------------------------------------------------
+
+// SB-02: a trade insert that fails for any reason other than a duplicate
+// trade id rolls the whole fill back, and the order is rejected with its
+// margin returned.
+#[tokio::test]
+async fn a_fill_whose_trade_cannot_be_recorded_is_rejected_and_rolled_back() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    env.sb
+        .db()
+        .with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER refuse_trades BEFORE INSERT ON sandbox_trades
+                 BEGIN SELECT RAISE(ABORT, 'trade refused'); END;",
+            )
+        })
+        .unwrap();
+    let id = place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+
+    assert_eq!(env.status(&id).await, "rejected");
+    let o = env.sb.order_row(&id).await.unwrap().unwrap();
+    assert_eq!(o.filled_quantity, 0);
+    assert_eq!(o.average_price, None);
+    assert!(
+        env.sb
+            .position_row("SBIN", "NSE", "MIS")
+            .await
+            .unwrap()
+            .is_none(),
+        "no position from a fill that was not recorded"
+    );
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    assert_eq!(env.used().await, d("0"), "the order's margin is returned");
+    assert_eq!(env.available().await, d("10000000"));
+    assert!(env.sb.tradebook().await.unwrap().data.is_empty());
+    env.rec.wait_for("order.update", 2).await;
+    assert_eq!(env.rec.statuses(&id), vec!["open", "rejected"]);
+    assert_eq!(
+        env.rec.count("sandbox.order_filled"),
+        0,
+        "no fill event for a fill that rolled back"
+    );
+    env.assert_margin_consistent().await;
+    env.shutdown().await;
+}
