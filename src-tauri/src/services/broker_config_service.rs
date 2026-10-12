@@ -69,20 +69,6 @@ fn valid_broker(broker: &str) -> Result<()> {
     }
 }
 
-/// A full `http`/`https` address with a host (`url_with_scheme` in the
-/// broker routes applies the same rule to the Host Server URL).
-fn http_url(v: &str) -> bool {
-    match url::Url::parse(v) {
-        Ok(u) => {
-            matches!(u.scheme(), "http" | "https")
-                && u.host_str().is_some_and(|h| !h.is_empty())
-                && v.to_ascii_lowercase()
-                    .starts_with(&format!("{}://", u.scheme()))
-        }
-        Err(_) => false,
-    }
-}
-
 impl BrokerConfigService {
     /// The API key formats the web checks on save (`utils/env_check.py`):
     /// 5paisa `User_Key:::User_ID:::client_id`, Flattrade and Dhan
@@ -232,7 +218,10 @@ impl BrokerConfigService {
             Some(u) if u.is_empty() => Some(None),
             Some(u) => {
                 let suffix = format!("/{}/callback", broker);
-                if !http_url(&u) || !u.trim_end_matches('/').ends_with(&suffix) {
+                // Parsed as strictly as every other address (CFG-02).
+                if !crate::config::url_with_scheme(&u, &["http", "https"], true)
+                    || !u.trim_end_matches('/').ends_with(&suffix)
+                {
                     return Err(AppError::Validation(format!(
                         "Enter the redirect URL as a full address ending in {}, or use the automatic one.",
                         suffix
