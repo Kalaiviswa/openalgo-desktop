@@ -13,7 +13,7 @@
 //! 3. expired F&O positions are settled;
 //! 4. T+1 settlement of CNC positions created before today;
 //! 5. yesterday's P&L snapshot is backfilled when it is missing (trading
-//!    days only);
+//!    days, and any day the book held or traded crypto);
 //! 6. GTT legs stranded mid-fire are reclaimed, expired GTTs released, and
 //!    every active leg evaluated against one batch of quotes.
 
@@ -149,13 +149,11 @@ pub(crate) fn reset_stale_daily_pnl(conn: &Connection, core: &Core) -> rusqlite:
 }
 
 /// Backfill yesterday's snapshot when the 23:59 job was missed (web
-/// `catch_up_daily_pnl_snapshot`).
+/// `catch_up_daily_pnl_snapshot`), for a book that trades on that day
+/// ([`super::squareoff::snapshot_day`]: crypto books at weekends too).
 pub(crate) fn backfill_snapshot(conn: &Connection, core: &Core) -> rusqlite::Result<bool> {
     let now = core.now();
     let yesterday = now.date() - Duration::days(1);
-    if !(core.opts.trading_day)(yesterday) {
-        return Ok(false);
-    }
     let d = yesterday.format("%Y-%m-%d").to_string();
     let users: Vec<String> = {
         let mut stmt = conn.prepare_cached("SELECT user_id FROM sandbox_funds ORDER BY id")?;
@@ -164,6 +162,9 @@ pub(crate) fn backfill_snapshot(conn: &Connection, core: &Core) -> rusqlite::Res
     };
     let mut any = false;
     for user in users {
+        if !super::squareoff::snapshot_day(conn, core, &user, yesterday)? {
+            continue;
+        }
         let exists: Option<i64> = conn
             .query_row(
                 "SELECT id FROM sandbox_daily_pnl WHERE user_id = ?1 AND date = ?2",

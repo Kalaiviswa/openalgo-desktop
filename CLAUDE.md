@@ -575,6 +575,13 @@ and add each new one here.
   10 BTCUSD.P contracts (0.001 BTC each) at 60,000 hold 60 at 10x, not
   60,000. The web multiplies P&L only. Capital stays in rupees and crypto
   prices in dollars, with no conversion; the user docs say so.
+- **Crypto books get P&L snapshots every day.** The 23:59 snapshot and
+  the catch-up backfill use the trading calendar (weekdays) for the Indian
+  exchanges, but a book that held or traded CRYPTO on a day gets that day's
+  snapshot, weekends included (`squareoff::snapshot_day`). The web applies
+  the trading calendar to every book. CRYPTO has no square-off time, so no
+  MIS sweep and no leftover-MIS settlement at the 03:00 boundary touches a
+  crypto position.
 
 ### Security work
 
