@@ -1,6 +1,6 @@
 ---
 name: broker-integration
-description: Add a broker to OpenAlgo Desktop or change an existing Rust broker adapter under src-tauri/src/brokers/. Use when porting a broker from the web's broker/<name>/ Python, wiring its sign-in (OAuth redirect, direct login with TOTP, Noren or XTS family member, bespoke), master contract, books, quotes, depth, history, margin, GTT or streaming feeds, when a broker is missing from the login list or Profile form, or when debugging broker symbol, exchange, status or order-field mapping, a forged-callback refusal, or a token that reaches a log.
+description: Add a broker to OpenAlgo Desktop or change an existing Rust broker adapter under src-tauri/src/brokers/. Use when porting a broker from the web's broker/<name>/ Python, wiring its sign-in (OAuth redirect, direct login with TOTP, Noren or XTS family member, bespoke), master contract, books, quotes, depth, history, margin, GTT or streaming feeds, when a broker is missing from Select Broker or Broker Configuration, or when debugging broker symbol, exchange, status or order-field mapping, a forged-callback refusal, or a token that reaches a log.
 ---
 
 # Broker integration (Rust)
@@ -104,7 +104,7 @@ holds a `Secret`; read it with `expose()` only where the request is built.
    - `configured_account` and `CLIENT_ID_BROKERS`: the account a sign-in
      must come back for. Dhan and the Noren family take `client_id:::key` or
      a client id; Arrow, HDFC Sky, HDFC Securities and AliceBlue take the
-     Client ID entered on the Profile form. A state-less broker with no known
+     Client ID entered on Broker Configuration. A state-less broker with no known
      account is refused, so a state-less broker must name its account here.
    - `login_binding` / `callback_binding` (Dhan's `consentAppId`),
      `posts_callback` (XTS `session=` form POST: compositedge, rmoney),
@@ -255,22 +255,25 @@ cargo clippy --all-targets --locked -- -D warnings
 
 ## 9. Frontend touchpoints
 
-- `src/pages/Profile.tsx`, Broker Configuration: shows a Client ID field when
-  `brokerNeedsClientId(broker, client_id_brokers)` (`src/lib/desktop.ts`); the
-  list comes from `GET /api/broker/credentials`, which serves
-  `catalog::CLIENT_ID_BROKERS`. Nothing to edit in TS for a new client-id
-  broker beyond the catalogue.
-- The broker page (`src/pages/BrokerSelect.tsx`) starts each sign-in the way
+- `src-tauri/src/brokers/setup_guide.rs`: the broker's entry on the Broker
+  Configuration page (`src/pages/BrokerConfig.tsx`, served by
+  `GET /api/broker/list`): the display name, the keys it needs labelled the
+  way the broker names them (API key, secret, the client id for
+  `catalog::CLIENT_ID_BROKERS`, the market-data pair for XTS), a hint per
+  key, the sign-in banner and the redirect URL hint. Its table test
+  (`every_broker_has_help_consistent_with_its_sign_in`) checks the entry
+  against the catalogue; a new broker needs an entry and nothing in TS.
+- Select Broker (`src/pages/BrokerSelect.tsx`) starts each sign-in the way
   the server reports it: `sign_in` (`catalog::sign_in`) on
-  `GET /api/broker/configured` and `/auth/broker-config`. `redirect` goes to
-  `GET /<broker>/initiate-oauth` (the server builds the URL and records
-  `state`; the page never sees the API key), `form` to the in-app page,
-  `saved_keys` (`catalog::SAVED_KEY_BROKERS`: the keys are all the adapter
-  needs) signs in with one CSRF-checked `POST /<broker>/callback` and no
-  fields; a `GET` of that callback signs in nothing. The page keeps no
-  broker list of its own; a new broker needs nothing in TS
-  beyond the catalogue. `server::tests::sign_in` drives every catalogue
-  broker this way.
+  `GET /api/broker/list`. `redirect` goes to `GET /<broker>/initiate-oauth`
+  (the server builds the URL and records `state`; the page never sees the
+  API key), `form` to `GET /<broker>/callback` (which opens the in-app login
+  card, sending Definedge's and Nubra's OTP first), `saved_keys`
+  (`catalog::SAVED_KEY_BROKERS`: the keys are all the adapter needs) signs in
+  with one CSRF-checked `POST /<broker>/callback` and no fields; a `GET` of
+  that callback signs in nothing. A failed redirect sign-in comes back to
+  `/broker?error=..&broker=<id>` and shows on that card.
+  `server::tests::sign_in` drives every catalogue broker this way.
 - `src/pages/BrokerTOTP.tsx` carries the web's per-broker form copy for
   direct-login brokers; keep it close to the web's
   `frontend/src/pages/BrokerTOTP.tsx` and make its field names match
@@ -313,6 +316,6 @@ the web checkout.
 - [ ] Shared HTTP client; every error through `common::redact`; nothing secret in logs
 - [ ] Fixtures under `src-tauri/tests/fixtures/brokers/<broker>/` with placeholders
 - [ ] Unit mapping tests, HTTP round trip, secrets test (non-vacuous), feed parsing, forged-sign-in cases
-- [ ] `catalog::sign_in` right for the broker (the broker page follows it), `BrokerTOTP.tsx` copy
+- [ ] `catalog::sign_in` right for the broker (the broker page follows it), a `setup_guide.rs` entry, `BrokerTOTP.tsx` copy
 - [ ] `fd-audit` skill run on the change; `verify` skill before claiming a control holds
 - [ ] fmt, clippy `-D warnings`, the full `cargo test --locked` green
