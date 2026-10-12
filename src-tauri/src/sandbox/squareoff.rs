@@ -22,7 +22,7 @@ use super::holdings;
 use super::orders;
 use super::positions;
 use super::replies::{JobStatus, SquareOffStatus};
-use super::types::{dec_to_db, Product, SandboxError, SbResult};
+use super::types::{dec_to_db, PriceType, Product, SandboxError, SbResult};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use rusqlite::{params, Connection};
 use rust_decimal::Decimal;
@@ -33,7 +33,10 @@ use std::sync::Arc;
 pub struct SweepReport {
     pub cancelled_orders: usize,
     pub settled_expired: usize,
+    /// Positions whose close filled.
     pub closed_positions: usize,
+    /// Positions whose close order rests until a usable price arrives.
+    pub pending_closures: usize,
     pub failed_closures: usize,
 }
 
@@ -63,6 +66,14 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
                     &cfg,
                 );
                 if !(mis_due || expired) {
+                    continue;
+                }
+                // A square-off close still waiting for a price is the
+                // square-off itself: the backup sweep keeps it rather than
+                // cancelling it and placing another.
+                let own_close = o.strategy.as_deref() == Some("AUTO_SQUARE_OFF")
+                    && o.price_type == PriceType::Market;
+                if own_close && !expired {
                     continue;
                 }
                 tx.execute_batch("SAVEPOINT sq_cancel")?;
@@ -103,17 +114,43 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
     report.cancelled_orders = cancelled;
     report.settled_expired = settled;
 
-    // Step 2: close MIS positions past their time, each under its lock.
+    // Step 2: close MIS positions past their time, each under its lock. A
+    // close that is already waiting for a price is not placed again by the
+    // backup sweep; only a filled close counts as closed.
+    let mut placed = false;
     for (symbol, exchange) in to_close {
-        match positions::close_position(core, &symbol, &exchange, "MIS").await {
-            Ok(m) => {
-                report.closed_positions += 1;
-                tracing::info!(
-                    "Auto square-off of {} {}: order {}",
-                    symbol,
-                    exchange,
-                    m.orderid
-                );
+        match positions::close_position_outcome(core, &symbol, &exchange, "MIS").await {
+            Ok(r) => {
+                placed |= r.placed;
+                match r.outcome {
+                    positions::CloseOutcome::Filled => {
+                        report.closed_positions += 1;
+                        tracing::info!(
+                            "Auto square-off of {} {}: order {}",
+                            symbol,
+                            exchange,
+                            r.reply.orderid
+                        );
+                    }
+                    positions::CloseOutcome::Pending => {
+                        report.pending_closures += 1;
+                        tracing::warn!(
+                            "Auto square-off of {} {} is waiting for a price: order {} fills when one arrives",
+                            symbol,
+                            exchange,
+                            r.reply.orderid
+                        );
+                    }
+                    positions::CloseOutcome::Failed => {
+                        report.failed_closures += 1;
+                        tracing::warn!(
+                            "Auto square-off of {} {}: order {} was refused",
+                            symbol,
+                            exchange,
+                            r.reply.orderid
+                        );
+                    }
+                }
             }
             Err(e) if e.http_status == 404 => {}
             Err(e) => {
@@ -127,7 +164,7 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
             }
         }
     }
-    if report.cancelled_orders > 0 || report.closed_positions > 0 {
+    if report.cancelled_orders > 0 || report.closed_positions > 0 || placed {
         let mut outbox = Outbox::new();
         outbox.push(auto_squareoff(
             report.cancelled_orders,

@@ -804,3 +804,61 @@ async fn catch_up_after_the_app_was_closed_for_two_days_runs_what_was_missed_in_
     env.assert_margin_consistent().await;
     env.shutdown().await;
 }
+
+// SB-05: the square-off close finds no price. It rests and is reported as
+// pending, not closed; the one-minute backup sweep keeps that close instead
+// of cancelling it or adding a second exit, and it fills once prices return.
+#[tokio::test]
+async fn a_square_off_without_a_price_rests_once_and_fills_when_prices_return() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+    env.quotes.remove("SBIN", "NSE");
+
+    env.set_time("2026-10-05 15:15:00");
+    let first = env.sb.square_off_now().await.unwrap();
+    assert_eq!(
+        (
+            first.closed_positions,
+            first.pending_closures,
+            first.failed_closures
+        ),
+        (0, 1, 0)
+    );
+    env.rec.wait_for("sandbox.auto_squareoff", 1).await;
+    for at in ["2026-10-05 15:16:00", "2026-10-05 15:17:00"] {
+        env.set_time(at);
+        let backup = env.sb.square_off_now().await.unwrap();
+        assert_eq!(
+            (
+                backup.cancelled_orders,
+                backup.closed_positions,
+                backup.pending_closures
+            ),
+            (0, 0, 1),
+            "{at}"
+        );
+    }
+    let autos: Vec<(String, String)> = env
+        .sb
+        .orderbook()
+        .await
+        .unwrap()
+        .data
+        .orders
+        .iter()
+        .filter(|o| o.strategy == "AUTO_SQUARE_OFF")
+        .map(|o| (o.orderid.clone(), o.order_status.clone()))
+        .collect();
+    assert_eq!(autos.len(), 1, "one close, kept across sweeps: {autos:?}");
+    assert_eq!(autos[0].1, "open");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 10);
+
+    env.ltp("SBIN", "NSE", "99");
+    env.sb.poll_once().await.unwrap();
+    assert_eq!(env.status(&autos[0].0).await, "complete");
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0);
+    assert_eq!(env.used().await, Decimal::ZERO);
+    env.assert_margin_consistent().await;
+    env.shutdown().await;
+}

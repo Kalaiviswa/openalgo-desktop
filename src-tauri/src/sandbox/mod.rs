@@ -348,7 +348,10 @@ impl Sandbox {
         .await
     }
 
-    /// `closeposition` without a symbol: close everything open.
+    /// `closeposition` without a symbol: close everything open. Only a
+    /// position whose close filled counts as closed; a close still waiting
+    /// for a price is named in the message, and asking again does not place
+    /// a second one. (The web counted every placed close as closed.)
     pub async fn close_all_positions(&self) -> SbResult<CloseAllReply> {
         let (rows, _) = positions::open_positions(self.core(), true).await?;
         if rows.is_empty() {
@@ -357,16 +360,30 @@ impl Sandbox {
             )));
         }
         let mut closed = 0i64;
+        let mut pending = 0i64;
         let mut failed = 0i64;
         for p in rows.iter().filter(|p| p.quantity != 0) {
-            match positions::close_position(self.core(), &p.symbol, &p.exchange, p.product.as_str())
-                .await
+            match positions::close_position_outcome(
+                self.core(),
+                &p.symbol,
+                &p.exchange,
+                p.product.as_str(),
+            )
+            .await
             {
-                Ok(_) => closed += 1,
+                Ok(r) => match r.outcome {
+                    positions::CloseOutcome::Filled => closed += 1,
+                    positions::CloseOutcome::Pending => pending += 1,
+                    positions::CloseOutcome::Failed => failed += 1,
+                },
                 Err(_) => failed += 1,
             }
         }
         let mut message = format!("Closed {closed} positions");
+        if pending > 0 {
+            let orders = if pending == 1 { "order" } else { "orders" };
+            message.push_str(&format!(" ({pending} close {orders} waiting for a price)"));
+        }
         if failed > 0 {
             message.push_str(&format!(" (Failed to close {failed} positions)"));
         }

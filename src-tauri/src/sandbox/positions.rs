@@ -192,6 +192,38 @@ pub fn margin_price(order: &OrderRow) -> Decimal {
     }
 }
 
+/// Margin the position needs from filling `order` against a position of
+/// `position_qty`: the part of the order that opens or adds exposure, priced
+/// as the order's margin is priced. Zero for the part that reduces the
+/// position and for an order that blocks no margin (a CNC sale).
+///
+/// An exit placed against a position blocks nothing; if another order has
+/// closed that position by the time the exit fills, the exit opens a new one
+/// and this is what that position must hold.
+pub fn margin_needed_at_fill(cfg: &SandboxConfig, order: &OrderRow, position_qty: i64) -> Decimal {
+    if !funds::blocks_margin(&order.symbol, &order.exchange, order.product, order.action) {
+        return Decimal::ZERO;
+    }
+    let signed = order.action.sign() * order.quantity;
+    let opening = if position_qty == 0 || position_qty.signum() == signed.signum() {
+        signed.abs()
+    } else {
+        (signed.abs() - position_qty.abs()).max(0)
+    };
+    if opening == 0 {
+        return Decimal::ZERO;
+    }
+    funds::margin_required(
+        cfg,
+        &order.symbol,
+        &order.exchange,
+        order.product,
+        opening,
+        margin_price(order),
+        order.action,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Netting
 // ---------------------------------------------------------------------------
@@ -206,7 +238,9 @@ pub struct FillEffect {
 }
 
 /// Apply a filled order to its position and to the funds, in the caller's
-/// transaction (web `_update_position`).
+/// transaction (web `_update_position`). `order.margin_blocked` already
+/// includes anything the fill itself had to block
+/// ([`margin_needed_at_fill`]).
 ///
 /// Margin follows the order into the position, so after every fill
 /// `used_margin` equals the margin the books hold:
@@ -764,6 +798,51 @@ pub(crate) fn positionbook_reply(core: &Core, rows: &[PositionRow]) -> Positionb
     }
 }
 
+/// How a request to close a position ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// The position is flat.
+    Filled,
+    /// A close order rests until a usable price arrives (no quote, or a
+    /// quote outside its own day range).
+    Pending,
+    /// The close order was refused when it tried to fill.
+    Failed,
+}
+
+/// A close request's reply and what it did.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CloseResult {
+    pub reply: OrderMessage,
+    pub outcome: CloseOutcome,
+    /// Whether this request placed a new order (`false` when it returned a
+    /// close that was already pending).
+    pub placed: bool,
+}
+
+/// Resting MARKET orders on `action`'s side of one position: closes that are
+/// waiting for a price. Oldest first.
+fn pending_market_exits(
+    conn: &Connection,
+    user: &str,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+    action: Action,
+) -> rusqlite::Result<Vec<OrderRow>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {} FROM sandbox_orders WHERE user_id = ?1 AND symbol = ?2 AND exchange = ?3
+           AND product = ?4 AND action = ?5 AND price_type = 'MARKET'
+           AND order_status IN ('open','trigger pending') ORDER BY id",
+        OrderRow::COLUMNS
+    ))?;
+    let rows = stmt.query_map(
+        params![user, symbol, exchange, product, action.as_str()],
+        OrderRow::from_row,
+    )?;
+    rows.collect()
+}
+
 /// Close one position with a MARKET order tagged `AUTO_SQUARE_OFF`, holding
 /// the position's lock across the read and the order.
 pub(crate) async fn close_position(
@@ -772,6 +851,24 @@ pub(crate) async fn close_position(
     exchange: &str,
     product: &str,
 ) -> SbResult<OrderMessage> {
+    Ok(close_position_outcome(core, symbol, exchange, product)
+        .await?
+        .reply)
+}
+
+/// [`close_position`], reporting whether the position is flat, still
+/// waiting on a close order, or the close was refused.
+///
+/// A MARKET close rests when there is no usable price. Asking again while it
+/// rests returns that close instead of placing another: a second exit for the
+/// same quantity would, once prices return, close the position and then open
+/// the opposite one. Only the quantity no resting close covers is ordered.
+pub(crate) async fn close_position_outcome(
+    core: &Arc<Core>,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> SbResult<CloseResult> {
     let guard = core
         .locks
         .lock(PositionKey::new(core.user(), exchange, symbol, product))
@@ -781,25 +878,53 @@ pub(crate) async fn close_position(
         exchange.to_string(),
         product.to_string(),
     );
-    let pos = blocking(core, move |c| {
-        Ok(c.db.with_conn(|conn| get(conn, c.user(), &s, &e, &p))?)
+    let read = blocking(core, move |c| {
+        Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
+            let Some(pos) = get(conn, c.user(), &s, &e, &p)?.filter(|row| row.quantity != 0) else {
+                return Ok(None);
+            };
+            let action = if pos.quantity > 0 {
+                Action::Sell
+            } else {
+                Action::Buy
+            };
+            let exits = pending_market_exits(conn, c.user(), &s, &e, &p, action)?;
+            Ok(Some((pos, action, exits)))
+        })?)
     })
     .await?;
-    let Some(pos) = pos.filter(|p| p.quantity != 0) else {
+    let Some((pos, action, exits)) = read else {
         return Err(SandboxError::not_found(format!(
             "No open position found for {symbol}"
         )));
     };
-    let action = if pos.quantity > 0 {
-        Action::Sell
-    } else {
-        Action::Buy
-    };
+    let covered: i64 = exits.iter().map(|o| o.quantity).sum();
+    let remaining = pos.quantity.abs() - covered;
+    if remaining <= 0 {
+        let orderid = exits.last().map(|o| o.orderid.clone()).unwrap_or_default();
+        tracing::info!(
+            "Close of {} {} {} is already pending as order {}",
+            symbol,
+            exchange,
+            product,
+            orderid
+        );
+        return Ok(CloseResult {
+            reply: OrderMessage::new(
+                orderid,
+                format!(
+                    "Position close order for {symbol} is already placed and fills when a price is available"
+                ),
+            ),
+            outcome: CloseOutcome::Pending,
+            placed: false,
+        });
+    }
     let req = super::orders::OrderRequest {
         symbol: symbol.to_string(),
         exchange: exchange.to_string(),
         action: action.as_str().to_string(),
-        quantity: pos.quantity.abs(),
+        quantity: remaining,
         price: None,
         trigger_price: None,
         price_type: "MARKET".to_string(),
@@ -807,10 +932,39 @@ pub(crate) async fn close_position(
         strategy: "AUTO_SQUARE_OFF".to_string(),
     };
     let placed = super::orders::place_locked(core, &guard, req, None, None).await?;
-    Ok(OrderMessage::new(
-        placed.orderid,
-        format!("Position close order placed for {symbol}"),
-    ))
+    let (s, e, p, id) = (
+        symbol.to_string(),
+        exchange.to_string(),
+        product.to_string(),
+        placed.orderid.clone(),
+    );
+    let outcome = blocking(core, move |c| {
+        Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
+            let flat = get(conn, c.user(), &s, &e, &p)?
+                .map(|row| row.quantity == 0)
+                .unwrap_or(true);
+            let order = super::orders::get_by_orderid(conn, c.user(), &id)?;
+            Ok(if flat {
+                CloseOutcome::Filled
+            } else if order.map(|o| o.order_status.is_pending()).unwrap_or(false) {
+                CloseOutcome::Pending
+            } else if covered > 0 {
+                // This close filled; an earlier one still waits for a price.
+                CloseOutcome::Pending
+            } else {
+                CloseOutcome::Failed
+            })
+        })?)
+    })
+    .await?;
+    Ok(CloseResult {
+        reply: OrderMessage::new(
+            placed.orderid,
+            format!("Position close order placed for {symbol}"),
+        ),
+        outcome,
+        placed: true,
+    })
 }
 
 // ---------------------------------------------------------------------------
