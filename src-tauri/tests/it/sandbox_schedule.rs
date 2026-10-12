@@ -862,3 +862,138 @@ async fn a_square_off_without_a_price_rests_once_and_fills_when_prices_return() 
     env.assert_margin_consistent().await;
     env.shutdown().await;
 }
+
+fn snapshot_dates(p: &openalgo_desktop_lib::sandbox::replies::MyPnlReply) -> Vec<String> {
+    let mut d: Vec<String> = p.data.daily_pnl.iter().map(|r| r.date.clone()).collect();
+    d.sort();
+    d
+}
+
+// Crypto trades every day, so a book holding or trading crypto gets its P&L
+// snapshot on Saturday and Sunday too, at 23:59 and from a catch-up; an
+// equity-only book keeps the Indian calendar. Nothing at the weekend touches
+// the crypto position itself.
+#[tokio::test]
+async fn crypto_pnl_is_snapshotted_at_weekends_and_equity_keeps_the_trading_calendar() {
+    // Friday: a crypto position with some realized P&L stays open.
+    let env = Env::at("2026-10-09 10:00:00");
+    env.ltp("BTCUSD.P", "CRYPTO", "60000");
+    place(&env, req("BTCUSD.P", "CRYPTO", "BUY", 10, "MARKET", "NRML")).await;
+    env.ltp("BTCUSD.P", "CRYPTO", "60100");
+    place(&env, req("BTCUSD.P", "CRYPTO", "SELL", 5, "MARKET", "NRML")).await;
+    let held = env
+        .sb
+        .position_row("BTCUSD.P", "CRYPTO", "NRML")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.quantity, 5);
+    env.sb.run_due_jobs().await.unwrap();
+    for at in ["2026-10-09 23:59:10", "2026-10-10 23:59:10"] {
+        env.set_time(at);
+        env.sb.run_due_jobs().await.unwrap();
+    }
+    assert_eq!(
+        snapshot_dates(&env.sb.mypnl().await.unwrap()),
+        vec!["2026-10-09", "2026-10-10"],
+        "Friday and Saturday"
+    );
+    // Sunday's 23:59 was missed (the app was closed); Monday's catch-up
+    // backfills it.
+    env.set_time("2026-10-12 09:00:00");
+    let r = env.sb.catch_up().await.unwrap().unwrap();
+    assert!(r.snapshot_backfilled, "Sunday is backfilled for crypto");
+    assert_eq!(
+        snapshot_dates(&env.sb.mypnl().await.unwrap()),
+        vec!["2026-10-09", "2026-10-10", "2026-10-11"]
+    );
+    // The weekend and the 03:00 boundaries left the position as it was.
+    let after = env
+        .sb
+        .position_row("BTCUSD.P", "CRYPTO", "NRML")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (after.quantity, after.average_price, after.margin_blocked),
+        (held.quantity, held.average_price, held.margin_blocked)
+    );
+    env.assert_margin_consistent().await;
+    env.shutdown().await;
+
+    // An equity-only book: no weekend snapshot, no weekend backfill.
+    let env = Env::at("2026-10-09 10:00:00");
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+    env.ltp("SBIN", "NSE", "105");
+    place(&env, req("SBIN", "NSE", "SELL", 10, "MARKET", "MIS")).await;
+    env.sb.run_due_jobs().await.unwrap();
+    for at in ["2026-10-09 23:59:10", "2026-10-10 23:59:10"] {
+        env.set_time(at);
+        env.sb.run_due_jobs().await.unwrap();
+    }
+    env.set_time("2026-10-12 09:00:00");
+    let r = env.sb.catch_up().await.unwrap().unwrap();
+    assert!(!r.snapshot_backfilled);
+    assert_eq!(
+        snapshot_dates(&env.sb.mypnl().await.unwrap()),
+        vec!["2026-10-09"]
+    );
+    env.shutdown().await;
+}
+
+// Crypto MIS positions are outside every Indian-market time rule: the MIS
+// square-off sweeps, their one-minute backup, the 03:00 IST boundary job
+// and the catch-up's leftover-MIS settlement all leave them alone.
+#[tokio::test]
+async fn indian_square_off_and_the_0300_boundary_never_touch_crypto_positions() {
+    let env = Env::at("2026-10-05 10:00:00");
+    env.ltp("BTCUSD.P", "CRYPTO", "60000");
+    env.ltp("SBIN", "NSE", "100");
+    place(&env, req("BTCUSD.P", "CRYPTO", "BUY", 4, "MARKET", "MIS")).await;
+    place(&env, req("SBIN", "NSE", "BUY", 10, "MARKET", "MIS")).await;
+    let before = env
+        .sb
+        .position_row("BTCUSD.P", "CRYPTO", "MIS")
+        .await
+        .unwrap()
+        .unwrap();
+    env.sb.run_due_jobs().await.unwrap();
+    for at in [
+        "2026-10-05 15:15:10",
+        "2026-10-05 16:45:10",
+        "2026-10-05 17:00:10",
+        "2026-10-05 23:30:10",
+        "2026-10-06 03:00:10",
+    ] {
+        env.set_time(at);
+        env.sb.run_due_jobs().await.unwrap();
+        env.sb.square_off_now().await.unwrap();
+    }
+    assert_eq!(env.qty("SBIN", "NSE", "MIS").await, 0, "SBIN squared off");
+    env.set_time("2026-10-07 10:00:00");
+    env.sb.catch_up().await.unwrap();
+    let after = env
+        .sb
+        .position_row("BTCUSD.P", "CRYPTO", "MIS")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (after.quantity, after.average_price, after.margin_blocked),
+        (before.quantity, before.average_price, before.margin_blocked)
+    );
+    let crypto_autos = env
+        .sb
+        .orderbook()
+        .await
+        .unwrap()
+        .data
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "BTCUSD.P" && o.strategy == "AUTO_SQUARE_OFF")
+        .count();
+    assert_eq!(crypto_autos, 0);
+    env.assert_margin_consistent().await;
+    env.shutdown().await;
+}

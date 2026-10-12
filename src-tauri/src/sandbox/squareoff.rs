@@ -10,8 +10,10 @@
 //!
 //! The schedule (IST): square-off per exchange group at its configured time,
 //! the backup sweep every minute, T+1 at 00:00, the daily P&L snapshot at
-//! 23:59 (trading days only), today's P&L reset at the session boundary
-//! (03:00), and the optional weekly fund reset.
+//! 23:59 (trading days, and every day for a book holding or trading
+//! crypto), today's P&L reset at the session boundary (03:00), and the
+//! optional weekly fund reset. CRYPTO has no square-off time, so no sweep
+//! and no leftover-MIS settlement touches a crypto position.
 
 use super::clock::{ts, IST};
 use super::config::SandboxConfig;
@@ -194,9 +196,44 @@ pub(crate) fn reset_daily_pnl(conn: &Connection, now: &str) -> rusqlite::Result<
     Ok((f, p))
 }
 
-/// Upsert one day's P&L snapshot for every funds row (23:59 job).
+/// Whether the user held a crypto position on `date` (opened by then and
+/// still open, or closed that day) or traded crypto that day.
+fn crypto_active_on(conn: &Connection, user: &str, date: NaiveDate) -> rusqlite::Result<bool> {
+    let day = date.format("%Y-%m-%d").to_string();
+    let n: i64 = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM sandbox_positions WHERE user_id = ?1 AND exchange = 'CRYPTO'
+              AND ((quantity != 0 AND substr(created_at, 1, 10) <= ?2)
+                   OR substr(updated_at, 1, 10) = ?2))
+         + (SELECT COUNT(*) FROM sandbox_trades WHERE user_id = ?1 AND exchange = 'CRYPTO'
+              AND substr(trade_timestamp, 1, 10) = ?2)",
+        params![user, day],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Whether `user`'s book gets a P&L snapshot for `date`: every day of the
+/// configured trading calendar (the Indian exchanges'), and any other day
+/// on which the user held or traded crypto, which trades every day. (The
+/// web applies the trading calendar to every book.)
+pub(crate) fn snapshot_day(
+    conn: &Connection,
+    core: &Core,
+    user: &str,
+    date: NaiveDate,
+) -> rusqlite::Result<bool> {
+    if (core.opts.trading_day)(date) {
+        return Ok(true);
+    }
+    crypto_active_on(conn, user, date)
+}
+
+/// Upsert one day's P&L snapshot for every funds row whose book trades on
+/// `date` ([`snapshot_day`]; 23:59 job). Returns how many were written.
 pub(crate) fn capture_daily_snapshot(
     conn: &Connection,
+    core: &Core,
     date: NaiveDate,
     now: &str,
 ) -> rusqlite::Result<usize> {
@@ -206,7 +243,11 @@ pub(crate) fn capture_daily_snapshot(
         rows.collect::<rusqlite::Result<_>>()?
     };
     let d = date.format("%Y-%m-%d").to_string();
+    let mut written = 0;
     for user in &users {
+        if !snapshot_day(conn, core, user, date)? {
+            continue;
+        }
         let Some(f) = funds::read(conn, user)? else {
             continue;
         };
@@ -241,8 +282,9 @@ pub(crate) fn capture_daily_snapshot(
                 now
             ],
         )?;
+        written += 1;
     }
-    Ok(users.len())
+    Ok(written)
 }
 
 /// Reset a user's sandbox account to the starting capital: funds back to
@@ -505,14 +547,14 @@ pub(crate) async fn run_job(core: &Arc<Core>, kind: JobKind) -> SbResult<()> {
         JobKind::DailySnapshot => {
             blocking(core, |c| {
                 let now = c.now();
-                if !(c.opts.trading_day)(now.date()) {
+                let written =
+                    c.db.with_tx(|tx| capture_daily_snapshot(tx, c, now.date(), &ts(now)))?;
+                if written == 0 {
                     tracing::info!(
-                        "Skipping the sandbox P&L snapshot: {} is not a trading day",
+                        "No sandbox P&L snapshot for {}: not a trading day and no crypto held or traded",
                         now.date()
                     );
-                    return Ok(());
                 }
-                c.db.with_tx(|tx| capture_daily_snapshot(tx, now.date(), &ts(now)))?;
                 Ok(())
             })
             .await?;
