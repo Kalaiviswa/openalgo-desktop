@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowLeft, Loader2, RotateCcw, Save, Trash2 } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   BrokerConfigError,
@@ -94,6 +94,8 @@ export default function BrokerConfig() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [selected, setSelected] = useState(() => searchParams.get('broker') ?? '')
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
   const [drafts, setDrafts] = useState<Drafts>({})
   // The redirect URL input, prefilled with the URL in use.
   const [redirectDraft, setRedirectDraft] = useState('')
@@ -122,6 +124,13 @@ export default function BrokerConfig() {
     [list.data]
   )
   const broker: BrokerEntry | undefined = brokers.find((b) => b.id === selected)
+
+  // A `?broker=` that names no broker selects nothing.
+  useEffect(() => {
+    if (list.data && selected && !list.data.brokers.some((b) => b.id === selected)) {
+      setSelected('')
+    }
+  }, [list.data, selected])
 
   // A different broker starts with empty drafts: nothing typed for one
   // broker is ever saved under another.
@@ -189,14 +198,21 @@ export default function BrokerConfig() {
 
   const saveNow = async (signOut: boolean) => {
     if (!broker) return
+    const forBroker = broker.id
+    // The answer is shown only while the same broker is still selected.
+    const stillHere = () => selectedRef.current === forBroker
     setSaving(true)
     try {
-      const outcome = await brokerConfigApi.save(broker.id, update(), signOut)
-      setDrafts({})
-      setMessage(outcome.message)
+      const outcome = await brokerConfigApi.save(forBroker, update(), signOut)
       if (outcome.signed_out) endedLocally()
+      if (stillHere()) {
+        setDrafts({})
+        setMessage(outcome.message)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Your keys were not saved. Try again.')
+      if (stillHere()) {
+        setError(err instanceof Error ? err.message : 'Your keys were not saved. Try again.')
+      }
     } finally {
       setSaving(false)
       // Whatever happened, show what the server holds now.
@@ -224,11 +240,12 @@ export default function BrokerConfig() {
       if (broker.active) endedLocally()
       setDrafts({})
       setMessage(text)
-      await queryClient.invalidateQueries({ queryKey: ['broker-list'] })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The broker was not forgotten. Try again.')
     } finally {
       setForgetting(false)
+      // Whatever happened, show what the server holds now.
+      await queryClient.invalidateQueries({ queryKey: ['broker-list'] })
     }
   }
 

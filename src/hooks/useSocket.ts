@@ -263,6 +263,12 @@ export function useSocket() {
       // (a switch is both). The capabilities shown belong to the old
       // session, so they are dropped and read again (STATE-01).
       void useBrokerStore.getState().sessionChanged(data.count > 0)
+      // The broker session ended (from another window, or by forgetting
+      // the broker): this window has no broker now either.
+      if (data.count === 0) {
+        const { user, setUser } = useAuthStore.getState()
+        if (user?.broker) setUser({ ...user, broker: null, isLoggedIn: false })
+      }
     })
 
     // Analyzer update notification
