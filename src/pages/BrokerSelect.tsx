@@ -51,7 +51,7 @@ function StatusBadge({ broker }: { broker: BrokerEntry }) {
 }
 
 export default function BrokerSelect() {
-  const { user, setUser } = useAuthStore()
+  const { user } = useAuthStore()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -107,13 +107,20 @@ export default function BrokerSelect() {
       return
     }
     if (broker.sign_in === 'saved_keys') {
+      // This sign-in may replace the logged-in broker's session: an answer
+      // about the old session's capabilities still in flight must never be
+      // applied after it (STATE-01).
+      const capabilities = useBrokerStore.getState()
+      capabilities.clearCapabilities()
       const refusal = await signInWithSavedKeys(broker.id)
       if (refusal) {
         setCardError({ broker: broker.id, message: refusal })
         setStarting(null)
-        // A reply that never arrived may still have signed in: show what
-        // the server says now, not what this page assumed (FLOW-03).
+        // Refused, or the reply was lost: the server says which broker is
+        // logged in now, not what this page assumed (FLOW-03), and the
+        // capabilities are read again for it.
         await refresh()
+        void capabilities.fetchCapabilities()
         return
       }
       window.location.href = '/dashboard'
@@ -123,7 +130,9 @@ export default function BrokerSelect() {
     setStarting(null)
   }
 
-  // One broker at a time: logging in to another ends the live session first.
+  // One broker at a time. Logging in to another is confirmed first; the
+  // server ends the live session only when the new sign-in completes, so
+  // one that fails or is abandoned leaves the logged-in broker connected.
   const handleLogin = async (broker: BrokerEntry) => {
     const live = await fetchLiveBroker(list.data?.logged_in ?? null)
     if (live && live !== broker.id) {
@@ -147,28 +156,6 @@ export default function BrokerSelect() {
     setPendingLogin(null)
     const broker = brokers.find((b) => b.id === pending?.to)
     if (!pending || !broker) return
-    setStarting(broker.id)
-    try {
-      await brokerConfigApi.endSession()
-    } catch (e) {
-      setCardError({
-        broker: broker.id,
-        message:
-          e instanceof Error
-            ? e.message
-            : `Your ${nameOf(pending.from)} session could not be ended. Try again.`,
-      })
-      setStarting(null)
-      // The request may have ended the session before its reply was lost:
-      // read the server's state again rather than assume either way.
-      await refresh()
-      return
-    }
-    // The old session's capabilities and broker must never be applied to
-    // the next one, even by an answer still in flight (STATE-01).
-    useBrokerStore.getState().clearCapabilities()
-    if (user) setUser({ ...user, broker: null, isLoggedIn: false })
-    await refresh()
     await startSignIn(broker)
   }
 

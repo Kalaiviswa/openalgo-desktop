@@ -187,14 +187,16 @@ running on the broker you are logged in to (X):
 | Sandbox (analyzer mode) runs | Allowed; they keep running on the next broker's quotes. |
 
 When the switch is allowed, OpenAlgo asks you to confirm first: "Signing in
-to Y ends your X session. Open positions and orders stay with X."
-Confirming ends that session in OpenAlgo (stop-loss and target exits
-OpenAlgo places for it stop, and your trading platforms can no longer trade
-through it) before the new sign-in starts. OpenAlgo enforces all of this
-itself, not only on this page: a sign-in that completes always ends any
-other broker's session first, even if two sign-ins finish at the same
-moment, and it is refused while X still has any of the items refused
-above. The same rule applies to forgetting X and to saving new keys for X.
+to Y ends your X session. Open positions and orders stay with X." The X
+session ends only when the sign-in to Y completes: if that sign-in fails or
+you abandon it, X stays connected. Once it ends, stop-loss and target exits
+OpenAlgo places for X stop, and your trading platforms can no longer trade
+through it. OpenAlgo enforces all of this itself, not only on this page: a
+sign-in that completes always ends any other broker's session, even if two
+sign-ins finish at the same moment, and it is refused while X still has
+any of the items refused above. The same rule applies to forgetting X and
+to saving new keys for X. The only ways to end a broker session yourself
+are logging out of OpenAlgo and **Forget this broker**.
 
 Your keys for the broker you leave stay saved, so switching back needs only a
 login, not your keys again. No restart is needed.

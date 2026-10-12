@@ -12,9 +12,10 @@
 //! The counts come from the order-outcomes service through [`SwitchGuard`],
 //! so this module never reads another module's tables. Every way a broker
 //! session ends for another broker asks it first: a completed sign-in to
-//! another broker, `POST /api/broker/session/end`, the web-shaped settings
-//! save that switches, forgetting the logged-in broker and new keys for it.
-//! Signing out of OpenAlgo and the daily boundary are not switches.
+//! another broker (the switch itself: the old session ends only then),
+//! the web-shaped settings save that switches, forgetting the logged-in
+//! broker and new keys for it. Signing out of OpenAlgo and the daily
+//! boundary are not switches.
 
 use crate::error::Result;
 use crate::state::AppState;
