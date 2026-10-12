@@ -3,12 +3,18 @@
 //! [`TickSource`] for live LTP ticks. Production adapters wrap the feed cache
 //! and the broker quote API; tests use [`StaticQuoteSource`] and
 //! [`BroadcastTicks`].
+//!
+//! Ticks and quotes carry the local time they were received. A price older
+//! than `SandboxOptions::stale_quote_after` is not filled at (see
+//! [`quote_is_old`]); the guarantee is receipt time only, since broker quote
+//! timestamps are not part of the quote contract.
 
 use super::types::{dec_from_f64, SymbolKey};
 use parking_lot::{Mutex, RwLock};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 /// A quote snapshot. Zero means "not available" for every field, as in the
@@ -20,6 +26,9 @@ pub struct Quote {
     pub ask: Decimal,
     pub high: Decimal,
     pub low: Decimal,
+    /// When this process received the price; `None` when unknown (not
+    /// judged by [`quote_is_old`]).
+    pub received_at: Option<Instant>,
 }
 
 impl Quote {
@@ -32,6 +41,15 @@ impl Quote {
             ask: ltp,
             high: Decimal::ZERO,
             low: Decimal::ZERO,
+            received_at: None,
+        }
+    }
+
+    /// The same quote, received at `at`.
+    pub fn received(self, at: Instant) -> Self {
+        Self {
+            received_at: Some(at),
+            ..self
         }
     }
 
@@ -43,8 +61,17 @@ impl Quote {
             ask: dec_from_f64(ask),
             high: dec_from_f64(high),
             low: dec_from_f64(low),
+            received_at: None,
         }
     }
+}
+
+/// Whether a quote was received longer than `max_age` before `now`. A quote
+/// without a receipt time is not judged.
+pub fn quote_is_old(q: &Quote, now: Instant, max_age: Duration) -> bool {
+    q.received_at
+        .map(|t| now.saturating_duration_since(t) > max_age)
+        .unwrap_or(false)
 }
 
 /// The stale-quote guard (web issue #1638): a quote whose LTP lies outside
@@ -123,6 +150,7 @@ impl QuoteSource for StaticQuoteSource {
             .get(&SymbolKey::new(symbol, exchange))
             .copied()
             .filter(|q| q.ltp > Decimal::ZERO)
+            .map(answered_now)
     }
 
     async fn quotes(&self, keys: &[SymbolKey]) -> HashMap<SymbolKey, Quote> {
@@ -132,9 +160,19 @@ impl QuoteSource for StaticQuoteSource {
             .filter_map(|k| {
                 map.get(k)
                     .filter(|q| q.ltp > Decimal::ZERO)
-                    .map(|q| (k.clone(), *q))
+                    .map(|q| (k.clone(), answered_now(*q)))
             })
             .collect()
+    }
+}
+
+/// A stored quote served now: stamped with the time it was answered unless
+/// it carries its own receipt time.
+fn answered_now(q: Quote) -> Quote {
+    if q.received_at.is_some() {
+        q
+    } else {
+        q.received(Instant::now())
     }
 }
 
@@ -144,15 +182,24 @@ pub struct Tick {
     pub symbol: String,
     pub exchange: String,
     pub ltp: Decimal,
+    /// When this process received the tick.
+    pub received_at: Instant,
 }
 
 impl Tick {
+    /// A tick received now.
     pub fn new(symbol: &str, exchange: &str, ltp: Decimal) -> Self {
         Self {
             symbol: symbol.to_string(),
             exchange: exchange.to_string(),
             ltp,
+            received_at: Instant::now(),
         }
+    }
+
+    /// The tick as a quote (bid and ask at the LTP), with its receipt time.
+    pub fn quote(&self) -> Quote {
+        Quote::ltp(self.ltp).received(self.received_at)
     }
 
     pub fn key(&self) -> SymbolKey {

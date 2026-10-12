@@ -70,11 +70,14 @@ async fn prefetch(ctx: &AppState, keys: &[(String, String)]) -> HashMap<(String,
         return out;
     }
     if let Ok(rows) = h.broker.get_multiquotes(&h.auth, &qk).await {
+        // Stamped on receipt: a leg placed after the quote has aged past the
+        // sandbox's limit rests for a newer price instead of filling at it.
+        let received = std::time::Instant::now();
         for r in rows {
             if let Some(q) = r.data.filter(|q| q.ltp > 0.0) {
                 out.insert(
                     (r.symbol, r.exchange),
-                    Quote::from_f64(q.ltp, q.bid, q.ask, q.high, q.low),
+                    Quote::from_f64(q.ltp, q.bid, q.ask, q.high, q.low).received(received),
                 );
             }
         }

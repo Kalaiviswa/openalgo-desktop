@@ -36,8 +36,12 @@ pub struct SandboxOptions {
     pub quote_retry_delays: Vec<Duration>,
     /// Trading-day calendar (weekdays by default).
     pub trading_day: TradingDayFn,
-    /// A feed silent this long counts as stale and the polling fallback runs.
+    /// A symbol whose feed has been silent this long counts as stale and
+    /// the polling fallback quotes it.
     pub stale_feed_after: Duration,
+    /// A tick or quote received longer ago than this is not filled at; the
+    /// order waits for a newer price.
+    pub stale_quote_after: Duration,
 }
 
 impl Default for SandboxOptions {
@@ -51,6 +55,7 @@ impl Default for SandboxOptions {
                 !matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
             }),
             stale_feed_after: Duration::from_secs(30),
+            stale_quote_after: Duration::from_secs(30),
         }
     }
 }

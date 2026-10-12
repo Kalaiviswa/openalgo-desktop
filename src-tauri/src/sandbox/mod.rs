@@ -18,7 +18,9 @@
 //!   `trigger pending`, `complete`, `cancelled`, `rejected`.
 //! * MARKET fills at LTP (bid/ask when the quote has them); a marketable
 //!   LIMIT fills at LTP; resting LIMIT, SL and SL-M fill from ticks, with a
-//!   polling fallback every 5 s while the feed has been silent for 30 s.
+//!   polling fallback every 5 s for each symbol whose own feed has been
+//!   silent for 30 s (re-subscribed with a backoff); a price received more
+//!   than 30 s earlier is not filled at.
 //! * Weighted-average netting, realized P&L on reduce, the average reset to
 //!   the fill price on reversal, `today_realized_pnl` and
 //!   `accumulated_realized_pnl`.
@@ -903,8 +905,9 @@ impl Sandbox {
     /// Returns `(orders filled, GTT legs fired)`.
     pub async fn on_tick(&self, tick: Tick) -> SbResult<(usize, usize)> {
         let key = tick.key();
-        let filled = execution::on_price(self.core(), &key, tick.ltp).await?;
-        let fired = gtt::on_price(self.core(), &key, tick.ltp).await?;
+        let q = tick.quote();
+        let filled = execution::on_price(self.core(), &key, &q).await?;
+        let fired = gtt::on_price(self.core(), &key, &q).await?;
         Ok((filled, fired))
     }
 
