@@ -143,6 +143,41 @@ impl ServerConfig {
     }
 }
 
+/// A full URL with one of `schemes` and a host (`https://x.ngrok.app`,
+/// `wss://x.ngrok.app/ws`); not `http-not-a-url` or `ws:/x`. Anything that
+/// another parser could read differently is refused too (a broker reads the
+/// redirect address, a browser the feed address, `middleware::host_allowed`
+/// the host server address): a backslash (WHATWG parsing turns it into `/`
+/// for special schemes, other parsers keep it), white space or a control
+/// character, a user name or password, a query (it could carry a second
+/// `/<broker>/callback` for a suffix check to match) or a fragment. With
+/// `any_path` false only the bare origin is accepted (the host server
+/// address, to which the callback path is appended).
+///
+/// Security review follow-up (CFG-02 parser differential), from
+/// fix/codex-security.
+pub fn url_with_scheme(v: &str, schemes: &[&str], any_path: bool) -> bool {
+    if v.chars()
+        .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    match url::Url::parse(v) {
+        Ok(u) => {
+            schemes.contains(&u.scheme())
+                && u.host_str().is_some_and(|h| !h.is_empty())
+                && v.to_ascii_lowercase()
+                    .starts_with(&format!("{}://", u.scheme()))
+                && u.username().is_empty()
+                && u.password().is_none()
+                && u.query().is_none()
+                && u.fragment().is_none()
+                && (any_path || u.path() == "/")
+        }
+        Err(_) => false,
+    }
+}
+
 /// Validate a bind host: loopback names, `0.0.0.0`, or an IP literal.
 pub fn validate_bind_host(host: &str) -> Result<()> {
     if matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")

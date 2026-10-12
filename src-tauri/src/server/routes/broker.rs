@@ -2,6 +2,7 @@
 //! `blueprints/broker_credentials.py`).
 
 use crate::brokers::catalog::{self, AuthType, SignIn};
+use crate::config::url_with_scheme;
 use crate::db::sqlite::credentials::{self, CredentialUpdate};
 use crate::events::SessionEndReason;
 use crate::security::Secret;
@@ -24,20 +25,6 @@ type Ctx = State<Arc<AppState>>;
 
 fn valid_broker(b: &str) -> bool {
     catalog::ALL_BROKERS.contains(&b)
-}
-
-/// A full URL with one of `schemes` and a host (`https://x.ngrok.app`,
-/// `wss://x.ngrok.app/ws`); not `http-not-a-url` or `ws:/x`.
-fn url_with_scheme(v: &str, schemes: &[&str]) -> bool {
-    match url::Url::parse(v) {
-        Ok(u) => {
-            schemes.contains(&u.scheme())
-                && u.host_str().is_some_and(|h| !h.is_empty())
-                && v.to_ascii_lowercase()
-                    .starts_with(&format!("{}://", u.scheme()))
-        }
-        Err(_) => false,
-    }
 }
 
 /// Back to Select Broker with the reason, shown on that broker's card.
@@ -447,7 +434,8 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
             .strip_suffix("/callback")
             .and_then(|p| p.rsplit('/').next())
             .map(|s| s.to_lowercase());
-        let ok_format = (r.starts_with("http://") || r.starts_with("https://")) && b.is_some();
+        // Parsed like the other addresses: the broker reads this one.
+        let ok_format = url_with_scheme(r, &["http", "https"], true) && b.is_some();
         if !ok_format {
             return error(
                 StatusCode::BAD_REQUEST,
@@ -480,20 +468,22 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
     // with the right scheme and a host (CFG-01, CFG-02).
     let host_server = form.get("host_server").map(|v| v.trim().to_string());
     let websocket_url = form.get("websocket_url").map(|v| v.trim().to_string());
-    for (value, schemes, message) in [
+    for (value, schemes, any_path, message) in [
         (
             &host_server,
             ["http", "https"],
+            false,
             "Invalid HOST_SERVER format. Must start with http:// or https://",
         ),
         (
             &websocket_url,
             ["ws", "wss"],
+            true,
             "Invalid WEBSOCKET_URL format. Must start with ws:// or wss://",
         ),
     ] {
         if let Some(v) = value.as_deref().filter(|v| !v.is_empty()) {
-            if !url_with_scheme(v, &schemes) {
+            if !url_with_scheme(v, &schemes, any_path) {
                 return error(StatusCode::BAD_REQUEST, message);
             }
         }

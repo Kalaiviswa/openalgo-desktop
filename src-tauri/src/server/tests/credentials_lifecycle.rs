@@ -703,13 +703,33 @@ async fn cfg02_addresses_must_be_full_urls() {
         ("websocket_url", "ws-not-a-url"),
         ("websocket_url", "ws:/x.ngrok.app"),
         ("websocket_url", "https://x.ngrok.app"),
+        // Read one way here and another by a broker or a browser.
+        ("host_server", "https://x.ngrok.app\\@evil.example"),
+        ("host_server", "https://user@x.ngrok.app"),
+        ("host_server", "https://x.ngrok.app/?next=evil"),
+        ("host_server", "https://x.ngrok.app/#evil"),
+        ("host_server", "https://x.ngrok.app/somewhere"),
+        ("host_server", "https://x.ngrok .app"),
+        ("websocket_url", "wss://user:pass@x.ngrok.app/ws"),
+        ("websocket_url", "wss://x.ngrok.app/ws?k=v"),
+        (
+            "redirect_url",
+            "https://evil.example\\@127.0.0.1:5000/zerodha/callback",
+        ),
+        ("redirect_url", "https://u@evil.example/zerodha/callback"),
+        (
+            "redirect_url",
+            "https://127.0.0.1:5000/zerodha/callback?x=1/zerodha/callback",
+        ),
     ] {
         let (s, v) = post_settings(&h, &cookie, &csrf, json!({ field: value })).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{} = {}: {}", field, value, v);
     }
     for (field, value) in [
         ("host_server", "https://x.ngrok.app"),
+        ("host_server", "https://x.ngrok.app/"),
         ("websocket_url", "wss://x.ngrok.app/ws"),
+        ("redirect_url", "https://x.ngrok.app/zerodha/callback"),
     ] {
         let (s, v) = post_settings(&h, &cookie, &csrf, json!({ field: value })).await;
         assert_eq!(s, StatusCode::OK, "{} = {}: {}", field, value, v);

@@ -291,6 +291,12 @@ async fn an_empty_redirect_url_means_automatic() {
         "ftp://abc.ngrok.app/zerodha/callback",
         "https://abc.ngrok.app/fyers/callback",
         "not a url/zerodha/callback",
+        // Read one way here and another by the broker (CFG-02).
+        "https://evil.example\\@127.0.0.1:5000/zerodha/callback",
+        "https://u@evil.example/zerodha/callback",
+        "https://127.0.0.1:5000/zerodha/callback?x=1/zerodha/callback",
+        "https://abc.ngrok.app/zerodha/callback#x",
+        "https://abc .ngrok.app/zerodha/callback",
     ] {
         let (s, _) = save(&h, &cookie, &csrf, "zerodha", json!({"redirect_url": bad})).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
