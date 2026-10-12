@@ -1,10 +1,10 @@
 /**
- * Desktop-only: confirm before logging in to another broker ends the live
- * broker session.
+ * Desktop-only: confirm before logging in to another broker, which ends the
+ * live broker session when that sign-in completes (or before saving new
+ * keys for the logged-in broker, which ends its session at once).
  *
  * Keys can be saved for many brokers, but only one broker is logged in at a
- * time, so logging in to another broker ends the session that is live now.
- * Select Broker asks first, naming what stops and what stays.
+ * time. Select Broker asks first, naming what stops and what stays.
  */
 
 import { AlertTriangle } from 'lucide-react'
@@ -67,7 +67,7 @@ export function BrokerSwitchConfirm({
                 positions at {from} first if you need to.{' '}
                 {newKeys
                   ? `Log in to ${from} again to use the new keys.`
-                  : `Your ${from} keys stay saved, so switching back needs only a login.`}
+                  : `Your ${from} session ends only when the sign-in to ${to} completes; if it does not, ${from} stays connected. Your ${from} keys stay saved, so switching back needs only a login.`}
               </p>
             </div>
           </AlertDialogDescription>
@@ -75,7 +75,7 @@ export function BrokerSwitchConfirm({
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={onConfirm}>
-            {newKeys ? 'End session and save' : 'End session and log in'}
+            {newKeys ? 'End session and save' : `Log in to ${to}`}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

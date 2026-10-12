@@ -90,7 +90,6 @@ async fn every_route_needs_the_signed_in_user() {
         get("/api/broker/list"),
         put_json("/api/broker/credentials/zerodha", json!({"api_key": "k"})),
         delete("/api/broker/credentials/zerodha"),
-        post_json("/api/broker/session/end", json!({})),
     ] {
         let (s, _) = h.json(with_session(req, &anon, Some(&anon_csrf))).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -109,7 +108,6 @@ async fn writes_need_the_csrf_token() {
             json!({"api_key": "other"}),
         ),
         delete("/api/broker/credentials/zerodha?sign_out=true"),
-        post_json("/api/broker/session/end", json!({})),
     ] {
         let (s, _) = h.json(with_session(req, &cookie, None)).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "refused without the CSRF token");
@@ -403,28 +401,31 @@ async fn forgetting_the_logged_in_broker_signs_out_of_it() {
     let _ = list(&h, &cookie).await;
 }
 
+/// There is no explicit end of the session for a switch: the old session
+/// ends only when the new sign-in completes, so one that is refused or
+/// abandoned leaves the logged-in broker connected.
 #[tokio::test]
-async fn ending_the_session_keeps_openalgo_signed_in_and_the_keys_saved() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
-    let (s, v) = h
-        .json(with_session(
-            post_json("/api/broker/session/end", json!({})),
-            &cookie,
-            Some(&csrf),
-        ))
-        .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["signed_out_of"], "zerodha");
-    assert!(!h.ctx().is_broker_connected());
+async fn a_failed_or_abandoned_sign_in_to_another_broker_keeps_the_logged_in_one() {
+    let (t, _angel, samco) = two_brokers();
+    let ctx = t.ctx.clone();
+    BrokerAuthService::login_with_form(&ctx, "angel", totp())
+        .await
+        .unwrap();
+    // Refused by the broker (the mock refuses a sign-in with nothing typed).
     assert!(
-        stored(&h, "zerodha").is_some(),
-        "switching back needs only a login"
+        BrokerAuthService::login_with_form(&ctx, "samco", FormLogin::default())
+            .await
+            .is_err()
     );
-    let data = list(&h, &cookie).await;
-    assert_eq!(data["logged_in"], Value::Null);
-    assert_eq!(entry(&data, "zerodha")["configured"], true);
+    assert_eq!(*samco.logouts.lock(), 0);
+    assert_eq!(ctx.get_broker_session().unwrap().broker_id, "angel");
+    assert_eq!(ctx.runtime.active_broker().as_deref(), Some("angel"));
+    assert_eq!(live_rows(&ctx), vec!["angel".to_string()]);
+    // Started and never finished (the trader closed the broker's page).
+    let _ = BrokerAuthService::start_oauth(&ctx, "samco", None).await;
+    assert_eq!(ctx.get_broker_session().unwrap().broker_id, "angel");
+    assert_eq!(live_rows(&ctx), vec!["angel".to_string()]);
+    ctx.runtime.teardown(&ctx).await;
 }
 
 /// FLOW-04: a session belongs to the keys it signed in with. New keys for
@@ -726,25 +727,56 @@ fn guard(ctx: &AppState, b: SwitchBlockers) {
     *ctx.switch_guard.write() = Arc::new(FakeGuard(Ok(b)));
 }
 
-async fn end_session(h: &H, cookie: &str, csrf: &str) -> (StatusCode, Value) {
-    h.json(with_session(
-        post_json("/api/broker/session/end", json!({})),
-        cookie,
-        Some(csrf),
-    ))
-    .await
+/// Zerodha logged in (keys saved, session live) and Angel One configured:
+/// logging in to Angel One is the switch.
+fn switch_harness() -> (H, String, String) {
+    let mock = Arc::new(MockBroker::new("zerodha"));
+    let angel = Arc::new(MockBroker::new("angel"));
+    let t = build(
+        BrokerRegistry::with(vec![
+            mock.clone() as Arc<dyn crate::brokers::Broker>,
+            angel as Arc<dyn crate::brokers::Broker>,
+        ]),
+        ist(2026, 10, 5, 10, 0),
+    );
+    t.ctx.limiter.freeze(Some(std::time::Instant::now()));
+    let h = H { t, mock };
+    h.setup();
+    h.save_broker_credentials();
+    let conn = h.ctx().sqlite.conn().unwrap();
+    credentials::save(
+        &conn,
+        &h.ctx().security,
+        "angel",
+        CredentialUpdate {
+            api_key: Some("smartkey".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(conn);
+    h.connect_broker();
+    let (cookie, csrf) = h.session(true);
+    (h, cookie, csrf)
 }
 
 /// Every way a switch could end the logged-in broker's session is refused,
 /// with the same reason, and nothing changes.
 async fn every_switch_is_refused(h: &H, cookie: &str, csrf: &str, says: &[&str]) {
-    let (s, v) = end_session(h, cookie, csrf).await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
-    let why = v["message"].as_str().unwrap().to_string();
+    // The switch itself: a sign-in to another broker that completes.
+    let e = BrokerAuthService::login_with_form(h.ctx(), "angel", totp())
+        .await
+        .unwrap_err();
+    let why = e.client_message();
     for part in says {
         assert!(why.contains(part), "{why}");
     }
     assert!(why.contains("Nothing was changed."), "{why}");
+    assert_eq!(
+        h.ctx().get_broker_session().unwrap().broker_id,
+        "zerodha",
+        "the sign-in stored nothing"
+    );
     let refused = [
         with_session(
             delete("/api/broker/credentials/zerodha?sign_out=true"),
@@ -795,9 +827,7 @@ async fn every_switch_is_refused(h: &H, cookie: &str, csrf: &str, says: &[&str])
 
 #[tokio::test]
 async fn switch_row1_running_live_automation_refuses_the_switch_and_names_it() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, cookie, csrf) = switch_harness();
     guard(
         h.ctx(),
         SwitchBlockers {
@@ -854,9 +884,7 @@ async fn switch_row1_a_completed_sign_in_to_another_broker_is_refused_too() {
 
 #[tokio::test]
 async fn switch_row2_orders_with_an_unknown_outcome_refuse_the_switch() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, cookie, csrf) = switch_harness();
     guard(
         h.ctx(),
         SwitchBlockers {
@@ -878,9 +906,7 @@ async fn switch_row2_orders_with_an_unknown_outcome_refuse_the_switch() {
 
 #[tokio::test]
 async fn switch_row3_exits_still_filling_refuse_the_switch() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, cookie, csrf) = switch_harness();
     guard(
         h.ctx(),
         SwitchBlockers {
@@ -897,17 +923,17 @@ async fn switch_row3_exits_still_filling_refuse_the_switch() {
     .await;
 }
 
-/// Working orders and positions placed by hand do not block: after the
-/// confirm the session ends and they stay at the broker untouched.
+/// Working orders and positions placed by hand do not block: the sign-in
+/// to the next broker completes, the old session ends then, and they stay
+/// at the old broker untouched.
 #[tokio::test]
 async fn switch_row4_manual_orders_and_positions_stay_and_do_not_block() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, _cookie, _csrf) = switch_harness();
     guard(h.ctx(), SwitchBlockers::default());
-    let (s, v) = end_session(&h, &cookie, &csrf).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(!h.ctx().is_broker_connected());
+    BrokerAuthService::login_with_form(h.ctx(), "angel", totp())
+        .await
+        .unwrap();
+    assert_eq!(h.ctx().get_broker_session().unwrap().broker_id, "angel");
     assert!(
         !h.mock.calls().iter().any(|c| matches!(
             c,
@@ -916,40 +942,40 @@ async fn switch_row4_manual_orders_and_positions_stay_and_do_not_block() {
                 | crate::brokers::mock::MockCall::CancelAll
                 | crate::brokers::mock::MockCall::CloseAll
         )),
-        "nothing is cancelled or closed at the broker"
+        "nothing is cancelled or closed at the old broker"
     );
+    h.ctx().runtime.teardown(h.ctx()).await;
 }
 
 /// Sandbox runs are never counted: with analyzer mode on, the switch goes
 /// ahead and analyzer mode stays on for the next broker's quotes.
 #[tokio::test]
 async fn switch_row5_sandbox_runs_do_not_block() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, _cookie, _csrf) = switch_harness();
     h.ctx().sqlite.set_analyze_mode(true).unwrap();
     // The outcomes service counts Live items only.
     guard(h.ctx(), SwitchBlockers::default());
-    let (s, v) = end_session(&h, &cookie, &csrf).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(!h.ctx().is_broker_connected());
+    BrokerAuthService::login_with_form(h.ctx(), "angel", totp())
+        .await
+        .unwrap();
+    assert_eq!(h.ctx().get_broker_session().unwrap().broker_id, "angel");
     assert!(
         h.ctx().sqlite.get_analyze_mode().unwrap(),
         "sandbox mode stays on"
     );
+    h.ctx().runtime.teardown(h.ctx()).await;
 }
 
 /// A guard that cannot answer never lets a switch through.
 #[tokio::test]
 async fn switch_refused_when_the_check_cannot_answer() {
-    let (h, cookie, csrf) = signed_in_harness();
-    h.save_broker_credentials();
-    h.connect_broker();
+    let (h, _cookie, _csrf) = switch_harness();
     *h.ctx().switch_guard.write() = Arc::new(FakeGuard(Err(())));
-    let (s, v) = end_session(&h, &cookie, &csrf).await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
-    assert!(v["message"].as_str().unwrap().contains("could not check"));
-    assert!(h.ctx().is_broker_connected());
+    let e = BrokerAuthService::login_with_form(h.ctx(), "angel", totp())
+        .await
+        .unwrap_err();
+    assert!(e.client_message().contains("could not check"));
+    assert_eq!(h.ctx().get_broker_session().unwrap().broker_id, "zerodha");
 }
 
 // ------------------------------------------------ review follow-ups

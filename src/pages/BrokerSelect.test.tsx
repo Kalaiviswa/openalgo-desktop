@@ -21,8 +21,8 @@ let listReads = 0
 function serve(
   opts: {
     refuseSavedKeys?: string
-    /** The session ends at the server, but the reply never arrives. */
-    loseEndReply?: boolean
+    /** A saved-keys sign-in whose reply never arrives. */
+    loseSignInReply?: boolean
     capabilities?: () => Promise<Response>
   } = {}
 ) {
@@ -45,15 +45,7 @@ function serve(
       if (url === '/auth/csrf-token') return json({ csrf_token: 'tok' })
       if (init?.method === 'POST') {
         posts.push(url)
-        if (url === '/api/broker/session/end') {
-          list = {
-            ...list,
-            logged_in: null,
-            brokers: list.brokers.map((b) => ({ ...b, active: false })),
-          }
-          if (opts.loseEndReply) throw new TypeError('Failed to fetch')
-          return json({ status: 'success' })
-        }
+        if (opts.loseSignInReply) throw new TypeError('Failed to fetch')
         if (opts.refuseSavedKeys) {
           return json({ status: 'error', message: opts.refuseSavedKeys }, 401)
         }
@@ -219,13 +211,15 @@ describe('Login while another broker is logged in', () => {
     expect(assigned).toEqual([])
   })
 
-  it('ends the live session, then starts the new sign-in', async () => {
+  it('starts the new sign-in without ending the live session', async () => {
     serve()
     renderPage()
     fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
+    expect(await screen.findByText(/if it does not, Zerodha stays connected/)).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Log in to Fyers' }))
     await waitFor(() => expect(assigned).toEqual(['/fyers/initiate-oauth']))
-    expect(posts).toEqual(['/api/broker/session/end'])
+    // The server ends Zerodha's session only when Fyers' sign-in completes.
+    expect(posts).toEqual([])
   })
 
   it('offers the dashboard on the logged-in broker instead of a second login', async () => {
@@ -238,30 +232,40 @@ describe('Login while another broker is logged in', () => {
   })
 })
 
-// FLOW-03 (client): a switch whose reply is lost leaves no page claiming a
-// state the server is not in. STATE-01: the old session's capabilities are
-// never applied after the switch, even by an answer still in flight.
+// FLOW-03 (client): a sign-in to another broker that is refused, or whose
+// reply is lost, leaves the logged-in broker connected, and the page shows
+// what the server holds rather than what it assumed. STATE-01: the old
+// session's capabilities are never applied after a switch, even by an
+// answer still in flight.
 describe('Switching truthfully', () => {
   beforeEach(() => {
     list = brokerList([
       { ...saved(brokerEntry('zerodha', 'Zerodha', 'redirect'), {}), active: true },
-      saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+      saved(brokerEntry('fivepaisaxts', '5 Paisa (XTS)', 'saved_keys'), {}),
     ])
   })
 
-  it('says so when the reply is lost, and shows what the server holds now', async () => {
-    serve({ loseEndReply: true })
+  async function switchToXts() {
+    fireEvent.click(
+      (await card('fivepaisaxts')).getByRole('button', { name: 'Login with 5 Paisa (XTS)' })
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Log in to 5 Paisa (XTS)' }))
+  }
+
+  it('keeps the logged-in broker when the reply is lost, and says so', async () => {
+    serve({ loseSignInReply: true })
     renderPage()
-    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
+    await switchToXts()
     expect(
-      await (await card('fyers')).findByText('Could not reach OpenAlgo. Try again.')
+      await (await card('fivepaisaxts')).findByText('Could not reach OpenAlgo. Try again.')
     ).toBeInTheDocument()
     expect(assigned).toEqual([])
-    // Read again: the server did end Zerodha's session, so no card says Active.
+    // Read again: the server still has Zerodha logged in.
     await waitFor(() => expect(listReads).toBeGreaterThan(1))
-    await waitFor(() => expect(screen.queryByText('Active')).toBeNull())
-    expect((await card('fyers')).getByRole('button', { name: 'Login with Fyers' })).toBeEnabled()
+    expect((await card('zerodha')).getByText('Active')).toBeInTheDocument()
+    expect(
+      (await card('fivepaisaxts')).getByRole('button', { name: 'Login with 5 Paisa (XTS)' })
+    ).toBeEnabled()
   })
 
   it("never applies the old broker's capabilities after the switch", async () => {
@@ -275,9 +279,8 @@ describe('Switching truthfully', () => {
     // A request for Zerodha's capabilities is still in flight (AuthSync).
     const pending = useBrokerStore.getState().fetchCapabilities()
     renderPage()
-    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'End session and log in' }))
-    await waitFor(() => expect(assigned).toEqual(['/fyers/initiate-oauth']))
+    await switchToXts()
+    await waitFor(() => expect(assigned).toEqual(['/dashboard']))
     answerOld(
       new Response(
         JSON.stringify({
@@ -293,7 +296,6 @@ describe('Switching truthfully', () => {
     )
     await pending
     expect(useBrokerStore.getState().capabilities).toBeNull()
-    expect(useAuthStore.getState().user?.broker).toBeNull()
   })
 })
 

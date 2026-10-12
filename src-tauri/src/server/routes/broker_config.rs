@@ -10,7 +10,7 @@ use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::routes::webui::no_store;
 use crate::services::broker_config_service::{
-    BrokerConfigService, ForgetOutcome, KeySave, SaveOutcome, SessionEnd,
+    BrokerConfigService, ForgetOutcome, KeySave, SaveOutcome,
 };
 use crate::state::AppState;
 use axum::{
@@ -132,30 +132,5 @@ pub async fn forget(
             ),
         )),
         Err(e) => no_store(failed(e)),
-    }
-}
-
-/// POST /api/broker/session/end: end the broker session that is logged in
-/// (OpenAlgo stays signed in). Logging in to another broker does this
-/// first; open positions and orders stay with the broker.
-pub async fn end_session(State(ctx): Ctx) -> Response {
-    match BrokerConfigService::end_session(&ctx).await {
-        Ok(SessionEnd::Ended(ended)) => json_response(
-            StatusCode::OK,
-            json!({
-                "status": "success",
-                "message": match &ended {
-                    Some(b) => format!(
-                        "Your {} session has ended.",
-                        crate::brokers::setup_guide::display_name(b)
-                    ),
-                    None => "No broker is logged in.".to_string(),
-                },
-                "signed_out_of": ended,
-            }),
-        ),
-        // Live automation or unsettled orders keep the session.
-        Ok(SessionEnd::Refused(why)) => error(StatusCode::CONFLICT, why),
-        Err(e) => failed(e),
     }
 }

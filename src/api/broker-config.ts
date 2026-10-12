@@ -163,14 +163,6 @@ export const brokerConfigApi = {
     )
     return body.message ?? 'Forgotten.'
   },
-
-  /**
-   * End the broker session that is logged in now, without signing out of
-   * OpenAlgo: open positions and orders stay with that broker.
-   */
-  async endSession(): Promise<void> {
-    await write('/api/broker/session/end', 'POST')
-  },
 }
 
 /** Brokers in the order the pages list them: logged in, configured, the rest. */

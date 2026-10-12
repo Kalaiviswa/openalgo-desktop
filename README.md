@@ -250,7 +250,10 @@ per broker or go back to the automatic one.
 
 **Switching brokers.** Choose **Login with** on another configured broker.
 While a broker is logged in, OpenAlgo asks first: "Signing in to Y ends your
-X session. Open positions and orders stay with X." The keys of the broker you
+X session. Open positions and orders stay with X." X's session ends only
+when the sign-in to Y completes; if it fails, X stays connected. A switch is
+refused while Live strategies, OpenScript runs or scalping protection still
+run on X, or orders there are not yet settled. The keys of the broker you
 leave stay saved, so switching back needs only a login. No restart is needed.
 
 **Forgetting a broker.** **Forget this broker** on Broker Configuration
