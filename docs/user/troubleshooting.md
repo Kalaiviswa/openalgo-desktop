@@ -43,26 +43,27 @@ in Server Settings and restart.
 
 Check these in order:
 
-1. **Credentials saved for the right broker.** Profile, Broker tab, **Current
-   Configuration** shows the broker and a masked API key. If the Broker page
-   says to choose your broker and add its API key, do that first.
+1. **Keys saved for the right broker.** On **Broker Configuration**, choose
+   your broker: the badge says **Configured** and each saved key shows a
+   masked value. If a key is missing, enter it and save.
 2. **Redirect URL matches exactly.** The redirect URL in your broker's
-   developer portal must be the one shown under Current Configuration,
-   usually `http://127.0.0.1:5000/<broker>/callback`. `localhost` instead of
-   `127.0.0.1`, `https` instead of `http`, a different port or a trailing slash
-   all count as different.
+   developer portal must be the one Broker Configuration shows for that
+   broker, usually `http://127.0.0.1:5000/<broker>/callback`. `localhost`
+   instead of `127.0.0.1`, `https` instead of `http`, a different port or a
+   trailing slash all count as different.
 3. **Start from OpenAlgo.** "This broker sign-in was not started from OpenAlgo
    or has expired" means the broker sent you back after the sign-in timed out,
-   or to a sign-in OpenAlgo did not start. Go to the Broker page and choose
-   **Connect Account** again, and finish the broker's login within a few
-   minutes.
-4. **Client ID.** "Add your client id in Profile, Broker Configuration" means
-   your broker needs the client ID OpenAlgo checks the account against. See
+   or to a sign-in OpenAlgo did not start. On **Select Broker**, choose
+   **Login with** again, and finish the broker's login within a few minutes.
+   A failed login's reason shows on that broker's card.
+4. **Client ID.** A message asking you to add your client ID (or User ID) on
+   the Broker Configuration page means your broker needs the account OpenAlgo
+   checks the sign-in against. See
    [Brokers bound to your client ID](brokers.md#brokers-bound-to-your-client-id).
 5. **Same account.** "This sign-in is for a different account than the one set
    up in OpenAlgo" means you logged in to the broker with another account.
    Log in with the configured account, or, to switch accounts, log out and
-   save the broker settings again with the new account's details.
+   save the broker's keys again with the new account's details.
 6. **TOTP rejected.** Wait for a fresh code and make sure your computer's clock
    is set automatically; a clock that is off by a minute makes every code
    wrong.

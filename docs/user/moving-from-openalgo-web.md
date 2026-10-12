@@ -61,8 +61,8 @@ client = api(
 If your broker app's redirect URL is already
 `http://127.0.0.1:5000/<broker>/callback`, keep it. If it pointed at a domain
 or another port, change it in your broker's developer portal to the address
-shown on the **Broker** tab in **Profile** (under **Current Configuration**,
-**Redirect URL**).
+**Broker Configuration** shows for that broker under **Redirect URL** (or set
+that address for the broker on the same page).
 
 ## Settings that used to be in .env
 
@@ -70,9 +70,9 @@ There is no `.env` file. Each setting has a place in the app:
 
 | Web `.env` setting | In OpenAlgo Desktop |
 | --- | --- |
-| `BROKER_API_KEY`, `BROKER_API_SECRET` | Profile, Broker tab, Update Credentials |
-| `BROKER_API_KEY_MARKET`, `BROKER_API_SECRET_MARKET` | Profile, Broker tab, Market Data API (Optional) |
-| `REDIRECT_URL` | Worked out from the broker you choose; shown on the Broker tab |
+| `BROKER_API_KEY`, `BROKER_API_SECRET` | Broker Configuration, one set per broker, labelled the way each broker names them |
+| `BROKER_API_KEY_MARKET`, `BROKER_API_SECRET_MARKET` | Broker Configuration, Market Data App Key and Secret Key (XTS brokers) |
+| `REDIRECT_URL` | Automatic per broker; shown, and changeable, on Broker Configuration |
 | `FLASK_HOST_IP`, `FLASK_PORT` | Server Settings, App address and App port |
 | `WEBSOCKET_HOST`, `WEBSOCKET_PORT` | Server Settings, Market data address and Market data port |
 | `HOST_SERVER`, `NGROK_ALLOW`, `WEBSOCKET_URL` | Profile, Broker tab, Server Configuration |

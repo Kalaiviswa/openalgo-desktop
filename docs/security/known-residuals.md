@@ -26,11 +26,12 @@ tries each one the way a forger would.
 On every path, before anything is stored, the account the broker returns
 must be the configured one (`catalog::configured_account`: the client id or
 the `client_id:::key` prefix, for Dhan and the Noren family; the client id
-entered in Profile for Arrow, HDFC Sky, HDFC Securities and AliceBlue), else the
-account of the last session with that broker. A mismatch is refused and the
-live session and its stored row are left as they were. Saving a broker's
-settings again forgets an ended session's account, which is how a trader
-switches accounts. A state-less callback with no known account is refused.
+entered on Broker Configuration for Arrow, HDFC Sky, HDFC Securities and
+AliceBlue), else the account of the last session with that broker. A
+mismatch is refused and the live session and its stored row are left as they
+were. Saving a broker's settings again forgets an ended session's account,
+which is how a trader switches accounts. A state-less callback with no known
+account is refused.
 
 Residual: these brokers' redirects do not reliably echo `state`, and the
 session cookie is `SameSite=Lax`, so a cross-site top-level GET to the

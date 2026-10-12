@@ -64,6 +64,27 @@ a drop-in replacement for them.
   error frame and the 4401 auth-timeout close.
 - **The UI** looks and behaves like the web. The frontend is carried over from
   the web nearly verbatim; it is not a redesign.
+  - **Approved deviation (maintainer, 2026-10-12): broker keys and the login
+    flow follow OpenBull**, not the web. One key set per broker, for as many
+    brokers as the trader likes, edited on Broker Configuration
+    (`/broker/config`, `pages/BrokerConfig.tsx`); Select Broker (`/broker`)
+    is a card grid with an Active / Configured / Not Configured badge; the
+    sign-in page is one card that goes to `/dashboard` when the broker
+    session resumes and to `/broker` otherwise; each form broker logs in on
+    a small card (`/broker/<broker>/totp`); the Profile Broker tab is a
+    summary. **One broker is logged in at a time**: logging in to another
+    asks first, and a completed sign-in always ends any other broker's
+    session (`BrokerAuthService::session_lock`). New keys for the logged-in
+    broker end its session too, after the same confirm (a session belongs
+    to the keys it signed in with); one account per broker is by design.
+    The keys each broker needs
+    and their labels come from `brokers/setup_guide.rs`, served by
+    `GET /api/broker/list`; the pages keep no broker list. Unchanged: route
+    names, `/<broker>/callback` and the default redirect URL, `/api/v1`, the
+    feed, the SDK and MCP contracts, and the desktop's sign-in security
+    (`docs/codex/18-openbull-login-design-comparison.md`: never OAuth
+    `state` as an access token, never raw callback queries in a log, masked
+    display apart from replacement inputs).
 
 The contract is defined by the web, not by this repo. Sources, in order of
 authority:
@@ -538,6 +559,12 @@ Every flaky test found so far was a race, not a slow machine:
 
 ### Security work
 
+- **Broker sessions change under one lock.** Completing a sign-in, resuming
+  one, ending one and forgetting the logged-in broker hold
+  `BrokerAuthService::session_lock`, so two sign-ins finishing together
+  never leave two sessions (memory, stored rows and streaming disagreeing).
+  `revoke` takes the lock; code already holding it calls `revoke_held`, or
+  it waits on itself forever.
 - **Findings from a background security review are fixed before merge**, on
   the branch. MCP needed three rounds: unbounded fan-out, then caps that
   concurrency could bypass, then overflowing arithmetic and a cap check that
