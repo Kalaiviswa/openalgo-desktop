@@ -31,6 +31,10 @@ run-name: >-
   || format('{0} (CI run {1})', github.event.workflow_run.head_sha, github.event.workflow_run.id) }}
 
 on:
+  # ITERATION ONLY (wip branch, never merged): run on push with the bundles
+  # of master CI run 38245265017.
+  push:
+    branches: [wip/codex-e-native]
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -58,7 +62,7 @@ jobs:
   source:
     name: source (the CI run whose bundles are tested)
     if: >-
-      github.event_name == 'workflow_dispatch' || (
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository)
@@ -75,7 +79,7 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+          RUN_ID: ${{ github.event_name == 'push' && '38245265017' || github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
         run: python3 scripts/ci/smoke_gate.py source "$RUN_ID"
 
   linux:
