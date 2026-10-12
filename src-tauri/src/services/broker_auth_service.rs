@@ -184,7 +184,7 @@ impl BrokerAuthService {
         let Some(adapter) = state.brokers.get(broker) else {
             return Err(AppError::Validation(format!(
                 "Signing in to {} is not available in this version of OpenAlgo Desktop yet.",
-                broker
+                crate::brokers::setup_guide::display_name(broker)
             )));
         };
         let creds = Self::load_credentials(state, broker)?;
@@ -315,7 +315,14 @@ impl BrokerAuthService {
                 client_id: uid.or(stored.client_id.clone()),
                 ..stored
             };
-            return Self::authenticate_as(state, broker, input, expected.as_deref()).await;
+            return Self::authenticate_as(
+                state,
+                broker,
+                input,
+                expected.as_deref(),
+                Self::keys_digest(&creds),
+            )
+            .await;
         }
         let code = catalog::extract_code(broker, params).ok_or_else(|| {
             AppError::Auth("The broker did not complete the sign-in. Try again.".into())
@@ -326,7 +333,14 @@ impl BrokerAuthService {
             redirect_uri: pending.redirect_uri,
             ..Self::stored_input(&creds)
         };
-        Self::authenticate_as(state, broker, input, expected.as_deref()).await
+        Self::authenticate_as(
+            state,
+            broker,
+            input,
+            expected.as_deref(),
+            Self::keys_digest(&creds),
+        )
+        .await
     }
 
     /// The broker account a sign-in must belong to, on every path: the
@@ -402,7 +416,14 @@ impl BrokerAuthService {
             auth_code: form.dob.map(|s| s.expose().to_string()),
             ..stored
         };
-        Self::authenticate_as(state, broker, input, expected.as_deref()).await
+        Self::authenticate_as(
+            state,
+            broker,
+            input,
+            expected.as_deref(),
+            Self::keys_digest(&creds),
+        )
+        .await
     }
 
     /// Prepare a form login when its page opens or the trader asks again:
@@ -460,11 +481,13 @@ impl BrokerAuthService {
         broker_id: &str,
         input: BrokerCredentials,
         expected: Option<&str>,
+        keys: [u8; 32],
     ) -> Result<BrokerSession> {
+        let name = crate::brokers::setup_guide::display_name(broker_id);
         let broker = state.brokers.get(broker_id).ok_or_else(|| {
             AppError::Validation(format!(
                 "Signing in to {} is not available in this version of OpenAlgo Desktop yet.",
-                broker_id
+                name
             ))
         })?;
         // No database connection is held across this await.
@@ -477,7 +500,7 @@ impl BrokerAuthService {
                 );
                 return Err(AppError::Auth(format!(
                     "This sign-in is for a different {} account than the one set up in OpenAlgo. Nothing was changed. Log in with your own account; to switch accounts, log out and save the broker settings again first.",
-                    broker_id
+                    name
                 )));
             }
         }
@@ -494,6 +517,23 @@ impl BrokerAuthService {
         // hand-over runs under the session lock, so a second sign-in that
         // completes at the same moment waits and then ends this one.
         let held = Self::session_lock(state).await;
+        // The keys this sign-in used must still be the saved ones: a save
+        // or a forget that finished while the broker was answering wins,
+        // and nothing made with the old keys is stored.
+        let unchanged = Self::load_credentials(state, broker_id)
+            .ok()
+            .map(|c| Self::keys_digest(&c))
+            == Some(keys);
+        if !unchanged {
+            tracing::info!(
+                "Sign-in to {} not stored: its keys changed while it ran",
+                broker_id
+            );
+            return Err(AppError::Validation(format!(
+                "Your {} keys changed while this login was in progress. Nothing was stored. Log in again.",
+                name
+            )));
+        }
         if let Some(live) = state
             .get_broker_session()
             .filter(|s| s.broker_id != broker_id)
@@ -522,6 +562,31 @@ impl BrokerAuthService {
         Self::activate(state, &session).await;
         drop(held);
         Ok(session)
+    }
+
+    /// A digest of the saved keys a sign-in starts with, kept in memory for
+    /// that sign-in only (never stored or logged), so one that completes
+    /// after the trader changed or forgot those keys is refused.
+    fn keys_digest(creds: &credentials::BrokerCredentialSet) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for part in [
+            Some(creds.api_key.expose()),
+            creds.api_secret.as_ref().map(|s| s.expose()),
+            creds.api_key_market.as_ref().map(|s| s.expose()),
+            creds.api_secret_market.as_ref().map(|s| s.expose()),
+            creds.client_id.as_deref(),
+        ] {
+            match part {
+                Some(p) => {
+                    h.update([1u8]);
+                    h.update((p.len() as u64).to_le_bytes());
+                    h.update(p.as_bytes());
+                }
+                None => h.update([0u8]),
+            }
+        }
+        h.finalize().into()
     }
 
     /// Hold the one-session lock (`AppState::session_switch`) while a

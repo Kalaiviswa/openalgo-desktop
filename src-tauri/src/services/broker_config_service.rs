@@ -30,6 +30,10 @@ use serde_json::{json, Value};
 
 pub struct BrokerConfigService;
 
+/// What the page shows for a saved key this install cannot decrypt.
+const UNREADABLE: &str =
+    "saved, but cannot be read on this computer; forget this broker and enter its keys again";
+
 /// A save from the Broker Configuration page. Every `None` key keeps what
 /// is saved; `redirect_url` is `None` to keep, `Some("")` for the
 /// automatic address, or the address to use.
@@ -102,10 +106,13 @@ impl BrokerConfigService {
     }
 
     /// Save a broker's keys inside the caller's transaction: what `update`
-    /// carries replaces the stored value, the rest is kept. Saving a
-    /// broker's keys again is how a trader switches accounts, so the account
-    /// its last ended session was bound to is forgotten. The one save of
-    /// broker keys, for this page and the web-shaped
+    /// carries replaces the stored value, the rest is kept. A session
+    /// belongs to the keys it signed in with (FLOW-04), so the stored
+    /// session of this broker is revoked (a password sign-in never resumes
+    /// one made with the old keys; a live one is ended by the caller right
+    /// after) and the account it was bound to is forgotten: saving a
+    /// broker's keys again is how a trader switches accounts. The one save
+    /// of broker keys, for this page and the web-shaped
     /// `POST /api/broker/credentials`.
     pub fn save_keys(
         conn: &Connection,
@@ -114,6 +121,7 @@ impl BrokerConfigService {
         update: CredentialUpdate,
     ) -> Result<()> {
         credentials::save(conn, security, broker, update)?;
+        crate::db::sqlite::auth::revoke(conn, broker)?;
         crate::db::sqlite::auth::forget_account(conn, broker)?;
         Ok(())
     }
@@ -124,7 +132,7 @@ impl BrokerConfigService {
     pub fn redirect_url(state: &AppState, broker: &str) -> Result<String> {
         let saved = {
             let conn = state.sqlite.conn()?;
-            credentials::load(&conn, &state.security, broker)?.and_then(|c| c.redirect_url)
+            credentials::redirect_url(&conn, broker)?
         };
         Ok(saved.unwrap_or_else(|| state.server_config().redirect_url_for(broker)))
     }
@@ -136,8 +144,18 @@ impl BrokerConfigService {
         let conn = state.sqlite.conn()?;
         let mut brokers = Vec::with_capacity(catalog::ALL_BROKERS.len());
         for id in catalog::ALL_BROKERS {
-            let saved = credentials::load(&conn, &state.security, id)?;
-            let configured = saved.as_ref().is_some_and(|c| !c.api_key.is_empty());
+            // One row that cannot be decrypted (keys from another install)
+            // must not hide every broker: it shows as saved but unreadable,
+            // so the trader can enter its keys again or forget it.
+            let (saved, unreadable) = match credentials::load(&conn, &state.security, id) {
+                Ok(c) => (c, false),
+                Err(AppError::Locked) => return Err(AppError::Locked),
+                Err(e) => {
+                    tracing::warn!("Saved keys for {} cannot be read: {}", id, e);
+                    (None, true)
+                }
+            };
+            let configured = unreadable || saved.as_ref().is_some_and(|c| !c.api_key.is_empty());
             let guide = setup_guide::guide(id);
             let fields: Vec<Value> = guide
                 .fields
@@ -149,7 +167,11 @@ impl BrokerConfigService {
                         "hint": f.hint,
                         "secret": f.secret,
                         "required": f.required,
-                        "saved": saved.as_ref().and_then(|c| saved_view(c, f.key)),
+                        "saved": if unreadable {
+                            Some(UNREADABLE.to_string())
+                        } else {
+                            saved.as_ref().and_then(|c| saved_view(c, f.key))
+                        },
                     })
                 })
                 .collect();
@@ -318,7 +340,10 @@ impl BrokerConfigService {
             tx.commit()?;
         }
         if redirect.is_some() && global_named_broker {
-            state.reload_config()?;
+            // Saved already: a reload that fails must not skip the sign-out.
+            if let Err(e) = state.reload_config() {
+                tracing::warn!("Settings not reloaded after saving broker keys: {}", e);
+            }
         }
         let signed_out = live && keys_changed;
         if signed_out {
@@ -363,14 +388,8 @@ impl BrokerConfigService {
                 return Ok(ForgetOutcome::Refused(why));
             }
         }
-        if live {
-            if let Err(e) =
-                BrokerAuthService::revoke_held(state, SessionEndReason::Logout, &held).await
-            {
-                // The session is over in memory; its row is retried.
-                tracing::error!("The ended broker session is still to be revoked: {}", e);
-            }
-        }
+        // The keys go first: a removal that fails leaves the session and
+        // the keys as they were. The sign-out follows, still under the lock.
         let cfg = state.server_config();
         {
             let mut conn = state.sqlite.conn()?;
@@ -394,7 +413,17 @@ impl BrokerConfigService {
             }
             tx.commit()?;
         }
-        state.reload_config()?;
+        if let Err(e) = state.reload_config() {
+            tracing::warn!("Settings not reloaded after forgetting a broker: {}", e);
+        }
+        if live {
+            if let Err(e) =
+                BrokerAuthService::revoke_held(state, SessionEndReason::Logout, &held).await
+            {
+                // The session is over in memory; its row is gone already.
+                tracing::error!("The ended broker session is still to be revoked: {}", e);
+            }
+        }
         drop(held);
         tracing::info!("Broker keys forgotten for {}", broker);
         Ok(ForgetOutcome::Forgotten { signed_out: live })

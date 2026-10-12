@@ -54,7 +54,7 @@ export default function BrokerSelect() {
   const { user, setUser } = useAuthStore()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [filter, setFilter] = useState('')
   const [starting, setStarting] = useState<string | null>(null)
   // The reason a sign-in failed, shown on that broker's card.
@@ -78,7 +78,9 @@ export default function BrokerSelect() {
     const broker = searchParams.get('broker')
     if (broker) setCardError({ broker, message })
     else setPageError(message)
-  }, [searchParams])
+    // Shown once: a reload does not bring the old reason back.
+    setSearchParams({}, { replace: true })
+  }, [searchParams, setSearchParams])
 
   useEffect(() => {
     if (list.error instanceof BrokerConfigError && list.error.status === 401) {

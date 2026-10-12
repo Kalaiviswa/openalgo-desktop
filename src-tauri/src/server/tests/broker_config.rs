@@ -951,3 +951,165 @@ async fn switch_refused_when_the_check_cannot_answer() {
     assert!(v["message"].as_str().unwrap().contains("could not check"));
     assert!(h.ctx().is_broker_connected());
 }
+
+// ------------------------------------------------ review follow-ups
+
+/// FLOW-04: new keys end the logged-in broker's session and forget the
+/// account it was bound to, so the next login with the new account's keys
+/// is not refused as "a different account".
+#[tokio::test]
+async fn flow04_new_keys_forget_the_old_account() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker(); // bound to AB1234
+    let (s, v) = h
+        .json(with_session(
+            put_json(
+                "/api/broker/credentials/zerodha?sign_out=true",
+                json!({"api_key": "otheraccountkey"}),
+            ),
+            &cookie,
+            Some(&csrf),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let conn = h.ctx().sqlite.conn().unwrap();
+    assert_eq!(
+        crate::db::sqlite::auth::last_user_id(&conn, "zerodha").unwrap(),
+        None
+    );
+}
+
+/// A stored session not resumed yet (after a restart) is not brought back
+/// once that broker's keys changed.
+#[tokio::test]
+async fn new_keys_revoke_a_stored_session_not_yet_resumed() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    // A restart: memory is empty, the stored row remains.
+    h.ctx().set_broker_session(None);
+    let (s, v) = save(
+        &h,
+        &cookie,
+        &csrf,
+        "zerodha",
+        json!({"api_secret": "rotated"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(BrokerAuthService::try_resume(h.ctx())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!h.ctx().is_broker_connected());
+}
+
+/// A sign-in still waiting on the broker when the trader saves new keys
+/// for it is not stored: the newer keys win.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_that_outlives_its_keys_is_not_stored() {
+    let (t, angel, _samco) = two_brokers();
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    *angel.auth_gate.lock() = Some(gate.clone());
+    let ctx = t.ctx.clone();
+    let login =
+        tokio::spawn(
+            async move { BrokerAuthService::login_with_form(&ctx, "angel", totp()).await },
+        );
+    // The broker is answering; the trader saves new keys meanwhile.
+    while angel.last_auth.lock().is_none() {
+        tokio::task::yield_now().await;
+    }
+    let saved = BrokerConfigService::save(
+        &t.ctx,
+        "angel",
+        crate::services::broker_config_service::KeySave {
+            update: CredentialUpdate {
+                api_key: Some("newsmartkey".into()),
+                ..Default::default()
+            },
+            redirect_url: None,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        saved,
+        crate::services::broker_config_service::SaveOutcome::Saved { .. }
+    ));
+    gate.wait().await;
+    let e = login.await.unwrap().unwrap_err();
+    assert!(
+        e.client_message()
+            .contains("keys changed while this login was in progress"),
+        "{}",
+        e.client_message()
+    );
+    assert!(t.ctx.get_broker_session().is_none());
+    assert!(live_rows(&t.ctx).is_empty());
+}
+
+/// Forgetting the logged-in broker removes its keys first: when that
+/// fails, the session and the keys stay as they were.
+#[tokio::test]
+async fn a_forget_that_fails_keeps_the_session() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    h.connect_broker();
+    h.ctx()
+        .sqlite
+        .conn()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER test_fail_forget BEFORE DELETE ON broker_credentials
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let (s, _) = h
+        .json(with_session(
+            delete("/api/broker/credentials/zerodha?sign_out=true"),
+            &cookie,
+            Some(&csrf),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(h.ctx().is_broker_connected(), "the session stays");
+    assert!(stored(&h, "zerodha").is_some(), "the keys stay");
+}
+
+/// One broker's keys that this install cannot decrypt do not hide the
+/// others: that broker shows as saved but unreadable.
+#[tokio::test]
+async fn one_unreadable_broker_does_not_hide_the_list() {
+    let (h, cookie, csrf) = signed_in_harness();
+    h.save_broker_credentials();
+    let (s, _) = save(
+        &h,
+        &cookie,
+        &csrf,
+        "fyers",
+        json!({"api_key": "APP-100", "api_secret": "fsecret"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    h.ctx()
+        .sqlite
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE broker_credentials SET api_key_encrypted = 'AAAAAAAAAAAAAAAAAAAAAAAA'
+             WHERE broker_id = 'fyers'",
+            [],
+        )
+        .unwrap();
+    let data = list(&h, &cookie).await;
+    let fyers = entry(&data, "fyers");
+    assert_eq!(fyers["configured"], true);
+    assert!(field(fyers, "api_key")["saved"]
+        .as_str()
+        .unwrap()
+        .contains("cannot be read"));
+    assert_eq!(field(entry(&data, "zerodha"), "api_key")["saved"], "***");
+}

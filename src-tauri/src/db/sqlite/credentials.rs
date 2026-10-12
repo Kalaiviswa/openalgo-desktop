@@ -38,12 +38,12 @@ fn aad(column: &str, broker: &str) -> Aad {
 }
 
 /// What the Broker Configuration page shows of a saved value: the first and
-/// last three characters around `***` for a value of 12 characters or more,
-/// otherwise only `***`. At most six characters, and never more than half
-/// the value, are ever shown; the length is not.
+/// last three characters around `***` for a value of 16 characters or more,
+/// otherwise only `***`. At most six characters, and never more than three
+/// eighths of the value, are ever shown; the length is not.
 pub fn hint(value: &str) -> String {
     let n = value.chars().count();
-    if n >= 12 {
+    if n >= 16 {
         let head: String = value.chars().take(3).collect();
         let tail: String = value.chars().skip(n - 3).collect();
         format!("{}***{}", head, tail)
@@ -225,6 +225,19 @@ pub fn set_redirect_url(conn: &Connection, broker: &str, url: Option<&str>) -> R
     Ok(())
 }
 
+/// The redirect URL saved with a broker's keys, without decrypting them.
+pub fn redirect_url(conn: &Connection, broker: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT redirect_url FROM broker_credentials WHERE broker_id = ?1",
+            [broker],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .filter(|u| !u.trim().is_empty()))
+}
+
 pub fn delete(conn: &Connection, broker: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM broker_credentials WHERE broker_id = ?1",
@@ -285,11 +298,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hint_shows_at_most_six_characters_and_never_half() {
+    fn hint_shows_at_most_six_characters_and_never_half_the_value() {
         assert_eq!(hint(""), "***");
         assert_eq!(hint("abcd1234"), "***");
-        assert_eq!(hint("abcdefghijk"), "***");
-        assert_eq!(hint("abcdefghijkl"), "abc***jkl");
+        assert_eq!(hint("abcdefghijklmno"), "***");
+        assert_eq!(hint("abcdefghijklmnop"), "abc***nop");
         let long = "kiteapikey1234567890";
         let h = hint(long);
         assert_eq!(h, "kit***890");
