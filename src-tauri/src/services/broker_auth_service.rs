@@ -30,9 +30,13 @@ use crate::security::Secret;
 use crate::session::web::random_token;
 use crate::state::{AppState, BrokerSession};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub const OAUTH_STATE_TTL_MINUTES: i64 = 10;
+/// In the data folder while an ended broker session's stored row is still
+/// to be revoked, so a restart does not resume it.
+pub const REVOKE_MARKER: &str = "broker-revoke.pending";
 const RESUME_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct BrokerAuthService;
@@ -491,9 +495,10 @@ impl BrokerAuthService {
             // revokes this new session's row. The row and the active broker
             // change together or not at all.
             let mut pending = state.revoke_pending.lock();
+            let was_pending = Self::pending_locked(state, &pending);
             let mut conn = state.sqlite.conn()?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if *pending {
+            if was_pending {
                 auth::revoke_all(&tx)?;
             }
             auth::upsert(
@@ -516,7 +521,7 @@ impl BrokerAuthService {
                 },
             )?;
             tx.commit()?;
-            *pending = false;
+            Self::clear_pending_locked(state, &mut pending);
         }
         let _ = state.reload_config();
         state.set_broker_session(Some(s.clone()));
@@ -535,8 +540,11 @@ impl BrokerAuthService {
         if let Some(s) = state.get_broker_session() {
             return Ok(Some(s));
         }
+        // A revoke that starts while this resume waits on the broker wins:
+        // the session is installed only if none happened (checked below).
+        let started = state.revoke_epoch.load(Ordering::SeqCst);
         // A session the trader ended whose row could not be revoked yet is
-        // never brought back.
+        // never brought back, after a restart too (the marker file).
         if Self::revoke_is_pending(state) {
             if let Err(e) = Self::retry_pending_revoke(state) {
                 tracing::warn!("The ended broker session is still to be revoked: {}", e);
@@ -604,14 +612,37 @@ impl BrokerAuthService {
             user_name: stored.user_name,
             authenticated_at: stored.authenticated_at,
         };
-        state.set_broker_session(Some(session.clone()));
+        if !Self::install_resumed(state, &session, started) {
+            tracing::info!("Broker session not resumed: it was ended meanwhile");
+            return Ok(None);
+        }
         state.bus.publish(Event::BrokerConnected {
             broker: session.broker_id.clone(),
             user_id: Some(session.user_id.clone()),
         });
         tracing::info!("Resumed broker session for {}", session.broker_id);
         Self::activate(state, &session).await;
+        // Ended while its streaming started: stop that streaming again.
+        if state.revoke_epoch.load(Ordering::SeqCst) != started {
+            state.runtime.teardown(state).await;
+            return Ok(None);
+        }
         Ok(Some(session))
+    }
+
+    /// Put a resumed session in memory, unless a revoke started since
+    /// `started` (the revoke epoch read when the resume began) or one is
+    /// still pending. Decided under the hold `revoke` takes, so a resume and
+    /// a logout cannot both win.
+    pub(crate) fn install_resumed(state: &AppState, session: &BrokerSession, started: u64) -> bool {
+        let pending = state.revoke_pending.lock();
+        if Self::pending_locked(state, &pending)
+            || state.revoke_epoch.load(Ordering::SeqCst) != started
+        {
+            return false;
+        }
+        state.set_broker_session(Some(session.clone()));
+        true
     }
 
     /// End the broker session everywhere. Memory goes first and the stored
@@ -622,15 +653,21 @@ impl BrokerAuthService {
     /// row is revoked.
     ///
     /// The session is over in this process whatever the database does. If
-    /// the row cannot be written, `revoke_pending` stays set: no stored
+    /// the row cannot be written, the revoke stays pending, in memory and in
+    /// a marker file in the data folder that a restart reads: no stored
     /// session is resumed until the session poll, a resume or the next
     /// sign-in writes it (`retry_pending_revoke`). An `Err` means only that
     /// the stored row is still to be revoked.
     pub async fn revoke(state: &AppState, reason: SessionEndReason) -> Result<()> {
-        // Set before memory is cleared, so a sign-in racing this call
-        // cannot resume the row being revoked.
-        *state.revoke_pending.lock() = true;
-        state.set_broker_session(None);
+        // Marked before memory is cleared, so a sign-in racing this call
+        // cannot resume the row being revoked, and a stop before the row is
+        // written cannot bring it back at the next start.
+        {
+            let mut pending = state.revoke_pending.lock();
+            Self::mark_pending_locked(state, &mut pending);
+            state.revoke_epoch.fetch_add(1, Ordering::SeqCst);
+            state.set_broker_session(None);
+        }
         state.api_keys.clear();
         state.runtime.teardown(state).await;
         state.clear_symbol_cache();
@@ -640,21 +677,56 @@ impl BrokerAuthService {
 
     /// Whether an ended session's stored row is still to be revoked.
     pub fn revoke_is_pending(state: &AppState) -> bool {
-        *state.revoke_pending.lock()
+        let pending = state.revoke_pending.lock();
+        Self::pending_locked(state, &pending)
     }
 
     /// Write a pending revoke; a no-op when none is pending. Run by
-    /// `revoke` itself, by the session poll every 30 seconds and before a
-    /// resume.
+    /// `revoke` itself, by the session poll every 30 seconds (which also
+    /// picks up a revoke left pending by the last run) and before a resume.
     pub fn retry_pending_revoke(state: &AppState) -> Result<()> {
         let mut pending = state.revoke_pending.lock();
-        if !*pending {
+        if !Self::pending_locked(state, &pending) {
             return Ok(());
         }
         let conn = state.sqlite.conn()?;
         auth::revoke_all(&conn)?;
-        *pending = false;
+        Self::clear_pending_locked(state, &mut pending);
         Ok(())
+    }
+
+    /// Forget a pending revoke because the stored sessions themselves are
+    /// gone (account reset).
+    pub fn clear_pending_revoke(state: &AppState) {
+        let mut pending = state.revoke_pending.lock();
+        Self::clear_pending_locked(state, &mut pending);
+    }
+
+    fn revoke_marker(state: &AppState) -> std::path::PathBuf {
+        state.data_dir.join(REVOKE_MARKER)
+    }
+
+    fn pending_locked(state: &AppState, pending: &bool) -> bool {
+        *pending || Self::revoke_marker(state).exists()
+    }
+
+    fn mark_pending_locked(state: &AppState, pending: &mut bool) {
+        *pending = true;
+        if let Err(e) =
+            crate::security::fsperm::write_private_file(&Self::revoke_marker(state), b"")
+        {
+            tracing::warn!("Could not record the broker sign-out on disk: {}", e);
+        }
+    }
+
+    fn clear_pending_locked(state: &AppState, pending: &mut bool) {
+        *pending = false;
+        let marker = Self::revoke_marker(state);
+        if marker.exists() {
+            if let Err(e) = std::fs::remove_file(&marker) {
+                tracing::warn!("Could not remove the broker sign-out record: {}", e);
+            }
+        }
     }
 
     /// Whether the stored broker session ended (revoked/expired) rather than

@@ -78,6 +78,9 @@ pub struct AppState {
     /// resumed; the session poll and the next sign-in finish the revoke
     /// (`BrokerAuthService::retry_pending_revoke`).
     pub revoke_pending: Mutex<bool>,
+    /// Counts broker revokes, so a resume that waited on the broker while
+    /// one happened does not bring the ended session back.
+    pub revoke_epoch: std::sync::atomic::AtomicU64,
     pub server_status: RwLock<ServerStatus>,
     /// State of the 8765 market data listener (written by `FeedService`),
     /// shown with the fix when its port is taken.
@@ -285,6 +288,7 @@ impl AppState {
             api_keys: ApiKeyCache::new(),
             broker_session: RwLock::new(None),
             revoke_pending: Mutex::new(false),
+            revoke_epoch: std::sync::atomic::AtomicU64::new(0),
             server_status: RwLock::new(ServerStatus::Starting),
             feed_status: RwLock::new(ServerStatus::Starting),
             http,
