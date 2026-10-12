@@ -115,6 +115,60 @@ pub fn generate_trade_id(now: chrono::NaiveDateTime) -> String {
     format!("TRADE-{}-{}", now.format("%Y%m%d-%H%M%S"), &u[..8])
 }
 
+/// Fresh trade ids tried when one collides with an existing trade.
+const TRADE_ID_ATTEMPTS: usize = 5;
+
+/// Write the order's one trade row and return its id. Only a duplicate
+/// trade id (the `UNIQUE` constraint) is retried with a fresh id; any other
+/// failure, and a run of duplicates, is returned so the caller's
+/// transaction rolls the whole fill back: an order never completes without
+/// its trade.
+fn insert_trade(
+    tx: &Connection,
+    order: &OrderRow,
+    price: Decimal,
+    now: chrono::NaiveDateTime,
+    now_s: &str,
+) -> rusqlite::Result<String> {
+    let mut last = None;
+    for _ in 0..TRADE_ID_ATTEMPTS {
+        let tradeid = generate_trade_id(now);
+        let r = tx.execute(
+            "INSERT INTO sandbox_trades (tradeid, orderid, user_id, symbol, exchange, action,
+               quantity, price, product, strategy, trade_timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                tradeid,
+                order.orderid,
+                order.user_id,
+                order.symbol,
+                order.exchange,
+                order.action.as_str(),
+                order.quantity,
+                dec_to_db(price),
+                order.product.as_str(),
+                order.strategy,
+                now_s
+            ],
+        );
+        match r {
+            Ok(_) => return Ok(tradeid),
+            Err(rusqlite::Error::SqliteFailure(e, msg))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                last = Some(rusqlite::Error::SqliteFailure(e, msg));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("could not allocate a unique sandbox trade id".into()),
+        )
+    }))
+}
+
 /// Fill inside the caller's transaction. Returns `false` (nothing written)
 /// when the order is no longer pending or its terms changed.
 pub(crate) fn execute_in_tx(
@@ -151,36 +205,7 @@ pub(crate) fn execute_in_tx(
     if claimed != 1 {
         return Ok(false);
     }
-    let mut tradeid = generate_trade_id(now);
-    for _ in 0..5 {
-        let r = tx.execute(
-            "INSERT INTO sandbox_trades (tradeid, orderid, user_id, symbol, exchange, action,
-               quantity, price, product, strategy, trade_timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                tradeid,
-                order.orderid,
-                order.user_id,
-                order.symbol,
-                order.exchange,
-                order.action.as_str(),
-                order.quantity,
-                dec_to_db(price),
-                order.product.as_str(),
-                order.strategy,
-                now_s
-            ],
-        );
-        match r {
-            Ok(_) => break,
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                tradeid = generate_trade_id(now);
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    let tradeid = insert_trade(tx, &order, price, now, &now_s)?;
     let cfg = SandboxConfig::load(tx)?;
     let cv = core.contract_value(&order.symbol, &order.exchange);
     positions::apply_fill(tx, &cfg, &order, price, cv, &now_s)?;
