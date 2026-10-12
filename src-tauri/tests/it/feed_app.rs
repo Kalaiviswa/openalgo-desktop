@@ -129,6 +129,117 @@ async fn app_auth_uses_the_stored_api_key_and_broker_session() {
     ctx.shutdown().await;
 }
 
+/// Codex re-audit (raw-feed clients): an authenticated feed client is
+/// closed, with the web's error frame and then 4401, when the API key is
+/// regenerated, when the broker session ends (logout, a switch) and when a
+/// new one starts, so a client keyed before the change cannot keep
+/// streaming market data or order updates. A client that has not
+/// authenticated is left alone. The web keeps such clients connected; this
+/// is a deliberate difference.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_clients_are_closed_when_their_authentication_ends() {
+    use openalgo_desktop_lib::events::SessionEndReason;
+    use openalgo_desktop_lib::feed::server::CREDENTIALS_CHANGED_MSG;
+    use openalgo_desktop_lib::services::broker_auth_service::BrokerAuthService;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = open_ctx(&dir);
+    {
+        let conn = ctx.sqlite.conn().unwrap();
+        user::insert(
+            &conn,
+            &ctx.security,
+            "alice",
+            "alice@example.com",
+            "not-a-real-hash",
+            "JBSWY3DPEHPK3PXP",
+        )
+        .unwrap();
+    }
+    let key = ApiKeyService::regenerate(&ctx, "alice").unwrap();
+    // Pinned, not just set: a broker sign-in reloads the settings, which
+    // would otherwise move the feed back to its stored port.
+    ctx.pin_listener_ports(free_port().await, free_port().await);
+    let feed = FeedService::new(ctx.clone());
+    assert!(matches!(feed.start().await, ServerStatus::Running { .. }));
+    let url = format!("ws://{}", feed.local_addr().await.unwrap());
+    let closed = json!({"status": "error", "code": "AUTHENTICATION_ERROR",
+                        "message": CREDENTIALS_CHANGED_MSG});
+
+    // 1. The API key is regenerated.
+    let mut keyed = Client::connect(&url).await;
+    let v = keyed
+        .request(json!({"action": "authenticate", "api_key": key.expose()}))
+        .await;
+    assert_eq!(
+        v["code"], "BROKER_ERROR",
+        "authenticated, no broker yet: {}",
+        v
+    );
+    let mut idle = Client::connect(&url).await;
+    let key = ApiKeyService::regenerate(&ctx, "alice").unwrap();
+    assert_eq!(keyed.recv().await, closed);
+    assert_eq!(
+        keyed
+            .expect_close(Duration::from_secs(5))
+            .await
+            .map(|c| c.0),
+        Some(4401)
+    );
+    // Not authenticated: untouched.
+    let v = idle.request(json!({"action": "ping"})).await;
+    assert_eq!(v["type"], "pong", "{}", v);
+
+    // 2. A broker session starts, then the trader signs out.
+    let session = BrokerSession {
+        broker_id: "zerodha".into(),
+        auth_token: Secret::new("t"),
+        feed_token: None,
+        user_id: "AB1234".into(),
+        user_name: None,
+        authenticated_at: chrono::Utc::now(),
+    };
+    let mut before_sign_in = Client::connect(&url).await;
+    before_sign_in
+        .request(json!({"action": "authenticate", "api_key": key.expose()}))
+        .await;
+    BrokerAuthService::persist(&ctx, &session).unwrap();
+    assert_eq!(before_sign_in.recv().await, closed);
+    assert_eq!(
+        before_sign_in
+            .expect_close(Duration::from_secs(5))
+            .await
+            .map(|c| c.0),
+        Some(4401)
+    );
+    let mut streaming = Client::connect(&url).await;
+    let v = streaming
+        .request(json!({"action": "authenticate", "api_key": key.expose()}))
+        .await;
+    assert_eq!(v["status"], "success", "{}", v);
+    BrokerAuthService::revoke(&ctx, SessionEndReason::Logout)
+        .await
+        .unwrap();
+    assert_eq!(streaming.recv().await, closed);
+    assert_eq!(
+        streaming
+            .expect_close(Duration::from_secs(5))
+            .await
+            .map(|c| c.0),
+        Some(4401)
+    );
+    // The current key still authenticates on a new connection.
+    let mut again = Client::connect(&url).await;
+    let v = again
+        .request(json!({"action": "authenticate", "api_key": key.expose()}))
+        .await;
+    assert_eq!(v["code"], "BROKER_ERROR", "{}", v);
+
+    drop((idle, again));
+    feed.stop().await;
+    ctx.shutdown().await;
+}
+
 /// Security review S-02: failed feed keys count against the caller's
 /// failure budget, shared with `/api/v1` and `/mcp`, the caller classified
 /// from the handshake like an HTTP request. Once it is spent, a failed key

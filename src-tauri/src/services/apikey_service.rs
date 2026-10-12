@@ -34,6 +34,9 @@ pub struct ApiKeyCache {
     /// Argon2 checks run so far. They run only on an HMAC index hit, so an
     /// invented key never costs one.
     hash_checks: std::sync::atomic::AtomicU64,
+    /// The generation again, for those that must act when it moves: the
+    /// market data feed closes its authenticated clients (`subscribe`).
+    changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for ApiKeyCache {
@@ -44,6 +47,7 @@ impl Default for ApiKeyCache {
             cache_key,
             map: Mutex::new((HashMap::new(), 0)),
             hash_checks: std::sync::atomic::AtomicU64::new(0),
+            changed: tokio::sync::watch::channel(0).0,
         }
     }
 }
@@ -118,10 +122,24 @@ impl ApiKeyCache {
         map.insert(d, (valid, now + CACHE_TTL));
     }
 
+    /// Forget every answer. Called whenever what the API key reaches
+    /// changes: the key was regenerated, the broker session ended (logout,
+    /// the daily boundary, a broker switch, account reset) or a new one
+    /// started. Subscribers are told (`subscribe`).
     pub fn clear(&self) {
-        let mut guard = self.map.lock();
-        guard.0.clear();
-        guard.1 = guard.1.wrapping_add(1);
+        let gen = {
+            let mut guard = self.map.lock();
+            guard.0.clear();
+            guard.1 = guard.1.wrapping_add(1);
+            guard.1
+        };
+        self.changed.send_replace(gen);
+    }
+
+    /// A receiver that sees every `clear`: whoever authenticated a caller
+    /// with the key before must make it authenticate again.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     pub fn len(&self) -> usize {

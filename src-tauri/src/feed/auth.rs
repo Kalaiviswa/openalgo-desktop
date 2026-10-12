@@ -57,6 +57,13 @@ pub trait FeedAuth: Send + Sync + 'static {
     fn spent(&self, _caller: std::net::IpAddr) -> bool {
         false
     }
+
+    /// Moves whenever every authenticated client must authenticate again:
+    /// the trader signed out, the broker session ended or changed, or the
+    /// API key was regenerated. `None`: it never moves.
+    fn credentials_changed(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
 }
 
 /// Authentication against the app's stored API key and broker session.
@@ -136,6 +143,13 @@ impl FeedAuth for AppAuth {
         } else {
             "disconnected"
         }
+    }
+
+    /// Every change the API-key cache is cleared for: a regenerated key,
+    /// and a broker session that ended (logout, the daily boundary, a
+    /// switch, account reset) or started.
+    fn credentials_changed(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.ctx.api_keys.subscribe())
     }
 }
 

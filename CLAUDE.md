@@ -706,6 +706,13 @@ and add each new one here.
   one still counting, and count the attempt under the same lock that checks
   the wait, before verifying (`LoginBackoff::claim`), or parallel requests
   all pass the check.
+- An authenticated market data feed client (8765) is closed, with the
+  web's `AUTHENTICATION_ERROR` frame and then 4401, whenever the API-key
+  cache is cleared (`ApiKeyCache::clear`: a regenerated key, a broker
+  session that ended or started), so a client keyed before a sign-out or
+  key change cannot keep streaming. The web keeps such clients connected;
+  this is a deliberate difference. Anything new that changes what the key
+  reaches clears that cache.
 - A request without a signed-in session acts only on its own browser
   session. An anonymous `/auth/logout` once cleared every session, so
   anything that could reach the port, a tunnel included, kept the trader
