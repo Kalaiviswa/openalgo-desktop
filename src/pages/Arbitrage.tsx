@@ -49,6 +49,9 @@ interface Quote {
   ask?: number
   ltp?: number
   ts?: number
+  /** Where the observation came from: a WebSocket session (its epoch) or REST. */
+  source?: 'websocket' | 'rest'
+  epoch?: number
 }
 
 interface SpreadRow {
@@ -61,7 +64,11 @@ interface SpreadRow {
   bestCredit?: number
   direction?: Direction
   spreadPct?: number
+  /** Both legs observed recently, in the same session. */
   fresh: boolean
+  /** Age of each leg's last observation in ms; undefined when never seen. */
+  nearAge?: number
+  farAge?: number
   liquid: boolean
   hasData: boolean
 }
@@ -80,7 +87,23 @@ function extractQuote(sd: SymbolData | undefined): Quote | undefined {
     ask: rawAsk && rawAsk > 0 ? rawAsk : undefined,
     ltp: d.ltp && d.ltp > 0 ? d.ltp : undefined,
     ts: sd.lastUpdate,
+    source: sd.updateSource,
+    epoch: sd.connectionEpoch,
   }
+}
+
+/**
+ * Desktop: a spread is live only when BOTH legs were observed within
+ * FRESH_MS and in the same session (the same WebSocket epoch, or both from
+ * REST). The web takes the newer of the two timestamps, so one fresh leg
+ * made a stale far price look executable (TOOLS-12).
+ */
+export function legsFresh(near: Quote | undefined, far: Quote | undefined, now: number): boolean {
+  const live = (q: Quote | undefined) =>
+    q?.ts != null && q.ts > 0 && now - q.ts >= 0 && now - q.ts < FRESH_MS
+  if (!live(near) || !live(far)) return false
+  if (near?.source !== far?.source) return false
+  return near?.source !== 'websocket' || near?.epoch === far?.epoch
 }
 
 function midPrice(q?: Quote): number | undefined {
@@ -98,7 +121,11 @@ function fmt(n: number | undefined, digits = 2): string {
   return n == null || Number.isNaN(n) ? '—' : n.toFixed(digits)
 }
 
-function computeRow(pair: ArbitragePair, quotes: Map<string, Quote>, now: number): SpreadRow {
+export function computeRow(
+  pair: ArbitragePair,
+  quotes: Map<string, Quote>,
+  now: number
+): SpreadRow {
   const near = quotes.get(quoteKey(pair.near.symbol, pair.near.exchange))
   const far = quotes.get(quoteKey(pair.far.symbol, pair.far.exchange))
   const nearMid = midPrice(near)
@@ -127,8 +154,8 @@ function computeRow(pair: ArbitragePair, quotes: Map<string, Quote>, now: number
     bestCredit != null && nearMid && nearMid > 0 ? (bestCredit / nearMid) * 100 : undefined
   const rawSpread = farMid != null && nearMid != null ? farMid - nearMid : undefined
 
-  const newest = Math.max(near?.ts ?? 0, far?.ts ?? 0)
-  const fresh = newest > 0 && now - newest < FRESH_MS
+  const fresh = legsFresh(near, far, now)
+  const age = (q?: Quote) => (q?.ts ? Math.max(0, now - q.ts) : undefined)
   const liquid = Boolean(near?.bid && near?.ask && far?.bid && far?.ask)
 
   return {
@@ -142,9 +169,27 @@ function computeRow(pair: ArbitragePair, quotes: Map<string, Quote>, now: number
     direction,
     spreadPct,
     fresh,
+    nearAge: age(near),
+    farAge: age(far),
     liquid,
     hasData: spreadPct != null,
   }
+}
+
+/** Rank live spreads first, then by spread; a stale spread is never ranked above a live one. */
+export function rankRows(rows: SpreadRow[]): SpreadRow[] {
+  return [...rows].sort((a, b) => {
+    if (a.fresh !== b.fresh) return a.fresh ? -1 : 1
+    if (a.spreadPct == null && b.spreadPct == null) return 0
+    if (a.spreadPct == null) return 1
+    if (b.spreadPct == null) return -1
+    return b.spreadPct - a.spreadPct
+  })
+}
+
+function ageLabel(ms?: number): string {
+  if (ms == null) return 'no tick yet'
+  return ms < 1000 ? 'just now' : `${Math.round(ms / 1000)}s ago`
 }
 
 function directionLabel(dir: Direction): string {
@@ -250,14 +295,7 @@ export default function Arbitrage() {
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now()
-      const rows = pairsRef.current.map((p) => computeRow(p, quotesRef.current, now))
-      rows.sort((a, b) => {
-        if (a.spreadPct == null && b.spreadPct == null) return 0
-        if (a.spreadPct == null) return 1
-        if (b.spreadPct == null) return -1
-        return b.spreadPct - a.spreadPct
-      })
-      setAllRows(rows)
+      setAllRows(rankRows(pairsRef.current.map((p) => computeRow(p, quotesRef.current, now))))
     }, REFRESH_MS)
     return () => clearInterval(id)
   }, [])
@@ -336,6 +374,14 @@ export default function Arbitrage() {
 
   const submitTrade = useCallback(async () => {
     if (!tradeRow) return
+    // Desktop: both legs must still be live at the moment the order is sent.
+    const nowRow = computeRow(tradeRow.pair, quotesRef.current, Date.now())
+    if (!nowRow.fresh) {
+      showToast.error(
+        'One leg of this spread has no recent price. Wait for both legs to update, then try again.'
+      )
+      return
+    }
     if (!apiKey) {
       showToast.error('API key not found. Generate one at /apikey')
       return
@@ -562,7 +608,7 @@ export default function Arbitrage() {
                               className={`inline-block h-2 w-2 rounded-full ${
                                 row.fresh ? 'bg-emerald-500' : 'bg-muted-foreground/40'
                               }`}
-                              title={row.fresh ? 'Live' : 'Stale / no recent tick'}
+                              title={`${row.fresh ? 'Live' : 'Not live'}: near ${ageLabel(row.nearAge)}, far ${ageLabel(row.farAge)}`}
                             />
                             {row.pair.underlying}
                           </div>
@@ -596,7 +642,12 @@ export default function Arbitrage() {
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={!row.hasData}
+                            disabled={!row.hasData || !row.fresh}
+                            title={
+                              row.fresh
+                                ? undefined
+                                : 'Both legs need a recent price before this spread can be traded'
+                            }
                             onClick={() => openTrade(row)}
                           >
                             Trade
