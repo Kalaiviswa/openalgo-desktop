@@ -227,13 +227,38 @@ impl IntoResponse for crate::error::AppError {
             }
             crate::error::AppError::NotFound(_) => StatusCode::NOT_FOUND,
             crate::error::AppError::KeychainUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            crate::error::AppError::KeysDoNotMatch => StatusCode::CONFLICT,
+            crate::error::AppError::KeysDoNotMatch | crate::error::AppError::VaultUnreadable => {
+                StatusCode::CONFLICT
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!("Request failed: {}", self);
         }
-        error(status, self.client_message())
+        // The ways out the sign-in page offers when an install's keys cannot
+        // be opened (KEY-01).
+        let recovery = match &self {
+            crate::error::AppError::KeychainUnavailable => {
+                Some(("keychain_unreadable", vec!["retry_keychain", "start_fresh"]))
+            }
+            crate::error::AppError::KeysDoNotMatch => Some(("keys_missing", vec!["start_fresh"])),
+            crate::error::AppError::VaultUnreadable => {
+                Some(("vault_unreadable", vec!["start_fresh"]))
+            }
+            _ => None,
+        };
+        match recovery {
+            Some((code, ways)) => json_response(
+                status,
+                json!({
+                    "status": "error",
+                    "message": self.client_message(),
+                    "code": code,
+                    "recovery": ways,
+                }),
+            ),
+            None => error(status, self.client_message()),
+        }
     }
 }
 
@@ -254,6 +279,38 @@ mod tests {
     fn err_of(v: Value) -> FieldErrors {
         let e = serde_path_to_error::deserialize::<_, Q>(v).unwrap_err();
         serde_error_to_fields(&e)
+    }
+
+    /// KEY-01: the sign-in page reads the ways out of a key error from
+    /// the answer; ordinary errors keep the web's two fields.
+    #[tokio::test]
+    async fn key_errors_carry_their_ways_out() {
+        use http_body_util::BodyExt;
+        async fn body(e: crate::error::AppError) -> (StatusCode, Value) {
+            let r = e.into_response();
+            let s = r.status();
+            let b = r.into_body().collect().await.unwrap().to_bytes();
+            (s, serde_json::from_slice(&b).unwrap())
+        }
+        let (s, v) = body(crate::error::AppError::KeychainUnavailable).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(v["code"], "keychain_unreadable");
+        assert_eq!(v["recovery"], json!(["retry_keychain", "start_fresh"]));
+        assert_eq!(v["message"], crate::error::KEYCHAIN_UNAVAILABLE_MESSAGE);
+        let (s, v) = body(crate::error::AppError::KeysDoNotMatch).await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert_eq!(v["recovery"], json!(["start_fresh"]));
+        let (_, v) = body(crate::error::AppError::VaultUnreadable).await;
+        assert_eq!(v["code"], "vault_unreadable");
+        let (s, v) = body(crate::error::AppError::Validation(
+            "Enter a username.".into(),
+        ))
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            v,
+            json!({"status": "error", "message": "Enter a username."})
+        );
     }
 
     #[test]

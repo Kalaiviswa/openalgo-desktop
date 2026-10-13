@@ -42,17 +42,24 @@ pub enum AppError {
     #[error("Secure storage is locked")]
     Locked,
 
-    /// The account's keys are kept in the OS keychain, which could not be
-    /// opened when the app started (locked, or access denied). Signing in
-    /// must not create new keys; the trader unlocks it and restarts.
-    #[error("The keychain holding the account's keys could not be opened")]
+    /// The first sign-in of an install from an earlier build could not read
+    /// its keys from the OS keychain to move them into openalgo.db (locked,
+    /// or access refused). Nothing changed; the trader retries or starts
+    /// fresh (KEY-01).
+    #[error("The keychain holding the account's keys could not be read")]
     KeychainUnavailable,
 
-    /// The account in the data folder was encrypted with keys this
-    /// computer's keychain does not hold (a folder restored from another
-    /// computer, or from before an account reset).
-    #[error("The data folder belongs to other keys")]
+    /// The keys for the account are not where an earlier build kept them
+    /// (no keychain entries, or entries that open none of the account's
+    /// data: a folder from another computer, or from before an account
+    /// reset). The trader restores the folder or starts fresh.
+    #[error("The keys for the account are missing or belong to other data")]
     KeysDoNotMatch,
+
+    /// The key vault in openalgo.db (or an earlier build's vault.json)
+    /// cannot be read. The trader starts fresh.
+    #[error("The key vault cannot be read")]
+    VaultUnreadable,
 
     #[error("Authentication error: {0}")]
     Auth(String),
@@ -162,6 +169,7 @@ impl AppError {
             AppError::Locked => "LOCKED",
             AppError::KeychainUnavailable => "KEYCHAIN_UNAVAILABLE",
             AppError::KeysDoNotMatch => "KEYS_DO_NOT_MATCH",
+            AppError::VaultUnreadable => "VAULT_UNREADABLE",
             AppError::Auth(_) => "AUTH_ERROR",
             AppError::Broker(_) | AppError::Refused(_) => "BROKER_ERROR",
             AppError::Uncertain(_) => "ORDER_UNCERTAIN",
@@ -206,23 +214,32 @@ impl AppError {
             }
             AppError::KeychainUnavailable => KEYCHAIN_UNAVAILABLE_MESSAGE.to_string(),
             AppError::KeysDoNotMatch => KEYS_DO_NOT_MATCH_MESSAGE.to_string(),
+            AppError::VaultUnreadable => VAULT_UNREADABLE_MESSAGE.to_string(),
             _ => "An unexpected error occurred".to_string(),
         }
     }
 }
 
-/// What a sign-in answers when the keychain holding the account's keys
-/// could not be opened at startup.
-pub const KEYCHAIN_UNAVAILABLE_MESSAGE: &str = "OpenAlgo cannot open your system keychain, \
-where the keys for your account are kept. Unlock the keychain or allow OpenAlgo to use it, \
-then restart OpenAlgo and sign in. Your account and saved settings are unchanged.";
+/// What a sign-in answers when the keys of an earlier build could not be
+/// read from the system keychain to move them into openalgo.db (KEY-01).
+pub const KEYCHAIN_UNAVAILABLE_MESSAGE: &str = "OpenAlgo needs to read your keys from the system \
+keychain one last time, to move them into its own database, and the keychain is locked or refused \
+access. Choose Allow the keychain once and retry, and allow access when your computer asks: after \
+this OpenAlgo never uses the keychain again. Or choose Start fresh: your account, settings and \
+history stay, and you enter your broker keys again, get a new API key and set up two-factor login \
+again.";
 
-/// What a sign-in answers when the account in the data folder was made with
-/// keys this computer's keychain does not hold.
-pub const KEYS_DO_NOT_MATCH_MESSAGE: &str = "OpenAlgo cannot open the account in this data \
-folder: it was saved with keys this computer's keychain does not have, as happens with a backup \
-restored from another computer or from before an account reset. Restore the folder on the \
-computer it came from, or reset the account to start again on this one.";
+/// What a sign-in answers when the account's keys are not in this
+/// computer's keychain, or open none of its data.
+pub const KEYS_DO_NOT_MATCH_MESSAGE: &str = "The keys for this account are not in this computer's \
+keychain: the data folder may come from another computer, or from before an account reset. Restore \
+the folder on the computer it came from, or choose Start fresh: your account, settings and history \
+stay, and you enter your broker keys again, get a new API key and set up two-factor login again.";
+
+/// What a sign-in answers when the saved keys cannot be read.
+pub const VAULT_UNREADABLE_MESSAGE: &str = "OpenAlgo could not read the keys saved with your \
+account. Choose Start fresh: your account, settings and history stay, and you enter your broker \
+keys again, get a new API key and set up two-factor login again.";
 
 /// Trader-facing name of an optional broker capability.
 fn unsupported_label(what: &str) -> String {
