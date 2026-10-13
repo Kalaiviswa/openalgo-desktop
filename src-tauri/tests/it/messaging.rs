@@ -884,22 +884,59 @@ async fn telegram_hundred_start_stop_cycles_leave_no_tasks_or_descriptors() {
     let (_fake, base, _j) = spawn_fake().await;
     h.start_telegram(&base).await;
     h.ctx.messaging.telegram.stop(&h.ctx).await;
-    let tasks_before = h.ctx.task_count();
-    let fds_before = open_fds();
-    for _ in 0..100 {
-        let (ok, why) = h.ctx.messaging.telegram.start(&h.ctx).await;
-        assert!(ok, "{}", why);
-        let (ok, _) = h.ctx.messaging.telegram.stop(&h.ctx).await;
-        assert!(ok);
-        assert!(!h.ctx.messaging.telegram.task_alive().await);
+    async fn cycles(h: &H, n: usize) {
+        for _ in 0..n {
+            let (ok, why) = h.ctx.messaging.telegram.start(&h.ctx).await;
+            assert!(ok, "{}", why);
+            let (ok, _) = h.ctx.messaging.telegram.stop(&h.ctx).await;
+            assert!(ok);
+            assert!(!h.ctx.messaging.telegram.task_alive().await);
+        }
     }
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    let fds_after = open_fds();
+    // Descriptors once the transient ones are gone. Stop abandons the
+    // in-flight long poll; the fake API answers it within 500 ms, and only
+    // then do both ends of that loopback socket close. So wait on the count
+    // rather than a fixed sleep: the lowest of samples over 3 s.
+    async fn settled_fds() -> usize {
+        let mut low = open_fds();
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            low = low.min(open_fds());
+        }
+        low
+    }
+    // Warm up first: the SQLite pool refills its idle connections (two
+    // descriptors each) and the shared HTTP client keeps keep-alive
+    // connections to the fake server. Both settle within a few cycles; a
+    // baseline taken before that read their growth as a leak.
+    cycles(&h, 10).await;
+    let tasks_before = h.ctx.task_count();
+    let fds_warm = settled_fds().await;
+    cycles(&h, 100).await;
+    let fds_100 = settled_fds().await;
+    cycles(&h, 100).await;
+    let fds_200 = settled_fds().await;
+    println!(
+        "telegram start/stop fds: after warm-up {}, after 100 cycles {}, after 200 {}",
+        fds_warm, fds_100, fds_200
+    );
+    // A leak adds descriptors every cycle, so the second hundred would add
+    // about a hundred more. A plateau adds nothing, except that the HTTP
+    // client's idle pool can hold a connection or two more or fewer
+    // depending on timing (each is two descriptors here: the client's
+    // socket and the in-process fake's): up to three connections of slack.
     assert!(
-        fds_after <= fds_before + 4,
-        "fds {} -> {}",
-        fds_before,
-        fds_after
+        fds_200 <= fds_100 + 6,
+        "the second hundred cycles added descriptors: {} -> {} -> {}",
+        fds_warm,
+        fds_100,
+        fds_200
+    );
+    assert!(
+        fds_100 <= fds_warm + 8,
+        "a hundred cycles after warm-up added descriptors: {} -> {}",
+        fds_warm,
+        fds_100
     );
     assert_eq!(h.ctx.task_count(), tasks_before);
 }
