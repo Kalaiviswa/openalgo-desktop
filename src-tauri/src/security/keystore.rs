@@ -1,10 +1,18 @@
-//! Where the data key and the pepper live.
+//! The OS keychain of earlier builds (KEY-01, maintainer decision
+//! 2026-10-13).
 //!
-//! Production uses the OS keychain through the `keyring` crate (macOS
-//! Keychain, Windows Credential Manager, Linux Secret Service). Tests use
-//! `MemoryKeyStore`. `KeyStoreError::Unavailable` means there is no usable
-//! keychain on this machine (headless Linux, some Raspberry Pi setups); the
-//! security manager then falls back to a password-derived key.
+//! The keys now live in openalgo.db, wrapped with the login password
+//! (`db::sqlite::key_vault`). The keychain (macOS Keychain, Windows
+//! Credential Manager, Linux Secret Service, through the `keyring` crate) is
+//! read once, by the first sign-in of an install whose earlier build kept
+//! its keys there, and its entries are then deleted; nothing writes to it.
+//! `KeyStoreError::Unavailable` means it is locked, refused access or does
+//! not exist.
+//!
+//! `MemoryKeyStore` is the test harness's and the dev server's store: an app
+//! opened with it starts unlocked with keys it keeps (`harness_keys`), so
+//! feature tests need no sign-in. The KEY-01 tests use `CountingKeyStore`,
+//! which behaves like the OS keychain.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -26,6 +34,13 @@ pub trait KeyStore: Send + Sync {
     fn set(&self, name: &str, value: &str) -> Result<(), KeyStoreError>;
     fn delete(&self, name: &str) -> Result<(), KeyStoreError>;
     fn kind(&self) -> &'static str;
+
+    /// Whether the app opens unlocked with keys kept in this store: only
+    /// the in-memory store of the test harness and the dev server. The OS
+    /// keychain answers false: there the keys come with a sign-in.
+    fn harness_keys(&self) -> bool {
+        false
+    }
 }
 
 /// OS keychain.
@@ -85,7 +100,8 @@ impl KeyStore for KeyringStore {
     }
 }
 
-/// In-memory store for tests and for the in-process HTTP test harness.
+/// In-memory store for tests, the in-process HTTP test harness and the dev
+/// server. An app opened with it is unlocked from the start.
 #[derive(Default)]
 pub struct MemoryKeyStore {
     values: Mutex<HashMap<String, String>>,
@@ -116,6 +132,10 @@ impl KeyStore for MemoryKeyStore {
 
     fn kind(&self) -> &'static str {
         "memory"
+    }
+
+    fn harness_keys(&self) -> bool {
+        true
     }
 }
 
