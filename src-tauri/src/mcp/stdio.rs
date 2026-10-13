@@ -36,6 +36,9 @@ pub const BAD_TOKEN: &str =
 Create a new token on the API Key page in OpenAlgo Desktop and update this client's configuration.";
 pub const BUSY: &str =
     "OpenAlgo is receiving too many requests from this AI client. Wait a minute and try again.";
+/// OpenAlgo Desktop is running and refused the request because nobody is
+/// signed in (KEY-01). Nothing was done.
+pub const LOCKED: &str = crate::mcp::http::LOCKED_MESSAGE;
 /// The request reached OpenAlgo Desktop and its answer was lost (N-03):
 /// never "could not be sent".
 pub const ANSWER_LOST: &str =
@@ -131,6 +134,13 @@ impl Bridge {
                     .to_string(),
             )),
             429 => Err(Failure::Message(BUSY.into())),
+            // OpenAlgo refused before doing anything because nobody is
+            // signed in (KEY-01): say so, never "the answer was lost".
+            503 if value.get("error").and_then(Value::as_str)
+                == Some(crate::mcp::http::LOCKED_ERROR) =>
+            {
+                Err(Failure::Message(LOCKED.into()))
+            }
             other => {
                 // The app answered: the request was sent, and may have run.
                 tracing::warn!("OpenAlgo Desktop answered {} to an MCP request", other);

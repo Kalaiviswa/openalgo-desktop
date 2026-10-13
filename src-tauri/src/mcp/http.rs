@@ -59,6 +59,13 @@ pub const RETRY_MS: u64 = 30_000;
 
 pub const SSE_BUSY_MESSAGE: &str =
     "OpenAlgo is already holding as many MCP event streams as it allows. Try again in a moment.";
+/// What an AI client is told while OpenAlgo is locked (KEY-01): its token
+/// is fine, OpenAlgo has nobody signed in. Sent with 503 and the error code
+/// [`LOCKED_ERROR`]; the stdio bridge shows it as it is.
+pub const LOCKED_MESSAGE: &str = "OpenAlgo is locked: nobody has signed in since it started, or \
+you logged out. Sign in to OpenAlgo Desktop on this computer, then try again.";
+pub const LOCKED_ERROR: &str = "locked";
+
 pub const WRITES_DISABLED_MESSAGE: &str =
     "Order tools are turned off for AI clients (the MCP kill switch is on). \
 Turn the write scope back on under Admin, Remote MCP to allow them again.";
@@ -265,6 +272,16 @@ fn public_url(ctx: &AppState) -> String {
         .and_then(|c| store::settings(&c).ok())
         .map(|s| s.public_url.trim_end_matches('/').to_string())
         .unwrap_or_default()
+}
+
+/// 503 with the token-error shape: the token was accepted, OpenAlgo is
+/// locked (KEY-01).
+pub fn locked() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": LOCKED_ERROR, "error_description": LOCKED_MESSAGE})),
+    )
+        .into_response()
 }
 
 fn rpc_error(id: &Value, code: i64, message: &str, data: Option<Value>) -> Response {
@@ -531,6 +548,11 @@ pub async fn post(
         Ok(t) => t,
         Err(r) => return r,
     };
+    // The token is checked first (a digest lookup that needs no key), so
+    // only a client holding a valid token learns that OpenAlgo is locked.
+    if !ctx.security.is_unlocked() {
+        return locked();
+    }
     let (n, w) = DISPATCH_LIMIT;
     if !ctx.mcp.hit(&format!("{}|dispatch", tok.jti()), n, w) {
         return too_many();
@@ -708,6 +730,9 @@ pub async fn sse(
         Ok(t) => t,
         Err(r) => return r,
     };
+    if !ctx.security.is_unlocked() {
+        return locked();
+    }
     let (n, w) = SSE_LIMIT;
     if !ctx.mcp.hit(&format!("{}|sse", tok.jti()), n, w) {
         return too_many();
@@ -759,7 +784,11 @@ pub async fn sse(
                     .conn()
                     .and_then(|c| store::token_is_live(&c, s.token_id))
                     .unwrap_or(false);
-                if !live || tokio::time::Instant::now() >= s.deadline {
+                // So does a logout, which locks OpenAlgo (KEY-01).
+                if !live
+                    || !s.ctx.security.is_unlocked()
+                    || tokio::time::Instant::now() >= s.deadline
+                {
                     None
                 } else {
                     Some((Ok(Bytes::from_static(b": keepalive\n\n")), s))
