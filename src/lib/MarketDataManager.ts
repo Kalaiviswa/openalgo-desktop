@@ -262,10 +262,21 @@ export class MarketDataManager {
         (e) => e.symbol === symbol && e.exchange === exchange
       )
 
+      const dataKey = `${exchange}:${symbol}`
       if (!symbolStillNeeded) {
         // Clean up cache
-        const dataKey = `${exchange}:${symbol}`
         this.dataCache.delete(dataKey)
+      } else if (mode === 'Depth') {
+        // Desktop: with no Depth subscription left the book stops updating,
+        // so it is dropped rather than kept beside fresher prices (TOOLS-09).
+        const depthStillNeeded = Array.from(this.subscriptions.values()).some(
+          (e) => e.symbol === symbol && e.exchange === exchange && e.mode === 'Depth'
+        )
+        const cached = this.dataCache.get(dataKey)
+        if (!depthStillNeeded && cached?.data.depth) {
+          const { depth: _depth, ...rest } = cached.data
+          this.dataCache.set(dataKey, { ...cached, data: rest })
+        }
       }
 
       // Stop fallback polling if no more subscriptions
@@ -584,9 +595,15 @@ export class MarketDataManager {
           const marketDataPayload = (data.data || {}) as MarketData
           const dataKey = `${exchange}:${symbol}`
 
-          // Update cache
+          // Update cache. Desktop: a tick merges only into fields from the
+          // same WebSocket session. After a reconnect, a new authentication
+          // or REST polling, the first tick starts afresh, so an old depth or
+          // bid/ask never travels on with the new session's epoch (TOOLS-09).
           const existing = this.dataCache.get(dataKey) || { symbol, exchange, data: {} }
-          const newData = { ...existing.data }
+          const sameSession =
+            existing.updateSource === 'websocket' &&
+            existing.connectionEpoch === this.connectionEpoch
+          const newData: MarketData = sameSession ? { ...existing.data } : {}
 
           Object.assign(newData, {
             ltp: marketDataPayload.ltp ?? newData.ltp,
@@ -842,9 +859,10 @@ export class MarketDataManager {
           const exchange = result.exchange.toUpperCase()
           const dataKey = `${exchange}:${symbol}`
 
-          // Update cache
+          // Update cache. Desktop: a REST answer never inherits fields a
+          // WebSocket session left behind, such as its depth (TOOLS-09).
           const existing = this.dataCache.get(dataKey) || { symbol, exchange, data: {} }
-          const newData = { ...existing.data }
+          const newData: MarketData = existing.updateSource === 'rest' ? { ...existing.data } : {}
 
           Object.assign(newData, {
             ltp: result.data.ltp ?? newData.ltp,
