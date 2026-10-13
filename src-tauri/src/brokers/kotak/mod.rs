@@ -500,6 +500,8 @@ impl Broker for KotakBroker {
 
     async fn on_logout(&self) {
         *self.feed_url.lock() = None;
+        // A resume puts it back from the saved keys (KEY-01).
+        *self.ucc.lock() = None;
     }
 }
 

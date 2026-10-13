@@ -255,6 +255,12 @@ impl Broker for PocketfulBroker {
         LoginKind::Redirect { param: "code" }
     }
 
+    /// The client id cached under the session's token goes with the
+    /// session (KEY-01).
+    async fn on_logout(&self) {
+        *self.client_id_cache.lock() = None;
+    }
+
     fn supported_exchanges(&self) -> &'static [Exchange] {
         SUPPORTED_EXCHANGES
     }

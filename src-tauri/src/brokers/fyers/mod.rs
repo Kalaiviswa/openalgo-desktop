@@ -317,6 +317,12 @@ impl Broker for FyersBroker {
         LoginKind::Redirect { param: "auth_code" }
     }
 
+    /// The funds cached under the session's token go with the session
+    /// (KEY-01: every cache is cleared at logout).
+    async fn on_logout(&self) {
+        self.funds_cache.clear();
+    }
+
     fn supported_exchanges(&self) -> &'static [Exchange] {
         SUPPORTED_EXCHANGES
     }
