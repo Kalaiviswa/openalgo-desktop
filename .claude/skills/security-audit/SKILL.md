@@ -67,7 +67,7 @@ ephemeral ports).
 
 | Surface | Control | Code | Proof to run |
 | --- | --- | --- | --- |
-| `/api/v1/*` | API key in the JSON body (the `X-API-KEY` header alone is a 400, as on the web); HMAC index plus Argon2 with a short cache; 403 on a bad key; failures (a key in the URL included) throttled per network address (never this computer, per key behind a tunnel) in the budget `/mcp` and the feed share (`middleware::credential_locked`); cross-site requests refused before anything counts; 100/s per IP | `server/api_v1/`, `services/apikey_service.rs`, `security/hashing.rs`, `server/ratelimit.rs` | `cargo test --lib server::tests::bad_api_keys_are_throttled_per_ip`, `api_rate_limit_is_100_per_second_per_ip_with_flask_body`, `server::tests::security::s02`; `tests/it/api_v1_contract.rs` |
+| `/api/v1/*` | 503 with the locked sentence before any key check while nobody is signed in (KEY-01); API key in the JSON body (the `X-API-KEY` header alone is a 400, as on the web); HMAC index plus Argon2 with the web's caches (verified 10 h, invalid 5 min); 403 on a bad key; failures (a key in the URL included) throttled per network address (never this computer, per key behind a tunnel) in the budget `/mcp` and the feed share (`middleware::credential_locked`); cross-site requests refused before anything counts; 100/s per IP | `server/api_v1/`, `services/apikey_service.rs`, `security/hashing.rs`, `server/ratelimit.rs` | `cargo test --lib server::tests::bad_api_keys_are_throttled_per_ip`, `api_rate_limit_is_100_per_second_per_ip_with_flask_body`, `server::tests::security::s02`; `tests/it/api_v1_contract.rs` |
 | Sign-in `/auth/login`, `/auth/login/totp`, reset and 2FA codes, current password | from the app's own page only (`sign_in_origin_ok`), refused before counting; per-address request limit (5/min, 25/h); failure budget per source and account, claimed before the password is checked, 30 s doubling to 5 min; unknown names cost the same Argon2 work | `server/routes/auth.rs`, `server/middleware.rs`, `server/ratelimit.rs` `LoginBackoff` | `cargo test --lib server::tests::security::s02`, `server::ratelimit` |
 | Callers and bans | `middleware::classify` once per request, stored as `Source`: a loopback peer is local only with no forwarding header and the app's own `Host`; no forwarding header is ever read as an address; tunnel callers share one identity, never banned, matching no allowlist; bans and allowlists apply to network peers by canonical address, on every surface including the feed | `server/middleware.rs`, `server/addr.rs`, `services/monitor.rs`, `feed/auth.rs` | `cargo test --lib server::tests::security::s03`, `server::addr` |
 | `/api/v1/telegram/notify`, `/api/v1/whatsapp/notify` | the only endpoints that also read `X-API-KEY` (web parity) | `server/api_v1/notify.rs` | the notify tests in `tests/it/messaging.rs` |
@@ -96,10 +96,34 @@ arithmetic, and one shared budget reserved before any work starts.
 
 ## 3. Secrets at rest, in logs, on the wire
 
-- **Keys.** The data-encryption key and the API-key pepper live in the OS
-  keychain (`security/keystore.rs`, service `com.openalgo.desktop`); with no
-  keychain (headless Linux, some Raspberry Pi setups) a password-derived key,
-  announced in the UI. Never a hard-coded or obfuscated key.
+- **Keys (KEY-01, maintainer decision 2026-10-13).** The data-encryption
+  key and the API-key pepper are wrapped with Argon2id(login password) in
+  the one-row `key_vault` table of `openalgo.db`
+  (`db/sqlite/key_vault.rs`, `docs/port/no-keychain.md`). No OS keychain on
+  any platform: the keychain (`security/keystore.rs`) is read only once, by
+  the first sign-in of an install from an earlier build, and its entries are
+  then deleted. Check:
+  - a new install makes zero keychain calls
+    (`a_new_install_never_touches_the_keychain`) and a moved one never reads
+    the keychain again;
+  - the keys are in memory only between a sign-in that issued a session and
+    the logout (a sign-in waiting for its authenticator code installs
+    nothing), and while locked `/api/v1`, `/mcp`, the feed and the webhooks
+    refuse with the locked sentence and decrypt nothing;
+  - a password change writes the hash and the wrapping in one transaction
+    (the fault test), and a fresh start (forgotten password, unreadable
+    keychain) runs only from the desktop window and leaves no value
+    encrypted under the old key;
+  - every new encrypted column is listed in `key_vault::drop_encrypted_values`
+    and `key_vault::witness`.
+  Never a hard-coded or obfuscated key.
+- **Caches.** Every cache is bounded with a TTL and follows the web's
+  `LockedTTLCache` rules through `crate::cache::TtlCache`: readers fill
+  through the generation read before their query, writers clear after their
+  commit, and logout, a password change or reset, a key rotation and a
+  broker switch clear them. A new cache gets a race test (a read in flight
+  across a clear cannot repopulate it) and a row in the cache table of
+  `docs/port/no-keychain.md`.
 - **Ciphertext.** Broker credentials and tokens are AES-256-GCM with
   associated data binding each ciphertext to its row and column
   (`security/crypto.rs` `encrypt(plaintext, &Aad)`). Check a ciphertext
