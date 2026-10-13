@@ -1,0 +1,248 @@
+# No OS keychain: the key vault in openalgo.db (KEY-01)
+
+Maintainer decision, 2026-10-13. Binding for macOS, Windows and Linux alike.
+
+## Why
+
+Earlier builds kept the data-encryption key and the API-key pepper in the
+operating system's keychain (macOS Keychain, Windows Credential Manager,
+Linux Secret Service), falling back to a password-derived key in
+`vault.json` only where no keychain existed. Unsigned builds change their
+code identity on every update, so macOS asked for keychain access again
+after each one, and a refused prompt locked the trader out of the account
+("OpenAlgo cannot open your system keychain..."). This is finding KEY-01.
+
+## The decisions
+
+1. Every platform behaves the same: no keychain for new installs, and no
+   keychain use after the one-time move of an existing install.
+2. The keys are protected by the trader's OpenAlgo login password
+   (Argon2id). The wrapped key material lives in `openalgo.db`, not in a
+   separate file and not in a keychain. A copied database is useless
+   without the password.
+3. The keys are unlocked at sign-in and kept, with the values decrypted
+   with them, in memory until logout or until the app quits. Then they are
+   wiped (zeroized) and every cache is cleared.
+4. Caching follows the web (`database/auth_db.py`,
+   `utils/thread_safe_cache.py`): every cache is bounded with a TTL;
+   readers fill through the generation they read before their query;
+   writers clear after their commit.
+5. Existing keychain installs move their keys once, at the first sign-in
+   with the new build. Existing password-mode installs move `vault.json`
+   the same way. Every step is crash-safe.
+
+Accepted consequences, explained to the trader on the sign-in page, in
+README and in `docs/user/troubleshooting.md`:
+
+- Until the trader signs in after OpenAlgo starts (and after a logout),
+  `/api/v1`, the market data feed, webhooks, AI clients (MCP) and the broker
+  session are unavailable.
+- A forgotten password cannot be recovered. Setting a new one keeps the
+  account, settings and history; broker keys are entered again, a new API
+  key is issued, and two-factor login (TOTP) is set up again.
+
+## The vault
+
+Migration `081_key_vault` (`src-tauri/src/db/sqlite/key_vault.rs`):
+
+```sql
+CREATE TABLE key_vault (
+    id INTEGER PRIMARY KEY CHECK (id = 1),   -- one row
+    version INTEGER NOT NULL,                -- 1
+    kdf TEXT NOT NULL,                       -- 'argon2id-m19456-t2-p1'
+    salt TEXT NOT NULL,                      -- base64, 16 random bytes
+    nonce TEXT NOT NULL,                     -- base64, 12 bytes
+    ciphertext TEXT NOT NULL,                -- AES-256-GCM(data key || pepper)
+    source TEXT NOT NULL,                    -- setup | keychain | vault_file | legacy_file | fresh
+    keychain_cleanup TEXT NOT NULL DEFAULT 'none',  -- none | pending | done | failed | abandoned
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+- Key encryption key: Argon2id(password, salt) with m = 19 MiB, t = 2,
+  p = 1, the parameters of the password hash. It is zeroized after use.
+- Wrapped: the 32-byte data key followed by the 32-byte pepper, sealed with
+  AES-256-GCM under associated data `openalgo:v1:vault` (the same as the
+  retired `vault.json`, so the two formats wrap identically).
+- A new salt on every wrap. A damaged row (unknown version or KDF, bad
+  base64, wrong length) is an error, never read as a wrong password.
+- `source` and `keychain_cleanup` are bookkeeping, not secrets: where the
+  keys came from, and whether old keychain entries are still to be deleted.
+
+The password hash (`users.password_hash`, Argon2id with the pepper) sits in
+the same database. A password change rewrites the hash and the wrapping in
+**one SQLite transaction**, so no state exists in which one changed and
+the other did not. The file staging of the old password mode
+(`vault.next.json`, promote, roll back, settle at sign-in) is gone.
+
+What is encrypted with the data key (AES-256-GCM, associated data bound to
+table, column and row): the TOTP secret, the OpenAlgo API key (for the API
+Key page), saved broker keys, stored broker sessions, the Telegram bot token
+and linked users' API keys, and the WhatsApp session. The API key's lookup
+index and hash, and the password hash, use the pepper. MCP tokens and
+webhook addresses are SHA-256 digests and need no key.
+
+## Lock and unlock
+
+| Moment | Keys in memory | What happens |
+| --- | --- | --- |
+| App start | no | No keychain call, no decryption. The database is opened and migrated; the vault row is not opened. |
+| Sign-in, password step | staged, not installed | The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code. |
+| Sign-in completes (session issued) | yes | Installed in the same step that issues the signed-in session (`issue_if_current`, so a password change racing the sign-in voids both). Then the stored broker session resumes, and Telegram and WhatsApp start if they were on. |
+| Second device signs in | yes (unchanged) | The password still unwraps the vault; the keys in memory are the same. |
+| Logout | wiped | Every browser session ends; the broker session is revoked (memory first); Telegram and WhatsApp stop; the keys are dropped (the raw key and pepper are zeroed, the AES key schedule too with the `aes/zeroize` feature); every cache is cleared after the lock. |
+| App quit | wiped | Process exit; the shutdown path runs the same lock. |
+| Password change | yes (unchanged) | Hash and wrapping in one transaction; every browser session ends (as before) and every cache is cleared. The keys do not change, so they stay. |
+| Forgotten password (Set a new password) | no | New keys, new wrapping, new hash, encrypted values dropped, in one transaction. The trader signs in with the new password. |
+| Account reset | no | As before, plus the vault row is deleted in the same transaction. |
+| 03:00 IST boundary | yes | As before: the broker session ends and every browser session ends. The keys are not wiped: the maintainer's rule is logout or quit. A trader who wants the API off overnight logs out. Recorded as a deliberate choice. |
+
+While locked:
+
+| Surface | Answer |
+| --- | --- |
+| `/api/v1/*` | 503 with the web's envelope: `{"status": "error", "message": "Sign in to OpenAlgo to use the API. The API is off after OpenAlgo starts and after you log out, until you sign in again."}`. Checked in the `/api/v1` layer after the rate limit and before any key check; nothing counts against the caller. Deviation from the web, which has no locked state: a distinct 503 tells a client the key was not even checked (a wrong key stays 403). |
+| `/mcp` (HTTP) | The token is checked first (a digest lookup that needs no key), then 503 `{"error": "locked", "error_description": ...}`. Open event streams end at the next keepalive. |
+| MCP stdio (`openalgo-desktop mcp`) | The forwarder shows the same sentence as the tool's answer (`isError`), never "the answer was lost". |
+| Market data feed (`authenticate`) | The web's error frame, `AUTHENTICATION_ERROR`, with the locked sentence; the socket stays unauthenticated; nothing counts. |
+| Strategy and Chartink webhooks | The address is checked first; a valid one gets 503 with the locked sentence (in each webhook's own error shape). Nothing is placed. |
+| Broker resume | Runs only after a password sign-in has installed the keys; before that the stored session cannot be decrypted and nothing resumes. |
+| Telegram and WhatsApp bots | Not started until sign-in; stopped at logout. |
+
+## Migration of existing installs
+
+The state at start-up is read from the folder and the database, never from
+the keychain:
+
+```
+                       +-------------------------------+
+                       | users row?                    |
+                       +-------------------------------+
+                         | no                   | yes
+                         v                      v
+                    NoAccount            key_vault row?
+                 (setup makes the        | yes      | no
+                  vault; 0 keychain      v          v
+                  calls)              Vault     vault.json or vault.next.json?
+                                                 | yes             | no
+                                                 v                 v
+                                          FromVaultFile     secrets.dat?
+                                                            | yes        | no
+                                                            v            v
+                                                     FromLegacyFile  FromKeychain
+```
+
+Each `From*` state becomes `Vault` at the first sign-in that succeeds:
+
+1. **Read the old keys.** `FromVaultFile`: open `vault.json` with the typed
+   password (then `vault.next.json`, a password change an older build left
+   half done). `FromLegacyFile`: decode `secrets.dat`. `FromKeychain`: only
+   for the account's own user name, read `data-key` and `api-key-pepper`
+   from the keychain: the one last prompt.
+2. **Prove them.** The stored password hash must verify with the pepper,
+   and the first encrypted row (the TOTP secret, else the API key, else
+   broker keys, else a broker session) must decrypt with the data key.
+   A wrong password installs nothing. Keys that open no row are another
+   install's keys (see failures).
+3. **Copy into the database.** One `BEGIN IMMEDIATE` transaction inserts the
+   vault row (wrapped with the typed password; `source` says where from;
+   for the keychain `keychain_cleanup = 'pending'`), reads it back inside
+   the transaction and unwraps and decrypts the witness again, then commits
+   with `synchronous = FULL` so the commit is on disk before step 5.
+4. **Verify after the commit.** A new connection reads the row, unwraps it
+   and decrypts the witness.
+5. **Delete the source.** `vault.json` and `vault.next.json`, or
+   `secrets.dat` (after the AAD re-encryption it carries), are removed and
+   the folder synced. Keychain entries are deleted once and
+   `keychain_cleanup` becomes `done`; if the keychain refuses, `failed`, and
+   it is never touched again (the troubleshooting page says how to remove
+   them by hand).
+
+Crash at every step:
+
+| Stopped after | Left behind | Next sign-in |
+| --- | --- | --- |
+| 1 or 2 | the old source, no row | starts over from step 1 |
+| 3 before COMMIT | the old source, no row (rolled back) | starts over from step 1 |
+| 3 (committed) or 4 | row and old source | `Vault`: unwraps the row; the cleanup of step 5 runs then. The keychain is not read. |
+| 5, keychain deletion not reached | row with `pending` | `Vault`; the deletion is attempted once, then `done` or `failed` |
+| 5 done | row | `Vault` |
+
+The source is never deleted before the row is committed, on disk and
+verified. The keychain is never read once a row exists.
+
+## Failures
+
+| Situation | What the trader sees | Choices |
+| --- | --- | --- |
+| Keychain locked or access refused (`FromKeychain`) | "OpenAlgo needs to read your keys from the system keychain one last time to move them into its own database, and the keychain refused or is locked." | **Allow the keychain once and retry** (signs in again with what was typed; choose Allow when the system asks). **Start fresh**. |
+| Keychain has no entries, or entries that open no row (a folder from another computer, a reset) | "The keys for this account are not in this computer's keychain." | **Start fresh** (or restore the folder on the computer it came from). |
+| Wrong password | "Invalid credentials", as before | - |
+| Damaged vault row or unreadable `vault.json` | "OpenAlgo could not read the keys saved with your account." | **Start fresh** |
+| A write fails during a move | The sign-in fails with "try again"; the source is untouched | retry |
+| Forgotten password | Forgot password page | **Set a new password** (same operation as Start fresh) or Reset account |
+
+**Start fresh** and **Set a new password** are one operation
+(`AuthService::start_fresh`), allowed only from the OpenAlgo Desktop window
+on this computer after a native confirmation (a Tauri command, like Reset
+account), never over HTTP: nothing reaching the server over the network can
+replace the password. In one transaction: new random keys; the vault
+wrapped with the new password (`source = fresh`; `keychain_cleanup =
+abandoned` when the keychain was unreadable, so it is never touched); the
+new password hash; a new API key (the order mode is kept); a new TOTP
+secret with every "require the authenticator" switch off; and every
+encrypted value dropped (`key_vault::drop_encrypted_values`): saved broker
+keys (the broker id, client id and redirect URL stay), stored broker
+sessions, pending broker sign-ins, the Telegram bot token and linked users'
+saved keys, the WhatsApp pairing. Kept: the account (name and email),
+settings, strategies, webhook and Chartink addresses, AI client tokens,
+watchlists, logs, history and sandbox mode, none of which is encrypted.
+Every browser session ends and every cache is cleared. Then the new vault
+is unwrapped and the new TOTP secret decrypted (verification), and old
+`vault.json`, `vault.next.json` and `secrets.dat` are deleted.
+
+The TOTP reset of the web cannot work here: the TOTP secret is encrypted
+with the data key, which is locked while nobody is signed in. The
+`/auth/reset-password` route is retired with the web page it served.
+
+## Caches against the web
+
+The web's rules (`database/auth_db.py` lines 160-175, `invalidate_user_cache`
+and `invalidate_user_auth_cache`, `utils/thread_safe_cache.py`) and the
+desktop after this change. `crate::cache::TtlCache` is the Rust
+`LockedTTLCache`: maxsize, TTL, `generation`, `fill`, `invalidate`,
+`clear`, `get_or_load`.
+
+| Cache | Web | Desktop | Holds | Cleared by | Race guard | Difference, if any |
+| --- | --- | --- | --- | --- | --- | --- |
+| Verified API keys | 1024, 10 h, user id | `ApiKeyCache.verified`: 1024, 10 h, the account name | HMAC of the presented key under a per-process key -> account name | regeneration, logout (lock), password change or reset, start fresh, account reset, broker sign-in or switch (`persist`, `revoke_held`) | generations read before the query; `fill` drops a stale answer | Keyed by a per-process HMAC, not the key: stronger than the web's key-as-key. |
+| Invalid API keys | 512, 5 min | `ApiKeyCache.invalid`: 512, 5 min | HMAC -> nothing | same | same | - |
+| Order mode | 128, 60 s, invalidated on change | `ApiKeyCache.order_mode`: 128, 60 s | `auto` / `semi_auto` | `set_order_mode` after its write; every clear above | generation read before the query | Was read from the database on every order; now cached as on the web. |
+| Broker auth and feed tokens | 1024 each, TTL until the next 03:00 IST (5 min to 24 h) | `AppState.broker_session`: one slot | the decrypted session (`Secret`) | logout, switch, boundary, account reset, start fresh | `try_resume` re-reads the stored row under `session_lock` before installing; the boundary clears only the session it read (compare and clear) | Exact boundary instead of a clamped TTL: no 5-minute tail after 03:00. One slot because one broker is logged in at a time. |
+| Broker name | 1024, 50 min | `ServerConfig.active_broker` in memory | the active broker id | reloaded after every write | writers reload after their commit | A settings snapshot, not a TTL cache. |
+| Symbol master | loaded at login, cleared at logout | `SymbolResolver`: one generation, bounded by the master | broker symbols and tokens (no secret) | broker session end (logout, switch, boundary) | a load is accepted only if no `clear` ran since the loader read the clear generation (`load_master_if`) | - |
+| Instrument facts (`/trading`) | - | `FactsCache`: 256, 60 s, tagged with the master generation | facts from the master and the calendar | logout; any master change makes entries miss | `TtlCache` generation; entries from an older master are ignored | Desktop only. |
+| Quotes | per-symbol in the feed proxy | feed bridge `last_tick`, held instruments only; adapter snapshots live with their socket | ticks | broker session end (`bridge.reset`, socket teardown) | filled only for held instruments from the live socket | The bridge's subscription bookkeeping (`applied`) can be re-inserted after a reset by a subscribe in flight; recorded for the feed work (it holds no quote or credential). |
+| Capability store (frontend) | per page | `brokerStore` capabilities | what the logged-in broker supports | a session change pushed by the server (`active_sessions_update`), logout | a reply for an earlier broker is ignored (STATE-01) | - |
+| Browser sessions | Flask session | `WebSessionStore`: 256, anonymous 30 min idle, pending TOTP 5 min | session id -> user, CSRF token, pending sign-in (with staged keys) | logout, password change or reset, start fresh, account reset, boundary | - | - |
+| Broker adapter state | module globals per broker | per adapter | e.g. XTS market keys, OTP tokens, funds | `on_logout` of every adapter at the lock, not only the active one | - | Symbol-to-id lookups of a few adapters (Arrow, HDFC Sky, IndMoney, Samco, Motilal traits) stay: bounded, no account data. |
+
+Not caches in this sense, unchanged: rate limiter and sign-in backoff
+windows (bounded, per source), MCP and webhook rate windows, the analyzer
+mode memo (written under the reader's lock), the monitor's ban list.
+
+## Tests (acceptance)
+
+| Acceptance item | Test |
+| --- | --- |
+| New install: password mode, zero keychain calls, vault in openalgo.db | `security::tests::a_new_install_never_touches_the_keychain` |
+| Keychain move: copied, verified, entries deleted, rows readable, never read again | `server::tests::key_vault::keychain_keys_move_once_and_the_keychain_is_never_read_again` |
+| A stop at every step recovers | `server::tests::key_vault::a_stop_at_every_step_of_the_move_recovers` |
+| Unreadable keychain: retry and start fresh | `server::tests::key_vault::an_unreadable_keychain_offers_retry_and_start_fresh` |
+| `vault.json` move | `server::tests::key_vault::a_password_mode_vault_file_moves_into_the_database_once` |
+| Locked before sign-in and after logout | `server::tests::key_vault::locked_before_sign_in_and_after_logout_every_surface_refuses` |
+| Password change: one transaction, fault test | `server::tests::key_vault::a_password_change_writes_hash_and_vault_together` |
+| Forgotten password | `server::tests::key_vault::a_new_password_without_the_old_one_drops_only_encrypted_values` |
+| Caches | `services::apikey_service::tests::*`, `cache::tests::*`, master and facts race tests |
+| Windows and Linux | CI on four systems |
