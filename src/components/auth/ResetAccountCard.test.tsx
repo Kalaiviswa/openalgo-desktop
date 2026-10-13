@@ -39,7 +39,7 @@ describe('ResetAccountCard', () => {
 
   it('in a browser tab explains where to reset and offers no button', () => {
     renderCard()
-    expect(screen.getByText(/Lost your password and your authenticator/)).toBeInTheDocument()
+    expect(screen.getByText(/Start over with a new account instead/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /reset account/i })).toBeNull()
     expect(screen.getByText(/only in the OpenAlgo Desktop window/)).toBeInTheDocument()
   })

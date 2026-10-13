@@ -6,7 +6,14 @@ import Login from './Login'
 // go: the dashboard when the saved broker session was resumed, otherwise
 // Select Broker. No page in between.
 
-function serve(opts: { needsSetup?: boolean; login: Record<string, unknown>; totp?: unknown }) {
+function serve(opts: {
+  needsSetup?: boolean
+  login: Record<string, unknown>
+  totp?: unknown
+  /** Answers to successive sign-ins (with their status), before `login`. */
+  logins?: { status: number; body: Record<string, unknown> }[]
+}) {
+  const queue = [...(opts.logins ?? [])]
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
@@ -17,8 +24,9 @@ function serve(opts: { needsSetup?: boolean; login: Record<string, unknown>; tot
       }
       if (url === '/auth/csrf-token') return json({ csrf_token: 'tok' })
       if (url === '/auth/login') {
-        return new Response(JSON.stringify(opts.login), {
-          status: 200,
+        const next = queue.shift()
+        return new Response(JSON.stringify(next ? next.body : opts.login), {
+          status: next ? next.status : 200,
           headers: { 'content-type': 'application/json' },
         })
       }
@@ -109,5 +117,71 @@ describe('Sign-in card', () => {
       'href',
       '/reset-password'
     )
+  })
+})
+
+// KEY-01: the first sign-in with this build moves an earlier build's keys
+// out of the system keychain once. When the keychain cannot be read the
+// server offers two ways out.
+describe('Keys of an earlier build', () => {
+  const unreadable = {
+    status: 503,
+    body: {
+      status: 'error',
+      code: 'keychain_unreadable',
+      message: 'OpenAlgo needs to read your keys from the system keychain one last time.',
+      recovery: ['retry_keychain', 'start_fresh'],
+    },
+  }
+
+  it('retries the keychain with what was typed, then signs in', async () => {
+    serve({ logins: [unreadable], login: { status: 'success', redirect: '/broker' } })
+    render(<Login />)
+    await signIn()
+    expect(await screen.findByText(/one last time/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Allow the keychain once and retry' }))
+    await waitFor(() => expect(window.location.pathname).toBe('/broker'))
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+    expect(calls.filter((c) => c[0] === '/auth/login')).toHaveLength(2)
+  })
+
+  it('offers starting fresh, which opens the new-password form', async () => {
+    serve({ logins: [unreadable], login: { status: 'success' } })
+    render(<Login />)
+    await signIn()
+    fireEvent.click(await screen.findByRole('button', { name: 'Start fresh' }))
+    expect(await screen.findByRole('heading', { name: 'Start fresh' })).toBeInTheDocument()
+    expect(screen.getByText(/enter your broker keys again/)).toBeInTheDocument()
+  })
+
+  it('offers only a fresh start when the keychain has no keys for this account', async () => {
+    serve({
+      logins: [
+        {
+          status: 409,
+          body: {
+            status: 'error',
+            code: 'keys_missing',
+            message: "The keys for this account are not in this computer's keychain.",
+            recovery: ['start_fresh'],
+          },
+        },
+      ],
+      login: { status: 'success' },
+    })
+    render(<Login />)
+    await signIn()
+    expect(await screen.findByText(/not in this computer's keychain/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow the keychain once and retry' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Start fresh' })).toBeInTheDocument()
+  })
+
+  it('tells the trader what stays off until they sign in', async () => {
+    serve({ login: { status: 'success' } })
+    render(<Login />)
+    await screen.findByLabelText('Username')
+    expect(
+      screen.getByText(/Until you sign in, the API, market data, webhooks, AI clients/)
+    ).toBeInTheDocument()
   })
 })

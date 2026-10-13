@@ -235,6 +235,12 @@ export default function ApiKey() {
               </Button>
             </div>
 
+            {/* Desktop: the API answers only while OpenAlgo is unlocked (KEY-01). */}
+            <p className="text-sm text-muted-foreground">
+              Programs using this key work while you are signed in to OpenAlgo. After OpenAlgo
+              starts, and after you log out, they are told: Sign in to OpenAlgo to use the API.
+            </p>
+
             {/* Divider */}
             <div className="border-t pt-6">
               {/* Order Mode Toggle */}

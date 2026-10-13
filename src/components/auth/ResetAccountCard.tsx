@@ -5,9 +5,11 @@ import { isDesktopShell, resetAccountFromDesktop } from '@/lib/desktop'
 import { showToast } from '@/utils/toast'
 
 /**
- * Desktop: the last way back in when the password and the authenticator are
- * both lost. The reset runs only inside the OpenAlgo Desktop window, after
- * the trader confirms in a system dialog; a browser tab shows where to go.
+ * Desktop: start over with a new account. A forgotten password alone is
+ * handled by setting a new one (`StartFreshCard`), which keeps the account;
+ * this removes it. The reset runs only inside the OpenAlgo Desktop window,
+ * after the trader confirms in a system dialog; a browser tab shows where
+ * to go.
  */
 export function ResetAccountCard() {
   const navigate = useNavigate()
@@ -37,7 +39,7 @@ export function ResetAccountCard() {
       className="rounded-lg border border-destructive/40 p-4 space-y-2 text-sm"
     >
       <h2 id="reset-account-heading" className="font-medium">
-        Lost your password and your authenticator?
+        Start over with a new account instead?
       </h2>
       <p className="text-muted-foreground">
         Reset account removes your OpenAlgo login, API key and saved broker keys, ends your broker

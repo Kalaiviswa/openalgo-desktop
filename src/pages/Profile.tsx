@@ -1702,7 +1702,7 @@ export default function ProfilePage() {
               </div>
               <div>
                 <p className="font-medium text-foreground">Sensitive Files</p>
-                {/* Desktop: there is no .env file; secrets live in the OS keychain. */}
+                {/* Desktop: there is no .env file; the keys are in openalgo.db, locked with the password. */}
                 <p>
                   Files marked as sensitive should have restricted permissions (600 or 700) to
                   prevent unauthorized access.
