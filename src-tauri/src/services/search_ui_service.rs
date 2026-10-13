@@ -13,7 +13,7 @@ use crate::brokers::common::underlying::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub use crate::brokers::common::underlying::{extract_underlying, is_fno, FNO_EXCHANGES};
 
@@ -300,6 +300,9 @@ pub fn underlyings(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let mut set = BTreeSet::new();
+    // A master holds a few dozen distinct expiries across ~10^5 rows: decide
+    // each (expiry, venue) once.
+    let mut live: HashMap<(&str, &str), bool> = HashMap::new();
     for r in rows {
         if exchange.is_some_and(|e| r.exchange != e) {
             continue;
@@ -309,7 +312,11 @@ pub fn underlyings(
             Some(ContractKind::Future) => include_futures,
             _ => false,
         };
-        if !wanted || !listed_live(&r.expiry, &r.exchange, now) {
+        if !wanted
+            || !*live
+                .entry((r.expiry.as_str(), r.exchange.as_str()))
+                .or_insert_with(|| listed_live(&r.expiry, &r.exchange, now))
+        {
             continue;
         }
         if let Some(u) = row_underlying(r) {

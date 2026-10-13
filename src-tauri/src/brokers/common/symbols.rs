@@ -136,7 +136,12 @@ impl SymbolGeneration {
             // description on some masters (Fyers) and must not decide
             // which contracts belong to an underlying. Rows without a
             // dated symbol (cash, indices) keep `name`.
-            let identity = super::underlying::row_underlying(row)
+            // An undated crypto contract (a perpetual, spot) keeps `name`
+            // (`BTC`): its symbol (`BTCUSDFUT`) names no underlying.
+            let undated_crypto = row.exchange == "CRYPTO" && row.expiry.is_empty();
+            let identity = (!undated_crypto)
+                .then(|| super::underlying::row_underlying(row))
+                .flatten()
                 .or_else(|| (!row.name.is_empty()).then(|| row.name.clone()));
             if let Some(u) = identity {
                 by_underlying
@@ -510,6 +515,43 @@ pub(crate) mod tests {
             lot_size: 75,
             ..row(sym, br, "NFO", token)
         }
+    }
+
+    /// The underlying index keys F&O contracts by the underlying in their
+    /// symbol, never a description; an undated crypto contract keeps its
+    /// `name` (review of TOOLS-01).
+    #[test]
+    fn the_underlying_index_reads_symbols_and_keeps_crypto_perpetuals() {
+        let mut fyers = opt(
+            "NIFTY13OCT2625000CE",
+            "NSE:X",
+            "1",
+            "13-OCT-26",
+            25000.0,
+            "CE",
+        );
+        fyers.name = "NIFTY 13 Oct 26 25000 CE".into();
+        let mut perp = row("BTCUSDFUT", "BTCUSD", "CRYPTO", "2");
+        perp.name = "BTC".into();
+        perp.instrument_type = "PERPFUT".into();
+        let mut option = row("BTC14OCT26100000CE", "C-BTC-100000-141026", "CRYPTO", "3");
+        option.name = "BTC".into();
+        option.expiry = "14-OCT-26".into();
+        option.instrument_type = "CE".into();
+        let g = SymbolGeneration::build(vec![fyers, perp, option], 1);
+        let q = |exchange, underlying| {
+            g.contracts(&ContractQuery {
+                exchange,
+                underlying,
+                ..Default::default()
+            })
+            .into_iter()
+            .map(|r| r.symbol.as_str())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(q("NFO", "NIFTY"), ["NIFTY13OCT2625000CE"]);
+        assert!(q("NFO", "NIFTY 13 Oct 26 25000 CE").is_empty());
+        assert_eq!(q("CRYPTO", "BTC"), ["BTCUSDFUT", "BTC14OCT26100000CE"]);
     }
 
     fn sample() -> SymbolResolver {
