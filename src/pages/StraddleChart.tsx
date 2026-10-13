@@ -33,7 +33,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useExpiryLookup } from '@/hooks/useExpiryLookup'
+import { expiriesFor, useExpiryLookup } from '@/hooks/useExpiryLookup'
+import { useRequestGeneration } from '@/hooks/useRequestGeneration'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { serverSentence } from '@/lib/serverSentence'
 import { useThemeStore } from '@/stores/themeStore'
@@ -550,6 +551,9 @@ export default function StraddleChart() {
     }
   }, [selectedExchange, defaultUnderlyings])
 
+  // Desktop: only the newest load may change the chart (TOOLS-07).
+  const requests = useRequestGeneration()
+
   // Fetch expiries when underlying changes. Desktop: every outcome is a
   // state the page shows, with Retry (TOOLS-02).
   const expiryLookup = useExpiryLookup(
@@ -558,6 +562,8 @@ export default function StraddleChart() {
     oiProfileApi.getExpiries,
     {
       onReset: () => {
+        requests.invalidate()
+        setIsLoading(false)
         setExpiries([])
         setSelectedExpiry('')
         setChartData(null)
@@ -574,6 +580,7 @@ export default function StraddleChart() {
 
   const loadData = useCallback(async () => {
     if (!selectedExpiry) return
+    const request = requests.begin()
     setIsLoading(true)
     try {
       const res = await straddleChartApi.getStraddleData({
@@ -583,6 +590,7 @@ export default function StraddleChart() {
         interval: selectedInterval,
         days: parseInt(selectedDays, 10),
       })
+      if (!requests.isCurrent(request)) return
       if (res.status === 'success' && res.data) {
         chartDataRef.current = res.data
         setChartData(res.data)
@@ -591,11 +599,13 @@ export default function StraddleChart() {
         showToast.error(res.message || 'Failed to load straddle data', 'positions')
       }
     } catch (error) {
+      if (!requests.isCurrent(request)) return
       showToast.error(serverSentence(error, 'Failed to fetch straddle data'), 'positions')
     } finally {
-      setIsLoading(false)
+      if (requests.isCurrent(request)) setIsLoading(false)
     }
   }, [
+    requests,
     selectedExpiry,
     selectedInterval,
     selectedDays,
@@ -604,9 +614,12 @@ export default function StraddleChart() {
     applyDataToChart,
   ])
 
+  // Desktop: load only once the expiry belongs to the underlying shown
+  // (TOOLS-08); the web also loaded the new underlying with the old expiry.
+  const expiryCurrent = expiriesFor(expiryLookup, selectedExchange, selectedUnderlying)
   useEffect(() => {
-    loadData()
-  }, [loadData])
+    if (expiryCurrent) loadData()
+  }, [loadData, expiryCurrent])
 
   // ── Display helpers ───────────────────────────────────────────
 

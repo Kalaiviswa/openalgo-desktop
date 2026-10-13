@@ -133,6 +133,10 @@ export default function OIRange() {
     oiTrackerApi.getExpiries,
     {
       onReset: () => {
+        // Desktop: an answer for the previous underlying is dropped from
+        // here on, not only once the next data request starts (TOOLS-08).
+        requestIdRef.current += 1
+        setIsLoading(false)
         setExpiries([])
         setSelectedExpiry('')
         setOiData(null)
