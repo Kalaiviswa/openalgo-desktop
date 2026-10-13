@@ -103,6 +103,7 @@ pub fn uncertain_cause(e: &AppError) -> Option<Option<String>> {
         | AppError::Locked
         | AppError::KeychainUnavailable
         | AppError::KeysDoNotMatch
+        | AppError::VaultUnreadable
         | AppError::Keychain(_)
         | AppError::Encryption(_)
         | AppError::Database(_)
