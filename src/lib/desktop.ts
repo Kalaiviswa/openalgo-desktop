@@ -382,3 +382,64 @@ export async function resetAccountFromDesktop(): Promise<ResetAccountOutcome> {
     throw new Error(message || 'Your account could not be reset. Restart OpenAlgo and try again.')
   }
 }
+
+// ============================================================================
+// Start fresh / set a new password (desktop window only)
+// ============================================================================
+
+/**
+ * Why the trader is starting fresh: the keychain of an earlier build could
+ * not be read (or holds no keys for this account), or the password is
+ * forgotten. The operation is the same; the server records which.
+ */
+export type StartFreshReason = 'keychain' | 'forgot'
+
+/** What the desktop window answers to a start-fresh request. */
+export interface StartFreshOutcome {
+  status: 'done' | 'cancelled'
+  message: string
+}
+
+/**
+ * Keep the account, settings and history and set a new password, dropping
+ * what the old keys protected: saved broker keys, the API key (a new one is
+ * made) and two-factor login (set up again). There is no web address for
+ * it: the desktop shell asks the trader to confirm in a system dialog and
+ * only then changes anything, so nothing reaching the local server over the
+ * network can replace the password.
+ */
+export async function startFreshFromDesktop(
+  newPassword: string,
+  confirmPassword: string,
+  reason: StartFreshReason
+): Promise<StartFreshOutcome> {
+  if (!isDesktopShell()) {
+    throw new Error('Open OpenAlgo Desktop on this computer to set a new password.')
+  }
+  try {
+    return await invoke<StartFreshOutcome>('start_fresh', {
+      newPassword,
+      confirmPassword,
+      reason,
+    })
+  } catch (e) {
+    const message =
+      typeof e === 'object' && e !== null && 'message' in e ? String(e.message) : undefined
+    throw new Error(
+      message || 'Your new password could not be set. Restart OpenAlgo and try again.'
+    )
+  }
+}
+
+/** What the sign-in answers when the keys of an earlier build cannot be read. */
+export type KeyRecovery = 'retry_keychain' | 'start_fresh'
+
+/** The recovery choices of a sign-in answer, or null for an ordinary one. */
+export function keyRecoveryOf(body: unknown): KeyRecovery[] | null {
+  const b = body as { recovery?: unknown } | null
+  if (!b || !Array.isArray(b.recovery)) return null
+  const known = b.recovery.filter(
+    (r): r is KeyRecovery => r === 'retry_keychain' || r === 'start_fresh'
+  )
+  return known.length ? known : null
+}

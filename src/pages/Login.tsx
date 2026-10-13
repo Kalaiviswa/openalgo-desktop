@@ -1,11 +1,14 @@
-import { ArrowLeft, Eye, EyeOff, Loader2, LogIn, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, Eye, EyeOff, KeyRound, Loader2, LogIn, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
+// Desktop: the one-time move of an earlier build's keys (KEY-01).
+import { StartFreshCard } from '@/components/auth/StartFreshCard'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { type KeyRecovery, keyRecoveryOf } from '@/lib/desktop'
 import { useAuthStore } from '@/stores/authStore'
 import { showToast } from '@/utils/toast'
 
@@ -15,7 +18,13 @@ export default function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [totpCode, setTotpCode] = useState('')
-  const [step, setStep] = useState<'password' | 'totp'>('password')
+  // Desktop: 'keys' when the keys of an earlier build could not be read
+  // (the server offers retrying the keychain and starting fresh), 'fresh'
+  // for the start-fresh form.
+  const [step, setStep] = useState<'password' | 'totp' | 'keys' | 'fresh'>('password')
+  const [recovery, setRecovery] = useState<KeyRecovery[]>([])
+  const [keysMessage, setKeysMessage] = useState('')
+  const [notice, setNotice] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isCheckingSetup, setIsCheckingSetup] = useState(true)
@@ -72,8 +81,13 @@ export default function Login() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    await submitPassword()
+  }
+
+  const submitPassword = async () => {
     setIsLoading(true)
     setError(null)
+    setNotice(null)
 
     try {
       // First, fetch CSRF token
@@ -118,7 +132,18 @@ export default function Login() {
 
       const data = await response.json()
 
+      // Desktop: the keys of an earlier build could not be read; the
+      // server says which ways out there are.
+      const keyRecovery = keyRecoveryOf(data)
+      if (!response.ok && keyRecovery) {
+        setRecovery(keyRecovery)
+        setKeysMessage(data.message || 'OpenAlgo could not open the keys for your account.')
+        setStep('keys')
+        return
+      }
+
       if (!response.ok || data.status === 'error') {
+        setStep('password')
         setError(data.message || 'Login failed. Please try again.')
         if (data.redirect) {
           navigate(data.redirect)
@@ -198,6 +223,14 @@ export default function Login() {
     setError(null)
   }
 
+  // Desktop: after a fresh start the trader signs in with the new password.
+  const handleFreshStartDone = (message: string) => {
+    showToast.success(message, 'system')
+    setPassword('')
+    setStep('password')
+    setNotice(message)
+  }
+
   // Show loading while checking setup
   if (isCheckingSetup) {
     return (
@@ -224,7 +257,66 @@ export default function Login() {
             <CardDescription>Sign in to your account</CardDescription>
           </CardHeader>
           <CardContent>
-            {step === 'password' ? (
+            {step === 'keys' ? (
+              <div className="space-y-4">
+                <Alert variant="destructive">
+                  <KeyRound className="h-4 w-4" />
+                  <AlertTitle>Your keys could not be opened</AlertTitle>
+                  <AlertDescription>{keysMessage}</AlertDescription>
+                </Alert>
+                {recovery.includes('retry_keychain') && (
+                  <Button
+                    type="button"
+                    className="w-full"
+                    onClick={() => submitPassword()}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Waiting for the keychain...
+                      </>
+                    ) : (
+                      'Allow the keychain once and retry'
+                    )}
+                  </Button>
+                )}
+                {recovery.includes('start_fresh') && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => setStep('fresh')}
+                    disabled={isLoading}
+                  >
+                    Start fresh
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  onClick={handleBackToPassword}
+                  disabled={isLoading}
+                >
+                  <ArrowLeft className="mr-1 h-4 w-4" />
+                  Back
+                </Button>
+              </div>
+            ) : step === 'fresh' ? (
+              <div className="space-y-4">
+                <StartFreshCard reason="keychain" onDone={handleFreshStartDone} />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  onClick={() => setStep('keys')}
+                >
+                  <ArrowLeft className="mr-1 h-4 w-4" />
+                  Back
+                </Button>
+              </div>
+            ) : step === 'password' ? (
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="username">Username</Label>
@@ -278,6 +370,12 @@ export default function Login() {
                     </Link>
                   </div>
                 </div>
+
+                {notice && (
+                  <Alert>
+                    <AlertDescription>{notice}</AlertDescription>
+                  </Alert>
+                )}
 
                 {error && (
                   <Alert variant="destructive">
@@ -374,6 +472,12 @@ export default function Login() {
             )}
           </CardContent>
         </Card>
+        {/* Desktop: the keys are locked until sign-in (KEY-01). */}
+        <p className="mt-4 text-center text-xs text-muted-foreground">
+          OpenAlgo keeps your saved keys locked with your password. Until you sign in, the API,
+          market data, webhooks, AI clients and your broker connection stay off, and they go off
+          again when you log out.
+        </p>
       </div>
     </div>
   )
