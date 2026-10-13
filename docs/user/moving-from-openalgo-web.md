@@ -76,7 +76,7 @@ There is no `.env` file. Each setting has a place in the app:
 | `FLASK_HOST_IP`, `FLASK_PORT` | Server Settings, App address and App port |
 | `WEBSOCKET_HOST`, `WEBSOCKET_PORT` | Server Settings, Market data address and Market data port |
 | `HOST_SERVER`, `NGROK_ALLOW`, `WEBSOCKET_URL` | Profile, Broker tab, Server Configuration |
-| `APP_KEY`, `API_KEY_PEPPER` | Not needed. Created on first run and kept in your system keychain |
+| `APP_KEY`, `API_KEY_PEPPER` | Not needed. Created when you make your account and kept in `openalgo.db`, locked with your OpenAlgo password |
 
 ## What does not carry over
 

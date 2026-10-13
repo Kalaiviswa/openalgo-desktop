@@ -177,11 +177,56 @@ on this computer. Sign in with the right password once the wait is over.
 - Use the key from the **API Key** page of OpenAlgo Desktop. A key from
   OpenAlgo web does not work here.
 - If you regenerated the key, update every tool that uses it.
-- On a computer with no system keychain (for example Raspberry Pi OS Lite),
-  OpenAlgo protects its keys with your password. After the app starts, sign
-  in once; until then every API request is refused as an invalid key.
+- If the answer is "Sign in to OpenAlgo to use the API", the key is not the
+  problem: OpenAlgo protects its keys with your password, so after it starts,
+  and after you log out, the API stays off until you sign in. Sign in to
+  OpenAlgo and try again. The market data feed, webhooks and AI clients say
+  the same.
 - After several invalid-key attempts in a minute from another device on your
   network, OpenAlgo blocks further attempts from that device for a while. Fix
   the key, wait, and try again. Programs on this computer are never blocked
   this way, a web page open in your browser cannot cause it, and through a
   tunnel only the wrong key itself is blocked, never your correct one.
+
+## Signing in, and a forgotten password
+
+OpenAlgo Desktop keeps your saved broker keys, your API key and your
+two-factor login secret encrypted, and locks the key that opens them with your
+OpenAlgo password. Nothing is kept in your computer's keychain.
+
+- **After OpenAlgo starts, sign in first.** Until you do, the API, the market
+  data feed, TradingView and Chartink webhooks, AI clients (MCP) and your
+  broker connection stay off. Your saved broker session comes back when you
+  sign in, if it is still from today. Logging out turns them off again.
+- **Forgot your password?** Choose **Forgot password?** on the sign-in page,
+  in the OpenAlgo Desktop window on this computer. Without the old password
+  nothing it locked can be opened, so setting a new password keeps your
+  account, settings, strategies, watchlists and history, and then you:
+  - enter your broker keys again on **Broker Configuration** and sign in to
+    your broker;
+  - copy the new API key from the **API Key** page into every tool that uses
+    it (TradingView, Amibroker, Python scripts, Excel);
+  - set up two-factor login again (**Profile**, **TOTP** tab), if you used it;
+  - add your Telegram bot again and pair WhatsApp again, if you used them.
+
+  Your AI client tokens, webhook addresses and Chartink addresses keep
+  working.
+- **First sign-in after upgrading from an earlier build.** Earlier builds kept
+  the keys in your computer's keychain. The first sign-in reads them from
+  there one last time, moves them into OpenAlgo's own database, checks them
+  and deletes the keychain entries. On a Mac, choose **Allow** (or **Always
+  Allow**) when macOS asks; on Linux, unlock your keyring if asked. After this
+  OpenAlgo never uses the keychain again.
+- **"OpenAlgo needs to read your keys from the system keychain one last
+  time".** The keychain was locked or the request was refused. Choose
+  **Allow the keychain once and retry** and allow access when asked, or
+  choose **Start fresh**, which sets a new password as described above.
+- **"The keys for this account are not in this computer's keychain".** The
+  data folder came from another computer, or from before an account reset.
+  Restore the folder on the computer it came from, or choose **Start fresh**.
+- **Old keychain entries.** If OpenAlgo could not delete them after the move
+  (or you started fresh because the keychain could not be read), they are left
+  unused. You can remove them yourself: on a Mac, open **Keychain Access** and
+  delete the entries named `com.openalgo.desktop`; on Windows, open
+  **Credential Manager**, **Windows Credentials**; on Linux, use your
+  keyring manager (for example **Passwords and Keys**).

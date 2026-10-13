@@ -16,8 +16,7 @@ OpenAlgo Desktop is a single-user desktop version of
 macOS, Linux and Raspberry Pi, with the same screens, the same API and the same
 market data feed as the web version. There is no server to set up, no Python to
 install and no `.env` file: every setting and credential is entered inside the
-app, and secrets are kept encrypted with a key held in your operating system's
-keychain.
+app, and secrets are kept encrypted with a key locked by your OpenAlgo password.
 
 ## Contents
 
@@ -86,7 +85,7 @@ desktop, and it trades only while it is open.
 | Raspberry Pi 3 or Zero 2 W with 64-bit Raspberry Pi OS | Not tested | 1 GB of memory or less is too little for comfortable use. |
 | 32-bit Raspberry Pi OS (any Pi) | Not supported | No 32-bit build. |
 | Headless Linux (no desktop: servers, Raspberry Pi OS Lite, SSH-only), Docker | Not supported | The app opens a window and cannot run without a desktop session. Use [OpenAlgo web](https://github.com/marketcalls/openalgo) for a server. |
-| Running as a background service (Windows service, systemd unit, launchd daemon) | Not supported | The app runs as the signed-in user, with that user's keychain. |
+| Running as a background service (Windows service, systemd unit, launchd daemon) | Not supported | The app runs as the signed-in user, and its keys stay locked until that user signs in to OpenAlgo. |
 
 "Supported" means an installer is built for that system and a problem on it
 is a bug to report. The automated tests run on every change on the build
@@ -324,33 +323,43 @@ Everything OpenAlgo Desktop stores is in one folder:
 | Linux and Raspberry Pi | `~/.local/share/com.openalgo.desktop` |
 
 Inside it: `openalgo.db` (account, settings, strategies, encrypted broker
-credentials), `sandbox.db` (sandbox mode), `logs.db` (order and API logs),
-`historify.duckdb` (Historify market data), and your OpenScript and custom
-indicator files.
+credentials and the locked keys), `sandbox.db` (sandbox mode), `logs.db`
+(order and API logs), `historify.duckdb` (Historify market data), and your
+OpenScript and custom indicator files.
 
-Broker credentials, tokens and your API key are encrypted. The encryption key
-is kept in your operating system's keychain (macOS Keychain, Windows Credential
-Manager, or the Secret Service on Linux), not in this folder. On a Linux
-machine with no keychain (for example Raspberry Pi OS Lite) the key is instead
-protected by your OpenAlgo password and kept in `vault.json` in the same
-folder; the app tells you when it is working this way.
+Broker credentials, tokens, your API key and your two-factor login secret are
+encrypted. The encryption key is itself locked with your OpenAlgo password
+(Argon2id) and kept in `openalgo.db`. OpenAlgo Desktop does not use your
+operating system's keychain on any platform. A copy of the folder is useless
+to anyone without your password.
+
+What this means day to day:
+
+- **Sign in after OpenAlgo starts.** Until you do, the API (`/api/v1`), the
+  market data feed, TradingView and Chartink webhooks, AI clients (MCP) and
+  your broker connection stay off: programs are told "Sign in to OpenAlgo to
+  use the API". They go off again when you log out.
+- **Keep your password safe.** It cannot be recovered. If you forget it, the
+  sign-in page's Forgot password sets a new one: your account, settings,
+  strategies and history stay, and you enter your broker keys again, copy the
+  new API key into your tools, and set up two-factor login again.
 
 **To back up**, close OpenAlgo Desktop and copy the whole folder. Restore it by
-closing the app and copying the folder back.
+closing the app and copying the folder back. A backup opens on any computer
+with the password you had when you made it, because the locked keys travel
+with it.
 
-A backup restores on the same computer and user account, where the keychain
-still holds the key. On a new computer the keychain does not have that key, so
-the copied account and credentials cannot be opened there. To move to a new
-computer, install OpenAlgo Desktop there, create your account, and add your
-broker again. (A backup made in password mode, with `vault.json`, opens on any
-computer with your OpenAlgo password.)
+Resetting your account (Reset account, on the forgotten-password page) removes
+the account and its keys; make a new backup once you have set OpenAlgo up
+again. Backups made before a reset still open with the password you had then.
 
-Resetting your account (Reset account, on the forgotten-password page) replaces
-the key in the keychain. The account and saved credentials in backups made
-before a reset can then no longer be opened, because the key they need is
-gone; make a new backup once you have set OpenAlgo up again. (A password-mode
-backup carries its own `vault.json` and still opens with the password you had
-then.)
+**Upgrading from an earlier build** that kept the keys in the system keychain:
+the first time you sign in, OpenAlgo reads them from the keychain one last
+time (allow it when your computer asks), moves them into `openalgo.db`, checks
+them, and deletes the keychain entries. After that it never asks again. If the
+keychain cannot be read, the sign-in page offers to try again or to start
+fresh. An earlier build's `vault.json` is moved into `openalgo.db` the same
+way and then deleted.
 
 ## Supported brokers
 
@@ -476,13 +485,13 @@ later runs only rebuild what changed. What a development run does:
   changes restart the app.
 - **A development build always uses ports 5500 and 8766**, not 5000 and
   8765, so it can run next to an installed copy or OpenAlgo web.
-- **It uses the same data folder and keychain entries as the installed app**
+- **It uses the same data folder as the installed app**
   (see [Where your data lives](#where-your-data-lives-and-backups)). Close the
   installed app first, and back up the data folder if it holds an account you
   care about.
 
-To run only the server, with no window, a temporary data folder and an
-in-memory keychain, so nothing touches your real data:
+To run only the server, with no window and a temporary data folder, so
+nothing touches your real data:
 
 ```bash
 npm run build                                          # build the interface into dist/
