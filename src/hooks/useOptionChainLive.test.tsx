@@ -9,6 +9,7 @@ const marketDataCapture = vi.hoisted(() => ({
   isAuthenticated: false,
   isPaused: false,
   connectionEpoch: 0,
+  error: null as string | null,
 }))
 
 vi.mock('./useMarketData', () => ({
@@ -20,6 +21,7 @@ vi.mock('./useMarketData', () => ({
       isAuthenticated: marketDataCapture.isAuthenticated,
       isPaused: marketDataCapture.isPaused,
       connectionEpoch: marketDataCapture.connectionEpoch,
+      error: marketDataCapture.error,
     }
   },
 }))
@@ -72,6 +74,7 @@ describe('useOptionChainLive', () => {
     marketDataCapture.isAuthenticated = false
     marketDataCapture.isPaused = false
     marketDataCapture.connectionEpoch = 0
+    marketDataCapture.error = null
     lastOptionChainBody = {}
     vi.stubGlobal(
       'fetch',
@@ -351,7 +354,10 @@ describe('useOptionChainLive', () => {
     )
     await waitFor(() => expect(result.current.data).not.toBeNull())
 
-    expect(result.current.isStreaming).toBe(true)
+    // An authenticated socket with symbols requested is not streaming
+    // until a price arrives over it (TOOLS-10); a REST price does not count.
+    expect(result.current.isStreaming).toBe(false)
+    expect(result.current.streamStatus).toBe('waiting')
     expect(result.current.lastStreamUpdate).toBeNull()
     expect(result.current.data?.underlying_ltp).toBe(100_000)
 
@@ -372,6 +378,58 @@ describe('useOptionChainLive', () => {
 
     await waitFor(() => expect(result.current.lastStreamUpdate?.getTime()).toBe(1_796_000_000_001))
     expect(result.current.data?.underlying_ltp).toBe(100_075)
+    expect(result.current.isStreaming).toBe(true)
+    expect(result.current.streamingSymbols).toBe(1)
+  })
+
+  it('reports streaming only while prices keep arriving (TOOLS-10)', async () => {
+    const start = Date.parse('2026-10-13T05:00:00Z')
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(start)
+    try {
+      marketDataCapture.isConnected = true
+      marketDataCapture.isAuthenticated = true
+      marketDataCapture.connectionEpoch = 2
+      const { result, rerender } = renderHook(() =>
+        useOptionChainLive('key', 'BTC', 'CRYPTO', 'CRYPTO', '28AUG26', 20, { enabled: true })
+      )
+      await waitFor(() => expect(result.current.data).not.toBeNull())
+      expect(result.current.streamStatus).toBe('waiting')
+      expect(result.current.requestedSymbols).toBe(1)
+
+      marketDataCapture.data = new Map([
+        [
+          'CRYPTO:BTCUSD',
+          {
+            exchange: 'CRYPTO',
+            symbol: 'BTCUSD',
+            lastUpdate: start,
+            updateSource: 'websocket',
+            connectionEpoch: 2,
+            data: { ltp: 100_075 },
+          },
+        ],
+      ])
+      rerender()
+      await waitFor(() => expect(result.current.streamStatus).toBe('live'))
+      expect(result.current.streamingSymbols).toBe(1)
+
+      // The feed stalls: no tick for longer than the live window.
+      await act(async () => {
+        vi.setSystemTime(start + 20_000)
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(result.current.streamStatus).toBe('stale')
+      expect(result.current.isStreaming).toBe(false)
+      expect(result.current.streamingSymbols).toBe(0)
+
+      // A refusal from the feed with nothing arriving is shown as such.
+      marketDataCapture.error = 'WebSocket error: subscription limit reached'
+      rerender()
+      await waitFor(() => expect(result.current.streamStatus).toBe('refused'))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('requires a WebSocket tick from the current authentication epoch', async () => {
