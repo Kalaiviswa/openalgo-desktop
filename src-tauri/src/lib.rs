@@ -6,6 +6,7 @@
 
 pub mod analytics;
 pub mod brokers;
+pub mod cache;
 pub mod chartink;
 pub mod clock;
 pub mod commands;

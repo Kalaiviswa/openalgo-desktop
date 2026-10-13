@@ -312,6 +312,11 @@ impl SymbolGeneration {
 #[derive(Clone, Default)]
 pub struct SymbolResolver {
     current: Arc<RwLock<Arc<SymbolGeneration>>>,
+    /// Bumped by every `clear`, under the write lock: a load whose reader
+    /// started before a clear (a logout, a broker switch) is dropped
+    /// (`load_master_if`), as the web's cache fills go through the
+    /// generation read before their query.
+    cleared: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for SymbolResolver {
@@ -355,6 +360,36 @@ impl SymbolResolver {
         n
     }
 
+    /// The clear generation to pass to [`Self::load_master_if`], read
+    /// before the master is read from the database or downloaded.
+    pub fn clear_generation(&self) -> u64 {
+        self.cleared.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `load_master`, unless the master was cleared since `cleared` was
+    /// read: then nothing is loaded and `None` comes back. A reload that
+    /// read the stored master before a logout cannot bring it back after
+    /// the logout cleared it.
+    pub fn load_master_if(
+        &self,
+        master: crate::brokers::types::MasterContract,
+        cleared: u64,
+    ) -> Option<usize> {
+        // Built outside the lock, so readers are never held up by it.
+        let mut generation =
+            SymbolGeneration::build_with_contract_values(master.rows, &master.contract_values, 0);
+        let mut current = self.current.write();
+        if self.clear_generation() != cleared {
+            tracing::info!("Symbol master not loaded: the broker session ended while it was read");
+            return None;
+        }
+        generation.id = current.id + 1;
+        let n = generation.len();
+        *current = Arc::new(generation);
+        tracing::info!("Symbol master loaded: {} instruments", n);
+        Some(n)
+    }
+
     /// Contract multiplier of an OpenAlgo symbol (web
     /// `SymToken.contract_value`); `None` when the venue quotes none.
     pub fn contract_value(&self, symbol: &str, exchange: &str) -> Option<f64> {
@@ -365,8 +400,11 @@ impl SymbolResolver {
 
     /// Drop the master (broker logout).
     pub fn clear(&self) {
-        let next_id = self.current.read().id + 1;
-        *self.current.write() = Arc::new(SymbolGeneration {
+        let mut current = self.current.write();
+        self.cleared
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let next_id = current.id + 1;
+        *current = Arc::new(SymbolGeneration {
             id: next_id,
             ..Default::default()
         });

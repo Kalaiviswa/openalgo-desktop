@@ -160,6 +160,9 @@ fn emit_cache_loaded(ctx: &AppState, broker: &str, started: std::time::Instant) 
 /// Returns the number of instruments loaded.
 pub async fn load_cached(ctx: &Arc<AppState>, broker: &str) -> Result<usize> {
     let started = std::time::Instant::now();
+    // Read before the stored master is: a logout or switch that clears the
+    // master meanwhile keeps this load out (KEY-01).
+    let cleared = ctx.symbols.clear_generation();
     let db = ctx.sqlite.clone();
     // With the contract multipliers (crypto `contract_value`).
     let master = tokio::task::spawn_blocking(move || {
@@ -168,7 +171,11 @@ pub async fn load_cached(ctx: &Arc<AppState>, broker: &str) -> Result<usize> {
     })
     .await
     .map_err(|e| AppError::Internal(format!("symbol load task failed: {}", e)))??;
-    let n = ctx.load_master_cache(master);
+    #[cfg(test)]
+    test_hooks::before_load(ctx);
+    let Some(n) = ctx.symbols.load_master_if(master, cleared) else {
+        return Ok(0);
+    };
     emit_cache_loaded(ctx, broker, started);
     tracing::info!(
         "Loaded {} instruments for {} from the stored master",
@@ -214,6 +221,7 @@ async fn download_claimed(
 ) -> Result<usize> {
     let id = broker.id();
     let started = std::time::Instant::now();
+    let cleared = ctx.symbols.clear_generation();
     {
         let conn = ctx.sqlite.conn()?;
         mcs::update(
@@ -252,7 +260,14 @@ async fn download_claimed(
     })
     .await
     .map_err(|e| AppError::Internal(format!("symbol store task failed: {}", e)))??;
-    let total = ctx.load_master_cache(master);
+    // Stored either way; loaded into memory only if the session that asked
+    // for it is still the one (a logout meanwhile cleared the master).
+    let Some(total) = ctx.symbols.load_master_if(master, cleared) else {
+        return Err(AppError::Broker(
+            "The broker session ended during the master contract download. Sign in to your broker again."
+                .into(),
+        ));
+    };
     {
         let conn = ctx.sqlite.conn()?;
         let now = ctx.now();
@@ -423,6 +438,36 @@ pub fn cache_health(ctx: &AppState) -> Value {
     })
 }
 
+/// Test hook: runs after the stored master was read and before it is
+/// loaded, standing in for a logout that lands meanwhile.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use parking_lot::Mutex;
+
+    type Hook = Box<dyn FnOnce() + Send>;
+    static BEFORE_LOAD: Mutex<Option<(usize, Hook)>> = Mutex::new(None);
+
+    pub(crate) fn before_next_load(
+        state: &crate::state::AppState,
+        f: impl FnOnce() + Send + 'static,
+    ) {
+        *BEFORE_LOAD.lock() = Some((state as *const _ as usize, Box::new(f)));
+    }
+
+    pub(super) fn before_load(state: &crate::state::AppState) {
+        let hook = {
+            let mut g = BEFORE_LOAD.lock();
+            match g.as_ref() {
+                Some((s, _)) if *s == state as *const _ as usize => g.take(),
+                _ => None,
+            }
+        };
+        if let Some((_, f)) = hook {
+            f();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +553,34 @@ mod tests {
         assert_eq!(ctx.symbols.contract_value("BTCUSD", "CRYPTO"), None);
         assert_eq!(load_cached(ctx, "deltaexchange").await.unwrap(), 1);
         assert_eq!(ctx.symbols.contract_value("BTCUSD", "CRYPTO"), Some(0.001));
+    }
+
+    /// KEY-01: a cache reload that read the stored master before a logout
+    /// cleared it cannot load it back afterwards (the web's fill through
+    /// the generation read before the query).
+    #[tokio::test]
+    async fn a_reload_in_flight_across_a_logout_does_not_bring_the_master_back() {
+        use crate::brokers::common::symbols::tests::row;
+        use crate::brokers::mock::MockBroker;
+        use crate::brokers::BrokerRegistry;
+        let mock = Arc::new(MockBroker::new("zerodha"));
+        *mock.master.lock() = Some(Ok(vec![row("SBIN", "SBIN-EQ", "NSE", "3045")]));
+        let t = crate::state::testing::build(
+            BrokerRegistry::with(vec![mock.clone() as Arc<dyn Broker>]),
+            ist(3, 10, 0),
+        );
+        let ctx = &t.ctx;
+        let broker: Arc<dyn Broker> = mock.clone();
+        assert_eq!(
+            download(ctx, &broker, &AuthToken::new("t")).await.unwrap(),
+            1
+        );
+        let c2 = ctx.clone();
+        test_hooks::before_next_load(ctx, move || c2.clear_symbol_cache());
+        assert_eq!(load_cached(ctx, "zerodha").await.unwrap(), 0);
+        assert_eq!(ctx.symbol_count(), 0, "the logout's clear stands");
+        // The next reload, with nothing racing it, loads.
+        assert_eq!(load_cached(ctx, "zerodha").await.unwrap(), 1);
     }
 
     /// Web #2198 `get_existing_index_rows`: a broker that carries stored rows
