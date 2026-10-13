@@ -90,8 +90,9 @@ webhook addresses are SHA-256 digests and need no key.
 | App start | no | No keychain call, no decryption. The database is opened and migrated; the vault row is not opened. |
 | Sign-in, password step | staged, not installed | The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code. |
 | Sign-in completes (session issued) | yes | Installed in the same step that issues the signed-in session (`issue_if_current`, so a password change racing the sign-in voids both). Then the stored broker session resumes, and Telegram and WhatsApp start if they were on. |
+| Account setup | yes | New keys, the vault, the account and its API key in one transaction. Creating the account counts as its first sign-in: the keys stay until the logout. |
 | Second device signs in | yes (unchanged) | The password still unwraps the vault; the keys in memory are the same. |
-| Logout | wiped | Every browser session ends; the broker session is revoked (memory first); Telegram and WhatsApp stop; the keys are dropped (the raw key and pepper are zeroed, the AES key schedule too with the `aes/zeroize` feature); every cache is cleared after the lock. |
+| Logout | wiped | Every browser session ends; the broker session is revoked (memory first); Telegram and WhatsApp stop; the keys are dropped (the raw key and pepper are zeroed when the last copy goes); every cache is cleared after the lock, and `on_logout` runs on every broker adapter, not only the logged-in one. The lock bumps the credentials generation, so a sign-in that was being checked when the logout landed gets no session. |
 | App quit | wiped | Process exit; the shutdown path runs the same lock. |
 | Password change | yes (unchanged) | Hash and wrapping in one transaction; every browser session ends (as before) and every cache is cleared. The keys do not change, so they stay. |
 | Forgotten password (Set a new password) | no | New keys, new wrapping, new hash, encrypted values dropped, in one transaction. The trader signs in with the new password. |
@@ -246,3 +247,15 @@ mode memo (written under the reader's lock), the monitor's ban list.
 | Forgotten password | `server::tests::key_vault::a_new_password_without_the_old_one_drops_only_encrypted_values` |
 | Caches | `services::apikey_service::tests::*`, `cache::tests::*`, master and facts race tests |
 | Windows and Linux | CI on four systems |
+
+## Tests and the harness
+
+The in-memory keystore of the test harness and the dev server
+(`MemoryKeyStore`, `KeyStore::harness_keys`) opens the app unlocked with keys
+it keeps, as the keychain mode of earlier builds did, so the many feature
+tests need no sign-in. Account setup wraps those keys into the vault, so a
+reopened harness app still opens what it wrote. The KEY-01 tests use
+`CountingKeyStore`, which behaves like the OS keychain and counts every
+call; production uses the OS keychain (`KeyringStore`) for the one-time move
+only.
+
