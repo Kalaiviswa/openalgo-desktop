@@ -57,6 +57,7 @@ impl FundsCache {
     }
 
     /// Whether anything is cached (tests).
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entry.lock().is_none()
     }

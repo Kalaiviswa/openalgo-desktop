@@ -445,22 +445,23 @@ pub(crate) mod test_hooks {
     use parking_lot::Mutex;
 
     type Hook = Box<dyn FnOnce() + Send>;
-    static BEFORE_LOAD: Mutex<Option<(usize, Hook)>> = Mutex::new(None);
+    /// One hook per app state: tests run in parallel, each on its own.
+    static BEFORE_LOAD: Mutex<Vec<(usize, Hook)>> = Mutex::new(Vec::new());
 
     pub(crate) fn before_next_load(
         state: &crate::state::AppState,
         f: impl FnOnce() + Send + 'static,
     ) {
-        *BEFORE_LOAD.lock() = Some((state as *const _ as usize, Box::new(f)));
+        BEFORE_LOAD
+            .lock()
+            .push((state as *const _ as usize, Box::new(f)));
     }
 
     pub(super) fn before_load(state: &crate::state::AppState) {
         let hook = {
             let mut g = BEFORE_LOAD.lock();
-            match g.as_ref() {
-                Some((s, _)) if *s == state as *const _ as usize => g.take(),
-                _ => None,
-            }
+            let me = state as *const _ as usize;
+            g.iter().position(|(s, _)| *s == me).map(|i| g.remove(i))
         };
         if let Some((_, f)) = hook {
             f();
