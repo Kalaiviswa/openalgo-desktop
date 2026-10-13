@@ -181,6 +181,42 @@ export function currentWebSocketMarketData(
   )
 }
 
+/** A tick older than this no longer counts as live streaming. */
+export const STREAM_STALE_MS = 15_000
+
+/**
+ * What the live feed is doing for this chain. Desktop: the web called a chain
+ * "streaming" once the socket was authenticated and symbols were requested,
+ * whether or not any price arrived (TOOLS-10).
+ */
+export type StreamStatus =
+  /** Not streaming: disabled or nothing to subscribe. */
+  | 'off'
+  /** The socket is not authenticated yet. */
+  | 'connecting'
+  /** Subscribed, and no price has arrived in this session. */
+  | 'waiting'
+  /** At least one requested symbol had a price within STREAM_STALE_MS. */
+  | 'live'
+  /** Prices arrived in this session, none recently. */
+  | 'stale'
+  /** The feed reported an error and no price is arriving. */
+  | 'refused'
+
+export function streamStatusOf(feed: {
+  active: boolean
+  authenticated: boolean
+  error: string | null
+  receiving: number
+  seen: number
+}): StreamStatus {
+  if (!feed.active) return 'off'
+  if (feed.receiving > 0) return 'live'
+  if (feed.error) return 'refused'
+  if (!feed.authenticated) return 'connecting'
+  return feed.seen > 0 ? 'stale' : 'waiting'
+}
+
 interface UseOptionChainLiveOptions {
   enabled: boolean
   /** Polling interval for OI/Volume data in ms (default: 30000) */
@@ -280,6 +316,7 @@ export function useOptionChainLive(
     isAuthenticated: isWsAuthenticated,
     isPaused: isWsPaused,
     connectionEpoch: wsConnectionEpoch,
+    error: wsError,
   } = useMarketData({
     symbols: wsSymbols,
     mode: 'Depth', // Get LTP + Bid/Ask depth
@@ -361,8 +398,34 @@ export function useOptionChainLive(
     )
   }, [polledData, currentWsData, optionExchange, interestRate])
 
-  // Determine streaming status
-  const isStreaming = enabled && isWsConnected && isWsAuthenticated && wsSymbols.length > 0
+  // Determine streaming status from prices that actually arrived in this
+  // session, re-read every few seconds so a stalled feed turns stale.
+  const streamActive = enabled && wsSymbols.length > 0
+  const [streamClock, setStreamClock] = useState(() => Date.now())
+  useEffect(() => {
+    if (!streamActive || !isWsAuthenticated) return
+    const id = setInterval(() => setStreamClock(Date.now()), 2000)
+    return () => clearInterval(id)
+  }, [streamActive, isWsAuthenticated])
+  const { receiving, seen } = useMemo(() => {
+    const now = Math.max(streamClock, Date.now())
+    let fresh = 0
+    let any = 0
+    for (const [, symbolData] of currentWsData) {
+      if (!symbolData.lastUpdate) continue
+      any += 1
+      if (symbolData.lastUpdate >= now - STREAM_STALE_MS) fresh += 1
+    }
+    return { receiving: fresh, seen: any }
+  }, [currentWsData, streamClock])
+  const streamStatus = streamStatusOf({
+    active: streamActive,
+    authenticated: isWsConnected && isWsAuthenticated,
+    error: wsError,
+    receiving,
+    seen,
+  })
+  const isStreaming = streamStatus === 'live'
   const isPaused = isPollingPaused || isWsPaused
 
   // Combined last update (use LTP update if more recent)
@@ -383,7 +446,10 @@ export function useOptionChainLive(
     lastUpdate,
     lastStreamUpdate: lastLtpUpdate,
     dataIdentity,
-    streamingSymbols: wsSymbols.length,
+    streamStatus,
+    /** Requested symbols with a recent price in this session. */
+    streamingSymbols: receiving,
+    requestedSymbols: wsSymbols.length,
     clockOffsetMs: clockOffsetRef.current,
     forwardPrice: mergedData?.forward_price ?? null,
     refetch,

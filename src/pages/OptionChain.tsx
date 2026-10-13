@@ -604,6 +604,8 @@ export default function OptionChain() {
     refetch,
     isLoading,
     streamingSymbols,
+    requestedSymbols,
+    streamStatus,
   } = useOptionChainLive(
     apiKey,
     selectedUnderlying,
@@ -1054,13 +1056,20 @@ export default function OptionChain() {
                 <Badge
                   variant={isStreaming ? 'default' : isConnected ? 'secondary' : 'destructive'}
                 >
+                  {/* Desktop: "Streaming" only while prices arrive (TOOLS-10). */}
                   {isPaused
                     ? 'Paused'
                     : isStreaming
-                      ? `Streaming ${streamingSymbols} symbols`
-                      : isConnected
-                        ? 'Polling'
-                        : 'Disconnected'}
+                      ? `Streaming ${streamingSymbols} of ${requestedSymbols} symbols`
+                      : streamStatus === 'waiting'
+                        ? 'Polling, waiting for live prices'
+                        : streamStatus === 'stale'
+                          ? 'Polling, live prices stalled'
+                          : streamStatus === 'refused'
+                            ? 'Polling, live prices refused'
+                            : isConnected
+                              ? 'Polling'
+                              : 'Disconnected'}
                 </Badge>
               </div>
               <div className="text-xs">
