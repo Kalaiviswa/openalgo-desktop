@@ -248,13 +248,17 @@ pub fn register(ctx: &Arc<AppState>) {
     );
 }
 
-/// Bring the bots back after a launch, as the web's start-up does: Telegram
-/// when it was started, WhatsApp when a device is paired.
+/// Bring the bots back, as the web's start-up does: Telegram when it was
+/// started, WhatsApp when a device is paired. Run at each sign-in, when the
+/// keys that open their tokens are in memory (KEY-01; a logout stops them);
+/// a bot already running is left alone.
 pub fn autostart(ctx: &Arc<AppState>) {
     let weak = Arc::downgrade(ctx);
     ctx.spawn(async move {
         let Some(ctx) = weak.upgrade() else { return };
-        if telegram::TelegramService::is_bot_active(&ctx) {
+        if telegram::TelegramService::is_bot_active(&ctx)
+            && !ctx.messaging.telegram.task_alive().await
+        {
             let token = ctx
                 .sqlite
                 .conn()
@@ -271,7 +275,9 @@ pub fn autostart(ctx: &Arc<AppState>) {
                 }
             }
         }
-        if whatsapp::WhatsAppService::is_paired(&ctx) {
+        if whatsapp::WhatsAppService::is_paired(&ctx)
+            && !ctx.messaging.whatsapp.tasks_alive().await.1
+        {
             let (ok, msg) = ctx.messaging.whatsapp.start_bot(&ctx).await;
             tracing::info!("WhatsApp bot auto-start: {} ({})", ok, msg);
         }
