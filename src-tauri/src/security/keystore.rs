@@ -195,6 +195,64 @@ impl KeyStore for FaultyKeyStore {
     }
 }
 
+/// A keychain that counts every call, over an in-memory store: the tests
+/// that prove a new install never touches the OS keychain and a migrated
+/// one never reads it again (KEY-01).
+#[cfg(test)]
+#[derive(Default)]
+pub struct CountingKeyStore {
+    pub inner: FaultyKeyStore,
+    pub gets: std::sync::atomic::AtomicUsize,
+    pub sets: std::sync::atomic::AtomicUsize,
+    pub deletes: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl CountingKeyStore {
+    /// Every call of any kind so far.
+    pub fn calls(&self) -> usize {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.gets.load(SeqCst) + self.sets.load(SeqCst) + self.deletes.load(SeqCst)
+    }
+
+    pub fn reads(&self) -> usize {
+        self.gets.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Put a value in without counting it (an earlier build's entries).
+    pub fn seed(&self, name: &str, value: &str) {
+        self.inner.inner.set(name, value).unwrap_or_default();
+    }
+
+    /// What is stored, without counting.
+    pub fn peek(&self, name: &str) -> Option<String> {
+        self.inner.inner.get(name).ok().flatten()
+    }
+}
+
+#[cfg(test)]
+impl KeyStore for CountingKeyStore {
+    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError> {
+        self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(name)
+    }
+
+    fn set(&self, name: &str, value: &str) -> Result<(), KeyStoreError> {
+        self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.set(name, value)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), KeyStoreError> {
+        self.deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.delete(name)
+    }
+
+    fn kind(&self) -> &'static str {
+        "counted test keychain"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
