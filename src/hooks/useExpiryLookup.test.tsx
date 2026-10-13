@@ -6,6 +6,7 @@ import {
   EXPIRY_LOOKUP_TIMEOUT_MS,
   EXPIRY_TEXT,
   type ExpiriesAnswer,
+  expiriesFor,
   expiryOutcome,
   useExpiryLookup,
 } from './useExpiryLookup'
@@ -83,6 +84,19 @@ describe('useExpiryLookup', () => {
     await waitFor(() => expect(result.current.phase).toBe('ready'))
     expect(onReady).toHaveBeenCalledWith(['13-OCT-26', '20-OCT-26'])
     expect(fetchExpiries).toHaveBeenCalledWith('NFO', 'NIFTY')
+  })
+
+  it('says which underlying its dates belong to', async () => {
+    const fetchExpiries = vi.fn().mockResolvedValue({ status: 'success', expiries: ['13-OCT-26'] })
+    const { result, rerender } = renderHook(({ u }) => useExpiryLookup('NFO', u, fetchExpiries), {
+      initialProps: { u: 'NIFTY' },
+    })
+    await waitFor(() => expect(expiriesFor(result.current, 'NFO', 'NIFTY')).toBe(true))
+    rerender({ u: 'BANKNIFTY' })
+    // Until the new lookup answers, NIFTY's date is not BANKNIFTY's.
+    expect(expiriesFor(result.current, 'NFO', 'BANKNIFTY')).toBe(false)
+    await waitFor(() => expect(expiriesFor(result.current, 'NFO', 'BANKNIFTY')).toBe(true))
+    expect(expiriesFor(result.current, 'BFO', 'BANKNIFTY')).toBe(false)
   })
 
   it('stays idle with no underlying', () => {

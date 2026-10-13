@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useExpiryLookup } from '@/hooks/useExpiryLookup'
+import { expiriesFor, useExpiryLookup } from '@/hooks/useExpiryLookup'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import Plot from '@/lib/Plot2D'
 import { serverSentence } from '@/lib/serverSentence'
@@ -160,6 +160,10 @@ export default function OIProfile() {
     oiProfileApi.getExpiries,
     {
       onReset: () => {
+        // Desktop: an answer for the previous underlying is dropped from
+        // here on, not only once the next data request starts (TOOLS-08).
+        requestIdRef.current += 1
+        setIsLoading(false)
         setExpiries([])
         setSelectedExpiry('')
         setProfileData(null)
@@ -203,11 +207,14 @@ export default function OIProfile() {
     }
   }, [selectedUnderlying, selectedExpiry, selectedExchange, selectedInterval])
 
+  // Desktop: load only once the expiry belongs to the underlying shown
+  // (TOOLS-08); the web also loaded the new underlying with the old expiry.
+  const expiryCurrent = expiriesFor(expiryLookup, selectedExchange, selectedUnderlying)
   useEffect(() => {
-    if (selectedExpiry) {
+    if (selectedExpiry && expiryCurrent) {
       fetchProfileData()
     }
-  }, [selectedExpiry, fetchProfileData])
+  }, [selectedExpiry, fetchProfileData, expiryCurrent])
 
   // Theme colors
   const themeColors = useMemo(
