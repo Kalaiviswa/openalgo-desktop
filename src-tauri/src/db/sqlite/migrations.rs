@@ -82,6 +82,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     run_rust_migration(conn, "076_chartink", crate::chartink::store::migrate)?;
     run_rust_migration(conn, "077_mcp", crate::mcp::store::migrate)?;
     run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
+    run_rust_migration(conn, "081_key_vault", super::key_vault::migrate)?;
 
     tracing::info!("Database migrations completed");
     Ok(())

@@ -11,6 +11,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod credentials;
 pub mod data_migrations;
+pub mod key_vault;
 mod latency_logs;
 pub mod logs;
 mod market;
