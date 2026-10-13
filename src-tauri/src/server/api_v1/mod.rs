@@ -29,7 +29,7 @@ mod strategy;
 
 use crate::events::{Event, GttKind, Mode};
 use crate::server::envelope::{json_response, not_found, read_json_object};
-use crate::services::apikey_service::ApiKeyService;
+use crate::services::apikey_service::{ApiKeyService, KeyCheck};
 use crate::services::core::{is_analyze, meta, safe_request, Reply, INVALID_API_KEY};
 use crate::services::schema::{FieldErrors, Schema};
 use crate::state::AppState;
@@ -164,8 +164,14 @@ pub fn authorize(ctx: &AppState, key: &str, ip: IpAddr, auth: Auth) -> bool {
     };
     use crate::server::ratelimit::Bucket;
     // The key first: a cached answer, else an HMAC index lookup that misses
-    // for an invented key (Argon2 only on a hit).
-    if !ApiKeyService::is_valid(ctx, key) {
+    // for an invented key (Argon2 only on a hit). A logout that locked the
+    // keys after the route's lock check refuses without counting: nothing
+    // was checked (KEY-01).
+    let checked = ApiKeyService::check(ctx, key);
+    if checked == KeyCheck::Locked {
+        return false;
+    }
+    if checked == KeyCheck::Invalid {
         if !failures_exhausted(ctx, ip, Bucket::ApiKeyFail) {
             count_failure(ctx, ip, Bucket::ApiKeyFail);
         }

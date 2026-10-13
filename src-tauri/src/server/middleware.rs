@@ -690,6 +690,12 @@ pub async fn api_rate_limit(
             Admission::OverflowOver(_) => deferred = true,
         }
     }
+    // Locked (nobody has signed in since OpenAlgo started, or the trader
+    // logged out): no key can be checked, so none is, and nothing counts
+    // against the caller (KEY-01).
+    if !ctx.security.is_unlocked() {
+        return api_locked();
+    }
     let call = ApiCall {
         bucket,
         over: std::cell::Cell::new(false),
@@ -706,6 +712,15 @@ pub async fn api_rate_limit(
         return over();
     }
     resp
+}
+
+/// The answer of every `/api/v1` route while OpenAlgo is locked: the web's
+/// error envelope with 503 (KEY-01).
+pub fn api_locked() -> Response {
+    json_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"status": "error", "message": crate::services::core::API_LOCKED}),
+    )
 }
 
 /// The `/api/v1` call in progress: its rate bucket, and whether a valid

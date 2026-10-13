@@ -1005,6 +1005,15 @@ impl Session {
                     self.close = Some((AUTH_TIMEOUT_CODE, "Invalid API key"));
                 }
             }
+            AuthOutcome::Locked => {
+                // Nothing was checked and nothing counts against the
+                // caller; the socket stays unauthenticated (KEY-01).
+                self.error(
+                    code::AUTHENTICATION_ERROR,
+                    crate::feed::auth::FEED_LOCKED,
+                    None,
+                );
+            }
             AuthOutcome::NoBroker { user_id } => {
                 // The web records the user before the broker check, so the
                 // socket counts as authenticated from here on.

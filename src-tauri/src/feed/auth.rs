@@ -1,10 +1,11 @@
 //! API-key authentication for feed clients.
 //!
-//! Production goes through `ApiKeyService::is_valid` (HMAC index, Argon2,
-//! bounded cache), run on the blocking pool because Argon2 is CPU-bound.
+//! Production goes through `ApiKeyService::check` (HMAC index, Argon2,
+//! bounded caches), run on the blocking pool because Argon2 is CPU-bound.
+//! While OpenAlgo is locked no key is checked (`AuthOutcome::Locked`).
 
 use crate::db::sqlite::user;
-use crate::services::apikey_service::ApiKeyService;
+use crate::services::apikey_service::{ApiKeyService, KeyCheck};
 use crate::state::AppState;
 use std::sync::Arc;
 
@@ -21,7 +22,14 @@ pub enum AuthOutcome {
         user_id: String,
     },
     Invalid,
+    /// OpenAlgo is locked (nobody has signed in since it started, or the
+    /// trader logged out): no key was checked (KEY-01).
+    Locked,
 }
+
+/// The error frame's message while OpenAlgo is locked.
+pub const FEED_LOCKED: &str = "OpenAlgo is locked. Sign in to OpenAlgo to stream market data: \
+the feed is off after OpenAlgo starts and after you log out, until you sign in again.";
 
 #[async_trait::async_trait]
 pub trait FeedAuth: Send + Sync + 'static {
@@ -99,8 +107,10 @@ impl FeedAuth for AppAuth {
         let ctx = self.ctx.clone();
         let key = api_key.to_string();
         let checked = tokio::task::spawn_blocking(move || {
-            if !ApiKeyService::is_valid(&ctx, &key) {
-                return None;
+            match ApiKeyService::check(&ctx, &key) {
+                KeyCheck::Valid(_) => {}
+                KeyCheck::Invalid => return None,
+                KeyCheck::Locked => return Some(None),
             }
             let user_id = ctx
                 .sqlite
@@ -110,11 +120,12 @@ impl FeedAuth for AppAuth {
                 .map(|u| u.username)
                 .or_else(|| ctx.signed_in_user())
                 .unwrap_or_default();
-            Some(user_id)
+            Some(Some(user_id))
         })
         .await;
         let user_id = match checked {
-            Ok(Some(u)) => u,
+            Ok(Some(Some(u))) => u,
+            Ok(Some(None)) => return AuthOutcome::Locked,
             Ok(None) => return AuthOutcome::Invalid,
             Err(e) => {
                 tracing::error!("Feed API key check did not complete: {}", e);
