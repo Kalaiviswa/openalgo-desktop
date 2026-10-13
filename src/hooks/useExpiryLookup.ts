@@ -31,6 +31,9 @@ export type ExpiryLookupPhase =
 
 export interface ExpiryLookup {
   phase: ExpiryLookupPhase
+  /** The exchange and underlying this phase and these dates belong to. */
+  exchange: string
+  underlying: string
   expiries: string[]
   /** The sentence for the trader: empty while idle, loading or ready. */
   message: string
@@ -134,6 +137,17 @@ export function expiryOutcome(
 }
 
 /**
+ * Whether the lookup's dates belong to the exchange and underlying a page
+ * shows now. Right after a switch the previous underlying's expiry is still
+ * selected for one render; a load started then would mix the two.
+ */
+export function expiriesFor(lookup: ExpiryLookup, exchange: string, underlying: string): boolean {
+  return (
+    lookup.phase === 'ready' && lookup.exchange === exchange && lookup.underlying === underlying
+  )
+}
+
+/**
  * Look up the live expiries whenever `exchange` or `underlying` changes, or
  * the trader asks to retry. Only the newest lookup can change the page: an
  * answer for an underlying the trader has since left is dropped.
@@ -146,6 +160,8 @@ export function useExpiryLookup(
 ): ExpiryLookup {
   const [state, setState] = useState<Omit<ExpiryLookup, 'retry'>>({
     phase: 'idle',
+    exchange,
+    underlying: '',
     expiries: [],
     message: '',
   })
@@ -160,11 +176,11 @@ export function useExpiryLookup(
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is the retry trigger; the callbacks are read through refs on purpose
   useEffect(() => {
     if (!underlying) {
-      setState({ phase: 'idle', expiries: [], message: '' })
+      setState({ phase: 'idle', exchange, underlying, expiries: [], message: '' })
       return
     }
     optionsRef.current.onReset?.()
-    setState({ phase: 'loading', expiries: [], message: '' })
+    setState({ phase: 'loading', exchange, underlying, expiries: [], message: '' })
 
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -185,7 +201,7 @@ export function useExpiryLookup(
       }
       if (cancelled) return
       const outcome = expiryOutcome(result, underlying, exchange)
-      setState(outcome)
+      setState({ ...outcome, exchange, underlying })
       if (outcome.phase === 'ready') optionsRef.current.onReady?.(outcome.expiries)
     }
     run()

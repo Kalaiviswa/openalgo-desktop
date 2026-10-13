@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useExpiryLookup } from '@/hooks/useExpiryLookup'
+import { useRequestGeneration } from '@/hooks/useRequestGeneration'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { useThemeStore } from '@/stores/themeStore'
 import { showToast } from '@/utils/toast'
@@ -597,6 +598,9 @@ export default function CustomStraddle() {
     }
   }, [selectedUnderlying, selectedExchange])
 
+  // Desktop: only the newest load may change the chart (TOOLS-07).
+  const requests = useRequestGeneration()
+
   // Fetch expiries when underlying changes. Desktop: every outcome is a
   // state the page shows, with Retry (TOOLS-02).
   const expiryLookup = useExpiryLookup(
@@ -605,6 +609,8 @@ export default function CustomStraddle() {
     oiProfileApi.getExpiries,
     {
       onReset: () => {
+        requests.invalidate()
+        setIsLoading(false)
         setExpiries([])
         setSelectedExpiry('')
         setChartData(null)
@@ -621,6 +627,7 @@ export default function CustomStraddle() {
 
   const loadData = useCallback(async () => {
     if (!selectedExpiry) return
+    const request = requests.begin()
     setIsLoading(true)
     try {
       const res = await customStraddleApi.simulate({
@@ -633,6 +640,7 @@ export default function CustomStraddle() {
         lot_size: lotSize,
         lots: numLots,
       })
+      if (!requests.isCurrent(request)) return
       if (res.status === 'success' && res.data) {
         chartDataRef.current = res.data
         setChartData(res.data)
@@ -641,13 +649,15 @@ export default function CustomStraddle() {
         showToast.error(res.message || 'Failed to load simulation data', 'positions')
       }
     } catch (err: unknown) {
+      if (!requests.isCurrent(request)) return
       const axiosErr = err as { response?: { data?: { message?: string } } }
       const msg = axiosErr?.response?.data?.message || 'Failed to fetch simulation data'
       showToast.error(msg, 'positions')
     } finally {
-      setIsLoading(false)
+      if (requests.isCurrent(request)) setIsLoading(false)
     }
   }, [
+    requests,
     selectedExpiry,
     selectedInterval,
     selectedDays,
@@ -658,6 +668,14 @@ export default function CustomStraddle() {
     numLots,
     applyDataToChart,
   ])
+
+  // Desktop: a simulation still running when its inputs change belongs to
+  // the old inputs; drop it rather than draw it under the new ones.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: loadData's identity is the set of inputs; the body only invalidates
+  useEffect(() => {
+    requests.invalidate()
+    setIsLoading(false)
+  }, [loadData, requests])
 
   // ── Display helpers ──────────────────────────────────────────
 
