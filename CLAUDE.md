@@ -647,6 +647,18 @@ and add each new one here.
   split a character in `&expiry[..2]` and panicked the request. Read it
   through `options_service::Expiry::parse` or `parse_compact_expiry`, at
   every API, page and MCP boundary, before any master or broker lookup.
+- **A tool page applies only the answer for what it shows now.** Loads take
+  a token from `useRequestGeneration` (or the page's request id) that is
+  invalidated as soon as the underlying changes, not when the next load
+  starts, and a load waits until `expiriesFor` says the selected expiry
+  belongs to the selected underlying. The web pages accepted whichever
+  answer landed last.
+- **A cached market field belongs to the session that sent it.**
+  `MarketDataManager` merges a tick only into fields from the same
+  WebSocket epoch; a reconnect, a new authentication or REST polling starts
+  the symbol afresh, so an old depth never comes back stamped as current.
+  "Streaming" means prices arrived recently, not that symbols were asked
+  for.
 
 ### Security work
 
