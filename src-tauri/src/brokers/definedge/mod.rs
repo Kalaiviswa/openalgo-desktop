@@ -403,6 +403,13 @@ impl Broker for DefinedgeBroker {
         }
     }
 
+    /// A sign-in's pending OTP token and the open-interest cache go at
+    /// logout (KEY-01).
+    async fn on_logout(&self) {
+        *self.pending_otp.lock() = None;
+        self.oi_cache.lock().clear();
+    }
+
     fn supported_exchanges(&self) -> &'static [Exchange] {
         SUPPORTED_EXCHANGES
     }

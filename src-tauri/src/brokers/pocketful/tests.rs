@@ -907,3 +907,12 @@ mod data_watchdog {
         assert!(!DataWatchdog::new(o).stalled(at(o, 10_000)));
     }
 }
+
+/// KEY-01: the client id cached under a session's token goes at logout.
+#[tokio::test]
+async fn logout_clears_the_client_id_cache() {
+    let b = PocketfulBroker::new(SymbolResolver::new());
+    *b.client_id_cache.lock() = Some(([1u8; 32], "C1".into()));
+    b.on_logout().await;
+    assert!(b.client_id_cache.lock().is_none());
+}

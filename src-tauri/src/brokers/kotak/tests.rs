@@ -1357,3 +1357,13 @@ fn long_or_blank_caller_tag_is_bounded_and_never_blank() {
     assert!(long.len() <= 52);
     assert!(order_tag(Some("   ")).starts_with("openalgo-"));
 }
+
+/// KEY-01: the account's UCC goes at logout (a resume restores it from the
+/// saved keys).
+#[tokio::test]
+async fn logout_clears_the_ucc() {
+    let b = KotakBroker::new(SymbolResolver::new());
+    *b.ucc.lock() = Some("UCC1".into());
+    b.on_logout().await;
+    assert!(b.ucc.lock().is_none());
+}

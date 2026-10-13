@@ -739,3 +739,20 @@ fn feed_identity_needs_uid() {
     assert_eq!(streaming::feed_identity(&fed).unwrap().1, "fresh");
     assert!(streaming::feed_identity(&AuthToken::new("k:::s:::t")).is_err());
 }
+
+/// KEY-01: a sign-in's pending OTP token and the open-interest cache go at
+/// logout.
+#[tokio::test]
+async fn logout_clears_the_otp_token_and_the_oi_cache() {
+    let b = DefinedgeBroker::new(SymbolResolver::new());
+    *b.pending_otp.lock() = Some(PendingOtp {
+        token: "otp-token".into(),
+        sent_at: std::time::Instant::now(),
+    });
+    b.oi_cache
+        .lock()
+        .insert(("NSE".into(), "1".into()), (5, std::time::Instant::now()));
+    b.on_logout().await;
+    assert!(b.pending_otp.lock().is_none());
+    assert!(b.oi_cache.lock().is_empty());
+}

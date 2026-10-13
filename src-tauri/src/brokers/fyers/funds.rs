@@ -51,6 +51,16 @@ enum Cached {
 }
 
 impl FundsCache {
+    /// Forget the cached funds and any backoff (logout, KEY-01).
+    pub fn clear(&self) {
+        *self.entry.lock() = None;
+    }
+
+    /// Whether anything is cached (tests).
+    pub fn is_empty(&self) -> bool {
+        self.entry.lock().is_none()
+    }
+
     fn lookup(&self, auth: &AuthToken, now: Instant) -> Cached {
         let key = session_key(auth);
         let guard = self.entry.lock();
@@ -78,7 +88,7 @@ impl FundsCache {
     }
 
     /// Start or lengthen the 429 backoff; returns cached funds if any.
-    fn rate_limited(&self, auth: &AuthToken, now: Instant) -> Option<Funds> {
+    pub(super) fn rate_limited(&self, auth: &AuthToken, now: Instant) -> Option<Funds> {
         let key = session_key(auth);
         let mut guard = self.entry.lock();
         if guard.as_ref().is_none_or(|e| e.session != key) {

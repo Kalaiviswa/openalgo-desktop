@@ -1228,3 +1228,16 @@ fn tbt_protobuf_decodes_and_accumulates_50_levels() {
     let req = f.ws_request().unwrap();
     assert!(req.headers().get("authorization").is_some());
 }
+
+/// KEY-01: the funds cached under a session's token go at logout.
+#[tokio::test]
+async fn logout_clears_the_funds_cache() {
+    let b = FyersBroker::new(SymbolResolver::new());
+    b.funds_cache.clear();
+    assert!(b.funds_cache.is_empty());
+    let a = AuthToken::new("APP:tok");
+    b.funds_cache.rate_limited(&a, tokio::time::Instant::now());
+    assert!(!b.funds_cache.is_empty());
+    b.on_logout().await;
+    assert!(b.funds_cache.is_empty());
+}
