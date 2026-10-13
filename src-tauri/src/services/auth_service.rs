@@ -371,7 +371,7 @@ impl AuthService {
             }
         }
         // The stored broker sessions are gone, so nothing is left to revoke.
-        *state.revoke_pending.lock() = false;
+        crate::services::broker_auth_service::BrokerAuthService::clear_pending_revoke(state);
         state.security.rotate()?;
         state.api_keys.clear();
         state.sessions.clear();
