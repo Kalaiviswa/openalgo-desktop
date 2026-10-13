@@ -17,9 +17,7 @@ use crate::brokers::common::symbols::SymToken;
 use crate::db::sqlite::market_calendar as cal;
 use crate::state::AppState;
 use chrono::{Datelike, NaiveDate};
-use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const INDEX_EXCHANGES: &[&str] = &["NSE_INDEX", "BSE_INDEX", "MCX_INDEX", "GLOBAL_INDEX"];
@@ -186,15 +184,27 @@ pub fn facts(
 
 type FactsKey = (String, String, NaiveDate);
 
-/// The facts with a short, bounded cache in front of the database reads.
-#[derive(Default)]
+/// The facts with a short, bounded cache in front of the database reads
+/// (KEY-01 cache rules): at most [`CACHE_MAX`] answers for [`CACHE_TTL`],
+/// each tagged with the symbol-master generation it was read from, so an
+/// answer from a master that was cleared (logout) or replaced is never
+/// served, and filled through the generation read before the read, so a
+/// `clear` meanwhile keeps it out.
 pub struct FactsCache {
-    held: Mutex<HashMap<FactsKey, (Instant, Value)>>,
+    held: crate::cache::TtlCache<FactsKey, (u64, Value)>,
+}
+
+impl Default for FactsCache {
+    fn default() -> Self {
+        Self {
+            held: crate::cache::TtlCache::new(CACHE_MAX, CACHE_TTL),
+        }
+    }
 }
 
 impl FactsCache {
     pub fn len(&self) -> usize {
-        self.held.lock().len()
+        self.held.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -202,28 +212,23 @@ impl FactsCache {
     }
 
     pub fn clear(&self) {
-        self.held.lock().clear();
+        self.held.clear();
     }
 
     /// The record for one symbol on one date, read through the cache.
     pub fn get(&self, ctx: &AppState, symbol: &str, exchange: &str, date: NaiveDate) -> Value {
         let key = (symbol.to_string(), exchange.to_string(), date);
         let now = Instant::now();
-        if let Some((at, v)) = self.held.lock().get(&key) {
-            if now.duration_since(*at) < CACHE_TTL {
-                return v.clone();
+        let master = ctx.symbols.snapshot().id();
+        let (hit, gen) = self.held.get_with_generation(&key, now);
+        if let Some((id, v)) = hit {
+            if id == master {
+                return v;
             }
         }
         let (value, trusted) = read(ctx, symbol, exchange, date);
         if trusted {
-            let mut held = self.held.lock();
-            if held.len() >= CACHE_MAX {
-                held.retain(|_, (at, _)| now.duration_since(*at) < CACHE_TTL);
-                if held.len() >= CACHE_MAX {
-                    held.clear();
-                }
-            }
-            held.insert(key, (now, value.clone()));
+            self.held.fill(key, (master, value.clone()), gen, now);
         }
         value
     }
@@ -342,5 +347,33 @@ mod tests {
         assert_eq!(v["instrument"]["hasVolume"], false);
         assert!(v["instrument"].get("session").is_none());
         assert_eq!(v["today"], Value::Null);
+    }
+
+    /// KEY-01: an answer read from a master that a logout cleared is not
+    /// served afterwards, and the cache stays bounded.
+    #[tokio::test]
+    async fn facts_from_a_cleared_master_are_never_served() {
+        use crate::brokers::common::symbols::tests::row as master_row;
+        let t = crate::state::testing::build(
+            crate::brokers::BrokerRegistry::with(vec![]),
+            chrono::Utc::now(),
+        );
+        let ctx = &t.ctx;
+        ctx.load_symbol_cache(vec![master_row("SBIN", "SBIN-EQ", "NSE", "3045")]);
+        let date = NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        let cache = FactsCache::default();
+        assert_eq!(cache.get(ctx, "SBIN", "NSE", date)["contractFound"], true);
+        ctx.clear_symbol_cache();
+        assert_eq!(
+            cache.get(ctx, "SBIN", "NSE", date)["contractFound"],
+            false,
+            "served from the master the logout cleared"
+        );
+        for i in 0..(CACHE_MAX * 2) {
+            cache.get(ctx, &format!("S{}", i), "NSE", date);
+        }
+        assert!(cache.len() <= CACHE_MAX);
+        cache.clear();
+        assert!(cache.is_empty());
     }
 }
