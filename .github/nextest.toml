@@ -29,3 +29,23 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 path = "junit.xml"
 store-success-output = false
 store-failure-output = true
+
+# KEY-01 (maintainer decision 2026-10-13: no OS keychain on any platform).
+# ci.yml runs the key vault's acceptance tests again, by name, on every
+# system of the matrix after the full suite, listing each test that passed
+# so the log of each system shows what ran there.
+[profile.key01]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 5 }
+leak-timeout = "500ms"
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "pass"
+final-status-level = "pass"
+
+[profile.key01.junit]
+# Written to src-tauri/target/nextest/key01/junit.xml.
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true

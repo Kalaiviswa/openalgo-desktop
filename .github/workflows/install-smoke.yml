@@ -14,12 +14,13 @@ name: Install smoke
 #   Windows Server 2025     app (a GUI-subsystem executable), create the
 #                           account and sign in
 #   macOS Apple Silicon     the app copied out of the .dmg, started with its
-#                           window, account created and signed in (the
-#                           runner's login keychain, which is unlocked)
+#                           window, account created and signed in
 #
 # "Sign in" is the trader's first start through the app's own HTTP on the
 # shipped port: POST /setup, POST /auth/login, GET /auth/session-status,
 # plus a wrong password that must be refused (scripts/ci/launch_smoke.py).
+# No OS keychain is used on any system (KEY-01): session-status must say the
+# keys are locked until the sign-in and open after it.
 # Every job also runs the packaged `mcp` subcommand over piped stdio.
 #
 # Runs after every successful CI push to master, or by hand with the id of
@@ -260,9 +261,9 @@ jobs:
           test -x "$bin"
           echo "APP_BIN=${bin}" >> "$GITHUB_ENV"
       - name: Start the app (window and all), create the account and sign in
-        # The runner's own home is kept: on macOS the keychain belongs to it,
-        # and the app reads its keys there at start and writes them at
-        # account creation. The runner is fresh, so the data folder is empty.
+        # The runner's own home is kept (the runner is fresh, so the data
+        # folder is empty). The app makes no keychain call (KEY-01): its keys
+        # are locked with the password in openalgo.db.
         run: python3 scripts/ci/launch_smoke.py --first-sign-in --real-home "$APP_BIN"
       - name: MCP over piped stdio (installed binary)
         run: python3 scripts/ci/mcp_stdio_smoke.py "$APP_BIN"

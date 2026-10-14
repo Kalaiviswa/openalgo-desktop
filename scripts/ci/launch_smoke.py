@@ -9,10 +9,10 @@ machine may belong to OpenAlgo web or a running app. The script refuses to
 run outside CI for that reason.
 
 The app gets a fresh, empty home and data folder, so it starts as a first
-install would. With --real-home it keeps the runner's own home instead:
-on macOS the keychain belongs to the home, and a substituted one has no
-default keychain (the runner itself is fresh, so the data folder is empty
-either way). The script polls GET /auth/csrf-token (public, no side
+install would. With --real-home it keeps the runner's own home instead
+(the runner itself is fresh, so the data folder is empty either way). The
+app uses no OS keychain on any system (KEY-01), so neither choice changes
+where its keys go. The script polls GET /auth/csrf-token (public, no side
 effect) until it answers 200 with a token.
 
 With --first-sign-in it then does what a trader does on first start,
@@ -20,7 +20,9 @@ through the app's own HTTP on the shipped port: creates the account
 (POST /setup), signs in (POST /auth/login), and checks that the session
 is signed in (GET /auth/session-status). It also checks that a wrong
 password is refused, so the sign-in check can fail. The password is random
-per run and never printed.
+per run and never printed. KEY-01: the keys are locked with the password
+in openalgo.db, so session-status must say "locked" at the start and after
+the account is created, and not once the trader signed in.
 
 Then it stops the app and reaps it. It fails if the app exits first, does
 not answer within the deadline, or a sign-in step fails, and prints the
@@ -109,6 +111,14 @@ def first_sign_in() -> list[str]:
     problems: list[str] = []
 
     browser = Client()
+
+    def locked(when: str, expected: bool) -> None:
+        status, body = browser.call("GET", "/auth/session-status")
+        print(f"GET /auth/session-status {when}: {status} locked={body.get('locked')} key_mode={body.get('key_mode')}")
+        if body.get("locked") is not expected or body.get("key_mode") != "password":
+            problems.append(f"{when} the keys should be {'locked' if expected else 'open'}: {status} {body}")
+
+    locked("at the start", True)
     status, body = browser.call("POST", "/setup", {
         "username": USERNAME,
         "email": EMAIL,
@@ -117,7 +127,8 @@ def first_sign_in() -> list[str]:
     })
     print(f"POST /setup: {status} {body.get('status')} {body.get('message', '')}")
     if status != 200 or body.get("status") != "success":
-        return [f"creating the account failed: {status} {body}"]
+        return problems + [f"creating the account failed: {status} {body}"]
+    locked("after the account was created", True)
 
     status, body = browser.call("POST", "/auth/login", {"username": USERNAME, "password": password})
     print(f"POST /auth/login: {status} {body.get('status')} {body.get('message', '')}")
@@ -128,6 +139,7 @@ def first_sign_in() -> list[str]:
     print(f"GET /auth/session-status: {status} authenticated={body.get('authenticated')}")
     if status != 200 or body.get("authenticated") is not True:
         problems.append(f"the session is not signed in after the sign-in: {status} {body}")
+    locked("after the sign-in", False)
 
     # The check must be able to fail: a wrong password is refused and leaves
     # a fresh session signed out.

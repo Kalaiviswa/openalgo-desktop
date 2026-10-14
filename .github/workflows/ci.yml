@@ -113,12 +113,30 @@ jobs:
       - name: Doc tests (nextest does not run them)
         working-directory: src-tauri
         run: cargo test --locked --doc
+      - name: KEY-01 keys without the OS keychain, on this system
+        # Maintainer decision 2026-10-13: no OS keychain on any platform
+        # (macOS Keychain, Windows Credential Manager, Linux and Raspberry Pi
+        # Secret Service alike). The key vault's acceptance tests by name,
+        # each listed in the log; the step fails if none match. They use an
+        # in-memory stand-in for the keychain that counts every call; no
+        # test touches the runner's real keychain.
+        working-directory: src-tauri
+        run: >-
+          cargo nextest run --locked --lib --config-file ../.github/nextest.toml
+          --profile key01 --no-tests=fail
+          -E 'test(/^server::tests::key_vault::/) | test(/^security::tests::/)
+          | test(/^security::keystore::tests::/) | test(/^db::sqlite::key_vault::/)
+          | test(/^server::tests::credentials_lifecycle::sec0[234]/)
+          | test(=db::sqlite::data_migrations::tests::upgrade_from_previous_build_keeps_every_secret_readable)
+          | test(/^cache::tests::/) | test(/^services::apikey_service::tests::/)'
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: rust-test-junit-${{ matrix.os }}
-          path: src-tauri/target/nextest/ci/junit.xml
+          path: |
+            src-tauri/target/nextest/ci/junit.xml
+            src-tauri/target/nextest/key01/junit.xml
           if-no-files-found: ignore
           retention-days: 7
 
