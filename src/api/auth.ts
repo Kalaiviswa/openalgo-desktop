@@ -82,16 +82,6 @@ export const authApi = {
   },
 
   /**
-   * Reset password request
-   */
-  resetPassword: async (email: string): Promise<LoginResponse> => {
-    const formData = new FormData()
-    formData.append('email', email)
-    const response = await authClient.post<LoginResponse>('/auth/reset-password', formData)
-    return response.data
-  },
-
-  /**
    * Change password
    */
   changePassword: async (currentPassword: string, newPassword: string): Promise<LoginResponse> => {

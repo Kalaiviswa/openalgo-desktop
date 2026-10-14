@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher 0.4.4",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -3864,6 +3865,7 @@ dependencies = [
 name = "openalgo-desktop"
 version = "1.0.0"
 dependencies = [
+ "aes 0.8.4",
  "aes-gcm",
  "anyhow",
  "argon2",

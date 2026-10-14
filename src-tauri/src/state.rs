@@ -410,6 +410,8 @@ impl AppState {
         let mut tasks = std::mem::take(&mut *self.tasks.lock());
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        // Quitting wipes the keys like a logout (KEY-01).
+        self.security.lock();
     }
 
     pub fn now(&self) -> DateTime<Utc> {
@@ -487,7 +489,15 @@ impl AppState {
             Some(s)
         } else {
             drop(cfg);
-            *self.broker_session.write() = None;
+            // Clear only the session this read found stale: a sign-in that
+            // set a new one in between keeps it (KEY-01 cache rules: a
+            // writer never undoes a newer value).
+            let mut slot = self.broker_session.write();
+            if slot.as_ref().is_some_and(|cur| {
+                cur.broker_id == s.broker_id && cur.authenticated_at == s.authenticated_at
+            }) {
+                *slot = None;
+            }
             None
         }
     }

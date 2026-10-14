@@ -6,14 +6,13 @@ use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::middleware::{
     claim_sign_in, clear_session_cookie, login_limited, redirect, same_origin_navigation,
-    sign_in_refused, sign_in_source, with_cookie, Sess, Src, User,
+    sign_in_refused, with_cookie, Sess, Src, User,
 };
-use crate::server::ratelimit::Bucket;
 use crate::server::routes::webui::no_store;
 use crate::services::apikey_service::ApiKeyService;
 use crate::services::auth_service::{AuthService, LoginOutcome};
 use crate::services::broker_auth_service::BrokerAuthService;
-use crate::session::web::{random_token, PENDING_TOTP_SECS};
+use crate::session::web::PENDING_TOTP_SECS;
 use crate::state::AppState;
 use axum::{
     extract::State,
@@ -21,7 +20,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 type Ctx = State<Arc<AppState>>;
@@ -101,24 +99,27 @@ pub async fn setup(State(ctx): Ctx, Src(source): Src, form: FormData) -> Respons
     }
 }
 
-/// What a sign-in answers when the password was changed while it was being
-/// checked.
+/// What a sign-in answers when the password was changed, or every window
+/// was signed out, while it was being checked.
 pub const PASSWORD_CHANGED_DURING_SIGN_IN: &str =
-    "Your password was just changed. Sign in again with the new password.";
+    "You were signed out, or your password was changed, while signing in. Sign in again.";
 
-/// Issue the signed-in session. `epoch` is the credentials generation read
-/// before the account was read: if a password change or reset (or an
-/// account reset) happened since, no session is issued, even though the
-/// password checked out against the hash read before the change
-/// (`SecurityManager::issue_if_current`; security review of SEC-02).
+/// Issue the signed-in session and install the keys the password opened,
+/// together (KEY-01). `epoch` is the credentials generation read before the
+/// account was read: if a password change or reset, an account reset or a
+/// logout happened since, no session is issued and nothing is installed,
+/// even though the password checked out against the hash read before the
+/// change (`SecurityManager::issue_if_current`; security review of SEC-02).
 async fn finish_sign_in(
     ctx: &Arc<AppState>,
     old_session: Option<&str>,
     username: &str,
     epoch: u64,
+    keys: crate::security::Unlocked,
 ) -> Response {
     let now = ctx.now();
     let issued = ctx.security.issue_if_current(epoch, || {
+        ctx.security.install(&keys);
         let s = match old_session {
             Some(id) => ctx.sessions.rotate(id, now),
             None => ctx.sessions.create(now),
@@ -129,6 +130,7 @@ async fn finish_sign_in(
             x.pending_totp_user = None;
             x.pending_totp_started = None;
             x.pending_epoch = None;
+            x.pending_keys = None;
         });
         s
     });
@@ -156,6 +158,9 @@ async fn finish_sign_in(
             json!({"status": "success", "redirect": "/broker"})
         }
     };
+    // Telegram and WhatsApp come back with the keys, as the web's start-up
+    // brings them back (they were stopped at the logout).
+    crate::messaging::autostart(ctx);
     with_cookie(ok(body), &s.id)
 }
 
@@ -219,15 +224,22 @@ pub async fn login(
     })
     .await;
     match outcome {
-        Ok(Ok(LoginOutcome::Success(user))) => {
+        Ok(Ok(LoginOutcome::Success(user, keys))) => {
             attempt.succeeded();
             tracing::info!("Sign-in succeeded");
             crate::services::security_service::record_login(
                 &ctx, &user, ip, "success", "password", None,
             );
-            finish_sign_in(&ctx, sess.as_ref().map(|s| s.id.as_str()), &user, epoch).await
+            finish_sign_in(
+                &ctx,
+                sess.as_ref().map(|s| s.id.as_str()),
+                &user,
+                epoch,
+                keys,
+            )
+            .await
         }
-        Ok(Ok(LoginOutcome::TotpRequired(user))) => {
+        Ok(Ok(LoginOutcome::TotpRequired(user, keys))) => {
             // The password was right, so this attempt is given back; earlier
             // failures stay until the code is right too, so someone who
             // knows the password cannot clear them between code guesses.
@@ -244,6 +256,9 @@ pub async fn login(
                 // The code step issues the session only if the password is
                 // still the one checked here.
                 x.pending_epoch = Some(epoch);
+                // The keys the password opened, used only to check the
+                // code and installed only with the session (KEY-01).
+                x.pending_keys = Some(keys);
             });
             with_cookie(
                 ok(
@@ -322,13 +337,14 @@ pub async fn login_totp(
             x.pending_totp_user = None;
             x.pending_totp_started = None;
             x.pending_epoch = None;
+            x.pending_keys = None;
         });
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({"status": "error", "message": "Login session expired. Please sign in again.", "redirect": "/login"}),
         );
     }
-    let Some(user) = s.pending_totp_user.clone() else {
+    let (Some(user), Some(keys)) = (s.pending_totp_user.clone(), s.pending_keys.clone()) else {
         return error(StatusCode::UNAUTHORIZED, "No pending login. Sign in first.");
     };
     let code = form.non_empty("totp_code").unwrap_or_default();
@@ -341,7 +357,7 @@ pub async fn login_totp(
         Ok(a) => a,
         Err(r) => return r,
     };
-    match AuthService::verify_totp_for(&ctx, &user, &code) {
+    match AuthService::verify_totp_with(&ctx, &user, &code, &keys) {
         Ok(true) => {
             attempt.succeeded();
             ctx.sessions
@@ -353,7 +369,7 @@ pub async fn login_totp(
             // since then voids this sign-in. A pending sign-in without one
             // never issues a session.
             let epoch = s.pending_epoch.unwrap_or(u64::MAX);
-            finish_sign_in(&ctx, Some(&s.id), &user, epoch).await
+            finish_sign_in(&ctx, Some(&s.id), &user, epoch, keys).await
         }
         Ok(false) => {
             attempt.failed();
@@ -381,11 +397,14 @@ pub async fn session_status(State(ctx): Ctx, Sess(sess): Sess) -> Response {
 }
 
 fn session_status_body(ctx: &AppState, sess: Option<crate::session::web::WebSession>) -> Response {
-    let key_mode = ctx.security.mode();
+    // The keys are always locked with the password now (KEY-01); `locked`
+    // says whether they are in memory.
+    let key_mode = "password";
+    let locked = !ctx.security.is_unlocked();
     let Some(user) = sess.and_then(|s| s.user) else {
         return ok(json!({
             "status": "success", "message": "Not authenticated",
-            "authenticated": false, "logged_in": false, "key_mode": key_mode,
+            "authenticated": false, "logged_in": false, "key_mode": key_mode, "locked": locked,
         }));
     };
     let active = ctx.sessions.authenticated_count();
@@ -396,17 +415,17 @@ fn session_status_body(ctx: &AppState, sess: Option<crate::session::web::WebSess
                 "status": "success", "authenticated": true, "logged_in": true,
                 "user": user, "broker": b.broker_id,
                 "api_key": api_key.as_ref().map(|k| k.expose()),
-                "active_sessions": active, "key_mode": key_mode,
+                "active_sessions": active, "key_mode": key_mode, "locked": locked,
             }))
         }
         None if BrokerAuthService::had_revoked_session(ctx) => ok(json!({
             "status": "success", "authenticated": true, "logged_in": false,
             "user": user, "broker": Value::Null, "broker_session_expired": true,
-            "active_sessions": active, "key_mode": key_mode,
+            "active_sessions": active, "key_mode": key_mode, "locked": locked,
         })),
         None => ok(json!({
             "status": "success", "authenticated": true, "logged_in": false,
-            "user": user, "broker": Value::Null, "active_sessions": active, "key_mode": key_mode,
+            "user": user, "broker": Value::Null, "active_sessions": active, "key_mode": key_mode, "locked": locked,
         })),
     }
 }
@@ -460,6 +479,9 @@ pub async fn logout(
             );
             revoke_pending = true;
         }
+        // The keys and everything decrypted with them leave memory, and
+        // every cache is cleared (KEY-01).
+        AuthService::lock_everything(&ctx).await;
         ctx.bus.publish(Event::ForceLogout {
             message: "You have been logged out from another device.".into(),
         });
@@ -483,115 +505,6 @@ pub async fn logout(
     resp.headers_mut()
         .append(header::SET_COOKIE, clear_session_cookie());
     resp
-}
-
-fn hash_token(t: &str) -> String {
-    hex::encode(Sha256::digest(t.as_bytes()))
-}
-
-/// POST /auth/reset-password (steps: email, select_totp, select_email, totp, password)
-pub async fn reset_password(
-    State(ctx): Ctx,
-    Sess(sess): Sess,
-    Src(source): Src,
-    headers: HeaderMap,
-    form: FormData,
-) -> Response {
-    // Per address only; the authenticator code below also spends the
-    // source's sign-in budget.
-    if ctx
-        .limiter
-        .check(Bucket::Reset, source.ip(), ctx.limiter.now())
-        .is_err()
-    {
-        return error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many password reset attempts. Please wait and try again later.",
-        );
-    }
-    let Some(s) = sess else {
-        return error(StatusCode::BAD_REQUEST, "Invalid or expired reset token.");
-    };
-    let step = form.get("step").unwrap_or_default().to_string();
-    let email = form.non_empty("email").unwrap_or_default();
-    match step.as_str() {
-        "email" => ok(json!({"status": "success", "message": "Email verified"})),
-        "select_totp" => ok(json!({"status": "success", "method": "totp"})),
-        "select_email" => error(
-            StatusCode::BAD_REQUEST,
-            "Email reset is not available. Please use TOTP authentication.",
-        ),
-        "totp" => {
-            if !ctx.security.is_unlocked() {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "Password reset with an authenticator is not available on this computer because OpenAlgo protects its keys with your password. Use Reset account instead.",
-                );
-            }
-            // An authenticator code is a sign-in attempt: from the app's own
-            // page only, and spending the source's budget for the account
-            // the email names, claimed before the code is checked.
-            if let Some(r) = sign_in_refused(&ctx, &headers, source) {
-                return r;
-            }
-            let attempt = match claim_sign_in(&ctx, source) {
-                Ok(a) => a,
-                Err(r) => return r,
-            };
-            let code = form.non_empty("totp_code").unwrap_or_default();
-            let verified = AuthService::verify_totp_by_email(&ctx, &email, &code);
-            match &verified {
-                Ok(true) | Err(_) => attempt.released(),
-                Ok(false) => attempt.failed(),
-            }
-            match verified {
-                Ok(true) => {
-                    let token = random_token();
-                    let h = hash_token(&token);
-                    ctx.sessions.update(&s.id, |x| {
-                        x.reset_token_hash = Some(h);
-                        x.reset_email = Some(email.clone());
-                    });
-                    no_store(ok(
-                        json!({"status": "success", "message": "TOTP verified", "token": token}),
-                    ))
-                }
-                _ => error(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid TOTP code. Please try again.",
-                ),
-            }
-        }
-        "password" => {
-            let token = form.get("token").unwrap_or_default();
-            let valid = s
-                .reset_token_hash
-                .as_deref()
-                .map(|h| crate::server::form::tokens_match(&hash_token(token), h))
-                .unwrap_or(false)
-                && s.reset_email.as_deref() == Some(email.as_str());
-            if token.is_empty() || !valid {
-                return error(StatusCode::BAD_REQUEST, "Invalid or expired reset token.");
-            }
-            let password = Secret::new(form.get("password").unwrap_or_default());
-            match AuthService::reset_password(&ctx, &email, password.expose()) {
-                Ok(()) => {
-                    // Proven with the authenticator: the budget starts over.
-                    ctx.limiter.backoff.clear(sign_in_source(source));
-                    ctx.bus.publish(Event::ForceLogout {
-                        message:
-                            "Your password was reset. Please log in again with the new password."
-                                .into(),
-                    });
-                    ok(
-                        json!({"status": "success", "message": "Your password has been reset successfully."}),
-                    )
-                }
-                Err(e) => error(StatusCode::BAD_REQUEST, e.client_message()),
-            }
-        }
-        _ => error(StatusCode::BAD_REQUEST, "Invalid step"),
-    }
 }
 
 /// POST /auth/change-password (form: old_password, new_password, confirm_password)

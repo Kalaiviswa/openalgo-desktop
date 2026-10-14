@@ -8,6 +8,7 @@ fn main() {
         "restart_server",
         "open_external",
         "reset_account",
+        "start_fresh",
     ]);
     if let Err(e) = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(app)) {
         panic!("tauri build failed: {e:#}");

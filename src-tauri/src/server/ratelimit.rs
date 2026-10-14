@@ -7,7 +7,6 @@
 //! | SmartOrder   | 10 per second   | placesmartorder                                   |
 //! | LoginMinute  | 5 per minute    | `/auth/login`, `/auth/login/totp`, broker logins  |
 //! | LoginHour    | 25 per hour     | same                                              |
-//! | Reset        | 15 per hour     | `/auth/reset-password`                            |
 //! | ApiKeyFail   | 10 per minute   | failed API-key checks; over it the key is not even tried |
 //! | StrategyWebhook | 100 per minute | `/strategy/webhook/<token>` per caller address |
 //! | WebhookFail  | 10 per minute   | failed strategy-webhook authentications per caller |
@@ -92,7 +91,6 @@ pub enum Bucket {
     SmartOrder,
     LoginMinute,
     LoginHour,
-    Reset,
     /// Failed API keys, MCP tokens and feed keys by caller, one budget for
     /// all three (`middleware::failures_exhausted`). Spent, it refuses
     /// further invalid attempts early; never a valid credential.
@@ -119,7 +117,6 @@ impl Bucket {
             Bucket::Order | Bucket::SmartOrder => (10, Duration::from_secs(1)),
             Bucket::LoginMinute => (5, Duration::from_secs(60)),
             Bucket::LoginHour => (25, Duration::from_secs(3600)),
-            Bucket::Reset => (15, Duration::from_secs(3600)),
             Bucket::ApiKeyFail => (10, Duration::from_secs(60)),
             Bucket::Guard => (1000, Duration::from_secs(1)),
             Bucket::StrategyWebhook | Bucket::ChartinkWebhook => (100, Duration::from_secs(60)),

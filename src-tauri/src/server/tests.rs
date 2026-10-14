@@ -212,6 +212,8 @@ mod sign_in;
 mod broker_config;
 // Codex review evaluation B: sign-out, revocation, keys, broker settings.
 mod credentials_lifecycle;
+// KEY-01: no OS keychain; the keys locked with the password in openalgo.db.
+mod key_vault;
 
 // ------------------------------------------------------------------ fixtures
 
@@ -663,7 +665,6 @@ async fn public_route_list_is_exactly_the_reviewed_one() {
             "POST /auth/login/totp",
             "GET /auth/logout",
             "POST /auth/logout",
-            "POST /auth/reset-password",
             // Secret-verified webhook (the URL token is the credential).
             "POST /strategy/webhook/{token}",
             // MCP: bearer token (crate::mcp::http).
@@ -1167,8 +1168,13 @@ async fn change_password_signs_everyone_out() {
     assert_eq!(s, StatusCode::OK);
 }
 
+/// KEY-01: the web's password reset by authenticator code is retired. The
+/// TOTP secret is encrypted with the data key, which is locked while nobody
+/// is signed in, so a code proves nothing then; a forgotten password is
+/// replaced from the desktop window only (the `start_fresh` command). The
+/// route is gone: a right code changes nothing and the password still works.
 #[tokio::test]
-async fn password_reset_with_totp_like_the_web() {
+async fn the_reset_by_authenticator_code_is_retired() {
     let h = H::new();
     h.setup();
     let (cookie, csrf) = h.session(false);
@@ -1179,48 +1185,28 @@ async fn password_reset_with_totp_like_the_web() {
         .unwrap();
     let code =
         crate::security::totp::generate(secret.expose(), h.ctx().now().timestamp() as u64).unwrap();
-    let post = |body: Value| {
-        with_session(
-            post_json("/auth/reset-password", body),
-            &cookie,
-            Some(&csrf),
-        )
-    };
-    let (s, _) = h
-        .json(post(
-            json!({"step": "totp", "email": EMAIL, "totp_code": "000000"}),
-        ))
-        .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, headers, body) = h
-        .send(post(
-            json!({"step": "totp", "email": EMAIL, "totp_code": code}),
-        ))
-        .await;
-    assert_eq!(s, StatusCode::OK);
-    // The reset token is a secret: never cached (SEC-06).
-    assert!(headers[header::CACHE_CONTROL]
-        .to_str()
-        .unwrap()
-        .contains("no-store"));
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    let token = v["token"].as_str().unwrap().to_string();
-    let (s, _) = h
-        .json(post(
-            json!({"step": "password", "email": EMAIL, "token": "forged", "password": "Reset@789"}),
-        ))
-        .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, v) = h
-        .json(post(
-            json!({"step": "password", "email": EMAIL, "token": token, "password": "Reset@789"}),
-        ))
-        .await;
-    assert_eq!(s, StatusCode::OK, "{}", v);
+    for body in [
+        json!({"step": "totp", "email": EMAIL, "totp_code": code}),
+        json!({"step": "password", "email": EMAIL, "token": "x", "password": "Reset@789"}),
+    ] {
+        let (s, v) = h
+            .json(with_session(
+                post_json("/auth/reset-password", body),
+                &cookie,
+                Some(&csrf),
+            ))
+            .await;
+        assert!(
+            s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED,
+            "{} {}",
+            s,
+            v
+        );
+    }
     let (s, _) = h
         .json(multipart(
             "/auth/login",
-            &[("username", USER), ("password", "Reset@789")],
+            &[("username", USER), ("password", PASSWORD)],
         ))
         .await;
     assert_eq!(s, StatusCode::OK);

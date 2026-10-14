@@ -108,7 +108,8 @@ pub fn run() {
                     // its status with a trader-facing message.
                     let feed = feed::FeedService::new(ctx.clone());
                     feed.start().await;
-                    messaging::autostart(&ctx);
+                    // Telegram and WhatsApp start at the first sign-in, when
+                    // the keys that open their tokens are in memory (KEY-01).
                     Ok::<_, error::AppError>((ctx, server, feed))
                 })?;
                 app.manage(feed);
@@ -184,6 +185,7 @@ pub fn run() {
                 commands::restart_server,
                 commands::open_external,
                 commands::reset_account,
+                commands::start_fresh,
             ])
             .build(tauri::generate_context!());
 

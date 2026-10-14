@@ -318,11 +318,14 @@ pub fn system_payload(
             .flatten()
             .is_some()),
     );
-    let key_mode = ctx.security.mode();
+    // KEY-01: the keys are always wrapped with the login password in
+    // openalgo.db, never in the OS keychain; they are open only while the
+    // trader is signed in.
     let mut strength = Map::new();
+    strength.insert("Keys locked with your login password".into(), json!(true));
     strength.insert(
-        "Keys held in the OS keychain".into(),
-        json!(matches!(key_mode, crate::security::KeyMode::Keychain)),
+        "Keys open (signed in)".into(),
+        json!(ctx.security.is_unlocked()),
     );
     json!({
         "mode": {

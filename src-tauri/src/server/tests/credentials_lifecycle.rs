@@ -42,12 +42,16 @@ fn allow_auth_writes(h: &H) {
         .unwrap();
 }
 
-/// Whether the stored broker session is still un-revoked.
+/// Whether the stored broker session is still un-revoked (read without the
+/// keys, which a logout locks).
 fn stored_session_active(h: &H) -> bool {
     let conn = h.ctx().sqlite.conn().unwrap();
-    crate::db::sqlite::auth::latest_active(&conn, &h.ctx().security)
-        .unwrap()
-        .is_some()
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auth WHERE is_revoked = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    n > 0
 }
 
 fn csrf_of(h: &H, cookie: &str) -> String {
@@ -78,6 +82,16 @@ async fn api_key_refused(h: &H, key: &str) -> bool {
         ))
         .await;
     s == StatusCode::FORBIDDEN && v["message"] == "Invalid openalgo apikey" && s2 == s
+}
+
+/// The API answers that OpenAlgo is locked (after a logout, KEY-01): the
+/// key is not even checked.
+async fn api_locked(h: &H, key: &str) -> bool {
+    let (s, v) = h
+        .json(post_json("/api/v1/ping", json!({"apikey": key})))
+        .await;
+    s == StatusCode::SERVICE_UNAVAILABLE
+        && v == json!({"status": "error", "message": crate::services::core::API_LOCKED})
 }
 
 // ------------------------------------------- SEC-01 anonymous logout
@@ -226,7 +240,7 @@ async fn sec05_logout_ends_the_session_even_when_the_write_fails() {
         h.ctx().runtime.active_broker().is_none(),
         "streaming stopped"
     );
-    assert!(api_key_refused(&h, &key).await, "the API key still trades");
+    assert!(api_locked(&h, &key).await, "the API key still trades");
     assert!(BrokerAuthService::revoke_is_pending(h.ctx()));
     // A sign-in (or a restart's first sign-in) does not bring it back.
     assert!(BrokerAuthService::try_resume(h.ctx())
@@ -512,9 +526,10 @@ async fn sec05c_a_resume_racing_a_logout_installs_nothing() {
     assert!(!stored_session_active(&h));
 }
 
-// ---------------------------------- SEC-03 never new keys for an install
+// ------------------------------- SEC-03, SEC-04, SEC-09 under KEY-01
 
-/// The app opened on `dir` with `store` as its keychain, as at a start.
+/// The app opened on `dir` with `store` as the keychain of earlier builds,
+/// as at a start.
 fn open_at(
     dir: &std::path::Path,
     store: Arc<dyn crate::security::keystore::KeyStore>,
@@ -569,264 +584,235 @@ fn kite_key(ctx: &AppState) -> String {
         .to_string()
 }
 
+/// Sign in as the route does: check the password and, when it opens the
+/// keys, install them (with the session, in the route).
 fn signs_in(ctx: &AppState, password: &str) -> bool {
-    matches!(
-        AuthService::verify_credentials(ctx, USER, password),
-        Ok(crate::services::auth_service::LoginOutcome::Success(_))
-            | Ok(crate::services::auth_service::LoginOutcome::TotpRequired(_))
-    )
+    use crate::services::auth_service::LoginOutcome;
+    match AuthService::verify_credentials(ctx, USER, password) {
+        Ok(LoginOutcome::Success(_, keys)) | Ok(LoginOutcome::TotpRequired(_, keys)) => {
+            ctx.security.install(&keys);
+            true
+        }
+        _ => false,
+    }
 }
 
-/// SEC-03: the keychain is locked (or access was denied) when the app
-/// starts. Signing in with the right password says so, for any name, and
-/// creates no vault; once the keychain is back the same password signs in
-/// and every saved secret still decrypts.
-#[tokio::test]
+/// SEC-03 under KEY-01: no sign-in ever makes new keys for an existing
+/// install. The keys of an earlier build's keychain install stay where they
+/// are while the keychain is locked (nothing is written, the account is
+/// told how to go on), and once it opens the same password moves them and
+/// every saved secret still decrypts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sec03_a_locked_keychain_never_gets_new_keys() {
-    use crate::security::keystore::FaultyKeyStore;
+    use crate::security::keystore::{CountingKeyStore, DATA_KEY, PEPPER};
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(FaultyKeyStore::default());
-    let ctx = open_at(dir.path(), store.clone());
-    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
-    save_kite_key(&ctx);
-    close(ctx).await;
-
-    store.set_unavailable(true);
-    let ctx = open_at(dir.path(), store.clone());
-    for name in [USER, "someone-else"] {
-        let r = AuthService::verify_credentials(&ctx, name, PASSWORD);
-        assert!(
-            matches!(r, Err(crate::error::AppError::KeychainUnavailable)),
-            "{}: {:?}",
-            name,
-            r
-        );
-        let (s, _, v) = send_to(
-            &ctx,
-            multipart("/auth/login", &[("username", name), ("password", PASSWORD)]),
+    let store = Arc::new(CountingKeyStore::default());
+    let keys = crate::security::Unlocked::random().unwrap();
+    {
+        // An earlier build's install: its rows, its keys in the keychain.
+        let with = keys.manager();
+        let db = crate::db::sqlite::SqliteDb::new(&dir.path().join("openalgo.db")).unwrap();
+        let conn = db.conn().unwrap();
+        let hash = with.hash_password(PASSWORD).unwrap();
+        crate::db::sqlite::user::insert(
+            &conn,
+            &with,
+            USER,
+            EMAIL,
+            &hash,
+            &crate::security::totp::generate_secret(),
         )
-        .await;
-        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
-        assert_eq!(v["message"], crate::error::KEYCHAIN_UNAVAILABLE_MESSAGE);
+        .unwrap();
+        crate::db::sqlite::credentials::save(
+            &conn,
+            &with,
+            "zerodha",
+            crate::db::sqlite::credentials::CredentialUpdate {
+                api_key: Some("kiteapikey".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DROP TABLE key_vault; DELETE FROM migrations WHERE name = '081_key_vault';",
+        )
+        .unwrap();
+        let (k, p) = crate::security::keychain_entries_for_test(&keys);
+        store.seed(DATA_KEY, &k);
+        store.seed(PEPPER, &p);
     }
+    store.inner.set_unavailable(true);
+    let ctx = open_at(dir.path(), store.clone());
+    let r = AuthService::verify_credentials(&ctx, USER, PASSWORD);
     assert!(
-        !dir.path().join(crate::security::VAULT_FILE).exists(),
-        "a sign-in created new keys"
+        matches!(r, Err(crate::error::AppError::KeychainUnavailable)),
+        "{:?}",
+        r
     );
+    let (s, _, v) = send_to(
+        &ctx,
+        multipart("/auth/login", &[("username", USER), ("password", PASSWORD)]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
+    assert_eq!(v["message"], crate::error::KEYCHAIN_UNAVAILABLE_MESSAGE);
+    let vault = crate::db::sqlite::key_vault::read(&ctx.sqlite.conn().unwrap()).unwrap();
+    assert!(vault.is_none(), "a sign-in made new keys");
+    assert!(!ctx.security.is_unlocked());
     close(ctx).await;
 
-    store.set_unavailable(false);
+    store.inner.set_unavailable(false);
     let ctx = open_at(dir.path(), store);
     assert!(signs_in(&ctx, PASSWORD));
     assert_eq!(kite_key(&ctx), "kiteapikey");
     close(ctx).await;
 }
 
-/// SEC-03: in password mode, keys moved from an old `secrets.dat` are
-/// wrapped into the vault only with a password that was verified; a wrong
-/// password leaves no vault behind for the right one to fail on.
+/// SEC-03 under KEY-01: keys moved from an old `secrets.dat` are wrapped
+/// into the vault only with a password that was verified; a wrong password
+/// leaves no vault behind for the right one to fail on.
 #[tokio::test]
 async fn sec03_legacy_keys_are_wrapped_only_with_a_verified_password() {
-    use crate::security::keystore::UnavailableKeyStore;
+    use crate::security::keystore::CountingKeyStore;
     let dir = tempfile::tempdir().unwrap();
-    let vault = dir.path().join(crate::security::VAULT_FILE);
-    crate::security::legacy::write_for_test(dir.path(), &[5u8; 32], &[6u8; 32]);
-    let ctx = open_at(dir.path(), Arc::new(UnavailableKeyStore));
+    let store = Arc::new(CountingKeyStore::default());
+    let ctx = open_at(dir.path(), store.clone());
     AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    assert!(signs_in(&ctx, PASSWORD));
     save_kite_key(&ctx);
+    // The keys setup made, as an earlier build's secrets.dat held them.
+    let (key, pepper) = {
+        let row = crate::db::sqlite::key_vault::read(&ctx.sqlite.conn().unwrap())
+            .unwrap()
+            .unwrap();
+        let (k, p) = crate::db::sqlite::key_vault::unwrap(&row, PASSWORD)
+            .unwrap()
+            .unwrap();
+        (k.expose().to_vec(), p.expose().to_vec())
+    };
     close(ctx).await;
     // As a build that had not yet wrapped the moved keys left it.
-    std::fs::remove_file(&vault).unwrap();
-    crate::security::legacy::write_for_test(dir.path(), &[5u8; 32], &[6u8; 32]);
+    {
+        let db = crate::db::sqlite::SqliteDb::new(&dir.path().join("openalgo.db")).unwrap();
+        crate::db::sqlite::key_vault::delete(&db.conn().unwrap()).unwrap();
+    }
+    crate::security::legacy::write_for_test(dir.path(), &key, &pepper);
 
-    let ctx = open_at(dir.path(), Arc::new(UnavailableKeyStore));
+    let ctx = open_at(dir.path(), store.clone());
+    let vault = |ctx: &AppState| {
+        crate::db::sqlite::key_vault::read(&ctx.sqlite.conn().unwrap())
+            .unwrap()
+            .map(|r| r.source)
+    };
     assert!(!signs_in(&ctx, "Wrong@1234"));
-    assert!(!vault.exists(), "wrapped with a wrong password");
+    assert_eq!(vault(&ctx), None, "wrapped with a wrong password");
     assert!(signs_in(&ctx, PASSWORD));
-    assert!(vault.exists());
+    assert_eq!(
+        vault(&ctx),
+        Some(crate::db::sqlite::key_vault::Source::LegacyFile)
+    );
+    assert!(!crate::security::legacy::path(dir.path()).exists());
     close(ctx).await;
 
-    let ctx = open_at(dir.path(), Arc::new(UnavailableKeyStore));
+    let ctx = open_at(dir.path(), store.clone());
     assert!(signs_in(&ctx, PASSWORD));
     assert_eq!(kite_key(&ctx), "kiteapikey");
+    assert_eq!(store.calls(), 0, "the keychain was called");
     close(ctx).await;
 }
 
-/// SEC-04: an account reset whose new keys the keychain refuses still
-/// signs every window out: the account is already gone, so no session may
-/// outlive it because the last step failed.
+/// SEC-04 under KEY-01: an account reset signs every window out, locks the
+/// keys and deletes the vault with the account; no keychain is involved,
+/// so nothing it refuses can leave a window signed in.
 #[tokio::test]
-async fn sec04_a_reset_the_keychain_refuses_still_signs_everyone_out() {
-    use crate::security::keystore::FaultyKeyStore;
+async fn sec04_a_reset_signs_everyone_out_and_forgets_the_keys() {
+    use crate::security::keystore::CountingKeyStore;
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(FaultyKeyStore::default());
+    let store = Arc::new(CountingKeyStore::default());
     let ctx = open_at(dir.path(), store.clone());
     AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
     let s = ctx.sessions.create(ctx.now());
     ctx.sessions.update(&s.id, |x| x.user = Some(USER.into()));
     assert_eq!(ctx.sessions.authenticated_count(), 1);
-    *store.writes_left.lock() = Some(0);
-    assert!(AuthService::reset_account_everywhere(&ctx).await.is_err());
+    AuthService::reset_account_everywhere(&ctx).await.unwrap();
     assert!(AuthService::needs_setup(&ctx).unwrap(), "account removed");
     assert_eq!(
         ctx.sessions.authenticated_count(),
         0,
         "a window stayed signed in to a removed account"
     );
+    assert!(!ctx.security.is_unlocked(), "the keys outlived the account");
+    assert!(
+        crate::db::sqlite::key_vault::read(&ctx.sqlite.conn().unwrap())
+            .unwrap()
+            .is_none(),
+        "the vault outlived the account"
+    );
+    // A new account gets new keys.
+    AuthService::setup(&ctx, USER, EMAIL, "Second@123").unwrap();
+    assert!(signs_in(&ctx, "Second@123"));
+    assert_eq!(store.calls(), 0, "the keychain was called");
     close(ctx).await;
 }
 
-/// SEC-09 (and SEC-03's fingerprint): a data folder restored on a computer
-/// whose keychain holds other keys (another computer, or this one after an
-/// account reset) is explained at sign-in instead of "Invalid".
-#[tokio::test]
-async fn sec09_a_folder_saved_with_other_keys_is_explained() {
-    use crate::security::keystore::FaultyKeyStore;
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = open_at(dir.path(), Arc::new(FaultyKeyStore::default()));
-    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
-    close(ctx).await;
-
-    // Another computer: its keychain has never seen this folder.
-    let ctx = open_at(dir.path(), Arc::new(FaultyKeyStore::default()));
-    for name in [USER, "someone-else"] {
-        let r = AuthService::verify_credentials(&ctx, name, PASSWORD);
-        assert!(
-            matches!(r, Err(crate::error::AppError::KeysDoNotMatch)),
-            "{}: {:?}",
-            name,
-            r
-        );
-    }
-    let (s, _, v) = send_to(
-        &ctx,
-        multipart("/auth/login", &[("username", USER), ("password", PASSWORD)]),
-    )
-    .await;
-    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
-    assert_eq!(v["message"], crate::error::KEYS_DO_NOT_MATCH_MESSAGE);
-    close(ctx).await;
-}
-
-// ------------------------- SEC-02 password change in password mode
+// ------------------------------- SEC-02 password change under KEY-01
 
 const NEW_PASSWORD: &str = "Changed@456";
 
-/// A password-mode install (no keychain) with an account and a saved
-/// broker key.
-async fn password_mode_install() -> tempfile::TempDir {
+/// An install with an account and a saved broker key, its keys in the
+/// vault (an OS-keychain-like store: the app opens locked).
+async fn locked_install() -> (
+    tempfile::TempDir,
+    Arc<crate::security::keystore::CountingKeyStore>,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = open_at(
-        dir.path(),
-        Arc::new(crate::security::keystore::UnavailableKeyStore),
-    );
+    let store = Arc::new(crate::security::keystore::CountingKeyStore::default());
+    let ctx = open_at(dir.path(), store.clone());
     AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    assert!(signs_in(&ctx, PASSWORD));
     save_kite_key(&ctx);
     close(ctx).await;
-    dir
+    (dir, store)
 }
 
-fn reopen(dir: &tempfile::TempDir) -> Arc<AppState> {
-    open_at(
-        dir.path(),
-        Arc::new(crate::security::keystore::UnavailableKeyStore),
-    )
+fn reopen(
+    dir: &tempfile::TempDir,
+    store: &Arc<crate::security::keystore::CountingKeyStore>,
+) -> Arc<AppState> {
+    open_at(dir.path(), store.clone())
 }
 
-/// After a restart exactly `works` signs in (not `fails`), the saved key
-/// still decrypts, and no unfinished change is left behind.
-async fn only_password_signs_in(dir: &tempfile::TempDir, works: &str, fails: &str) {
-    let ctx = reopen(dir);
+/// After a restart exactly `works` signs in (not `fails`), and the saved
+/// key still decrypts.
+async fn only_password_signs_in(
+    dir: &tempfile::TempDir,
+    store: &Arc<crate::security::keystore::CountingKeyStore>,
+    works: &str,
+    fails: &str,
+) {
+    let ctx = reopen(dir, store);
     assert!(!signs_in(&ctx, fails), "{} signs in", fails);
-    // A password that is not the account's unlocks nothing either, even
-    // one that opens a key file a password change left behind.
     assert!(!ctx.security.is_unlocked(), "{} unlocked the keys", fails);
     assert!(signs_in(&ctx, works), "{} does not sign in", works);
     assert_eq!(kite_key(&ctx), "kiteapikey");
-    assert!(!dir.path().join(crate::security::VAULT_NEXT_FILE).exists());
     close(ctx).await;
-    let ctx = reopen(dir);
+    let ctx = reopen(dir, store);
     assert!(signs_in(&ctx, works), "{} after a second restart", works);
     close(ctx).await;
+    assert_eq!(store.calls(), 0, "the keychain was called");
 }
 
-/// SEC-02: the new vault cannot be written (a full disk): the change is
-/// refused and the old password still signs in.
-#[tokio::test]
-async fn sec02_a_failed_vault_write_keeps_the_old_password() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
-    assert!(signs_in(&ctx, PASSWORD));
-    // Every file the vault write could use is taken.
-    for name in ["vault.tmp", "vault.next.json", "vault.next.tmp"] {
-        std::fs::create_dir(dir.path().join(name)).unwrap();
-    }
-    assert!(
-        AuthService::change_password(&ctx, USER, PASSWORD, NEW_PASSWORD, NEW_PASSWORD).is_err()
-    );
-    close(ctx).await;
-    for name in ["vault.tmp", "vault.next.json", "vault.next.tmp"] {
-        std::fs::remove_dir(dir.path().join(name)).unwrap();
-    }
-    only_password_signs_in(&dir, PASSWORD, NEW_PASSWORD).await;
-}
-
-/// SEC-02: the last step fails: the stored hash is put back, so the old
-/// password still signs in.
-#[tokio::test]
-async fn sec02_a_failed_last_step_puts_the_old_password_back() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
-    assert!(signs_in(&ctx, PASSWORD));
-    ctx.security.fail_vault_promote(true);
-    assert!(
-        AuthService::change_password(&ctx, USER, PASSWORD, NEW_PASSWORD, NEW_PASSWORD).is_err()
-    );
-    close(ctx).await;
-    only_password_signs_in(&dir, PASSWORD, NEW_PASSWORD).await;
-}
-
-/// SEC-02: the app stops after the new vault was written but before the
-/// new hash was stored: the old password signs in.
-#[tokio::test]
-async fn sec02_a_stop_before_the_hash_keeps_the_old_password() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
-    assert!(signs_in(&ctx, PASSWORD));
-    ctx.security.stage_vault_for_test(NEW_PASSWORD).unwrap();
-    close(ctx).await;
-    only_password_signs_in(&dir, PASSWORD, NEW_PASSWORD).await;
-}
-
-/// SEC-02: the app stops after the new hash was stored but before the new
-/// vault replaced the old one: the new password signs in.
-#[tokio::test]
-async fn sec02_a_stop_after_the_hash_keeps_the_new_password() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
-    assert!(signs_in(&ctx, PASSWORD));
-    ctx.security.stage_vault_for_test(NEW_PASSWORD).unwrap();
-    {
-        let conn = ctx.sqlite.conn().unwrap();
-        let row = crate::db::sqlite::user::find_by_username(&conn, USER)
-            .unwrap()
-            .unwrap();
-        let hash = ctx.security.hash_password(NEW_PASSWORD).unwrap();
-        crate::db::sqlite::user::update_password_hash(&conn, row.id, &hash).unwrap();
-    }
-    close(ctx).await;
-    only_password_signs_in(&dir, NEW_PASSWORD, PASSWORD).await;
-}
-
-/// SEC-02: a change that completes leaves one vault, for the new password.
+/// SEC-02: a change that completes moves the hash and the vault to the new
+/// password together.
 #[tokio::test]
 async fn sec02_a_completed_change_moves_to_the_new_password() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
+    let (dir, store) = locked_install().await;
+    let ctx = reopen(&dir, &store);
     assert!(signs_in(&ctx, PASSWORD));
     AuthService::change_password(&ctx, USER, PASSWORD, NEW_PASSWORD, NEW_PASSWORD).unwrap();
+    assert!(ctx.security.is_unlocked(), "the keys stay with the trader");
     close(ctx).await;
-    only_password_signs_in(&dir, NEW_PASSWORD, PASSWORD).await;
+    only_password_signs_in(&dir, &store, NEW_PASSWORD, PASSWORD).await;
 }
 
 /// SEC-02 (review): the trader changes a leaked password while someone
@@ -865,10 +851,6 @@ async fn sec02_a_sign_in_racing_a_password_change_gets_no_session() {
     let (s, _, v) = old_password_sign_in.await.unwrap();
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{}", v);
     assert_eq!(
-        v["message"],
-        crate::server::routes::auth::PASSWORD_CHANGED_DURING_SIGN_IN
-    );
-    assert_eq!(
         h.ctx().sessions.authenticated_count(),
         0,
         "a session was issued for the old password"
@@ -886,13 +868,13 @@ async fn sec02_a_sign_in_racing_a_password_change_gets_no_session() {
 }
 
 /// SEC-02b: two password changes both validated against the old password.
-/// The first finishes; the second, whose last step then fails, must not
-/// overwrite it or put back the hash both started from (which no key file
-/// matches any more). Only the first change's password signs in.
+/// The first finishes; the second must not overwrite it (its hash and its
+/// vault write are refused together, in one transaction). Only the first
+/// change's password signs in.
 #[tokio::test]
 async fn sec02b_a_second_change_validated_against_a_stale_hash_is_refused() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
+    let (dir, store) = locked_install().await;
+    let ctx = reopen(&dir, &store);
     assert!(signs_in(&ctx, PASSWORD));
     let (id, original): (i64, String) = ctx
         .sqlite
@@ -904,9 +886,7 @@ async fn sec02b_a_second_change_validated_against_a_stale_hash_is_refused() {
         .unwrap();
     // A: validated and finished.
     AuthService::set_password(&ctx, id, &original, NEW_PASSWORD).unwrap();
-    // B: validated against the same old password, finishes second, and its
-    // last step fails.
-    ctx.security.fail_vault_promote(true);
+    // B: validated against the same old password, finishes second.
     let r = AuthService::set_password(&ctx, id, &original, "Other@789");
     assert!(
         matches!(&r, Err(crate::error::AppError::Validation(m))
@@ -915,37 +895,10 @@ async fn sec02b_a_second_change_validated_against_a_stale_hash_is_refused() {
         r
     );
     close(ctx).await;
-    only_password_signs_in(&dir, NEW_PASSWORD, PASSWORD).await;
-    let ctx = reopen(&dir);
+    only_password_signs_in(&dir, &store, NEW_PASSWORD, PASSWORD).await;
+    let ctx = reopen(&dir, &store);
     assert!(!signs_in(&ctx, "Other@789"));
     close(ctx).await;
-}
-
-/// SEC-02: the last step fails and the old hash cannot be put back either
-/// (the database refuses it). The new hash stands, so the change is
-/// reported done, only the new password signs in, and the old one, which
-/// still opens the old key file, unlocks nothing.
-#[tokio::test]
-async fn sec02_when_the_old_password_cannot_come_back_only_the_new_one_works() {
-    let dir = password_mode_install().await;
-    let ctx = reopen(&dir);
-    assert!(signs_in(&ctx, PASSWORD));
-    {
-        let conn = ctx.sqlite.conn().unwrap();
-        let old: String = conn
-            .query_row("SELECT password_hash FROM users", [], |r| r.get(0))
-            .unwrap();
-        conn.execute_batch(&format!(
-            "CREATE TRIGGER test_no_rollback BEFORE UPDATE ON users
-             WHEN NEW.password_hash = '{}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
-            old
-        ))
-        .unwrap();
-    }
-    ctx.security.fail_vault_promote(true);
-    AuthService::change_password(&ctx, USER, PASSWORD, NEW_PASSWORD, NEW_PASSWORD).unwrap();
-    close(ctx).await;
-    only_password_signs_in(&dir, NEW_PASSWORD, PASSWORD).await;
 }
 
 // ------------------------------------------ WI-3 broker settings save

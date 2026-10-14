@@ -29,9 +29,17 @@ pub enum KeyStoreError {
     Failure(String),
 }
 
+/// What `set` answers on a store that is never written: the OS keychain.
+pub const NEVER_WRITTEN: &str = "OpenAlgo never writes to the system keychain";
+
 pub trait KeyStore: Send + Sync {
     fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError>;
-    fn set(&self, name: &str, value: &str) -> Result<(), KeyStoreError>;
+    /// Only the test harness's in-memory store keeps values. Every other
+    /// store, the OS keychain first, refuses without touching anything: no
+    /// code writes to the keychain (KEY-01).
+    fn set(&self, _name: &str, _value: &str) -> Result<(), KeyStoreError> {
+        Err(KeyStoreError::Failure(NEVER_WRITTEN.into()))
+    }
     fn delete(&self, name: &str) -> Result<(), KeyStoreError>;
     fn kind(&self) -> &'static str;
 
@@ -84,9 +92,7 @@ impl KeyStore for KeyringStore {
         }
     }
 
-    fn set(&self, name: &str, value: &str) -> Result<(), KeyStoreError> {
-        self.entry(name)?.set_password(value).map_err(classify)
-    }
+    // No `set`: the trait's refuses, so nothing can write to the keychain.
 
     fn delete(&self, name: &str) -> Result<(), KeyStoreError> {
         match self.entry(name)?.delete_credential() {
@@ -285,6 +291,18 @@ mod tests {
         assert_eq!(s.get(DATA_KEY).unwrap().as_deref(), Some("abc"));
         s.delete(DATA_KEY).unwrap();
         assert_eq!(s.get(DATA_KEY).unwrap(), None);
+    }
+
+    /// KEY-01: the OS keychain store has no write: `set` refuses before
+    /// any keychain call (this test makes none).
+    #[test]
+    fn the_os_keychain_is_never_written() {
+        let r = KeyringStore::new().set(DATA_KEY, "x");
+        assert!(
+            matches!(&r, Err(KeyStoreError::Failure(m)) if m == NEVER_WRITTEN),
+            "{:?}",
+            r
+        );
     }
 
     #[test]

@@ -34,6 +34,9 @@ r2d2_sqlite = "0.25"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
+# The AES key schedule is zeroed when the data key leaves memory at logout
+# (KEY-01).
+aes = { version = "0.8", features = ["zeroize"] }
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"

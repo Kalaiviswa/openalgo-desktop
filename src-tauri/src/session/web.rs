@@ -31,9 +31,11 @@ pub struct WebSession {
     /// waiting for its code (`SecurityManager::credentials_epoch`).
     pub pending_epoch: Option<u64>,
     pub totp_verified_at: Option<DateTime<Utc>>,
-    /// SHA-256 of the password-reset token (the raw token is never stored).
-    pub reset_token_hash: Option<String>,
-    pub reset_email: Option<String>,
+    /// The keys a sign-in's password opened while it waits for the
+    /// authenticator code: used only to check the code, installed only with
+    /// the signed-in session, dropped (and zeroed) when this session ends
+    /// (KEY-01).
+    pub pending_keys: Option<crate::security::Unlocked>,
 }
 
 impl std::fmt::Debug for WebSession {
@@ -210,6 +212,29 @@ impl WebSessionStore {
             .filter(|s| s.user.is_some())
             .count()
     }
+
+    /// Forget every sign-in that has waited for its authenticator code past
+    /// `PENDING_TOTP_SECS`, and the keys its password opened with it, even
+    /// when its browser never comes back (KEY-01: staged keys do not linger
+    /// in memory). The session poll runs it every 30 seconds. Returns how
+    /// many were forgotten.
+    pub fn drop_stale_sign_ins(&self, now: DateTime<Utc>) -> usize {
+        let mut n = 0;
+        for s in self.map.lock().values_mut() {
+            let stale = s
+                .pending_totp_started
+                .map(|t| now - t > Duration::seconds(PENDING_TOTP_SECS))
+                .unwrap_or(true);
+            if s.pending_keys.is_some() && stale {
+                s.pending_totp_user = None;
+                s.pending_totp_started = None;
+                s.pending_epoch = None;
+                s.pending_keys = None;
+                n += 1;
+            }
+        }
+        n
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +269,30 @@ mod tests {
         }
         assert!(st.len() <= MAX_SESSIONS);
         assert!(st.get(&signed.id, now).is_some(), "signed-in session kept");
+    }
+
+    /// KEY-01: the keys a sign-in waiting for its code holds leave memory
+    /// once it has waited too long, without the browser coming back.
+    #[test]
+    fn an_abandoned_code_step_lets_its_keys_go() {
+        let st = WebSessionStore::new();
+        let now = Utc::now();
+        let keys = crate::security::Unlocked::random().unwrap();
+        let waiting = st.create(now);
+        st.update(&waiting.id, |x| {
+            x.pending_totp_user = Some("u".into());
+            x.pending_totp_started = Some(now);
+            x.pending_epoch = Some(1);
+            x.pending_keys = Some(keys.clone());
+        });
+        assert_eq!(st.drop_stale_sign_ins(now + Duration::seconds(60)), 0);
+        assert_eq!(
+            st.drop_stale_sign_ins(now + Duration::seconds(PENDING_TOTP_SECS + 1)),
+            1
+        );
+        let s = st.map.lock().get(&waiting.id).cloned().unwrap();
+        assert!(s.pending_keys.is_none() && s.pending_totp_user.is_none());
+        assert!(s.pending_epoch.is_none());
     }
 
     #[test]

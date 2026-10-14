@@ -39,12 +39,15 @@ pub async fn expire_if_crossed(ctx: &AppState, last_check: DateTime<Utc>) -> boo
 }
 
 /// One tick of the session poll: finish a broker revoke whose database
-/// write failed earlier (`BrokerAuthService::retry_pending_revoke`), then
-/// enforce the daily boundary. Returns whether the boundary fired.
+/// write failed earlier (`BrokerAuthService::retry_pending_revoke`), forget
+/// sign-ins left waiting for their authenticator code, then enforce the
+/// daily boundary. Returns whether the boundary fired.
 pub async fn poll_tick(ctx: &AppState, last_check: DateTime<Utc>) -> bool {
     if let Err(e) = BrokerAuthService::retry_pending_revoke(ctx) {
         tracing::warn!("The ended broker session is still to be revoked: {}", e);
     }
+    // Keys a sign-in opened and then left waiting for its code go (KEY-01).
+    ctx.sessions.drop_stale_sign_ins(ctx.now());
     expire_if_crossed(ctx, last_check).await
 }
 

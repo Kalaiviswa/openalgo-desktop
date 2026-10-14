@@ -1,5 +1,5 @@
-//! Data migrations that need the key material, run after the security manager
-//! is unlocked.
+//! Data migrations that need the key material, run at sign-in with the keys
+//! the password opened (KEY-01: nothing is unlocked before a sign-in).
 //!
 //! `043_crypto_aad_v1` re-encrypts every ciphertext written before associated
 //! data existed (auth tokens, broker credentials, the API key) and fills the
@@ -20,15 +20,16 @@ pub const AAD_MIGRATION: &str = "043_crypto_aad_v1";
 /// (row key, ciphertext, nonce, second ciphertext, second nonce)
 type CipherRow = (String, String, String, Option<String>, Option<String>);
 
+/// Run the migrations with `security`'s keys; a no-op while it is locked
+/// or once they ran. `secrets.dat` is removed by the caller afterwards
+/// (`SecurityManager::finish_legacy_migration`), once the keys are in the
+/// vault.
 pub fn run(db: &SqliteDb, security: &SecurityManager) -> Result<()> {
     if !security.is_unlocked() {
         return Ok(());
     }
     let conn = db.conn()?;
     if migrations::is_applied(&conn, AAD_MIGRATION)? {
-        if security.legacy_migration_pending() {
-            security.finish_legacy_migration()?;
-        }
         return Ok(());
     }
     tracing::info!("Re-encrypting stored secrets with associated data");
@@ -46,8 +47,6 @@ pub fn run(db: &SqliteDb, security: &SecurityManager) -> Result<()> {
             return Err(e);
         }
     }
-    drop(conn);
-    security.finish_legacy_migration()?;
     Ok(())
 }
 
@@ -241,7 +240,8 @@ mod tests {
     //! Upgrade of a database exactly as the previous build left it: legacy
     //! schema (001-036), rows encrypted without AAD, keys in `secrets.dat`.
     use crate::security::crypto::DataCipher;
-    use crate::security::{hashing, keystore::MemoryKeyStore, legacy};
+    use crate::security::{hashing, keystore::CountingKeyStore, legacy};
+    use crate::services::auth_service::{AuthService, LoginOutcome};
     use crate::state::{AppState, OpenOptions};
     use rusqlite::{params, Connection};
     use std::sync::Arc;
@@ -295,30 +295,50 @@ mod tests {
         .unwrap();
     }
 
+    fn open(dir: &std::path::Path, store: Arc<CountingKeyStore>) -> Arc<AppState> {
+        AppState::open(
+            dir,
+            OpenOptions {
+                keystore: store,
+                clock: Arc::new(crate::clock::SystemClock),
+                brokers: Arc::new(crate::brokers::BrokerRegistry::with(vec![])),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Sign in as the route does and install the keys the password opened.
+    fn sign_in(ctx: &AppState) {
+        match AuthService::verify_credentials(ctx, "old", "Legacy@123").unwrap() {
+            LoginOutcome::Success(_, keys) | LoginOutcome::TotpRequired(_, keys) => {
+                ctx.security.install(&keys)
+            }
+            LoginOutcome::Invalid => panic!("the old password was refused"),
+        }
+    }
+
     #[tokio::test]
     async fn upgrade_from_previous_build_keeps_every_secret_readable() {
         let dir = tempfile::tempdir().unwrap();
         let api_key = "a".repeat(64);
         legacy_db(dir.path(), &api_key);
 
-        let store = Arc::new(MemoryKeyStore::new());
-        let ctx = AppState::open(
-            dir.path(),
-            OpenOptions {
-                keystore: store.clone(),
-                clock: Arc::new(crate::clock::SystemClock),
-                brokers: Arc::new(crate::brokers::BrokerRegistry::with(vec![])),
-            },
-        )
-        .unwrap();
-
-        // Keys moved into the keystore, the XOR file is gone.
-        assert!(!legacy::path(dir.path()).exists());
-        assert!(
-            crate::security::keystore::KeyStore::get(&*store, "data-key")
-                .unwrap()
-                .is_some()
+        // Opening reads no key: the keys come with the first sign-in, which
+        // moves them from the XOR file into the vault (KEY-01).
+        let store = Arc::new(CountingKeyStore::default());
+        let ctx = open(dir.path(), store.clone());
+        assert!(!ctx.security.is_unlocked());
+        assert!(legacy::path(dir.path()).exists());
+        sign_in(&ctx);
+        assert!(!legacy::path(dir.path()).exists(), "the XOR file is left");
+        let vault = crate::db::sqlite::key_vault::read(&ctx.sqlite.conn().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vault.source,
+            crate::db::sqlite::key_vault::Source::LegacyFile
         );
+        assert_eq!(store.calls(), 0, "the keychain was called");
 
         let conn = ctx.sqlite.conn().unwrap();
         // Old password still works (same pepper).
@@ -392,22 +412,16 @@ mod tests {
             "app state must not outlive shutdown"
         );
         drop(ctx);
-        let ctx2 = AppState::open(
-            dir.path(),
-            OpenOptions {
-                keystore: store,
-                clock: Arc::new(crate::clock::SystemClock),
-                brokers: Arc::new(crate::brokers::BrokerRegistry::with(vec![])),
-            },
-        )
-        .unwrap();
+        let ctx2 = open(dir.path(), store.clone());
         assert_eq!(ctx2.logs.count_analyzer_logs().unwrap(), 1);
+        sign_in(&ctx2);
         let conn = ctx2.sqlite.conn().unwrap();
         let creds = crate::db::sqlite::credentials::load(&conn, &ctx2.security, "zerodha")
             .unwrap()
             .unwrap();
         assert_eq!(creds.api_key.expose(), "brokerkey");
         drop(conn);
+        assert_eq!(store.calls(), 0, "the keychain was called");
         ctx2.shutdown().await;
     }
 

@@ -3,8 +3,7 @@
 
 use crate::db::sqlite::{api_keys, auth, credentials, user};
 use crate::error::{AppError, Result};
-use crate::security::{totp, KeyMode, Secret};
-use crate::services::apikey_service::ApiKeyService;
+use crate::security::{totp, Opened, Secret, SecurityManager, Unlocked};
 use crate::state::AppState;
 
 /// The answer to a wrong current password on a password change.
@@ -13,23 +12,6 @@ pub const WRONG_CURRENT_PASSWORD: &str = "Current password is incorrect";
 /// The answer when another password change finished first.
 pub const PASSWORD_CHANGED_MEANWHILE: &str =
     "Your password was changed while this change was being saved. Sign in with the new password and try again.";
-
-/// Run `f` on `conn` with `synchronous=FULL`, so the statement it commits is
-/// on disk when it returns (WAL with NORMAL may lose the last commits at a
-/// power cut), then put the connection's own setting back. For the password
-/// hash, whose old value must not come back beside a new key file.
-pub(crate) fn with_full_sync<T>(
-    conn: &rusqlite::Connection,
-    f: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let before: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
-    conn.execute_batch("PRAGMA synchronous = FULL")?;
-    let out = f();
-    if let Err(e) = conn.execute_batch(&format!("PRAGMA synchronous = {}", before)) {
-        tracing::warn!("Could not restore the database sync setting: {}", e);
-    }
-    out
-}
 
 /// Pepper of the stand-in hash checked for a name that is not the
 /// account's (see [`AuthService::verify_credentials`]): random per process,
@@ -100,10 +82,14 @@ fn valid_email(email: &str) -> bool {
     }
 }
 
+/// What a password sign-in came to. The keys the password opened travel
+/// with it: they are installed only with the signed-in session
+/// (`SecurityManager::install`, inside `issue_if_current`), so a sign-in
+/// still waiting for its authenticator code unlocks nothing (KEY-01).
 #[derive(Debug, PartialEq, Eq)]
 pub enum LoginOutcome {
-    Success(String),
-    TotpRequired(String),
+    Success(String, Unlocked),
+    TotpRequired(String, Unlocked),
     Invalid,
 }
 
@@ -130,51 +116,38 @@ impl AuthService {
             return Err(AppError::Validation("Enter a valid email address.".into()));
         }
         validate_password_strength(password).map_err(|m| AppError::Validation(m.into()))?;
-        // Password mode: the first password creates the key vault. Only
-        // setup may create one.
-        if !state.security.unlock_with_password(password, true)? {
-            return Err(AppError::Auth("Could not open secure storage.".into()));
-        }
-        let hash = state.security.hash_password(password)?;
+        // The keys, their vault, the account and its API key in one
+        // transaction (KEY-01). Creating the account counts as its first
+        // sign-in: the keys stay in memory until the trader logs out.
         let secret = totp::generate_secret();
-        {
-            let conn = state.sqlite.conn()?;
-            user::insert(
-                &conn,
-                &state.security,
-                username,
-                email.trim(),
-                &hash,
-                &secret,
-            )?;
-        }
-        ApiKeyService::regenerate(state, username)?;
-        crate::db::sqlite::data_migrations::run(&state.sqlite, &state.security)?;
+        let key = api_keys::generate_api_key();
+        state
+            .security
+            .create_account(&state.sqlite, password, |conn, with| {
+                let hash = with.hash_password(password)?;
+                user::insert(conn, with, username, email.trim(), &hash, &secret)?;
+                api_keys::upsert_for_user(conn, with, username, &key)?;
+                Ok(())
+            })?;
+        state.api_keys.clear();
         tracing::info!("Account created");
         Ok(())
     }
 
-    /// Check a username and password. Does not create a web session.
+    /// Check a username and password. Does not create a web session and
+    /// installs no keys: the keys the password opened come back in the
+    /// outcome, for the caller to install with the session.
+    ///
+    /// The first sign-in of an install from an earlier build moves its keys
+    /// into openalgo.db (`SecurityManager::open_for_sign_in`): from the OS
+    /// keychain (the one last read), `vault.json` or `secrets.dat`. That can
+    /// fail with `KeychainUnavailable` (retry or start fresh),
+    /// `KeysDoNotMatch` or `VaultUnreadable` (start fresh).
     pub fn verify_credentials(
         state: &AppState,
         username: &str,
         password: &str,
     ) -> Result<LoginOutcome> {
-        // The account's keys are in a keychain that could not be opened at
-        // startup (locked, or access denied): say so, whatever name was
-        // typed, and never make new keys in their place (SEC-03).
-        if state.security.keys_unreachable() {
-            tracing::warn!("Sign-in refused: the keychain holding the keys could not be opened");
-            return Err(AppError::KeychainUnavailable);
-        }
-        // The keychain holds other keys than the ones this folder's account
-        // was saved with (a backup restored elsewhere, or from before a
-        // reset): explain it instead of answering "Invalid" for the right
-        // password (SEC-09).
-        if Self::account_saved_with_other_keys(state)? {
-            tracing::warn!("Sign-in refused: the data folder was saved with other keys");
-            return Err(AppError::KeysDoNotMatch);
-        }
         let row = {
             let conn = state.sqlite.conn()?;
             user::find_by_username(&conn, username)?
@@ -183,7 +156,8 @@ impl AuthService {
             // A name that is not the account's is checked against a fixed
             // stand-in hash with the account's Argon2 parameters: the same
             // work, the same answer and (in the caller) the same budget as
-            // a wrong password, so nothing tells which names exist.
+            // a wrong password, so nothing tells which names exist. The
+            // keychain of an earlier build is never read for it.
             STAND_IN_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = crate::security::hashing::verify_password(
                 stand_in_pepper(),
@@ -194,85 +168,37 @@ impl AuthService {
         };
         #[cfg(test)]
         test_hooks::after_account_read(state);
-        let password_mode = state.security.mode() == KeyMode::Password;
-        // Password mode: the vault's keys are taken only when the password
-        // also matches the stored hash, read again under the lock a password
-        // change holds, so a password that opens a key file but is not the
-        // account's (the old one around a password change) unlocks nothing
-        // (SEC-02). The session itself is issued only if no change happened
-        // since the caller read the credentials generation (the route's
-        // `issue_if_current`).
-        if password_mode
-            && state.security.has_vault()
-            && !state.security.unlock_for_sign_in(password, |pepper| {
-                let current = {
-                    let conn = state.sqlite.conn()?;
-                    user::find_by_username(&conn, &row.username)?
-                };
-                match current {
-                    Some(r) => crate::security::hashing::verify_password(
-                        pepper,
-                        password,
-                        &r.password_hash,
-                    ),
-                    None => Ok(false),
-                }
-            })?
-        {
-            return Ok(LoginOutcome::Invalid);
-        }
-        if !state
+        // The password must open the vault and match the stored hash, read
+        // again under the lock a password change holds (SEC-02).
+        let keys = match state
             .security
-            .verify_password(password, &row.password_hash)?
+            .open_for_sign_in(&state.sqlite, &row.username, password)?
         {
-            return Ok(LoginOutcome::Invalid);
-        }
-        // Keys moved from `secrets.dat` and held in memory are wrapped into
-        // the vault only with a password that was just verified; a wrong
-        // one would leave a vault the right password cannot open.
-        if password_mode && !state.security.has_vault() {
-            state.security.unlock_with_password(password, false)?;
-        }
-        // Now unlocked in password mode: finish any pending re-encryption.
-        crate::db::sqlite::data_migrations::run(&state.sqlite, &state.security)?;
-        Self::ensure_totp_secret(state, &row)?;
-        if row.is_totp_required_for("login") {
-            Ok(LoginOutcome::TotpRequired(row.username))
-        } else {
-            Ok(LoginOutcome::Success(row.username))
-        }
-    }
-
-    /// Whether the account was saved with other keys than the keychain's.
-    /// Its TOTP secret, encrypted with the data key when the account was
-    /// made, is the witness: it decrypts with the right key and fails the
-    /// authentication tag with any other. Keychain mode only (in password
-    /// mode the vault travels with the folder); an account without a secret
-    /// (made by an early build) cannot tell and passes.
-    fn account_saved_with_other_keys(state: &AppState) -> Result<bool> {
-        if state.security.mode() != KeyMode::Keychain {
-            return Ok(false);
-        }
-        let row = {
-            let conn = state.sqlite.conn()?;
-            user::find_first(&conn)?
+            Opened::Keys(k) => k,
+            Opened::WrongPassword => return Ok(LoginOutcome::Invalid),
         };
-        Ok(match row {
-            Some(r) => matches!(r.totp_secret(&state.security), Err(AppError::Encryption(_))),
-            None => false,
-        })
+        let with = keys.manager();
+        // Rows an early build stored without associated data are
+        // re-encrypted now that the keys are open (a no-op once done).
+        crate::db::sqlite::data_migrations::run(&state.sqlite, &with)?;
+        state.security.finish_legacy_migration(&state.sqlite)?;
+        Self::ensure_totp_secret(state, &with, &row)?;
+        if row.is_totp_required_for("login") {
+            Ok(LoginOutcome::TotpRequired(row.username, keys))
+        } else {
+            Ok(LoginOutcome::Success(row.username, keys))
+        }
     }
 
     /// Accounts created by earlier desktop builds have no TOTP secret.
-    fn ensure_totp_secret(state: &AppState, row: &user::UserRow) -> Result<()> {
-        if row.totp_secret(&state.security)?.is_none() {
+    fn ensure_totp_secret(
+        state: &AppState,
+        with: &SecurityManager,
+        row: &user::UserRow,
+    ) -> Result<()> {
+        if row.totp_secret(with)?.is_none() {
             let conn = state.sqlite.conn()?;
-            user::set_totp_secret(
-                &conn,
-                &state.security,
-                &row.username,
-                &totp::generate_secret(),
-            )?;
+            user::set_totp_secret(&conn, with, &row.username, &totp::generate_secret())?;
         }
         Ok(())
     }
@@ -290,15 +216,24 @@ impl AuthService {
         Ok(totp::verify(secret.expose(), code, now))
     }
 
-    pub fn verify_totp_by_email(state: &AppState, email: &str, code: &str) -> Result<bool> {
+    /// The authenticator code of a sign-in still waiting for it, checked
+    /// with the keys its password opened (not installed yet).
+    pub fn verify_totp_with(
+        state: &AppState,
+        username: &str,
+        code: &str,
+        keys: &Unlocked,
+    ) -> Result<bool> {
         let row = {
             let conn = state.sqlite.conn()?;
-            user::find_by_email(&conn, email)?
+            user::find_by_username(&conn, username)?
         };
-        match row {
-            Some(r) => Self::verify_totp_for(state, &r.username, code),
-            None => Ok(false),
-        }
+        let Some(row) = row else { return Ok(false) };
+        let Some(secret) = row.totp_secret(&keys.manager())? else {
+            return Ok(false);
+        };
+        let now = state.now().timestamp().max(0) as u64;
+        Ok(totp::verify(secret.expose(), code, now))
     }
 
     pub fn change_password(
@@ -323,55 +258,149 @@ impl AuthService {
         Self::set_password(state, row.id, &row.password_hash, new)
     }
 
-    /// Reset by email + TOTP (the web's TOTP path; no email step on desktop).
-    pub fn reset_password(state: &AppState, email: &str, new: &str) -> Result<()> {
-        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))?;
-        let row = {
-            let conn = state.sqlite.conn()?;
-            user::find_by_email(&conn, email)?
-        }
-        .ok_or_else(|| AppError::Validation("Error resetting password.".into()))?;
-        Self::set_password(state, row.id, &row.password_hash, new)
-    }
-
-    /// Store a new password: the hash in SQLite and, in password mode, the
-    /// vault wrapped with it, as one recoverable change (security review
-    /// SEC-02, `SecurityManager::change_vault_password`). On an error the
-    /// previous hash is put back, so the old password keeps working.
+    /// Store a new password: the hash and the keys wrapped with it, in one
+    /// transaction (KEY-01; `SecurityManager::change_password`), so there is
+    /// no state in which one changed and the other did not.
     ///
     /// `old_hash` is the hash the caller checked the request against. The
     /// change applies only while it is still the stored one, checked in the
     /// same statement that writes the new hash, under the vault lock: a
     /// second change validated against the same old password, finishing
-    /// after the first, is refused instead of overwriting it or, when its
-    /// own last step fails, restoring a hash that matches no key file
-    /// (SEC-02b). Both writes reach the disk before the key file is
-    /// replaced (`with_full_sync`), so a power cut cannot leave the old hash
-    /// beside the new key file.
+    /// after the first, is refused instead of overwriting it (SEC-02b).
+    /// Every browser session ends and every cache is cleared after the
+    /// commit; the keys do not change, so they stay in memory.
     pub(crate) fn set_password(state: &AppState, id: i64, old_hash: &str, new: &str) -> Result<()> {
-        let hash = state.security.hash_password(new)?;
-        let swap = |from: &str, to: &str| -> Result<()> {
-            let conn = state.sqlite.conn()?;
-            with_full_sync(&conn, || {
-                let n = conn.execute(
-                    "UPDATE users SET password_hash = ?1, updated_at = datetime('now')
-                     WHERE id = ?2 AND password_hash = ?3",
-                    rusqlite::params![to, id, from],
-                )?;
-                if n == 1 {
-                    Ok(())
-                } else {
-                    Err(AppError::Validation(PASSWORD_CHANGED_MEANWHILE.into()))
-                }
-            })
-        };
-        state.security.change_vault_password(
-            new,
-            || swap(old_hash, &hash),
-            || swap(&hash, old_hash),
-        )?;
+        state
+            .security
+            .change_password(&state.sqlite, id, old_hash, new, || {
+                AppError::Validation(PASSWORD_CHANGED_MEANWHILE.into())
+            })?;
         state.sessions.clear();
+        Self::clear_caches(state);
         Ok(())
+    }
+
+    /// Every cache a change of credentials makes stale (the web's
+    /// `invalidate_user_cache`): API keys and order mode, instrument facts.
+    /// Run after the change is committed.
+    pub fn clear_caches(state: &AppState) {
+        state.api_keys.clear();
+        state.trading.facts.clear();
+    }
+
+    /// A new password without the old one, which starts fresh: new keys
+    /// wrapped with the new password, every value the old keys encrypted
+    /// dropped (saved broker keys, stored broker sessions, the Telegram bot
+    /// token and linked users' keys, the WhatsApp pairing), and a new API
+    /// key (order mode kept) and TOTP secret (every "require the
+    /// authenticator" switch off), in one transaction. The account, its
+    /// settings and its history stay. The keys are locked afterwards: the
+    /// trader signs in with the new password.
+    ///
+    /// Used for a forgotten password and for an install whose earlier
+    /// build's keys cannot be read. Only the desktop window calls it (the
+    /// `start_fresh` command, after a native confirmation); no HTTP route
+    /// reaches it.
+    pub fn start_fresh(state: &AppState, new: &str, confirm: &str) -> Result<()> {
+        if new != confirm {
+            return Err(AppError::Validation("The passwords do not match.".into()));
+        }
+        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))?;
+        let row = {
+            let conn = state.sqlite.conn()?;
+            user::find_first(&conn)?
+        }
+        .ok_or_else(|| {
+            AppError::Validation(
+                "There is no account on this computer yet. Create one instead.".into(),
+            )
+        })?;
+        let secret = totp::generate_secret();
+        let key = api_keys::generate_api_key();
+        state
+            .security
+            .replace_keys(&state.sqlite, new, |conn, with| {
+                let hash = with.hash_password(new)?;
+                conn.execute(
+                "UPDATE users SET password_hash = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![hash, row.id],
+            )?;
+                user::set_totp_secret(conn, with, &row.username, &secret)?;
+                api_keys::upsert_for_user(conn, with, &row.username, &key)?;
+                Ok(())
+            })?;
+        // The stored broker sessions are gone, so nothing is left to revoke.
+        crate::services::broker_auth_service::BrokerAuthService::clear_pending_revoke(state);
+        state.sessions.clear();
+        state.set_broker_session(None);
+        Self::clear_caches(state);
+        tracing::info!("Started fresh with a new password; the old encrypted values were dropped");
+        Ok(())
+    }
+
+    /// The fresh start as the desktop window runs it: end the live broker
+    /// session and the bots, start fresh, clear every adapter's state, then
+    /// sign every window out.
+    pub async fn start_fresh_everywhere(
+        ctx: &std::sync::Arc<AppState>,
+        new: &str,
+        confirm: &str,
+    ) -> Result<()> {
+        if new != confirm {
+            return Err(AppError::Validation("The passwords do not match.".into()));
+        }
+        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))?;
+        if let Err(e) = crate::services::broker_auth_service::BrokerAuthService::revoke(
+            ctx,
+            crate::events::SessionEndReason::Logout,
+        )
+        .await
+        {
+            tracing::warn!(
+                "Fresh start: the broker session ended; its stored row could not be revoked: {}",
+                e
+            );
+        }
+        ctx.messaging.telegram.stop(ctx).await;
+        ctx.messaging.whatsapp.stop_bot(ctx).await;
+        let c = ctx.clone();
+        let (n, f) = (new.to_string(), confirm.to_string());
+        tokio::task::spawn_blocking(move || Self::start_fresh(&c, &n, &f))
+            .await
+            .map_err(|e| AppError::Internal(format!("fresh start task: {}", e)))??;
+        Self::forget_adapter_state(ctx).await;
+        ctx.bus.publish(crate::events::Event::ForceLogout {
+            message: "A new password was set on this computer. Sign in with it.".into(),
+        });
+        Ok(())
+    }
+
+    /// Log out: after the broker session was revoked, lock the keys, stop
+    /// the bots, and clear every cache and every adapter's in-memory state
+    /// (KEY-01). Until the next sign-in nothing can be decrypted.
+    ///
+    /// The keys go together with every browser session, under the lock a
+    /// sign-in issues its session under (`SecurityManager::lock_with`): a
+    /// sign-in checked before this point gets no session, and one that
+    /// finished during the revoke does not keep a session without keys.
+    /// The bots end as at an app exit, keeping their "on" setting, so the
+    /// next sign-in brings them back (`messaging::autostart`).
+    pub async fn lock_everything(ctx: &std::sync::Arc<AppState>) {
+        ctx.security.lock_with(|| ctx.sessions.clear());
+        ctx.messaging.shutdown().await;
+        Self::clear_caches(ctx);
+        ctx.clear_symbol_cache();
+        Self::forget_adapter_state(ctx).await;
+        tracing::info!("Keys locked until the next sign-in");
+    }
+
+    /// `on_logout` of every broker adapter, not only the logged-in one: an
+    /// adapter a sign-in or resume touched but never completed may still
+    /// hold keys or tokens (XTS market keys, OTP tokens).
+    async fn forget_adapter_state(ctx: &AppState) {
+        for b in ctx.brokers.list() {
+            b.on_logout().await;
+        }
     }
 
     pub fn profile(
@@ -421,6 +450,9 @@ impl AuthService {
                 )?;
                 conn.execute("DELETE FROM whatsapp_users", [])?;
                 crate::messaging::whatsapp::db::clear_session(&conn)?;
+                // The keys go with the account; the next setup makes new
+                // ones (KEY-01).
+                crate::db::sqlite::key_vault::delete(&conn)?;
                 Ok(())
             })();
             match r {
@@ -433,14 +465,13 @@ impl AuthService {
         }
         // The stored broker sessions are gone, so nothing is left to revoke.
         crate::services::broker_auth_service::BrokerAuthService::clear_pending_revoke(state);
-        // The account is gone whatever the key rotation does: every window
-        // is signed out and nothing cached survives, even when the keychain
-        // refuses the new keys (the error is still returned).
-        let rotated = state.security.rotate();
-        state.api_keys.clear();
+        // The account and its keys are gone: the keys are locked, every
+        // window is signed out and nothing cached survives.
+        state.security.forget_keys();
+        Self::clear_caches(state);
         state.sessions.clear();
         state.set_broker_session(None);
-        rotated
+        Ok(())
     }
 
     /// New, unpublished secrets for every strategy webhook (only the digest
@@ -494,6 +525,7 @@ impl AuthService {
         tokio::task::spawn_blocking(move || Self::reset_account(&c))
             .await
             .map_err(|e| AppError::Internal(format!("account reset task: {}", e)))??;
+        Self::forget_adapter_state(ctx).await;
         ctx.bus.publish(crate::events::Event::ForceLogout {
             message: "OpenAlgo was reset on this computer. Create a new account to continue."
                 .into(),
@@ -585,9 +617,10 @@ mod tests {
         assert!(!valid_email("a@b"));
     }
 
-    /// SEC-02b: the password hash is written with the database's full sync
-    /// (on disk before the key file is replaced), and the connection's own
-    /// setting comes back afterwards.
+    /// SEC-02b, KEY-01: a password change (the hash and the wrapped keys,
+    /// one transaction) is written with the database's full sync, so it is
+    /// on disk when the change returns, and the connection's own setting
+    /// comes back afterwards.
     #[test]
     fn the_password_hash_is_written_with_full_sync() {
         let dir = tempfile::tempdir().unwrap();
@@ -597,11 +630,12 @@ mod tests {
         let sync = |c: &rusqlite::Connection| -> i64 {
             c.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap()
         };
-        let inside = with_full_sync(&conn, || Ok(sync(&conn))).unwrap();
+        let inside = crate::security::with_full_sync(&conn, || Ok(sync(&conn))).unwrap();
         assert_eq!(inside, 2, "FULL while the hash is written");
         assert_eq!(sync(&conn), 1, "NORMAL again afterwards");
         // An error inside still restores the setting.
-        let r: Result<()> = with_full_sync(&conn, || Err(AppError::Validation("x".into())));
+        let r: Result<()> =
+            crate::security::with_full_sync(&conn, || Err(AppError::Validation("x".into())));
         assert!(r.is_err());
         assert_eq!(sync(&conn), 1);
     }
