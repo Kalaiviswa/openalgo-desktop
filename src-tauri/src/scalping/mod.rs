@@ -28,6 +28,7 @@
 pub mod monitor;
 pub mod service;
 pub mod store;
+pub mod unconfirmed;
 
 use crate::events::{Event, EventBus, Lane, Subscriber, Topic};
 use std::sync::{Arc, Weak};
