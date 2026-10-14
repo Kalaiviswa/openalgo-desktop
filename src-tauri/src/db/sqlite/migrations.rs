@@ -92,6 +92,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         "084_openscript_unconfirmed",
         crate::trading::runner::store::migrate_unconfirmed,
     )?;
+    run_rust_migration(
+        conn,
+        "085_scalping_unconfirmed",
+        crate::scalping::unconfirmed::migrate,
+    )?;
 
     tracing::info!("Database migrations completed");
     Ok(())

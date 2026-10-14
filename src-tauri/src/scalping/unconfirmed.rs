@@ -1,0 +1,484 @@
+//! Scalping page orders the destination did not confirm (LOG-08).
+//!
+//! An entry or a risk-reducing exit sent from the scalping page whose
+//! answer is neither an acceptance nor a refusal may be at the broker. The
+//! page used to get the raw error back, and a click to retry sent it again.
+//! Now it is recorded here as unconfirmed, the trader is told to check the
+//! order book, and every further order for that contract from the page is
+//! refused until the order book settles it:
+//!
+//! * **found** in the book ([`BookSnapshot::find`]: by the client tag it was
+//!   sent with where the broker reports tags, else by its fields and shape
+//!   among orders nobody owns), it is settled as placed (an entry joins the
+//!   scalping list);
+//! * **absent**, [`AbsenceTracker::judge`] decides: in Sandbox a confirmed
+//!   absence means it was not placed; in Live absence alone never releases
+//!   it (a broker's book can lag; a wrong release lets a second order out).
+//!   It is held, the trader is alerted once on the Health page, and it is
+//!   released when the trader marks it not placed there. The page does not
+//!   read the position before each order, so it gives no `net_before` and a
+//!   Live order is never released without the trader.
+//!
+//! The rows live in `scalping_unconfirmed`, so all of this holds across a
+//! restart.
+
+use super::store::{MODE_ANALYZE, MODE_LIVE};
+use crate::db::sqlite::SqliteDb;
+use crate::error::Result;
+use crate::services::order_reconciler::{
+    held_message, Absence, AbsenceTracker, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
+};
+use crate::state::AppState;
+use crate::strategy::dispatch::RunMode;
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
+use std::sync::Weak;
+
+/// What the page is told when its order was not confirmed.
+pub const NOT_CONFIRMED: &str =
+    "The broker did not confirm this order. Check the order book before placing it again.";
+
+/// What a repeat is told while an order for the contract is unconfirmed.
+pub fn repeat_refusal(symbol: &str) -> String {
+    format!(
+        "An earlier order for {} was not confirmed by the broker, so nothing more is sent for it until the order book settles it. Check the order book.",
+        symbol
+    )
+}
+
+/// Migration `085_scalping_unconfirmed`.
+pub fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scalping_unconfirmed (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            product TEXT NOT NULL,
+            action TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            client_tag TEXT,
+            status TEXT NOT NULL DEFAULT 'unconfirmed',
+            orderid TEXT,
+            placed_at TEXT NOT NULL,
+            settled_at TEXT
+         );
+         CREATE INDEX IF NOT EXISTS ix_scalping_unconfirmed_status
+            ON scalping_unconfirmed(status, mode);",
+    )?;
+    Ok(())
+}
+
+/// The scalping store's word for a side.
+pub fn mode_word(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::Live => MODE_LIVE,
+        RunMode::Sandbox => MODE_ANALYZE,
+    }
+}
+
+/// One order from the page, as recorded when its answer was uncertain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub id: i64,
+    pub mode: String,
+    /// `entry` or `exit`.
+    pub kind: String,
+    pub symbol: String,
+    pub exchange: String,
+    pub product: String,
+    pub action: String,
+    pub quantity: i64,
+    pub client_tag: Option<String>,
+    pub placed_at: String,
+}
+
+/// What to record.
+pub struct NewPending<'a> {
+    pub mode: &'a str,
+    pub kind: &'a str,
+    pub symbol: &'a str,
+    pub exchange: &'a str,
+    pub product: &'a str,
+    pub action: &'a str,
+    pub quantity: i64,
+    pub client_tag: Option<&'a str>,
+}
+
+pub fn record(db: &SqliteDb, p: &NewPending, now: DateTime<Utc>) -> Result<i64> {
+    let conn = db.conn()?;
+    conn.execute(
+        "INSERT INTO scalping_unconfirmed
+            (mode, kind, symbol, exchange, product, action, quantity, client_tag, placed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            p.mode,
+            p.kind,
+            p.symbol,
+            p.exchange,
+            p.product,
+            p.action,
+            p.quantity,
+            p.client_tag,
+            now.to_rfc3339()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Whether the page has an unconfirmed order for this contract.
+pub fn open_for(
+    db: &SqliteDb,
+    mode: &str,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> Result<bool> {
+    let conn = db.conn()?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM scalping_unconfirmed WHERE status = 'unconfirmed' AND mode = ?1
+                AND symbol = ?2 AND exchange = ?3 AND product = ?4 LIMIT 1",
+            params![mode, symbol, exchange, product],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn pending_from_row(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
+    Ok(Pending {
+        id: r.get(0)?,
+        mode: r.get(1)?,
+        kind: r.get(2)?,
+        symbol: r.get(3)?,
+        exchange: r.get(4)?,
+        product: r.get(5)?,
+        action: r.get(6)?,
+        quantity: r.get(7)?,
+        client_tag: r.get(8)?,
+        placed_at: r.get(9)?,
+    })
+}
+
+fn open_rows(conn: &Connection, mode: &str) -> Result<Vec<Pending>> {
+    let mut st = conn.prepare_cached(
+        "SELECT id, mode, kind, symbol, exchange, product, action, quantity, client_tag, placed_at
+         FROM scalping_unconfirmed WHERE status = 'unconfirmed' AND mode = ?1 ORDER BY id",
+    )?;
+    let rows = st
+        .query_map(params![mode], pending_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Every unconfirmed order of one side.
+pub fn pending(db: &SqliteDb, mode: &str) -> Result<Vec<Pending>> {
+    let conn = db.conn()?;
+    open_rows(&conn, mode)
+}
+
+fn settle(
+    conn: &Connection,
+    id: i64,
+    status: &str,
+    orderid: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE scalping_unconfirmed SET status = ?2, orderid = ?3, settled_at = ?4
+         WHERE id = ?1 AND status = 'unconfirmed'",
+        params![id, status, orderid, now.to_rfc3339()],
+    )? > 0)
+}
+
+fn read_one(conn: &Connection, id: i64) -> Result<Option<Pending>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, mode, kind, symbol, exchange, product, action, quantity, client_tag,
+                placed_at FROM scalping_unconfirmed WHERE id = ?1 AND status = 'unconfirmed'",
+            params![id],
+            pending_from_row,
+        )
+        .optional()?)
+}
+
+/// An unconfirmed page order as the order book is searched for it.
+fn unconfirmed_of(p: &Pending) -> Unconfirmed<'_> {
+    Unconfirmed {
+        symbol: &p.symbol,
+        exchange: &p.exchange,
+        action: &p.action,
+        quantity: p.quantity,
+        product: Some(p.product.as_str()),
+        client_tag: p.client_tag.as_deref(),
+        placed_at: DateTime::parse_from_rfc3339(&p.placed_at)
+            .ok()
+            .map(|t| t.with_timezone(&Utc)),
+        // Not known: a Live absence is released by the trader only.
+        net_before: None,
+        // The page sends MARKET orders only.
+        pricetype: Some("MARKET"),
+        price: None,
+        trigger_price: None,
+    }
+}
+
+/// The scalping page as an owner of orders.
+pub struct ScalpingOrders {
+    ctx: Weak<AppState>,
+    absence: AbsenceTracker,
+    /// Orders matching several book orders the trader was told of.
+    ambiguous: Mutex<HashSet<String>>,
+}
+
+impl ScalpingOrders {
+    pub fn new(ctx: Weak<AppState>) -> Self {
+        Self {
+            ctx,
+            absence: AbsenceTracker::new(),
+            ambiguous: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderOwner for ScalpingOrders {
+    fn name(&self) -> &'static str {
+        "scalping-page"
+    }
+
+    fn has_open_orders(&self, mode: RunMode) -> bool {
+        let Some(ctx) = self.ctx.upgrade() else {
+            return false;
+        };
+        let read = ctx.sqlite.conn().and_then(|c| {
+            let open = c
+                .prepare_cached(
+                    "SELECT 1 FROM scalping_unconfirmed WHERE status = 'unconfirmed' AND mode = ?1 LIMIT 1",
+                )?
+                .exists(params![mode_word(mode)])?;
+            Ok(open)
+        });
+        // Unknown: read the book rather than leave an order unsettled.
+        read.unwrap_or(true)
+    }
+
+    fn owns_order(&self, order_id: &str) -> bool {
+        let Some(ctx) = self.ctx.upgrade() else {
+            return false;
+        };
+        ctx.sqlite
+            .conn()
+            .and_then(|c| {
+                let owned = c
+                    .prepare_cached(
+                        "SELECT 1 FROM scalping_unconfirmed WHERE orderid = ?1 LIMIT 1",
+                    )?
+                    .exists(params![order_id])?;
+                Ok(owned)
+            })
+            .unwrap_or(true)
+    }
+
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+        let Some(ctx) = self.ctx.upgrade() else {
+            return 0;
+        };
+        let conn = match ctx.sqlite.conn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Scalping orders could not be read to reconcile: {}", e);
+                return 0;
+            }
+        };
+        let rows = match open_rows(&conn, mode_word(mode)) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Scalping orders could not be read to reconcile: {}", e);
+                return 0;
+            }
+        };
+        drop(conn);
+        let scope = format!("{}:", mode.as_str());
+        let mut live: HashSet<String> = HashSet::new();
+        let mut claimed: HashSet<String> = HashSet::new();
+        let mut unresolved = 0;
+        for p in &rows {
+            let key = format!("{}{}", scope, p.id);
+            live.insert(key.clone());
+            let u = unconfirmed_of(p);
+            let found = {
+                let bound = |id: &str| claimed.contains(id) || book.owned(id);
+                book.find(&u, &bound)
+            };
+            match found {
+                Found::Order(b) => {
+                    self.absence.forget(&key);
+                    self.ambiguous.lock().remove(&key);
+                    claimed.insert(b.order_id.clone());
+                    self.settle_placed(&ctx, p, &b.order_id, book.read_at);
+                }
+                Found::Absent => {
+                    let id = p.id.to_string();
+                    match self.absence.judge(&key, &id, mode, book, &u).await {
+                        Absence::Wait => unresolved += 1,
+                        Absence::NotPlaced => {
+                            self.absence.forget(&key);
+                            let settled = ctx
+                                .sqlite
+                                .conn()
+                                .and_then(|c| settle(&c, p.id, "not_placed", None, book.read_at));
+                            match settled {
+                                Ok(_) => tracing::info!(
+                                    "The unconfirmed scalping {} {} {} is not in the order book after repeated checks: it was not placed.",
+                                    p.action,
+                                    p.quantity,
+                                    p.symbol
+                                ),
+                                Err(e) => tracing::error!(
+                                    "Unconfirmed scalping order {} could not be settled: {}",
+                                    p.id,
+                                    e
+                                ),
+                            }
+                        }
+                        Absence::Hold { alert } => {
+                            // Live: never released on absence alone (P0-3).
+                            unresolved += 1;
+                            if alert {
+                                let msg = held_message("Scalping page", &u);
+                                self.absence.describe(&key, &msg);
+                                book.alert_held(msg);
+                            }
+                        }
+                    }
+                }
+                Found::Ambiguous(n) => {
+                    unresolved += 1;
+                    if self.ambiguous.lock().insert(key.clone()) {
+                        tracing::error!(
+                            "The unconfirmed scalping {} {} {} matches {} orders in the order book; none is taken for it. Check the order book.",
+                            p.action,
+                            p.quantity,
+                            p.symbol,
+                            n
+                        );
+                    }
+                }
+            }
+        }
+        // Bounded by the rows still unconfirmed on this side.
+        self.absence.retain_scope(&scope, &live);
+        self.ambiguous
+            .lock()
+            .retain(|k| !k.starts_with(&scope) || live.contains(k));
+        unresolved
+    }
+
+    fn held_orders(&self) -> Vec<HeldOrder> {
+        self.absence.held()
+    }
+
+    /// The trader checked the broker's books: the held page order `id` was
+    /// not placed, so the contract trades again. Run under the reconciler's
+    /// pass lock, after it read the order book and trade book once more.
+    async fn confirm_not_placed(&self, id: &str) -> std::result::Result<bool, String> {
+        let Some(key) = self.absence.held_key(id) else {
+            return Ok(false);
+        };
+        let Ok(row_id) = id.parse::<i64>() else {
+            return Ok(false);
+        };
+        let Some(ctx) = self.ctx.upgrade() else {
+            return Ok(false);
+        };
+        let now = ctx.now();
+        let marked = ctx.sqlite.conn().and_then(|c| {
+            let Some(p) = read_one(&c, row_id)? else {
+                return Ok(None);
+            };
+            Ok(Some((p, settle(&c, row_id, "not_placed", None, now)?)))
+        });
+        match marked {
+            Ok(Some((p, true))) => {
+                self.absence.forget(&key);
+                tracing::warn!(
+                    "The trader marked the unconfirmed scalping {} {} {} as not placed",
+                    p.action,
+                    p.quantity,
+                    p.symbol
+                );
+                Ok(true)
+            }
+            Ok(_) => {
+                // Found or settled since the page was loaded.
+                self.absence.forget(&key);
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::error!("Held scalping order {} could not be marked: {}", id, e);
+                Err(
+                    "The order could not be marked just now. Nothing was changed. Try again."
+                        .into(),
+                )
+            }
+        }
+    }
+}
+
+impl ScalpingOrders {
+    /// The book shows the order: settle it as placed; an entry joins the
+    /// scalping list.
+    fn settle_placed(&self, ctx: &AppState, p: &Pending, order_id: &str, at: DateTime<Utc>) {
+        match ctx
+            .sqlite
+            .conn()
+            .and_then(|c| settle(&c, p.id, "placed", Some(order_id), at))
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::error!(
+                    "Unconfirmed scalping order {} could not be settled as order {}: {}",
+                    p.id,
+                    order_id,
+                    e
+                );
+                return;
+            }
+        }
+        if p.kind == "entry" {
+            if let Err(e) = ctx
+                .scalping
+                .store
+                .track(&p.symbol, &p.exchange, &p.product, &p.mode)
+            {
+                tracing::error!("Scalping list could not record {}: {}", p.symbol, e);
+            }
+        }
+        tracing::info!(
+            "The unconfirmed scalping {} {} {} is order {} in the order book.",
+            p.action,
+            p.quantity,
+            p.symbol,
+            order_id
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_is_created_twice_without_harm() {
+        let c = Connection::open_in_memory().unwrap();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap();
+        assert!(repeat_refusal("NIFTY").contains("NIFTY"));
+    }
+}
