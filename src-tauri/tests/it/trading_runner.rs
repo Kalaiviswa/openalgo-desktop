@@ -1585,3 +1585,58 @@ async fn a_bracket_stops_the_run_and_sends_nothing() {
     assert!(t.fake.placed.lock().is_empty());
     assert!(!t.h.ctx.trading.runner.is_running(&id));
 }
+
+/// Broker switching, row 1 (LOG-07): a running Live OpenScript run refuses
+/// a switch away from the logged-in broker, named, until it is paused; a
+/// Sandbox run never does. The real guard, through the Broker page's save.
+#[tokio::test]
+async fn a_live_openscript_run_refuses_a_broker_switch_until_it_is_paused() {
+    use openalgo_desktop_lib::services::broker_auth_service::BrokerAuthService;
+    use openalgo_desktop_lib::state::BrokerSession;
+    let t = setup().await;
+    let ctx = &t.h.ctx;
+    let session = || BrokerSession {
+        broker_id: "zerodha".into(),
+        auth_token: "mock-access-token".into(),
+        feed_token: None,
+        user_id: "AB1234".into(),
+        user_name: None,
+        authenticated_at: ctx.now(),
+    };
+    BrokerAuthService::persist(ctx, &session()).unwrap();
+    let switch = || {
+        t.call(
+            Method::POST,
+            "/api/broker/credentials",
+            Some(json!({"broker": "angel"})),
+        )
+    };
+    // A Sandbox run does not count.
+    let id = t.deploy("SBIN").await;
+    assert_eq!(t.start(&id).await["run"]["mode"], "sandbox");
+    assert!(
+        openalgo_desktop_lib::services::broker_switch::refusal(ctx, "zerodha").is_none(),
+        "a Sandbox run does not block"
+    );
+    t.h.ctx.trading.runner.pause(&id).unwrap();
+    t.go_live(&id).await;
+    let (s, v) = switch().await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    let why = v["message"].as_str().unwrap();
+    assert!(
+        why.starts_with("Zerodha still has 1 running Live OpenScript run."),
+        "{}",
+        why
+    );
+    assert!(
+        why.contains("stop the strategies and protection"),
+        "{}",
+        why
+    );
+    assert_eq!(ctx.get_broker_session().unwrap().broker_id, "zerodha");
+    t.h.ctx.trading.runner.pause(&id).unwrap();
+    let (s, v) = switch().await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["broker_switched"], true, "{}", v);
+    assert!(ctx.get_broker_session().is_none());
+}

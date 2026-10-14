@@ -304,7 +304,7 @@ impl AppState {
             broker_session: RwLock::new(None),
             revoke_pending: Mutex::new(false),
             session_switch: tokio::sync::Mutex::new(()),
-            switch_guard: RwLock::new(Arc::new(crate::services::broker_switch::NoKnownObligations)),
+            switch_guard: RwLock::new(Arc::new(crate::services::obligations::OutcomesGuard)),
             server_status: RwLock::new(ServerStatus::Starting),
             feed_status: RwLock::new(ServerStatus::Starting),
             http,

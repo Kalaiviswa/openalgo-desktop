@@ -105,22 +105,12 @@ impl SwitchBlockers {
 }
 
 /// Where the counts come from: the order-outcomes service
-/// (`services::obligations::open_live_obligations`) once it is on master.
+/// (`services::obligations::OutcomesGuard`, installed by `AppState::new`).
+/// Tests replace it to drive each row.
 pub trait SwitchGuard: Send + Sync {
     /// What still depends on `broker`'s Live session. Sandbox items are
     /// never counted.
     fn blockers(&self, state: &AppState, broker: &str) -> Result<SwitchBlockers>;
-}
-
-/// The guard until the order-outcomes service lands: it knows of nothing,
-/// so only the confirm stands between a trader and a switch. Replaced by
-/// the outcomes service's count in `AppState::new`.
-pub struct NoKnownObligations;
-
-impl SwitchGuard for NoKnownObligations {
-    fn blockers(&self, _state: &AppState, _broker: &str) -> Result<SwitchBlockers> {
-        Ok(SwitchBlockers::default())
-    }
 }
 
 /// The trader-facing refusal when `live_broker`'s session must not end yet.
