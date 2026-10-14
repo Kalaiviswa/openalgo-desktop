@@ -87,6 +87,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         crate::scalping::store::migrate_exit_attempts,
     )?;
     run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
+    run_rust_migration(
+        conn,
+        "084_openscript_unconfirmed",
+        crate::trading::runner::store::migrate_unconfirmed,
+    )?;
 
     tracing::info!("Database migrations completed");
     Ok(())

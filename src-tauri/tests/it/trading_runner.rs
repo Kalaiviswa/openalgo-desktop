@@ -8,8 +8,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::NaiveDate;
-use openalgo_desktop_lib::strategy::dispatch::{Book, DispatchResult, OrderStatusResult, RunMode};
+use openalgo_desktop_lib::services::order_reconciler::{BookSnapshot, OrderOwner};
+use openalgo_desktop_lib::strategy::dispatch::{
+    Book, BookOrder, DispatchResult, OrderStatusResult, RunMode,
+};
 use openalgo_desktop_lib::trading::runner::host::{fragment_of, RecordingHost, RunnerHost};
+use openalgo_desktop_lib::trading::runner::reconcile::RunnerOrders;
 use openalgo_desktop_lib::trading::runner::services::{Bar, RunnerServices};
 use openalgo_desktop_lib::trading::runner::RunnerOptions;
 use openalgo_desktop_lib::trading::scripts::source_hash;
@@ -51,6 +55,31 @@ struct Fake {
     /// What the destination does with a cancel. A cancel is a request: the
     /// order may stay open, or fill partly before it ends.
     cancel_mode: Mutex<CancelMode>,
+    /// Placements whose answer is lost after the order reached the
+    /// destination (LOG-08): it holds the order, the runner hears nothing
+    /// definite.
+    lose_reply: AtomicU64,
+    /// Placements with no definite answer that never reached it.
+    never_arrives: AtomicU64,
+}
+
+/// A placement the destination neither accepted nor refused.
+fn uncertain() -> DispatchResult {
+    DispatchResult {
+        ok: false,
+        uncertain: true,
+        error: Some(
+            "The broker did not confirm this order. Check the order book before placing it again."
+                .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// Take one from a countdown, if any is left.
+fn take(n: &AtomicU64) -> bool {
+    n.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+        .is_ok()
 }
 
 #[derive(Default, Clone, Copy)]
@@ -83,6 +112,45 @@ impl Fake {
         let mut outside = self.outside.lock();
         outside.retain(|(m, s, _)| !(*m == mode && s == symbol));
         outside.push((mode, symbol.to_string(), quantity));
+    }
+
+    /// One read of a side's order book, as the order reconciler hands it to
+    /// its owners. Each row carries the time of the read as its own (IST),
+    /// so the matcher can tell it was placed after the order it looks for.
+    fn snapshot(
+        &self,
+        mode: RunMode,
+        read_at: chrono::DateTime<chrono::Utc>,
+        owners: Vec<Arc<dyn OrderOwner>>,
+    ) -> BookSnapshot {
+        let at = read_at
+            .with_timezone(&chrono_tz::Asia::Kolkata)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let rows = self
+            .orders
+            .lock()
+            .iter()
+            .filter(|o| o.mode == mode)
+            .filter_map(|o| {
+                let s = &o.status;
+                let filled = if s["order_status"] == "complete" {
+                    s["quantity"].clone()
+                } else {
+                    s.get("filled_quantity").cloned().unwrap_or(json!(0))
+                };
+                BookOrder::from_row(&json!({
+                    "orderid": o.id, "symbol": s["symbol"], "exchange": s["exchange"],
+                    "action": s["action"], "quantity": s["quantity"], "product": s["product"],
+                    "pricetype": s["pricetype"], "order_status": s["order_status"],
+                    "filled_quantity": filled, "average_price": s["average_price"],
+                    "timestamp": at,
+                }))
+            })
+            .collect();
+        let mut book = BookSnapshot::new(rows, read_at);
+        book.owners = owners;
+        book
     }
 
     fn placed_on(&self, mode: RunMode) -> Vec<Value> {
@@ -174,10 +242,14 @@ impl RunnerServices for Fake {
         if self.refuse_orders.load(Ordering::SeqCst) {
             return DispatchResult::refused("Insufficient funds");
         }
+        if take(&self.never_arrives) {
+            return uncertain();
+        }
         let id = format!("OID{}", self.next.fetch_add(1, Ordering::SeqCst) + 1);
         let mut status = json!({"order_status": "open", "quantity": request["quantity"],
             "action": request["action"], "symbol": request["symbol"],
-            "exchange": request["exchange"], "product": request["product"]});
+            "exchange": request["exchange"], "product": request["product"],
+            "pricetype": request["pricetype"]});
         if self.fill_at_once.load(Ordering::SeqCst) {
             status["order_status"] = json!("complete");
             status["average_price"] = json!(100.0);
@@ -187,6 +259,10 @@ impl RunnerServices for Fake {
             id: id.clone(),
             status,
         });
+        if take(&self.lose_reply) {
+            // The destination holds the order; its answer never arrives.
+            return uncertain();
+        }
         DispatchResult {
             ok: true,
             broker_order_id: Some(id.clone()),
@@ -1584,4 +1660,340 @@ async fn a_bracket_stops_the_run_and_sends_nothing() {
     assert_eq!(v["stopped"], true);
     assert!(t.fake.placed.lock().is_empty());
     assert!(!t.h.ctx.trading.runner.is_running(&id));
+}
+
+// ------------------------------------------------------------ LOG-08
+
+impl T {
+    /// The runner, as the order reconciler's owner of its orders.
+    fn owner(
+        &self,
+        runner: &Arc<openalgo_desktop_lib::trading::runner::Runner>,
+    ) -> Arc<dyn OrderOwner> {
+        Arc::new(RunnerOrders(Arc::downgrade(runner)))
+    }
+
+    fn row_status(&self, id: i64) -> (String, Option<String>, i64) {
+        self.h
+            .ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT status, orderid, filled_quantity FROM openscript_orders WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    fn row_message(&self, id: i64) -> Option<String> {
+        self.h
+            .ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT message FROM openscript_orders WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Fold `reads` reads of a side's book, 10 s apart from `from`, as the
+    /// reconciler would. Answers how many rows stay unresolved.
+    async fn reads(
+        &self,
+        owner: &Arc<dyn OrderOwner>,
+        mode: RunMode,
+        from: chrono::DateTime<chrono::Utc>,
+        reads: i64,
+    ) -> usize {
+        let mut left = 0;
+        for n in 0..reads {
+            let at = from + chrono::Duration::seconds(10 * n);
+            left = owner
+                .reconcile(mode, &self.fake.snapshot(mode, at, vec![owner.clone()]))
+                .await;
+        }
+        left
+    }
+
+    /// The frames the page has received for one intent, oldest first.
+    async fn frames(&self, run: &str, intent: i64) -> Vec<Value> {
+        let (_, inbox) = self.page(Method::GET, run, "inbox?after=0", None).await;
+        inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["kind"] == "frame" && m["frame"]["intentId"] == intent)
+            .map(|m| m["frame"].clone())
+            .collect()
+    }
+}
+
+/// LOG-08: Stop's exit reaches the destination and its answer is lost. It
+/// was treated as refused ("could not be closed, try again"), so each Stop
+/// pressed again measured the same filled rows and sent another SELL. Now
+/// the exit is unconfirmed: no further Stop, before or after a restart, sends
+/// a second one, and once the order book shows it the run closes with exactly
+/// one SELL.
+#[tokio::test]
+async fn a_lost_exit_reply_sends_one_sell_across_repeated_stops_and_a_restart() {
+    let t = setup().await;
+    // Book reads are driven by hand.
+    t.h.ctx.reconciler.stop();
+    let id = t.deploy("SBIN").await;
+    t.fake.fill_at_once.store(true, Ordering::SeqCst);
+    t.start(&id).await;
+    t.buy(&id, 1, 3).await;
+    t.h.ctx.trading.runner.pump_once(&id).await;
+
+    t.fake.lose_reply.store(1, Ordering::SeqCst);
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    assert!(v["message"].as_str().unwrap().contains("did not confirm"));
+    assert_eq!(t.fake.placed_on(RunMode::Sandbox).len(), 2);
+    for _ in 0..3 {
+        let (s, v) = t.close(&id).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    }
+    assert_eq!(t.fake.placed_on(RunMode::Sandbox).len(), 2, "one SELL only");
+    assert_eq!(t.row_status(2).0, "unconfirmed");
+
+    // The app restarts: the row is still unconfirmed, and Stop still waits.
+    let trading = t.restart().await;
+    let runner = trading.runner.clone();
+    runner.start(&id).unwrap();
+    assert_eq!(runner.close(&id).await.unwrap_err().status, 409);
+    assert_eq!(t.fake.placed_on(RunMode::Sandbox).len(), 2, "one SELL only");
+
+    // The order book settles it: bound to OID2, filled; Stop then closes.
+    let owner = t.owner(&runner);
+    let book = t
+        .fake
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+    assert_eq!(
+        t.row_status(2),
+        ("filled".to_string(), Some("OID2".to_string()), 3)
+    );
+    runner.close(&id).await.unwrap();
+    let sent = t.fake.placed_on(RunMode::Sandbox);
+    assert_eq!(sent.len(), 2, "exactly one SELL in all");
+    assert_eq!(sent[1]["action"], "SELL");
+    trading.shutdown().await;
+}
+
+/// LOG-08: an entry whose answer is lost was recorded rejected and a
+/// rejected frame told the script it had no order, so it could enter again
+/// while the first one filled. Now the intent stays pending (`placed`), the
+/// run sends nothing new, and the book settles it into a fill the script
+/// sees and Stop closes.
+#[tokio::test]
+async fn a_lost_entry_reply_keeps_the_intent_pending_and_blocks_new_orders() {
+    let t = setup().await;
+    t.h.ctx.reconciler.stop();
+    let id = t.deploy("SBIN").await;
+    let runner = t.h.ctx.trading.runner.clone();
+    t.fake.fill_at_once.store(true, Ordering::SeqCst);
+    t.start(&id).await;
+    t.fake.lose_reply.store(1, Ordering::SeqCst);
+    let v = t.buy(&id, 1, 3).await;
+    assert_eq!(v["sent"], 0);
+    let frames = t.frames(&id, 1).await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["status"], "placed", "pending, never rejected");
+
+    // Nothing new goes out, and Stop does not go ahead.
+    let v = t.buy(&id, 2, 1).await;
+    assert_eq!(v["unconfirmed"], true);
+    let (s, _) = t.close(&id).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(t.fake.placed_on(RunMode::Sandbox).len(), 1);
+
+    // Settled from the book: the script hears the fill.
+    let owner = t.owner(&runner);
+    let book = t
+        .fake
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+    let frames = t.frames(&id, 1).await;
+    let last = frames.last().unwrap();
+    assert_eq!(last["status"], "filled");
+    assert_eq!(last["filledQty"], 3);
+    assert_eq!(last["orderRef"], "OID1");
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let sent = t.fake.placed_on(RunMode::Sandbox);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["quantity"], 3);
+}
+
+/// LOG-08 P0-3: absence. A sandbox order missing from the sandbox's book
+/// over repeated reads was not placed: the row is rejected and the run
+/// trades again. A live order missing from the broker's book is never
+/// released on absence alone, however long (the book can lag; a wrong
+/// release sends a second order): it is held, listed for the trader on the
+/// Health page, and released only when the trader marks it not placed.
+#[tokio::test]
+async fn absence_releases_a_sandbox_row_and_a_live_one_only_on_the_traders_word() {
+    for mode in [RunMode::Sandbox, RunMode::Live] {
+        let t = setup().await;
+        t.h.ctx.reconciler.stop();
+        let id = t.deploy("SBIN").await;
+        let runner = t.h.ctx.trading.runner.clone();
+        if mode == RunMode::Live {
+            t.fake.analyzer.store(false, Ordering::SeqCst);
+            t.fake.broker.store(true, Ordering::SeqCst);
+        }
+        t.start(&id).await;
+        t.fake.never_arrives.store(1, Ordering::SeqCst);
+        t.buy(&id, 1, 3).await;
+        let owner = t.owner(&runner);
+        let t0 = t.h.ctx.now();
+        let left = t.reads(&owner, mode, t0, 6).await;
+        let v = t.buy(&id, 2, 1).await;
+        if mode == RunMode::Sandbox {
+            assert_eq!(left, 0);
+            assert_eq!(t.row_status(1).0, "rejected");
+            assert_eq!(v["sent"], 1, "the run trades again");
+            assert!(t.h.ctx.reconciler.held_orders().is_empty());
+            continue;
+        }
+        assert_eq!(left, 1, "kept unconfirmed");
+        assert_eq!(t.row_status(1).0, "unconfirmed");
+        assert_eq!(v["sent"], 0, "still nothing new");
+        // Held for the trader, through the owner the app registered.
+        let held = t.h.ctx.reconciler.held_orders();
+        assert_eq!(held.len(), 1, "{:?}", held);
+        assert_eq!(held[0].owner, "openscript");
+        assert_eq!(held[0].id, "1");
+        assert!(held[0].message.contains("OpenScript t.oscript"));
+        assert!(held[0].message.contains("mark it as not placed"));
+        // Long after the release window: still held, never released alone.
+        let late = t0
+            + chrono::Duration::seconds(
+                openalgo_desktop_lib::services::order_reconciler::LIVE_RELEASE_SECS + 60,
+            );
+        assert_eq!(t.reads(&owner, mode, late, 2).await, 1);
+        assert_eq!(t.row_status(1).0, "unconfirmed");
+        // The trader marks it not placed: the run trades again.
+        assert_eq!(owner.confirm_not_placed("1").await, Ok(true));
+        assert_eq!(t.row_status(1).0, "rejected");
+        assert_eq!(
+            t.row_message(1).as_deref(),
+            Some(openalgo_desktop_lib::trading::runner::reconcile::MARKED_NOT_PLACED)
+        );
+        let frames = t.frames(&id, 1).await;
+        assert_eq!(frames.last().unwrap()["status"], "rejected");
+        assert!(t.h.ctx.reconciler.held_orders().is_empty());
+        assert_eq!(owner.confirm_not_placed("1").await, Ok(false), "once");
+        let v = t.buy(&id, 3, 1).await;
+        assert_eq!(v["sent"], 1, "the run trades again");
+    }
+}
+
+/// LOG-08 P0-3 with Stop: a live exit that never reached the broker. Stop
+/// pressed again sends nothing while it is unconfirmed, and nothing releases
+/// it on absence alone; once the trader marks it not placed, Stop closes the
+/// position with one SELL.
+#[tokio::test]
+async fn a_held_live_exit_is_sent_again_only_after_the_trader_marks_it() {
+    let t = setup().await;
+    t.h.ctx.reconciler.stop();
+    let id = t.deploy("SBIN").await;
+    let runner = t.h.ctx.trading.runner.clone();
+    t.fake.fill_at_once.store(true, Ordering::SeqCst);
+    t.go_live(&id).await;
+    t.buy(&id, 1, 3).await;
+    runner.pump_once(&id).await;
+    t.fake.never_arrives.store(1, Ordering::SeqCst);
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    assert!(v["message"].as_str().unwrap().contains("did not confirm"));
+    let owner = t.owner(&runner);
+    assert_eq!(t.reads(&owner, RunMode::Live, t.h.ctx.now(), 6).await, 1);
+    for _ in 0..2 {
+        let (s, _) = t.close(&id).await;
+        assert_eq!(s, StatusCode::CONFLICT);
+    }
+    assert_eq!(t.fake.placed_on(RunMode::Live).len(), 2, "one SELL tried");
+    let held = t.h.ctx.reconciler.held_orders();
+    assert_eq!(held.len(), 1, "{:?}", held);
+    assert_eq!((held[0].action.as_str(), held[0].quantity), ("SELL", 3));
+
+    assert_eq!(owner.confirm_not_placed(&held[0].id).await, Ok(true));
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let live = t.fake.placed_on(RunMode::Live);
+    assert_eq!(live.len(), 3);
+    assert_eq!(live[2]["action"], "SELL");
+    assert_eq!(live[2]["quantity"], 3);
+}
+
+/// LOG-08 across a restart: the app stopped after an entry reached the
+/// destination and before its answer was recorded, so its row has no order
+/// number. It blocked Stop for good. Now the app's start marks it
+/// unconfirmed, the order book settles it, and Stop closes with one SELL.
+#[tokio::test]
+async fn an_order_left_without_its_answer_is_settled_from_the_book_after_a_restart() {
+    let t = setup().await;
+    t.h.ctx.reconciler.stop();
+    let id = t.deploy("SBIN").await;
+    t.fake.fill_at_once.store(true, Ordering::SeqCst);
+    t.start(&id).await;
+    let sql = |s: &str| t.h.ctx.sqlite.conn().unwrap().execute_batch(s).unwrap();
+    sql(
+        "CREATE TRIGGER no_ack BEFORE UPDATE OF orderid ON openscript_orders
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+    );
+    t.buy(&id, 1, 3).await;
+    let trading = t.restart().await;
+    sql("DROP TRIGGER no_ack;");
+    assert_eq!(t.row_status(1), ("placed".to_string(), None, 0));
+    trading.start(t.h.ctx.now(), &t.h.ctx.sqlite);
+    assert_eq!(t.row_status(1).0, "unconfirmed");
+
+    let runner = trading.runner.clone();
+    runner.start(&id).unwrap();
+    let owner = t.owner(&runner);
+    let book = t
+        .fake
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+    assert_eq!(
+        t.row_status(1),
+        ("filled".to_string(), Some("OID1".to_string()), 3)
+    );
+    runner.close(&id).await.unwrap();
+    let sent = t.fake.placed_on(RunMode::Sandbox);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        (sent[1]["action"].clone(), sent[1]["quantity"].clone()),
+        (json!("SELL"), json!(3))
+    );
+    trading.shutdown().await;
+}
+
+/// LOG-08, the whole app: the runner is registered with the order
+/// reconciler, whose pass reads the real sandbox book while the runner holds
+/// an unconfirmed sandbox row, and settles it there.
+#[tokio::test]
+async fn the_reconciler_settles_the_runners_unconfirmed_rows() {
+    let t = setup().await;
+    t.h.ctx.reconciler.stop();
+    let id = t.deploy("SBIN").await;
+    t.start(&id).await;
+    t.fake.never_arrives.store(1, Ordering::SeqCst);
+    t.buy(&id, 1, 3).await;
+    assert_eq!(t.row_status(1).0, "unconfirmed");
+    let mut report = Value::Null;
+    for _ in 0..6 {
+        report = t.h.ctx.reconciler.pass().await;
+        t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(10));
+    }
+    assert_eq!(t.row_status(1).0, "rejected", "{}", report);
+    assert_eq!(report["unresolved"], 0);
 }

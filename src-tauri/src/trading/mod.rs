@@ -57,6 +57,16 @@ impl Trading {
             if let Err(e) = runner::store::prune_orders(&conn, now) {
                 tracing::warn!("Could not prune old OpenScript orders: {}", e);
             }
+            // Rows the app stopped on between sending and recording the
+            // answer may be at the destination: the order book settles them.
+            match runner::store::unconfirm_leftovers(&conn, now) {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(
+                    "{} OpenScript order(s) had no recorded answer after a restart; the order book will settle them",
+                    n
+                ),
+                Err(e) => tracing::error!("Could not mark unanswered OpenScript orders: {}", e),
+            }
         }
         self.runner.start_scheduler();
     }
