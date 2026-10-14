@@ -85,6 +85,9 @@ pub trait RunnerServices: Send + Sync {
     fn instrument(&self, symbol: &str, exchange: &str, date: NaiveDate) -> Value;
     /// Whether the OpenAlgo user is signed in.
     fn signed_in(&self) -> bool;
+    /// Ask the order reconciler to read the order book now (an uncertain
+    /// placement was just recorded).
+    fn request_reconcile(&self) {}
 }
 
 /// The production services, over the app context.
@@ -296,6 +299,12 @@ impl RunnerServices for AppServices {
         self.ctx
             .upgrade()
             .is_some_and(|c| c.signed_in_user().is_some())
+    }
+
+    fn request_reconcile(&self) {
+        if let Some(ctx) = self.ctx.upgrade() {
+            ctx.reconciler.request_pass();
+        }
     }
 }
 

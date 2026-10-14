@@ -345,6 +345,10 @@ impl AppState {
             .register(Arc::new(crate::scalping::monitor::ScalpingOrders(
                 Arc::downgrade(&ctx.scalping.monitor),
             )));
+        ctx.reconciler
+            .register(Arc::new(crate::trading::runner::reconcile::RunnerOrders(
+                Arc::downgrade(&ctx.trading.runner),
+            )));
         ctx.strategy.set_entry_gate(ctx.reconciler.clone());
         let alerts = Arc::downgrade(&ctx);
         ctx.reconciler.set_alert_sink(Arc::new(move |a| {
