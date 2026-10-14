@@ -155,6 +155,17 @@ pub struct OpenOptions {
     pub brokers: Arc<BrokerRegistry>,
 }
 
+impl OpenOptions {
+    /// The installed app's: OS keychain, system clock, every broker adapter.
+    pub fn production() -> Self {
+        Self {
+            keystore: Arc::new(crate::security::keystore::KeyringStore::new()),
+            clock: Arc::new(SystemClock),
+            brokers: Arc::new(BrokerRegistry::new()),
+        }
+    }
+}
+
 impl AppState {
     /// Open everything under `data_dir`. Must run inside a Tokio runtime
     /// (subscribers are spawned here).
@@ -362,14 +373,21 @@ impl AppState {
 
     /// Production defaults: OS keychain, system clock, every broker adapter.
     pub fn open_default(data_dir: &Path) -> Result<Arc<Self>> {
-        Self::open(
-            data_dir,
-            OpenOptions {
-                keystore: Arc::new(crate::security::keystore::KeyringStore::new()),
-                clock: Arc::new(SystemClock),
-                brokers: Arc::new(BrokerRegistry::new()),
-            },
-        )
+        Self::open(data_dir, OpenOptions::production())
+    }
+
+    /// Open the data folder as version `version` of the app (REL-02):
+    /// refuse a folder written by a newer version, back up one from an
+    /// older version before the migrations run, put the backup back if
+    /// opening then fails, and record `version` once it opened
+    /// (`db::upgrade`).
+    pub fn open_upgrading(
+        data_dir: &Path,
+        opts: OpenOptions,
+        version: &str,
+    ) -> std::result::Result<Arc<Self>, crate::db::upgrade::OpenError> {
+        let now = opts.clock.now();
+        crate::db::upgrade::open_data(data_dir, version, now, || Self::open(data_dir, opts))
     }
 
     /// Spawn a background task owned by the context; aborted on shutdown.

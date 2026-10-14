@@ -725,6 +725,25 @@ Every flaky test found so far was a race, not a slow machine:
   checkpoints, and opening moves an unreplayable log aside, keeps it and
   raises a health alert. Do not remove any of the three.
 - Never hold a pooled SQLite connection across an `.await` on network I/O.
+- The app opens its data folder through `AppState::open_upgrading`
+  (`db::upgrade`, REL-02): it refuses a folder `data-version.json` says a
+  newer version wrote, backs up every store before an older folder is
+  migrated, and puts the backup back when the open fails. A new store (a
+  database or key file in the data folder) goes into `db::upgrade::STORES`
+  in the same change, or it is neither backed up nor restored. Anything an
+  upgrade changes outside the folder (the OS keychain) is not in the
+  backup: change it only after the open has succeeded. Tests open
+  `AppState::open` directly; only the app start takes the folder lock
+  (`DataFolderLock`), so a second copy of the app never backs up, restores
+  or migrates a folder the first has open.
+- A data backup lives only for the start that made it (REL-02 security
+  review, `docs/port/data-upgrades.md`): deleted once the upgraded open
+  succeeds or after it was put back, and on account reset. Never add a
+  manual restore of an older backup or keep backups "just in case": an older
+  copy brings back forgotten broker keys, a revoked session, an old API key
+  or a leaked password. Backup files and folders are created owner-only
+  (never widened then narrowed), and nothing in `backups/` is followed
+  through a link.
 
 ### Sandbox deviations from the web
 

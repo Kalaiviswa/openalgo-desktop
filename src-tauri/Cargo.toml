@@ -23,6 +23,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 # Native confirmation for account reset (called from Rust only; no JS permission)
 tauri-plugin-dialog = "2.8"
+# Version precedence for the data-folder version check (db::upgrade).
+semver = "1"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

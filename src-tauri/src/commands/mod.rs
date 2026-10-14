@@ -142,24 +142,57 @@ fn navigate(app: &AppHandle, ctx: &AppState) {
 }
 
 /// The HTTP listener's state (the start-up page reads it as before) plus
-/// the market data listener's under `ws`.
+/// the market data listener's under `ws`, and, when the data folder was
+/// not opened, why (`data_refused`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct StartupStatus {
     #[serde(flatten)]
     pub http: ServerStatus,
     pub ws: ServerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_refused: Option<String>,
 }
 
 pub fn startup_status_of(ctx: &AppState) -> StartupStatus {
     StartupStatus {
         http: ctx.server_status.read().clone(),
         ws: ctx.feed_status.read().clone(),
+        data_refused: None,
+    }
+}
+
+/// The data folder was not opened (REL-02); the start-up page shows this
+/// message and nothing else runs.
+pub struct DataRefusal(pub String);
+
+/// The running app's lock on its data folder, held until it exits.
+pub struct DataFolderHold(pub Option<crate::db::upgrade::DataFolderLock>);
+
+/// What the start-up page shows when the data folder was refused.
+pub fn data_refused_status(message: &str) -> StartupStatus {
+    let failed = ServerStatus::Failed {
+        message: message.to_string(),
+    };
+    StartupStatus {
+        http: failed,
+        ws: ServerStatus::Starting,
+        data_refused: Some(message.to_string()),
     }
 }
 
 #[tauri::command]
-pub fn startup_status(shell: State<'_, ShellState>) -> StartupStatus {
-    startup_status_of(&shell.ctx)
+pub fn startup_status(app: AppHandle) -> StartupStatus {
+    if let Some(r) = app.try_state::<DataRefusal>() {
+        return data_refused_status(&r.0);
+    }
+    match app.try_state::<ShellState>() {
+        Some(shell) => startup_status_of(&shell.ctx),
+        None => StartupStatus {
+            http: ServerStatus::Starting,
+            ws: ServerStatus::Starting,
+            data_refused: None,
+        },
+    }
 }
 
 #[tauri::command]
@@ -640,5 +673,34 @@ mod reset_tests {
             &u("http://127.0.0.1:5000/"),
             5000
         ));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    /// REL-02: a refused data folder reaches the start-up page as
+    /// `data_refused` (startup.js shows it with no port or retry), and an
+    /// ordinary status carries no such key.
+    #[test]
+    fn a_refused_data_folder_reaches_the_start_up_page() {
+        let refusal = crate::db::upgrade::Refusal::Downgrade {
+            recorded: "1.2.0".into(),
+            current: "1.1.0".into(),
+        };
+        let v = serde_json::to_value(super::data_refused_status(&refusal.message())).unwrap();
+        assert_eq!(v["data_refused"], refusal.message());
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["ws"]["state"], "starting");
+        let js = include_str!("../../bootstrap/startup.js");
+        assert!(js.contains("status.data_refused"));
+        let ok = super::StartupStatus {
+            http: crate::state::ServerStatus::Starting,
+            ws: crate::state::ServerStatus::Starting,
+            data_refused: None,
+        };
+        assert!(serde_json::to_value(ok)
+            .unwrap()
+            .get("data_refused")
+            .is_none());
     }
 }

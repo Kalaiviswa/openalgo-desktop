@@ -567,6 +567,12 @@ impl AuthService {
             .await
             .map_err(|e| AppError::Internal(format!("account reset task: {}", e)))??;
         Self::forget_adapter_state(ctx).await;
+        // No copy of the old account may outlive it in the data folder's
+        // update backups (REL-02 security review; normally there are none:
+        // a successful start deletes them).
+        if let Err(e) = crate::db::upgrade::delete_backups(&ctx.data_dir) {
+            tracing::warn!("Account reset: could not remove the data backups: {}", e);
+        }
         ctx.bus.publish(crate::events::Event::ForceLogout {
             message: "OpenAlgo was reset on this computer. Create a new account to continue."
                 .into(),

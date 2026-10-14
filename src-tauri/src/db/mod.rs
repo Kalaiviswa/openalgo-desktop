@@ -2,3 +2,4 @@
 
 pub mod duckdb;
 pub mod sqlite;
+pub mod upgrade;

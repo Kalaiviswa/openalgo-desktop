@@ -102,3 +102,4 @@ mod webui_admin;
 mod webui_market;
 mod webui_monitoring;
 mod webui_settings;
+mod data_upgrade;

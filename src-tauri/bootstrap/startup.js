@@ -19,6 +19,14 @@
 
   function show(status) {
     if (!status) return
+    // The data folder was not opened (a newer version's data, a failed
+    // update put back, OpenAlgo already running): nothing to retry here.
+    if (status.data_refused) {
+      title.textContent = 'OpenAlgo could not open your data'
+      msg.textContent = status.data_refused
+      actions.hidden = true
+      return
+    }
     // retry_server answers with the app's own state only; keep the last one.
     if (status.ws) showFeed(status.ws)
     if (status.state === 'running') {

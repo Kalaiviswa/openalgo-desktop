@@ -6,6 +6,7 @@
 - [Historify says some changes could not be recovered](#historify-says-some-changes-could-not-be-recovered)
 - [Another device, a firewall, or a tunnel](#another-device-a-firewall-or-a-tunnel)
 - [Your API client says the API key is invalid](#your-api-client-says-the-api-key-is-invalid)
+- [OpenAlgo could not open your data](#openalgo-could-not-open-your-data)
 
 ## The app says a port is already in use
 
@@ -243,3 +244,28 @@ OpenAlgo password. Nothing is kept in your computer's keychain.
   delete the entries named `com.openalgo.desktop`; on Windows, open
   **Credential Manager**, **Windows Credentials**; on Linux, use your
   keyring manager (for example **Passwords and Keys**).
+
+## OpenAlgo could not open your data
+
+OpenAlgo shows this page instead of starting when opening your data folder
+would be unsafe. The message names the cause; nothing in the folder was
+changed.
+
+- **"Your OpenAlgo data was last opened by version X, which is newer than
+  this copy"**: you started an older version after a newer one. Install
+  version X or newer, or go back as described in
+  [Going back to an earlier version](updating.md#going-back-to-an-earlier-version).
+- **"OpenAlgo Desktop is already running"**: another OpenAlgo window has the
+  data open. Close it (on Windows, check the taskbar; on a Mac, the Dock),
+  then start OpenAlgo again.
+- **"this backup could not be made"**: OpenAlgo backs up your data before an
+  update changes it and could not, usually because the disk is full. Free
+  some space and start it again.
+- **"could not open your data ... was put back exactly as it was"**: the new
+  version could not update your data, so it restored the backup it had just
+  made. Start OpenAlgo again; if the same message comes back, install the
+  previous version from the release page and report the problem.
+- **"this backup could not be made"** can also mean `backups` inside the
+  data folder is not an ordinary folder (a link, or a file): remove it and
+  start OpenAlgo again.
+

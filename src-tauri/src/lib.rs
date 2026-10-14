@@ -66,6 +66,26 @@ pub(crate) fn log_filter(development: bool) -> &'static str {
     }
 }
 
+/// The data folder was not opened: show the start-up page with the reason
+/// (the `startup_status` command reads it) and start nothing else.
+fn show_data_refusal(
+    app: &mut tauri::App,
+    refusal: db::upgrade::Refusal,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    tracing::error!(
+        "OpenAlgo did not open its data folder: {}",
+        refusal.detail()
+    );
+    app.manage(commands::DataRefusal(refusal.message()));
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("OpenAlgo Desktop")
+        .inner_size(900.0, 640.0)
+        .min_inner_size(640.0, 480.0)
+        .center()
+        .build()?;
+    Ok(())
+}
+
 fn init_logging() {
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(log_filter(cfg!(
@@ -89,8 +109,29 @@ pub fn run() {
             .plugin(tauri_plugin_dialog::init())
             .setup(|app| {
                 let data_dir = app.path().app_data_dir()?;
-                let (ctx, server, feed) = tauri::async_runtime::block_on(async {
-                    let ctx = AppState::open_default(&data_dir)?;
+                // REL-02: one running copy per data folder; a folder from a
+                // newer version is refused; an older one is backed up
+                // before its migrations and put back if they fail
+                // (`db::upgrade`). A refusal shows the start-up page with
+                // the reason and starts nothing else.
+                let lock = match db::upgrade::DataFolderLock::acquire(&data_dir) {
+                    Ok(lock) => lock,
+                    Err(refusal) => return show_data_refusal(app, refusal),
+                };
+                let opened = tauri::async_runtime::block_on(async {
+                    AppState::open_upgrading(
+                        &data_dir,
+                        state::OpenOptions::production(),
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                });
+                let ctx = match opened {
+                    Ok(ctx) => ctx,
+                    Err(db::upgrade::OpenError::Refused(r)) => return show_data_refusal(app, r),
+                    Err(db::upgrade::OpenError::Open(e)) => return Err(e.into()),
+                };
+                app.manage(commands::DataFolderHold(lock));
+                let (server, feed) = tauri::async_runtime::block_on(async {
                     session::spawn_expiry_task(ctx.clone());
                     services::system_info::mark_start();
                     services::monitor::start(&ctx);
@@ -108,7 +149,7 @@ pub fn run() {
                     // its status with a trader-facing message.
                     let feed = feed::FeedService::new(ctx.clone());
                     feed.start().await;
-                    Ok::<_, error::AppError>((ctx, server, feed))
+                    Ok::<_, error::AppError>((server, feed))
                 })?;
                 app.manage(feed);
                 if let Some(h) = &server {

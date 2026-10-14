@@ -30,6 +30,7 @@ app, and secrets are kept encrypted with a key locked by your OpenAlgo password.
 - [Sandbox mode (analyzer mode)](#sandbox-mode-analyzer-mode)
 - [Ports](#ports)
 - [Where your data lives, and backups](#where-your-data-lives-and-backups)
+- [Updating OpenAlgo Desktop](#updating-openalgo-desktop)
 - [Supported brokers](#supported-brokers)
 - [What is included, and what is not](#what-is-included-and-what-is-not)
 - [Guides](#guides)
@@ -362,6 +363,18 @@ closing the app and copying the folder back. A backup opens on any computer
 with the password you had when you made it, because the locked keys travel
 with it.
 
+**Before an update changes your data**, OpenAlgo backs it up by itself: the
+first time a newer version opens the folder, it copies every database into
+`backups/` inside the folder before anything is migrated. If the new version
+then cannot open the data, it puts that copy back, so the folder is exactly
+as the old version left it, and says so. The copy exists only for that
+start: it is deleted as soon as the new version has opened the data (or put
+it back), so no older copy of your account, broker keys or API key is kept.
+`data-version.json` records the version that last opened the folder; an
+older version will not open a folder a newer one has used (it says so and
+changes nothing). See
+[Updating OpenAlgo Desktop](docs/user/updating.md#your-data-is-backed-up-before-an-update).
+
 Resetting your account (Reset account, on the forgotten-password page) removes
 the account and its keys; make a new backup once you have set OpenAlgo up
 again. Backups made before a reset still open with the password you had then.
@@ -383,6 +396,21 @@ the saved keys could not be opened, with the ways out. A browser, a program,
 another device or a tunnel gets "Invalid credentials" for every failure, after
 the same amount of work, so nobody can learn from a failed sign-in whether a
 name or a password was right.
+
+## Updating OpenAlgo Desktop
+
+Download the new version for your system from
+[Releases](https://github.com/marketcalls/openalgo-desktop/releases) and
+install it over the old one, as in [Download and install](#download-and-install).
+Your account, settings, broker keys, strategies, sandbox data and Historify
+data are kept.
+
+The first time the new version starts, it backs up your data before it
+changes anything, and if it then cannot open the data it puts that copy back
+and says so. The copy is deleted as soon as the new version has opened your
+data. An older version never opens data that a newer version has used; it
+says so and changes nothing. Details:
+[Updating OpenAlgo Desktop](docs/user/updating.md).
 
 ## Supported brokers
 
