@@ -1491,6 +1491,91 @@ mod subscription_batches {
         }
     }
 
+    /// Calls a fake subscription endpoint received: subscribe (POST) or
+    /// not (PUT), with the instrument ids.
+    type Calls = Arc<Mutex<Vec<(bool, Vec<i64>)>>>;
+
+    /// A subscription endpoint answering the calls in `fail` (1-based) with
+    /// a server error; records whether each call subscribed (POST) or
+    /// unsubscribed (PUT), with its instrument ids.
+    async fn recorded(fail: &'static [usize]) -> (String, Calls) {
+        let seen: Calls = Arc::default();
+        let answer = |subscribe: bool, seen: Calls, b: Value| {
+            let ids: Vec<i64> = b["instruments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["exchangeInstrumentID"].as_i64().unwrap())
+                .collect();
+            let n = {
+                let mut g = seen.lock();
+                g.push((subscribe, ids));
+                g.len()
+            };
+            if fail.contains(&n) {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{\"type\":\"error\"}".to_string(),
+                )
+            } else {
+                (
+                    axum::http::StatusCode::OK,
+                    json!({"type": "success", "result": {"listQuotes": []}}).to_string(),
+                )
+            }
+        };
+        let (s1, s2) = (seen.clone(), seen.clone());
+        let app = Router::new().route(
+            "/sub",
+            post(move |Json(b): Json<Value>| {
+                let seen = s1.clone();
+                async move { answer(true, seen, b) }
+            })
+            .put(move |Json(b): Json<Value>| {
+                let seen = s2.clone();
+                async move { answer(false, seen, b) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sub", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(l, app).await;
+        });
+        (url, seen)
+    }
+
+    /// BF-03 review: a newer command replaces a pending retry for the same
+    /// instruments. An unsubscribe of instrument 7 fails and waits to be
+    /// sent again; the trader adds 7 back meanwhile: the subscribe goes out
+    /// and the failed unsubscribe is never sent again (it would silently
+    /// stop 7 while the feed believes it is subscribed). The other way
+    /// round, a failed subscribe is not sent again after an unsubscribe.
+    #[tokio::test]
+    async fn a_newer_command_replaces_a_pending_retry() {
+        let one = |subscribe: bool| super::super::streaming::Command {
+            subscribe,
+            code: 1501,
+            instruments: vec![json!({"exchangeSegment": 1, "exchangeInstrumentID": 7})],
+        };
+        for first in [false, true] {
+            let (url, seen) = recorded(&[1]).await;
+            worker(
+                &crate::brokers::rmoney::CONFIG,
+                url,
+                vec![one(first), one(!first)],
+                Duration::from_millis(50),
+                Duration::from_millis(500),
+            )
+            .await;
+            assert_eq!(
+                seen.lock().clone(),
+                vec![(first, vec![7]), (!first, vec![7])],
+                "the failed {} was sent again",
+                if first { "subscribe" } else { "unsubscribe" }
+            );
+        }
+    }
+
     /// BF-03: retries are bounded, and stop with the worker (logout or
     /// reconnect drops the queue) even in the middle of a back-off.
     #[tokio::test]

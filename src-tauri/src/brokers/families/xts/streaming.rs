@@ -441,8 +441,10 @@ struct Pending {
 
 /// Run commands in order until the queue closes, sending failed batches
 /// again with doubling waits from `retry_base` up to `RETRY_MAX`, at most
-/// `RETRY_ATTEMPTS` times (BF-03). An unsubscribe drops the same
-/// instruments from a pending retry. A refused token sets `reconnect`,
+/// `RETRY_ATTEMPTS` times (BF-03). A newer command for the same
+/// instruments and message code replaces their pending retry, so a failed
+/// unsubscribe sent again never undoes a later subscribe, nor a failed
+/// subscribe a later unsubscribe. A refused token sets `reconnect`,
 /// which the feed turns into a reconnect. Ends (and so cancels every
 /// pending retry) when the feed drops the queue or aborts the task.
 pub async fn run_commands(
@@ -472,12 +474,10 @@ pub async fn run_commands(
                 None => return,
             },
         };
-        if !cmd.subscribe {
-            for p in pending.iter_mut().filter(|p| p.cmd.code == cmd.code) {
-                p.cmd.instruments.retain(|i| !cmd.instruments.contains(i));
-            }
-            pending.retain(|p| !p.cmd.instruments.is_empty());
+        for p in pending.iter_mut().filter(|p| p.cmd.code == cmd.code) {
+            p.cmd.instruments.retain(|i| !cmd.instruments.contains(i));
         }
+        pending.retain(|p| !p.cmd.instruments.is_empty());
         let report = run_command(t, &cmd, snapshots, &mut first).await;
         if report.reconnect {
             reconnect.store(true, std::sync::atomic::Ordering::SeqCst);
