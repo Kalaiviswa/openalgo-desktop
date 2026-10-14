@@ -453,7 +453,7 @@ pub async fn gamma_density(
         .collect();
     let atm = body.get("atm_strike").and_then(Value::as_f64);
     let g = chain::gamma_density(&input, spot, f, atm, t_years, rate_pct / 100.0);
-    if g.fallback_iv {
+    if g.atm_iv_source == chain::AtmIvSource::Assumed {
         tracing::warn!(
             "No invertible IV for {} {}; using fallback IV {}",
             underlying,
@@ -485,6 +485,12 @@ pub async fn gamma_density(
         "forward_price": if forward.is_some() { float(f) } else { num(py_round(f, 2)) },
         "atm_strike": field(&body, "atm_strike"),
         "atm_iv": float(py_round(g.atm_iv * 100.0, 2)),
+        // Provenance the web does not report (TOOLS-15): where the ATM IV
+        // came from, how many legs priced with it instead of their own IV,
+        // and what the options were priced against.
+        "atm_iv_source": g.atm_iv_source,
+        "estimated_iv_legs": g.estimated_iv_legs,
+        "pricing_reference": if forward.is_some() { "forward" } else { "spot" },
         "dte_days": float(py_round(dte_days, 2)),
         "interest_rate": 0,
         "peak_intraday_strike": opt_float(g.peak_intraday_strike),

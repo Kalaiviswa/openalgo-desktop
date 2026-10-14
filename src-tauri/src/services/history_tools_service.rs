@@ -21,7 +21,7 @@ use crate::analytics::straddle::{self, StrikeLegs, StrikeMap};
 use crate::analytics::{closest_strike, py_round, surface};
 use crate::brokers::common::master_contract::format_strike;
 use crate::state::AppState;
-use chrono::{NaiveDate, NaiveTime, TimeZone};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -59,14 +59,21 @@ async fn info_ltp(ctx: &AppState, h: &BrokerHandle, symbol: &str, exchange: &str
     }
 }
 
-/// The expiry at 15:30 IST (web `_calculate_days_to_expiry`).
-fn days_to_expiry(ctx: &AppState, expiry: &str) -> i64 {
+/// Whole days to the expiry at its venue's cut-off (MCX 23:30, CDS and BCD
+/// 12:30, crypto 17:30, otherwise 15:30 IST). The web
+/// (`_calculate_days_to_expiry`) uses 15:30 for every venue, so an MCX
+/// straddle lost a day each evening (TOOLS-15).
+fn days_to_expiry(ctx: &AppState, expiry: &str, options_exchange: &str) -> i64 {
+    venue_days_to_expiry(expiry, options_exchange, ctx.now())
+}
+
+fn venue_days_to_expiry(expiry: &str, options_exchange: &str, now: DateTime<Utc>) -> i64 {
     let Some(d) = super::options_service::parse_compact_expiry(expiry) else {
         return 0;
     };
-    let t = NaiveTime::from_hms_opt(15, 30, 0).unwrap_or_default();
+    let t = super::options_service::listing_cutoff(options_exchange);
     match Kolkata.from_local_datetime(&d.and_time(t)).single() {
-        Some(e) => straddle::days_to_expiry(e.timestamp(), ctx.now().timestamp()),
+        Some(e) => straddle::days_to_expiry(e.timestamp(), now.timestamp()),
         None => 0,
     }
 }
@@ -373,7 +380,7 @@ pub async fn straddle_chart(
         "underlying_ltp": info_ltp(ctx, &h, &s.r.quote_symbol, &s.r.quote_exchange).await,
         "expiry_date": expiry.to_ascii_uppercase(),
         "interval": interval,
-        "days_to_expiry": days_to_expiry(ctx, expiry),
+        "days_to_expiry": days_to_expiry(ctx, expiry, &s.r.options_exchange),
         "series": series,
     }))
 }
@@ -435,7 +442,7 @@ pub async fn custom_straddle(
         "underlying_ltp": info_ltp(ctx, &h, &s.r.quote_symbol, &s.r.quote_exchange).await,
         "expiry_date": expiry.to_ascii_uppercase(),
         "interval": interval,
-        "days_to_expiry": days_to_expiry(ctx, expiry),
+        "days_to_expiry": days_to_expiry(ctx, expiry, &s.r.options_exchange),
         "adjustment_points": p.adjustment_points,
         "lot_size": p.lot_size,
         "lots": p.lots,
@@ -833,6 +840,30 @@ pub fn lot_size(ctx: &AppState, underlying: &str, exchange: &str) -> Option<i64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TOOLS-15: the straddle's days to expiry count to the venue's cut-off.
+    /// Worked by hand for an expiry on 20 Oct 2026: on the evening of the
+    /// 19th an MCX contract (23:30) still has more than a day, a CDS one
+    /// (12:30) less than a day from 13:00, and NFO turns at 15:30.
+    #[test]
+    fn straddle_days_to_expiry_count_to_the_venue_cutoff() {
+        let ist = |d: u32, h: u32, m: u32| {
+            Kolkata
+                .with_ymd_and_hms(2026, 10, d, h, m, 0)
+                .single()
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        assert_eq!(venue_days_to_expiry("20OCT26", "MCX", ist(19, 20, 0)), 1);
+        assert_eq!(venue_days_to_expiry("20OCT26", "NFO", ist(19, 20, 0)), 0);
+        assert_eq!(venue_days_to_expiry("20OCT26", "CDS", ist(19, 13, 0)), 0);
+        assert_eq!(venue_days_to_expiry("20OCT26", "NFO", ist(19, 13, 0)), 1);
+        assert_eq!(venue_days_to_expiry("20OCT26", "NFO", ist(19, 15, 29)), 1);
+        assert_eq!(venue_days_to_expiry("20OCT26", "NFO", ist(19, 15, 31)), 0);
+        assert_eq!(venue_days_to_expiry("20OCT26", "MCX", ist(10, 23, 0)), 10);
+        assert_eq!(venue_days_to_expiry("20OCT26", "MCX", ist(21, 0, 0)), 0);
+        assert_eq!(venue_days_to_expiry("1\u{e9}CT26", "MCX", ist(19, 0, 0)), 0);
+    }
 
     #[test]
     fn legs_normalize_like_the_web() {

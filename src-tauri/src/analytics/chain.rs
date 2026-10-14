@@ -201,13 +201,29 @@ impl Band {
     }
 }
 
+/// Where the ATM IV that prices the bands (and every leg without an IV of
+/// its own) came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AtmIvSource {
+    /// The ATM strike's own option prices.
+    Atm,
+    /// The median of the strikes whose prices gave an IV (the ATM strike's
+    /// gave none).
+    Median,
+    /// No price in the chain gave an IV: [`FALLBACK_IV`] is assumed.
+    Assumed,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GammaDensity {
     pub rows: Vec<DensityRow>,
     /// Decimal ATM IV actually used.
     pub atm_iv: f64,
-    /// True when no strike inverted and [`FALLBACK_IV`] was used.
-    pub fallback_iv: bool,
+    pub atm_iv_source: AtmIvSource,
+    /// Legs with open interest whose gamma used the ATM IV because their
+    /// own price gave no IV.
+    pub estimated_iv_legs: usize,
     pub peak_intraday_strike: Option<f64>,
     pub peak_expiry_strike: Option<f64>,
     pub intraday_band: Band,
@@ -286,18 +302,21 @@ pub fn gamma_density(
             strike_iv,
         });
     }
-    let mut fallback_iv = false;
-    let atm_iv = match atm_iv {
-        Some(v) => v,
+    let (atm_iv, atm_iv_source) = match atm_iv {
+        Some(v) => (v, AtmIvSource::Atm),
         None if !valid.is_empty() => {
             valid.sort_by(|a, b| a.total_cmp(b));
-            valid[valid.len() / 2]
+            (valid[valid.len() / 2], AtmIvSource::Median)
         }
-        None => {
-            fallback_iv = true;
-            FALLBACK_IV
-        }
+        None => (FALLBACK_IV, AtmIvSource::Assumed),
     };
+    let estimated_iv_legs = legs
+        .iter()
+        .map(|l| {
+            usize::from(l.ce_iv.is_none() && l.input.ce_oi > 0.0)
+                + usize::from(l.pe_iv.is_none() && l.input.pe_oi > 0.0)
+        })
+        .sum();
     let (mut max_i, mut max_e) = (0.0, 0.0);
     let (mut peak_i, mut peak_e) = (None, None);
     let rows = legs
@@ -334,7 +353,8 @@ pub fn gamma_density(
     GammaDensity {
         rows,
         atm_iv,
-        fallback_iv,
+        atm_iv_source,
+        estimated_iv_legs,
         peak_intraday_strike: peak_i,
         peak_expiry_strike: peak_e,
         intraday_band: Band::around(spot, sigma_i),
@@ -445,7 +465,8 @@ mod tests {
         };
         let chain: Vec<DensityInput> = (0..9).map(|i| mk(22_000.0 + 100.0 * i as f64)).collect();
         let g = gamma_density(&chain, f, f, Some(22_400.0), t, 0.0);
-        assert!(!g.fallback_iv);
+        assert_eq!(g.atm_iv_source, AtmIvSource::Atm);
+        assert_eq!(g.estimated_iv_legs, 0);
         assert!((g.atm_iv - 0.18).abs() < 1e-6);
         assert_eq!(g.peak_expiry_strike, Some(22_400.0));
         assert_eq!(g.peak_intraday_strike, Some(22_400.0));
@@ -459,6 +480,58 @@ mod tests {
         assert!(g.rows[4].density_intraday > g.rows[4].density_expiry);
     }
 
+    /// TOOLS-15: the result says whether its IV came from the ATM strike,
+    /// the median of other strikes, or the 15% assumption, and how many
+    /// legs borrowed it. Expected bands worked by hand: spot 100 at 15%,
+    /// one day = 100 * 0.15 * sqrt(1/365) = 0.7851; 30 days = 4.3004.
+    #[test]
+    fn gamma_density_says_where_its_iv_came_from() {
+        let t = 30.0 / 365.0;
+        let dead = |k: f64| DensityInput {
+            strike: k,
+            ce_oi: 10.0,
+            pe_oi: 10.0,
+            ce_ltp: 0.0,
+            pe_ltp: 0.0,
+        };
+        let g = gamma_density(
+            &[dead(95.0), dead(100.0)],
+            100.0,
+            100.0,
+            Some(100.0),
+            t,
+            0.0,
+        );
+        assert_eq!(g.atm_iv_source, AtmIvSource::Assumed);
+        assert_eq!(g.estimated_iv_legs, 4);
+        assert_eq!(g.intraday_band.sigma_move, 0.79);
+        assert_eq!(g.expiry_band.sigma_move, 4.3);
+        assert_eq!(g.expiry_band.two_sigma_low, 91.4);
+
+        // The ATM strike has no price; two others are priced at 20% and 30%.
+        let priced = |k: f64, sigma: f64| DensityInput {
+            strike: k,
+            ce_oi: 10.0,
+            pe_oi: 0.0,
+            ce_ltp: b76::price(Flag::Call, 100.0, k, t, 0.0, sigma),
+            pe_ltp: 0.0,
+        };
+        let g = gamma_density(
+            &[priced(95.0, 0.20), dead(100.0), priced(105.0, 0.30)],
+            100.0,
+            100.0,
+            Some(100.0),
+            t,
+            0.0,
+        );
+        assert_eq!(g.atm_iv_source, AtmIvSource::Median);
+        // Upper median of [0.20, 0.30], as the web picks it.
+        assert!((g.atm_iv - 0.30).abs() < 1e-6, "{}", g.atm_iv);
+        // The ATM strike's two legs; the priced strikes' puts hold no OI.
+        assert_eq!(g.estimated_iv_legs, 2);
+        assert_eq!(serde_json::to_value(AtmIvSource::Median).unwrap(), "median");
+    }
+
     #[test]
     fn gamma_density_falls_back_when_nothing_inverts() {
         let chain = [DensityInput {
@@ -469,7 +542,8 @@ mod tests {
             pe_ltp: 0.0,
         }];
         let g = gamma_density(&chain, 100.0, 100.0, Some(100.0), 0.0, 0.0);
-        assert!(g.fallback_iv);
+        assert_eq!(g.atm_iv_source, AtmIvSource::Assumed);
+        assert_eq!(g.estimated_iv_legs, 2);
         assert_eq!(g.atm_iv, FALLBACK_IV);
         // Expired: the to-expiry gamma is zero, the intraday one is not.
         assert_eq!(g.rows[0].density_expiry, 0.0);
