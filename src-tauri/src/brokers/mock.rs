@@ -171,6 +171,9 @@ pub struct MockBroker {
     /// Holds `place_order` while set, so a test can act while an order is
     /// in flight.
     pub place_gate: Mutex<Option<std::sync::Arc<PlaceGate>>>,
+    /// Holds a master download while set (it signals `entered`, then waits
+    /// for `release`), so a test can act while one is in flight.
+    pub master_gate: Mutex<Option<std::sync::Arc<PlaceGate>>>,
     /// What `carries_stored` answers.
     pub carry: Mutex<Option<&'static str>>,
     /// The stored rows the last `download_master_carrying` was given.
@@ -241,6 +244,7 @@ impl MockBroker {
             funds_gate: Mutex::new(None),
             next_id: Mutex::new(0),
             place_gate: Mutex::new(None),
+            master_gate: Mutex::new(None),
         }
     }
 
@@ -619,6 +623,11 @@ impl Broker for MockBroker {
 
     async fn download_master_contract(&self, _: &AuthToken) -> Result<Vec<SymbolData>> {
         self.record(MockCall::MasterContract);
+        let gate = self.master_gate.lock().clone();
+        if let Some(g) = gate {
+            g.entered.notify_one();
+            g.release.notified().await;
+        }
         out(&self.master, Vec::new)
     }
 

@@ -501,30 +501,35 @@ impl AppState {
 
     /// The live broker session, or `None` once it has crossed the daily
     /// boundary (it is then dropped from memory; the scheduler revokes the
-    /// stored row).
+    /// stored row). A continuous (crypto) session has no daily boundary
+    /// (SES-01).
     pub fn get_broker_session(&self) -> Option<BrokerSession> {
         let s = self.broker_session.read().clone()?;
-        let cfg = self.config.read();
-        if crate::session::boundary::is_fresh(
-            s.authenticated_at,
-            self.clock.now(),
-            cfg.session_expiry_hour,
-            cfg.session_expiry_minute,
-        ) {
-            Some(s)
-        } else {
-            drop(cfg);
-            // Clear only the session this read found stale: a sign-in that
-            // set a new one in between keeps it (KEY-01 cache rules: a
-            // writer never undoes a newer value).
-            let mut slot = self.broker_session.write();
-            if slot.as_ref().is_some_and(|cur| {
-                cur.broker_id == s.broker_id && cur.authenticated_at == s.authenticated_at
-            }) {
-                *slot = None;
-            }
-            None
+        let continuous = crate::brokers::catalog::session_policy(&s.broker_id)
+            == crate::brokers::catalog::SessionPolicy::Continuous;
+        let fresh = {
+            let cfg = self.config.read();
+            crate::session::boundary::is_fresh(
+                s.authenticated_at,
+                self.clock.now(),
+                cfg.session_expiry_hour,
+                cfg.session_expiry_minute,
+            )
+        };
+        if continuous || fresh {
+            return Some(s);
         }
+        // Clear only the session this read found stale: a sign-in that set a
+        // new one in between keeps it (KEY-01 cache rules: a writer never
+        // undoes a newer value).
+        let mut live = self.broker_session.write();
+        if live
+            .as_ref()
+            .is_some_and(|l| l.broker_id == s.broker_id && l.authenticated_at == s.authenticated_at)
+        {
+            *live = None;
+        }
+        None
     }
 
     pub fn set_broker_session(&self, session: Option<BrokerSession>) {

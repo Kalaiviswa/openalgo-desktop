@@ -26,7 +26,6 @@ use std::sync::Arc;
 
 const RULE: &str = "━━━━━━━━━━━━━━━";
 const LINK_FIRST: &str = "Please link your account first using /link";
-const CRYPTO_BROKERS: &[&str] = &["deltaexchange"];
 
 /// One Telegram user as the update carries it.
 #[derive(Debug, Clone, Default)]
@@ -753,7 +752,7 @@ impl Bot {
     }
 
     fn cs(user: &db::TgUser) -> &'static str {
-        if CRYPTO_BROKERS.contains(&user.broker.as_deref().unwrap_or("")) {
+        if crate::brokers::catalog::is_crypto(user.broker.as_deref().unwrap_or("")) {
             "$"
         } else {
             "₹"

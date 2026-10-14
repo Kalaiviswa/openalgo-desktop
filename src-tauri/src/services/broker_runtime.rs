@@ -42,6 +42,10 @@ pub struct BrokerRuntime {
     pub claims: DownloadClaims,
     tasks: Arc<Mutex<JoinSet<()>>>,
     active: Mutex<Option<Arc<dyn Broker>>>,
+    /// When the session last activated was authenticated (the daily
+    /// boundary ends only a session from before it, SES-02); read only
+    /// while `active` holds a broker.
+    started: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Serialises activate / teardown.
     lifecycle: tokio::sync::Mutex<()>,
 }
@@ -60,6 +64,7 @@ impl BrokerRuntime {
             claims: DownloadClaims::default(),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
             active: Mutex::new(None),
+            started: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
         }
     }
@@ -74,6 +79,28 @@ impl BrokerRuntime {
     /// The broker whose session is running, if any.
     pub fn active_broker(&self) -> Option<String> {
         self.active.lock().as_ref().map(|b| b.id().to_string())
+    }
+
+    /// Stop what runs only if it is a daily-boundary session authenticated
+    /// before `boundary` (SES-02): checked under the lifecycle lock, so a
+    /// session activated after the boundary keeps running, and a continuous
+    /// (crypto) session is never stopped here (SES-01). Returns whether a
+    /// session was stopped.
+    pub async fn teardown_started_before(
+        &self,
+        ctx: &AppState,
+        boundary: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let _guard = self.lifecycle.lock().await;
+        let daily = self.active.lock().as_ref().is_some_and(|b| {
+            crate::brokers::catalog::session_policy(b.id())
+                == crate::brokers::catalog::SessionPolicy::DailyBoundary
+        });
+        let old = daily && self.started.lock().is_some_and(|t| t < boundary);
+        if old {
+            self.teardown_locked(ctx).await;
+        }
+        old
     }
 
     /// Run `fut` as a task of the current session (aborted on teardown).
@@ -112,6 +139,7 @@ impl BrokerRuntime {
             .with_feed(session.feed_token.as_ref().map(|s| s.expose().to_string()))
             .with_user_id(session.user_id.clone());
         *self.active.lock() = Some(broker.clone());
+        *self.started.lock() = Some(session.authenticated_at);
         // Every order update this session relays carries its generation; one
         // from an earlier session is never delivered (EV-02).
         let generation = ctx.bus.begin_session();

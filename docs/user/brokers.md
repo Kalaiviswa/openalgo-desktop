@@ -169,6 +169,13 @@ shows its progress.
 
 Indian brokers end API sessions every night, so OpenAlgo ends the broker
 session at about 03:00 IST, after which you log in again from Select Broker.
+A login made after 03:00 IST is kept, even if the computer was asleep at
+03:00. Delta Exchange trades around the clock and its keys do not expire,
+so its session stays connected across 03:00 IST (feeds, scalping
+protection and orders from your trading platforms keep working); its
+symbol list refreshes by itself after 00:00 UTC, when Delta lists the new
+day's contracts. You still sign in to OpenAlgo itself again after 03:00
+IST, whichever broker you use.
 Logging out of OpenAlgo also ends the broker session and returns you to the
 sign-in page.
 
