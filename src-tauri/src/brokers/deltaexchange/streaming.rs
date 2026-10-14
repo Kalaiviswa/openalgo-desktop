@@ -17,6 +17,12 @@
 //! * Fields from both channels are merged per symbol, so a depth
 //!   subscriber still carries LTP and OI. The cache holds one entry per
 //!   subscribed symbol and is cleared on unsubscribe.
+//! * Not carried, by decision (Codex BF-02): the ticker's best bid and ask
+//!   (`q`), because the documented 8765 quote frame has no bid or ask field
+//!   and no desktop broker publishes one (REST quotes and depth carry
+//!   them); and Delta's private channels (orders, positions, margins),
+//!   which the web opens but its proxy drops (no `user_id`), so no web
+//!   client receives them either.
 
 use crate::brokers::common::streaming::{
     now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,

@@ -156,6 +156,10 @@ Key** on the Broker Configuration page; they are the market data keys from
 the same XTS account, and quotes and the live feed need them.
 
 Delta Exchange is a crypto exchange: its symbols use the `CRYPTO` exchange.
+Its live feed carries the last price, open, high, low, close, volume and
+open interest, like every broker's feed; the best bid and ask come from
+quotes and market depth. OpenAlgo does not read Delta's private account
+channels (OpenAlgo web opens them but passes nothing on from them).
 
 ## Signing in to OpenAlgo, and the daily broker sign-in
 
