@@ -369,6 +369,49 @@ mod tests {
         assert!(!format!("{:?}", s).contains("sekrit"));
     }
 
+    /// BRL-06: Flattrade quotes count against the same budget as books,
+    /// history and funds (web one DATA_LIMITER): nine sends a second in
+    /// all, so the tenth, a quote after nine data calls, waits a second.
+    /// They were two copies of the setting, so quotes added another nine.
+    #[tokio::test(start_paused = true)]
+    async fn flattrade_quotes_share_the_data_budget() {
+        let b = crate::brokers::flattrade::broker(
+            crate::brokers::common::symbols::SymbolResolver::new(),
+        );
+        let start = Instant::now();
+        for _ in 0..9 {
+            b.limiter(Category::Data).acquire().await;
+        }
+        b.limiter(Category::Quote).acquire().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        // Orders keep their own lane.
+        let t = Instant::now();
+        b.limiter(Category::Order).acquire().await;
+        assert_eq!(t.elapsed(), Duration::ZERO);
+    }
+
+    /// BRL-07: TradeSmart orders, history, books and funds share one
+    /// non-quote budget (web); quotes keep their own.
+    #[tokio::test(start_paused = true)]
+    async fn tradesmart_orders_share_the_non_quote_budget() {
+        let b = crate::brokers::tradesmart::broker(
+            crate::brokers::common::symbols::SymbolResolver::new(),
+        );
+        let start = Instant::now();
+        for _ in 0..8 {
+            b.limiter(Category::Data).acquire().await;
+        }
+        let q = Instant::now();
+        b.limiter(Category::Quote).acquire().await;
+        assert_eq!(q.elapsed(), Duration::ZERO, "quotes have their own budget");
+        b.limiter(Category::Order).acquire().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert!(
+            b.cfg.rate.order.is_none(),
+            "a shared order budget names no own window"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn limiter_respects_both_windows() {
         let l = Limiter::new(Some(Window {

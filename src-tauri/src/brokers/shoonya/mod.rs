@@ -97,6 +97,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
         order: None,
         data: None,
         quote: None,
+        order_shares_data: false,
     },
     persistent_socket: false,
     order_feed_subscribe: true,

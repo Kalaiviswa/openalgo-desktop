@@ -35,6 +35,7 @@ use crate::brokers::{AuthResponse, Broker, BrokerCredentials};
 use crate::error::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
 use transport::Limiter;
 
 // ---------------------------------------------------------------------------
@@ -181,11 +182,18 @@ pub struct Window {
 }
 
 /// Request budgets per category; `None` means unpaced.
+///
+/// Budgets are shared state, not copies of a setting (BRL-06, BRL-07):
+/// with `quote: None` quotes count against the data budget itself (web
+/// Flattrade's one `DATA_LIMITER` for quotes, history, books and funds),
+/// and with `order_shares_data` orders do too (web TradeSmart's one
+/// non-quote budget); `order` is then unused and left `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimits {
     pub order: Option<Window>,
     pub data: Option<Window>,
     pub quote: Option<Window>,
+    pub order_shares_data: bool,
 }
 
 /// Access token and, when the broker returned one, the user id.
@@ -564,9 +572,9 @@ pub struct NorenBroker {
     pub(crate) http: reqwest::Client,
     pub(crate) endpoints: NorenEndpoints,
     pub(crate) symbols: SymbolResolver,
-    pub(crate) order_limiter: Limiter,
-    pub(crate) data_limiter: Limiter,
-    pub(crate) quote_limiter: Limiter,
+    pub(crate) order_limiter: Arc<Limiter>,
+    pub(crate) data_limiter: Arc<Limiter>,
+    pub(crate) quote_limiter: Arc<Limiter>,
 }
 
 impl NorenBroker {
@@ -580,14 +588,22 @@ impl NorenBroker {
         symbols: SymbolResolver,
         endpoints: NorenEndpoints,
     ) -> Self {
+        let data = Arc::new(Limiter::new(cfg.rate.data));
         Self {
             cfg,
             http: crate::brokers::common::http::client(),
             endpoints,
             symbols,
-            order_limiter: Limiter::new(cfg.rate.order),
-            data_limiter: Limiter::new(cfg.rate.data),
-            quote_limiter: Limiter::new(cfg.rate.quote.or(cfg.rate.data)),
+            order_limiter: if cfg.rate.order_shares_data {
+                data.clone()
+            } else {
+                Arc::new(Limiter::new(cfg.rate.order))
+            },
+            quote_limiter: match cfg.rate.quote {
+                Some(w) => Arc::new(Limiter::new(Some(w))),
+                None => data.clone(),
+            },
+            data_limiter: data,
         }
     }
 

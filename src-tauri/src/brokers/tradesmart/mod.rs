@@ -88,11 +88,10 @@ pub static CONFIG: NorenConfig = NorenConfig {
     tradebook_time_only: false,
     orderbook_price_fallback: true,
     depth_oi: true,
+    // Web `broker/tradesmart/api/rate_limiter.py`: orders, history, books
+    // and funds share one non-quote budget; quotes have their own (BRL-07).
     rate: RateLimits {
-        order: Some(Window {
-            per_second: 8,
-            per_minute: 110,
-        }),
+        order: None,
         data: Some(Window {
             per_second: 8,
             per_minute: 110,
@@ -101,6 +100,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
             per_second: 90,
             per_minute: 5400,
         }),
+        order_shares_data: true,
     },
     persistent_socket: false,
     order_feed_subscribe: false,
