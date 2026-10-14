@@ -169,7 +169,8 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
   validate, call a service, and shape the response.
 - **The frontend talks HTTP and Socket.IO to the local server**, like the web
   frontend talks to Flask. Tauri `invoke` is reserved for things only the shell
-  can do (window control, opening the browser, OS keychain prompts). This is
+  can do (window control, opening the browser, the account reset and the
+  fresh start confirmed in a native dialog). This is
   what lets the web frontend be carried over with minimal edits, and what lets a
   browser open the same dashboard.
 - **Event driven, like the web.** Every order operation publishes an event on
@@ -290,11 +291,27 @@ Single user, local machine. Whoever controls the OS account controls the app;
 the job is to keep secrets off disk in usable form, out of logs, and away from
 anything that is not the signed-in user.
 
-- **No `.env`, no plaintext secrets on disk.** The data-encryption key and the
-  API-key pepper live in the OS keychain (macOS Keychain, Windows Credential
-  Manager, Linux Secret Service). Where no keychain exists (headless Linux,
-  some Raspberry Pi setups), fall back to a key derived from the user's password
-  and say so in the UI. A hard-coded or XOR-obfuscated key is not encryption.
+- **No `.env`, no plaintext secrets on disk, no OS keychain** (maintainer
+  decision 2026-10-13, KEY-01, `docs/port/no-keychain.md`). The
+  data-encryption key and the API-key pepper are wrapped with
+  Argon2id(login password) in the one-row `key_vault` table of `openalgo.db`,
+  beside the password hash, on every platform. A copied database is useless
+  without the password. A hard-coded or XOR-obfuscated key is not encryption.
+- **Unlocked while signed in, wiped at logout.** The keys are in memory from
+  a sign-in that issued a session until the logout or the app quitting, then
+  dropped and zeroed, with every cache cleared (account setup leaves them
+  locked; the setup page sends the trader to sign in). Until
+  the trader signs in after a start, and after a logout, `/api/v1` (503, the
+  web's envelope), `/mcp`, the feed and the webhooks answer "Sign in to
+  OpenAlgo...", broker sessions do not resume, the bots do not run, and
+  nothing decrypts. The 03:00 boundary ends sessions as before but does not
+  lock: the rule is logout or quit.
+- **A password change rewrites the hash and the wrapped keys in one SQLite
+  transaction.** A forgotten password is replaced by starting fresh, from the
+  desktop window only: new keys; the account, settings and history stay;
+  broker keys, the API key and TOTP are set up again. Installs from earlier
+  builds move their keys (keychain, `vault.json`, `secrets.dat`) into the
+  vault once, at the first sign-in, and the keychain is not touched again.
 - Broker credentials and tokens are AES-256-GCM encrypted with associated data
   binding each ciphertext to its row and column.
 - **Secrets never leave Rust**, with two exceptions shared with the web. No
@@ -311,7 +328,8 @@ anything that is not the signed-in user.
   assets.
 - Strict CSP, `withGlobalTauri: false`, devtools off in release builds,
   `shell:allow-open` scoped to http(s).
-- API keys are verified through an HMAC index plus Argon2, with a short cache;
+- API keys are verified through an HMAC index plus Argon2, with the web's
+  caches (verified keys 10 hours, invalid keys 5 minutes);
   API-key failures are throttled per network address (never for this
   computer; per key behind a tunnel). Sign-in has the per-address request
   limit plus a failure budget per source (this computer, the tunnel, each
@@ -936,16 +954,34 @@ and add each new one here.
 - A GET with a global effect (`/auth/logout` ending every session) runs
   only for a same-origin navigation: the Lax cookie rides on a link from
   another site in browsers without Fetch Metadata.
-- A key file opened by a password is trusted only once the password also
-  matches the stored hash (`SecurityManager::unlock_for_sign_in`); around a
-  password change an old or uncommitted password opens a file but must
-  unlock nothing.
-- Only account setup creates key material. A keychain that is locked or
-  denies access at startup looks like no keychain at all
-  (`KeyStoreError::Unavailable`); a sign-in that then wrote a vault with new
-  keys locked the account out for good. Keychain writes put the data key
-  last and read both keys back; a password change writes the new vault
-  beside the old one before the hash changes.
+- Keys a password opened are trusted only once the password also matches
+  the stored hash, read again under the lock a password change holds
+  (`SecurityManager::open_for_sign_in`); a password that matches neither
+  installs nothing.
+- **The keys live in openalgo.db, locked with the password (KEY-01).** No
+  code calls the OS keychain except the one-time move of an earlier build's
+  keys at sign-in (`SecurityManager::open_for_sign_in`): only for the
+  account's own name, only while no vault row exists, and the entries are
+  deleted only after the copy is committed with `synchronous = FULL` and
+  verified. A new install makes zero keychain calls (a test counts them).
+  `KeyringStore` has no write code at all (`KeyStore::set` refuses), and
+  only the test harness's `MemoryKeyStore` opens unlocked. Later, once the
+  migration releases have shipped, the `keyring` crate and the Linux
+  libsecret/dbus package dependencies go.
+  Keys are installed only with the session a sign-in issues
+  (`issue_if_current`); a sign-in waiting for its authenticator code keeps
+  them in its pending browser session. The logout locks them together with
+  every browser session (`SecurityManager::lock_with`), so no session
+  issued just before it outlives its keys; the bots end as at an app exit
+  and come back at the next sign-in. A new encrypted column is added to
+  `key_vault::drop_encrypted_values` and `key_vault::witness` in the same
+  change.
+- **Every cache follows the web's rules** (`crate::cache::TtlCache`, the
+  Rust `LockedTTLCache`): bounded, with a TTL; readers fill through the
+  generation they read before their query; writers clear after their
+  commit; logout, a password change or reset, a key rotation and a broker
+  switch clear them. A new cache gets a race test and a row in the cache
+  table of `docs/port/no-keychain.md`.
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
 

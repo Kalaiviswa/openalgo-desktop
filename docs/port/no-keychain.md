@@ -88,11 +88,11 @@ webhook addresses are SHA-256 digests and need no key.
 | Moment | Keys in memory | What happens |
 | --- | --- | --- |
 | App start | no | No keychain call, no decryption. The database is opened and migrated; the vault row is not opened. |
-| Sign-in, password step | staged, not installed | The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code. |
+| Sign-in, password step | staged, not installed | The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code; the session poll drops them once the 5 minutes are over. |
 | Sign-in completes (session issued) | yes | Installed in the same step that issues the signed-in session (`issue_if_current`, so a password change racing the sign-in voids both). Then the stored broker session resumes, and Telegram and WhatsApp start if they were on. |
-| Account setup | yes | New keys, the vault, the account and its API key in one transaction. Creating the account counts as its first sign-in: the keys stay until the logout. |
+| Account setup | no | New keys, the vault, the account and its API key in one transaction, then the keys leave memory: the setup page sends the trader to sign in, and the keys come back with that session like every other time. (Only the test harness, which opens unlocked, keeps its own.) |
 | Second device signs in | yes (unchanged) | The password still unwraps the vault; the keys in memory are the same. |
-| Logout | wiped | Every browser session ends; the broker session is revoked (memory first); Telegram and WhatsApp stop; the keys are dropped (the raw key and pepper are zeroed when the last copy goes); every cache is cleared after the lock, and `on_logout` runs on every broker adapter, not only the logged-in one. The lock bumps the credentials generation, so a sign-in that was being checked when the logout landed gets no session. |
+| Logout | wiped | Every browser session ends; the broker session is revoked (memory first); the keys are dropped (the raw key and pepper are zeroed when the last copy goes, the AES key schedule too with `aes/zeroize`) together with every browser session, under the lock a sign-in issues its session under (`lock_with`), so no session issued during the revoke outlives its keys; Telegram and WhatsApp end as at an app exit, keeping their "on" setting, and come back at the next sign-in; every cache is cleared after the lock, and `on_logout` runs on every broker adapter, not only the logged-in one. The lock bumps the credentials generation, so a sign-in that was being checked when the logout landed gets no session. |
 | App quit | wiped | Process exit; the shutdown path runs the same lock. |
 | Password change | yes (unchanged) | Hash and wrapping in one transaction; every browser session ends (as before) and every cache is cleared. The keys do not change, so they stay. |
 | Forgotten password (Set a new password) | no | New keys, new wrapping, new hash, encrypted values dropped, in one transaction. The trader signs in with the new password. |
@@ -226,7 +226,7 @@ desktop after this change. `crate::cache::TtlCache` is the Rust
 | Instrument facts (`/trading`) | - | `FactsCache`: 256, 60 s, tagged with the master generation | facts from the master and the calendar | logout; any master change makes entries miss | `TtlCache` generation; entries from an older master are ignored | Desktop only. |
 | Quotes | per-symbol in the feed proxy | feed bridge `last_tick`, held instruments only; adapter snapshots live with their socket | ticks | broker session end (`bridge.reset`, socket teardown) | filled only for held instruments from the live socket | The bridge's subscription bookkeeping (`applied`) can be re-inserted after a reset by a subscribe in flight; recorded for the feed work (it holds no quote or credential). |
 | Capability store (frontend) | per page | `brokerStore` capabilities | what the logged-in broker supports | a session change pushed by the server (`active_sessions_update`), logout | a reply for an earlier broker is ignored (STATE-01) | - |
-| Browser sessions | Flask session | `WebSessionStore`: 256, anonymous 30 min idle, pending TOTP 5 min | session id -> user, CSRF token, pending sign-in (with staged keys) | logout, password change or reset, start fresh, account reset, boundary | - | - |
+| Browser sessions | Flask session | `WebSessionStore`: 256, anonymous 30 min idle, pending TOTP 5 min | session id -> user, CSRF token, pending sign-in (with staged keys) | logout, password change or reset, start fresh, account reset, boundary; a pending sign-in older than 5 minutes loses its staged keys at the next 30-second session poll (`drop_stale_sign_ins`), whether or not its browser comes back | the logout clears them under the lock a sign-in issues its session under | - |
 | Broker adapter state | module globals per broker | per adapter | e.g. XTS market keys, OTP tokens, funds | `on_logout` of every adapter at the lock, not only the active one | - | Symbol-to-id lookups of a few adapters (Arrow, HDFC Sky, IndMoney, Samco, Motilal traits) stay: bounded, no account data. |
 
 Not caches in this sense, unchanged: rate limiter and sign-in backoff
@@ -246,7 +246,8 @@ mode memo (written under the reader's lock), the monitor's ban list.
 | Password change: one transaction, fault test | `server::tests::key_vault::a_password_change_writes_hash_and_vault_together` |
 | Forgotten password | `server::tests::key_vault::a_new_password_without_the_old_one_drops_only_encrypted_values` |
 | Caches | `services::apikey_service::tests::*`, `cache::tests::*`, master and facts race tests |
-| Windows and Linux | CI on four systems |
+| The OS keychain is never written | `security::keystore::tests::the_os_keychain_is_never_written` (`KeyringStore` has no write code) |
+| macOS, Windows and Linux | CI on four systems: the full suite, then the step "KEY-01 keys without the OS keychain, on this system" in `rust-test`, which runs the tests above by name and lists each one (nextest profile `key01`) |
 
 ## Tests and the harness
 

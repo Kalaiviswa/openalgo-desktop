@@ -197,7 +197,9 @@ OpenAlgo password. Nothing is kept in your computer's keychain.
 - **After OpenAlgo starts, sign in first.** Until you do, the API, the market
   data feed, TradingView and Chartink webhooks, AI clients (MCP) and your
   broker connection stay off. Your saved broker session comes back when you
-  sign in, if it is still from today. Logging out turns them off again.
+  sign in, if it is still from today, and Telegram and WhatsApp bots you had
+  switched on start again. Logging out (or quitting OpenAlgo) turns them off
+  again and wipes the unlocked key from memory.
 - **Forgot your password?** Choose **Forgot password?** on the sign-in page,
   in the OpenAlgo Desktop window on this computer. Without the old password
   nothing it locked can be opened, so setting a new password keeps your
@@ -215,7 +217,8 @@ OpenAlgo password. Nothing is kept in your computer's keychain.
   the keys in your computer's keychain. The first sign-in reads them from
   there one last time, moves them into OpenAlgo's own database, checks them
   and deletes the keychain entries. On a Mac, choose **Allow** (or **Always
-  Allow**) when macOS asks; on Linux, unlock your keyring if asked. After this
+  Allow**) when macOS asks; on Linux and Raspberry Pi, unlock your keyring if
+  asked; on Windows, the Credential Manager does not usually ask. After this
   OpenAlgo never uses the keychain again.
 - **"OpenAlgo needs to read your keys from the system keychain one last
   time".** The keychain was locked or the request was refused. Choose

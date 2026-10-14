@@ -340,15 +340,18 @@ OpenScript and custom indicator files.
 Broker credentials, tokens, your API key and your two-factor login secret are
 encrypted. The encryption key is itself locked with your OpenAlgo password
 (Argon2id) and kept in `openalgo.db`. OpenAlgo Desktop does not use your
-operating system's keychain on any platform. A copy of the folder is useless
-to anyone without your password.
+operating system's keychain on any platform: not the macOS Keychain, not the
+Windows Credential Manager, not the Secret Service of Linux or Raspberry Pi.
+A copy of the folder is useless to anyone without your password.
 
 What this means day to day:
 
 - **Sign in after OpenAlgo starts.** Until you do, the API (`/api/v1`), the
   market data feed, TradingView and Chartink webhooks, AI clients (MCP) and
   your broker connection stay off: programs are told "Sign in to OpenAlgo to
-  use the API". They go off again when you log out.
+  use the API". Telegram and WhatsApp bots that you had switched on start
+  when you sign in. Everything goes off again when you log out, and the
+  unlocked key is wiped from memory; quitting OpenAlgo does the same.
 - **Keep your password safe.** It cannot be recovered. If you forget it, the
   sign-in page's Forgot password sets a new one: your account, settings,
   strategies and history stay, and you enter your broker keys again, copy the
@@ -363,7 +366,9 @@ Resetting your account (Reset account, on the forgotten-password page) removes
 the account and its keys; make a new backup once you have set OpenAlgo up
 again. Backups made before a reset still open with the password you had then.
 
-**Upgrading from an earlier build** that kept the keys in the system keychain:
+**Upgrading from an earlier build** that kept the keys in the system keychain
+(macOS Keychain, Windows Credential Manager, or the Secret Service on Linux and
+Raspberry Pi):
 the first time you sign in, OpenAlgo reads them from the keychain one last
 time (allow it when your computer asks), moves them into `openalgo.db`, checks
 them, and deletes the keychain entries. After that it never asks again. If the
