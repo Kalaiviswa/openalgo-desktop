@@ -35,9 +35,11 @@ fn build() -> reqwest::Client {
         .tcp_keepalive(Duration::from_secs(60))
         .user_agent(concat!("openalgo-desktop/", env!("CARGO_PKG_VERSION")))
         .build()
-        // Only fails when the TLS backend cannot initialise; fall back to the
-        // default client (which still has the request timeout applied per
-        // call by the adapters) rather than panic.
+        // Fails only when the TLS backend cannot initialise, and
+        // `Client::new()` panics on that same failure, so this fallback is
+        // not reached in practice. If it were, the client would have none
+        // of the timeouts above: most adapters set no timeout per call and
+        // rely on the ones configured here (BR-04).
         .unwrap_or_else(|e| {
             tracing::error!("Broker HTTP client could not be configured: {}", e);
             reqwest::Client::new()
