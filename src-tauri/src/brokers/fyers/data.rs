@@ -278,7 +278,18 @@ pub async fn get_multiquotes(
     auth: &AuthToken,
     keys: &[QuoteKey],
 ) -> Result<Vec<QuoteResult>> {
-    let fetch_oi = keys.len() <= OI_THRESHOLD;
+    multiquotes_with(b, auth, keys, keys.len() <= OI_THRESHOLD).await
+}
+
+/// `/data/quotes` in batches of 50, with OI per derivative from
+/// `/data/depth` only when `fetch_oi` (the chain path never asks: its
+/// legs without native OI are reported as missing instead).
+pub(crate) async fn multiquotes_with(
+    b: &FyersBroker,
+    auth: &AuthToken,
+    keys: &[QuoteKey],
+    fetch_oi: bool,
+) -> Result<Vec<QuoteResult>> {
     let resolved: Vec<(QuoteKey, Option<SymToken>)> = keys
         .iter()
         .map(|k| (k.clone(), b.resolver().by_symbol(&k.exchange, &k.symbol)))

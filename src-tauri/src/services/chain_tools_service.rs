@@ -5,8 +5,8 @@
 
 use super::core::{broker_handle, float, num, BrokerHandle, Reply};
 use super::options_service::{
-    calculate_greeks, expiry_datetime, greeks_underlying_exchange, option_chain,
-    parse_option_symbol, synthetic_future_price, time_to_expiry, today_ist,
+    calculate_greeks, expiry_datetime, greeks_underlying_exchange, option_chain_answer,
+    parse_option_symbol, synthetic_future_price, time_to_expiry, today_ist, ChainAnswer,
 };
 use super::tools_service::{
     chain_options_exchange, fan_out, history_gate, history_rows, nearest_future, quote,
@@ -55,15 +55,16 @@ fn computed(x: f64, is_float: bool) -> Value {
     }
 }
 
-/// The chain the tool reads: the `/api/v1/optionchain` body.
+/// The chain the tool reads: the `/api/v1/optionchain` body, with the legs
+/// the broker could not supply.
 async fn fetch_chain(
     ctx: &AppState,
     underlying: &str,
     exchange: &str,
     expiry: &str,
     strike_count: i64,
-) -> Result<Value, Reply> {
-    let r = option_chain(
+) -> Result<ChainAnswer, Reply> {
+    option_chain_answer(
         ctx,
         underlying,
         exchange,
@@ -72,12 +73,39 @@ async fn fetch_chain(
         false,
         None,
     )
-    .await;
-    if r.is_success() {
-        Ok(r.body)
-    } else {
-        Err(r)
+    .await
+}
+
+/// An open-interest figure is worked out only when every leg's open
+/// interest is a reading. A leg the broker answered without one (no
+/// quote, or OI not supplied) would otherwise read as zero and pass for a
+/// quiet strike (TOOLS-04, TOOLS-13). The web totals such legs as zero.
+fn require_oi(a: &ChainAnswer, underlying: &str, expiry: &str) -> Result<(), Reply> {
+    let unknown = a.oi_unknown();
+    if unknown.is_empty() {
+        return Ok(());
     }
+    let total = rows(&a.body)
+        .iter()
+        .map(|r| usize::from(leg(r, "ce").is_some()) + usize::from(leg(r, "pe").is_some()))
+        .sum::<usize>();
+    tracing::warn!(
+        "Open interest missing for {} of {} options of {} {}; OI figures refused",
+        unknown.len(),
+        total,
+        underlying,
+        expiry
+    );
+    Err(Reply::error(
+        503,
+        format!(
+            "Open interest did not come back from your broker for {} of {} options of {} {}, so the OI figures are not shown: a missing value would read as zero. Try again shortly.",
+            unknown.len(),
+            total,
+            underlying.to_ascii_uppercase(),
+            expiry.to_ascii_uppercase()
+        ),
+    ))
 }
 
 fn rows(body: &Value) -> Vec<Value> {
@@ -138,7 +166,9 @@ async fn oi_snapshot(
     let h = broker_handle(ctx)?;
     // 23 strikes each side: 94 symbols, inside the smallest broker
     // multiquote OI bucket (web comment, oi_tracker_service.py).
-    let body = fetch_chain(ctx, underlying, exchange, expiry, 23).await?;
+    let answer = fetch_chain(ctx, underlying, exchange, expiry, 23).await?;
+    require_oi(&answer, underlying, expiry)?;
+    let body = answer.body;
     let (mut ce_oi, mut pe_oi, mut ce_vol, mut pe_vol) = (0.0, 0.0, 0.0, 0.0);
     let mut lot_size = None;
     let mut chain = Vec::new();
@@ -217,6 +247,14 @@ pub async fn max_pain(ctx: &AppState, underlying: &str, exchange: &str, expiry: 
     if s.chain.is_empty() {
         return Reply::error(404, "No OI data available");
     }
+    // Every strike at zero open interest has no max pain: the lowest
+    // strike would win the tie and read as a finding (TOOLS-13).
+    if s.chain.iter().all(|c| c.ce_oi <= 0.0 && c.pe_oi <= 0.0) {
+        return Reply::error(
+            404,
+            "Open interest is zero at every strike of this expiry, so there is no max pain to show yet.",
+        );
+    }
     let Some((strike, pain)) = chain::max_pain(&s.chain) else {
         return Reply::error(404, "No valid strike data available");
     };
@@ -272,7 +310,10 @@ pub async fn gex(ctx: &AppState, underlying: &str, exchange: &str, expiry: &str)
         Err(r) => return r,
     };
     let body = match fetch_chain(ctx, underlying, exchange, expiry, 45).await {
-        Ok(b) => b,
+        Ok(a) => match require_oi(&a, underlying, expiry) {
+            Ok(()) => a.body,
+            Err(r) => return r,
+        },
         Err(r) => return r,
     };
     let Some(spot) = spot_of(&body) else {
@@ -356,7 +397,7 @@ pub async fn gex(ctx: &AppState, underlying: &str, exchange: &str, expiry: &str)
 /// `POST /ivsmile/api/iv-smile-data`.
 pub async fn iv_smile(ctx: &AppState, underlying: &str, exchange: &str, expiry: &str) -> Reply {
     let body = match fetch_chain(ctx, underlying, exchange, expiry, 25).await {
-        Ok(b) => b,
+        Ok(a) => a.body,
         Err(r) => return r,
     };
     let Some(spot) = spot_of(&body) else {
@@ -415,7 +456,10 @@ pub async fn gamma_density(
         Err(r) => return r,
     };
     let body = match fetch_chain(ctx, underlying, exchange, expiry, 23).await {
-        Ok(b) => b,
+        Ok(a) => match require_oi(&a, underlying, expiry) {
+            Ok(()) => a.body,
+            Err(r) => return r,
+        },
         Err(r) => return r,
     };
     let items = rows(&body);
@@ -558,15 +602,29 @@ fn gamma_density_body(
     })
 }
 
+/// Previous-day OI per option, and what could not be had.
+#[derive(Debug, Default)]
+pub struct PreviousOi {
+    /// Symbol -> the previous trading day's OI, a reading (zero included).
+    pub values: HashMap<String, f64>,
+    /// History did not answer, or had no previous trading day in it.
+    pub failed: usize,
+    /// Not reached within the time budget.
+    pub omitted: usize,
+}
+
 /// Previous-day OI per option (web `_fetch_daily_oi_changes`): the
 /// second-last daily candle's OI over the last 14 days, fetched through the
-/// shared gate. Symbols not reached within `budget` are left out.
+/// shared gate. A failed or too-short history is counted as failed, never
+/// read as a previous OI of zero (TOOLS-14: the web does, and the whole
+/// current OI then shows as one day's build-up); symbols not reached
+/// within `budget` are counted as omitted.
 pub async fn previous_day_oi(
     ctx: &AppState,
     symbols: Vec<String>,
     options_exchange: &str,
     budget: StdDuration,
-) -> HashMap<String, f64> {
+) -> PreviousOi {
     let today = today_ist(ctx);
     let start = today - Duration::days(14);
     let deadline = tokio::time::Instant::now() + budget;
@@ -575,18 +633,27 @@ pub async fn previous_day_oi(
             return (sym, None);
         }
         let prev = match history_rows(ctx, &sym, options_exchange, "D", start, today).await {
-            Ok(rows) if rows.len() >= 2 => rows[rows.len() - 2]
-                .get("oi")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            _ => 0.0,
+            Ok(rows) if rows.len() >= 2 => rows[rows.len() - 2].get("oi").and_then(Value::as_f64),
+            Ok(_) => None,
+            Err(r) => {
+                tracing::debug!("Previous-day OI for {} not read: {}", sym, r.message());
+                None
+            }
         };
         (sym, Some(prev))
     })
     .await;
-    got.into_iter()
-        .filter_map(|(s, p)| p.map(|p| (s, p)))
-        .collect()
+    let mut out = PreviousOi::default();
+    for (sym, p) in got {
+        match p {
+            Some(Some(v)) => {
+                out.values.insert(sym, v);
+            }
+            Some(None) => out.failed += 1,
+            None => out.omitted += 1,
+        }
+    }
+    out
 }
 
 /// `POST /oiprofile/api/profile-data`.
@@ -600,7 +667,10 @@ pub async fn oi_profile(
 ) -> Reply {
     let opt_ex = chain_options_exchange(exchange);
     let body = match fetch_chain(ctx, underlying, exchange, expiry, 20).await {
-        Ok(b) => b,
+        Ok(a) => match require_oi(&a, underlying, expiry) {
+            Ok(()) => a.body,
+            Err(r) => return r,
+        },
         Err(r) => return r,
     };
     let mut lot_size = None;
@@ -654,19 +724,25 @@ pub async fn oi_profile(
         }
     }
 
-    let mut unique = wanted.clone();
-    unique.sort();
-    unique.dedup();
-    let requested = unique.len();
+    wanted.sort();
+    wanted.dedup();
+    let requested = wanted.len();
+    let wanted_set: std::collections::HashSet<String> = wanted.iter().cloned().collect();
     let prev = previous_day_oi(ctx, wanted, &opt_ex, OI_CHANGE_BUDGET).await;
-    let loaded = prev.len();
+    let loaded = prev.values.len();
 
     let oi_chain: Vec<Value> = chain_rows
         .into_iter()
         .map(|(k, ce_oi, pe_oi, ce_sym, pe_sym)| {
-            let change = |oi: f64, s: &Option<String>| match s.as_ref().and_then(|s| prev.get(s)) {
-                Some(p) => float(oi - p),
-                None => json!(0),
+            // A contract whose previous OI was asked for and not had has no
+            // change (null), not a change of its whole OI. One with no OI
+            // now is not looked up and keeps the web's 0.
+            let change = |oi: f64, s: &Option<String>| match s.as_ref() {
+                Some(s) if wanted_set.contains(s) => match prev.values.get(s) {
+                    Some(p) => float(oi - p),
+                    None => Value::Null,
+                },
+                _ => json!(0),
             };
             json!({
                 "strike": k,
@@ -691,17 +767,33 @@ pub async fn oi_profile(
     });
     if loaded < requested {
         tracing::warn!(
-            "OI Profile previous-day OI stopped at its time budget: {} of {} contracts",
+            "OI Profile previous-day OI: {} of {} contracts ({} failed, {} past the time budget)",
             loaded,
-            requested
+            requested,
+            prev.failed,
+            prev.omitted
         );
+        let mut why = Vec::new();
+        if prev.failed > 0 {
+            why.push(format!(
+                "the broker's history did not give the previous day for {}",
+                prev.failed
+            ));
+        }
+        if prev.omitted > 0 {
+            why.push(format!("loading took too long for {}", prev.omitted));
+        }
         if let Some(m) = out.as_object_mut() {
             m.insert("message".into(), json!(format!(
-                "Loading the previous day's OI took too long, so the daily OI change is shown for {} of {} option contracts. Refresh in a minute to load the rest.",
-                loaded, requested
+                "The daily OI change is shown for {} of {} option contracts: {}. The others show no change rather than a guess. Refresh in a minute to try again.",
+                loaded,
+                requested,
+                why.join(", and ")
             )));
             m.insert("oi_change_loaded".into(), json!(loaded));
             m.insert("oi_change_requested".into(), json!(requested));
+            m.insert("oi_change_failed".into(), json!(prev.failed));
+            m.insert("oi_change_omitted".into(), json!(prev.omitted));
         }
     }
     Reply::ok(out)

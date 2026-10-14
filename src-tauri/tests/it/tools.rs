@@ -914,6 +914,104 @@ async fn oi_profile_with_previous_day_oi() {
     assert_eq!(h.calls(|c| matches!(c, MockCall::History(_))), 11);
 }
 
+/// TOOLS-04, TOOLS-13: an OI figure is not worked out over a leg whose
+/// open interest did not come back (here a leg the broker answered
+/// without a quote): it would total as zero and read as a quiet strike.
+/// The price-only IV Smile still answers.
+#[tokio::test]
+async fn oi_figures_are_refused_when_a_legs_oi_did_not_come_back() {
+    let h = H::new(true);
+    h.mock.quotes.lock().remove("NFO:NIFTY30OCT2625100PE");
+    let want = "Open interest did not come back from your broker for 1 of 10 options of NIFTY 30OCT26, so the OI figures are not shown: a missing value would read as zero. Try again shortly.";
+    for p in [
+        "/oitracker/api/oi-data",
+        "/oitracker/api/maxpain",
+        "/gex/api/gex-data",
+        "/gammadensity/api/gamma-data",
+    ] {
+        let (s, v) = h.post(p, nifty()).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{} {}", p, v);
+        assert_eq!(v["message"], want, "{}", p);
+    }
+    let mut b = nifty();
+    b["interval"] = json!("1m");
+    let (s, v) = h.post("/oiprofile/api/profile-data", b).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
+    let (s, v) = h.post("/ivsmile/api/iv-smile-data", nifty()).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["chain"][3]["pe_iv"], Value::Null);
+}
+
+/// TOOLS-13: with zero open interest at every strike there is no max pain;
+/// the lowest strike used to win the tie and read as a finding.
+#[tokio::test]
+async fn max_pain_is_not_shown_over_all_zero_open_interest() {
+    let h = H::new(true);
+    {
+        let mut q = h.mock.quotes.lock();
+        for (k, v) in q.iter_mut() {
+            if k.starts_with("NFO:NIFTY30OCT26") && !k.ends_with("FUT") {
+                v.oi = 0;
+            }
+        }
+    }
+    let (s, v) = h.post("/oitracker/api/maxpain", nifty()).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{}", v);
+    assert_eq!(
+        v["message"],
+        "Open interest is zero at every strike of this expiry, so there is no max pain to show yet."
+    );
+}
+
+/// TOOLS-14: when the previous day's OI cannot be had (the history fails,
+/// or holds no previous day), the change is unknown (null) and counted,
+/// never the whole current OI as one day's build-up.
+#[tokio::test]
+async fn oi_profile_shows_no_change_where_the_previous_day_is_unknown() {
+    let h = H::new(true);
+    *h.mock.history.lock() = Some(Err("history unavailable".into()));
+    let mut b = nifty();
+    b["interval"] = json!("1m");
+    b["days"] = json!(1);
+    let (s, v) = h.post("/oiprofile/api/profile-data", b.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(
+        v["oi_chain"][0],
+        json!({"strike": 24800.0, "ce_oi": 1000, "pe_oi": 5000, "ce_oi_change": null, "pe_oi_change": null})
+    );
+    assert_eq!(v["oi_change_loaded"], 0);
+    assert_eq!(v["oi_change_requested"], 10);
+    assert_eq!(v["oi_change_failed"], 10);
+    assert_eq!(
+        v["message"],
+        "The daily OI change is shown for 0 of 10 option contracts: the broker's history did not give the previous day for 10. The others show no change rather than a guess. Refresh in a minute to try again."
+    );
+
+    // One daily candle: no previous day in it, so no change either; a
+    // real previous OI of zero is a reading (the whole OI is new).
+    let h = H::new(true);
+    let one = Candle {
+        timestamp: ist(5, 9, 15).timestamp(),
+        open: 1.0,
+        high: 1.0,
+        low: 1.0,
+        close: 1.0,
+        volume: 1,
+        oi: 0,
+    };
+    *h.mock.history.lock() = Some(Ok(vec![one]));
+    let (_, v) = h.post("/oiprofile/api/profile-data", b.clone()).await;
+    assert_eq!(v["oi_chain"][0]["ce_oi_change"], Value::Null);
+    let zero_before = Candle {
+        timestamp: ist(2, 15, 29).timestamp(),
+        ..one
+    };
+    *h.mock.history.lock() = Some(Ok(vec![zero_before, one]));
+    let (_, v) = h.post("/oiprofile/api/profile-data", b).await;
+    assert_eq!(v["oi_chain"][0]["ce_oi_change"], json!(1000.0));
+    assert!(v.get("oi_change_failed").is_none());
+}
+
 #[tokio::test]
 async fn iv_chart_and_default_symbols() {
     let h = H::new(true);

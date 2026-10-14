@@ -13,6 +13,7 @@
 //! (`streaming::OrderFeed`).
 
 mod auth;
+pub mod chain;
 mod data;
 mod funds;
 mod gtt;
@@ -108,6 +109,8 @@ pub struct FyersBroker {
     /// Base of the throttle and history-chunk retry backoff (web 1 s / 2 s).
     retry_base: Duration,
     funds_cache: funds::FundsCache,
+    /// The native option chain's `timestamp` per underlying and expiry.
+    expiry_timestamps: chain::ExpiryTimestamps,
 }
 
 impl FyersBroker {
@@ -124,6 +127,7 @@ impl FyersBroker {
             limiter: FyersLimiter::new(FyersPlan::Standard),
             retry_base: Duration::from_secs(1),
             funds_cache: funds::FundsCache::default(),
+            expiry_timestamps: chain::ExpiryTimestamps::default(),
         }
     }
 
@@ -141,6 +145,10 @@ impl FyersBroker {
 
     pub fn limiter(&self) -> &FyersLimiter {
         &self.limiter
+    }
+
+    pub(crate) fn expiry_timestamps(&self) -> &chain::ExpiryTimestamps {
+        &self.expiry_timestamps
     }
 
     pub(crate) fn resolver(&self) -> &SymbolResolver {
@@ -494,6 +502,14 @@ impl Broker for FyersBroker {
 
     async fn get_market_depth(&self, auth: &AuthToken, key: &QuoteKey) -> Result<MarketDepth> {
         data::get_market_depth(self, auth, key).await
+    }
+
+    async fn get_chain_quotes(
+        &self,
+        auth: &AuthToken,
+        req: &ChainQuoteRequest,
+    ) -> Result<ChainQuotes> {
+        chain::get_chain_quotes(self, auth, req).await
     }
 
     async fn get_history(&self, auth: &AuthToken, req: &HistoryRequest) -> Result<Vec<Candle>> {

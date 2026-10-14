@@ -278,7 +278,10 @@ export default function OIProfile() {
     const ceOI = oiChain.map((item) => item.ce_oi)
     const peOI = oiChain.map((item) => -item.pe_oi) // negative for left side
     const ceOIChange = oiChain.map((item) => item.ce_oi_change)
-    const peOIChange = oiChain.map((item) => -item.pe_oi_change)
+    // An unknown change stays a gap (null), never a bar of zero.
+    const peOIChange = oiChain.map((item) =>
+      item.pe_oi_change == null ? null : -item.pe_oi_change
+    )
 
     // Custom data for hover on PE (show absolute values)
     const peOIAbs = oiChain.map((item) => item.pe_oi)

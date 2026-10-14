@@ -8,12 +8,12 @@ use super::symbol_service::freeze_qty_for_option;
 use crate::analytics::black76::{self as bs, Flag};
 use crate::brokers::common::master_contract::{format_strike, parse_oa_expiry};
 use crate::brokers::common::symbols::SymToken;
-use crate::brokers::types::{Quote, QuoteKey};
+use crate::brokers::types::{ChainQuoteRequest, ChainQuotes, Quote, QuoteKey};
 use crate::state::AppState;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -789,6 +789,31 @@ fn add_leg_greeks(leg: &mut Map<String, Value>, call: bool, f: f64, k: f64, t: f
     }
 }
 
+/// An option chain with what the broker could not supply: legs that came
+/// back without a quote, and legs whose open interest did not come back.
+/// The `/api/v1` body keeps the web's shape (those legs read zero there,
+/// as on the web); the chain tools read the sets and do not total a gap as
+/// zero (TOOLS-04, TOOLS-13).
+#[derive(Debug, Clone)]
+pub struct ChainAnswer {
+    pub body: Value,
+    /// Symbols (OpenAlgo) with no quote.
+    pub quote_missing: HashSet<String>,
+    /// Symbols (OpenAlgo) quoted without their open interest.
+    pub oi_missing: HashSet<String>,
+}
+
+impl ChainAnswer {
+    /// Legs in the chain whose open interest is not a reading.
+    pub fn oi_unknown(&self) -> HashSet<&str> {
+        self.quote_missing
+            .iter()
+            .chain(self.oi_missing.iter())
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 /// `optionchain`.
 pub async fn option_chain(
     ctx: &AppState,
@@ -799,26 +824,43 @@ pub async fn option_chain(
     with_greeks: bool,
     interest_rate: Option<f64>,
 ) -> Reply {
-    let h = match broker_handle(ctx) {
-        Ok(h) => h,
-        Err(r) => return r,
-    };
-    let u = match resolve_underlying(ctx, underlying, exchange, Some(expiry_date), true) {
-        Ok(u) => u,
-        Err(r) => return r,
-    };
-    let uq = match underlying_ltp(ctx, &h, &u, ":").await {
-        Ok(q) => q,
-        Err(r) => return r,
-    };
+    match option_chain_answer(
+        ctx,
+        underlying,
+        exchange,
+        expiry_date,
+        strike_count,
+        with_greeks,
+        interest_rate,
+    )
+    .await
+    {
+        Ok(a) => Reply::ok(a.body),
+        Err(r) => r,
+    }
+}
+
+/// [`option_chain`] with the legs the broker could not supply.
+pub async fn option_chain_answer(
+    ctx: &AppState,
+    underlying: &str,
+    exchange: &str,
+    expiry_date: &str,
+    strike_count: Option<i64>,
+    with_greeks: bool,
+    interest_rate: Option<f64>,
+) -> Result<ChainAnswer, Reply> {
+    let h = broker_handle(ctx)?;
+    let u = resolve_underlying(ctx, underlying, exchange, Some(expiry_date), true)?;
+    let uq = underlying_ltp(ctx, &h, &u, ":").await?;
     let opt_ex = option_exchange(&u.quote_exchange);
     let snap = ctx.symbols.snapshot();
     let strikes = available_strikes(snap.rows(), &u.base, &u.expiry, "CE", &opt_ex);
     if strikes.is_empty() {
-        return no_strikes(&u.base, &u.expiry);
+        return Err(no_strikes(&u.base, &u.expiry));
     }
     let Some(atm) = atm_index(&strikes, uq.ltp) else {
-        return Reply::error(500, "Failed to determine ATM strike");
+        return Err(Reply::error(500, "Failed to determine ATM strike"));
     };
     let (start, end) = match strike_count {
         Some(sc) if sc > 0 => {
@@ -843,26 +885,53 @@ pub async fn option_chain(
         legs.push((*k, ce, pe, idx));
     }
     if keys.is_empty() {
-        return Reply::error(
+        return Err(Reply::error(
             404,
             "No valid option symbols found for the given parameters",
-        );
+        ));
     }
-    let quotes: HashMap<String, Quote> = match h.broker.get_multiquotes(&h.auth, &keys).await {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|r| r.data.map(|q| (r.symbol, q)))
-            .collect(),
+    let fetched = match parse_compact_expiry(&u.expiry) {
+        Some(expiry) => {
+            let req = ChainQuoteRequest {
+                underlying: QuoteKey::new(u.quote_exchange.clone(), u.quote_symbol.clone()),
+                expiry,
+                keys: keys.clone(),
+                strikes_each_side: strike_count.filter(|n| *n > 0).map(|n| n as usize),
+            };
+            h.broker.get_chain_quotes(&h.auth, &req).await
+        }
+        None => h
+            .broker
+            .get_multiquotes(&h.auth, &keys)
+            .await
+            .map(|quotes| ChainQuotes {
+                quotes,
+                oi_missing: HashSet::new(),
+            }),
+    };
+    let fetched = match fetched {
+        Ok(f) => f,
         Err(e) => {
-            return Reply::error(
+            return Err(Reply::error(
                 500,
                 format!(
                     "An error occurred while fetching option chain: {}",
                     e.client_message()
                 ),
-            )
+            ))
         }
     };
+    let oi_missing = fetched.oi_missing;
+    let quotes: HashMap<String, Quote> = fetched
+        .quotes
+        .into_iter()
+        .filter_map(|r| r.data.map(|q| (r.symbol, q)))
+        .collect();
+    let quote_missing: HashSet<String> = keys
+        .iter()
+        .filter(|k| !quotes.contains_key(&k.symbol))
+        .map(|k| k.symbol.clone())
+        .collect();
     let mut chain: Vec<Value> = Vec::with_capacity(legs.len());
     let mut rows_m: Vec<ChainRow> = Vec::new();
     for (k, ce, pe, idx) in &legs {
@@ -913,7 +982,7 @@ pub async fn option_chain(
             "pe": p.map(Value::Object).unwrap_or(Value::Null),
         }));
     }
-    Reply::ok(json!({
+    let body = json!({
         "status": "success",
         "underlying": u.base,
         "underlying_symbol": u.quote_symbol,
@@ -928,7 +997,12 @@ pub async fn option_chain(
         "greeks_included": with_greeks,
         "forward_price": forward.map(num).unwrap_or(Value::Null),
         "chain": chain,
-    }))
+    });
+    Ok(ChainAnswer {
+        body,
+        quote_missing,
+        oi_missing,
+    })
 }
 
 // ------------------------------------------------------------------ greeks

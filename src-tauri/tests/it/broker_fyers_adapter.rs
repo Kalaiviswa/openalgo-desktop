@@ -795,6 +795,199 @@ async fn a_throttled_placement_is_retried_or_refused_never_uncertain() {
     assert_eq!(fake.requests("POST", "/api/v3/orders/sync").len(), 1);
 }
 
+/// A NIFTY master with 91 strikes a side of CE and PE for two weekly
+/// expiries, Fyers-style broker symbols.
+fn chain_master() -> SymbolResolver {
+    use openalgo_desktop_lib::brokers::common::symbols::SymToken;
+    let row =
+        |symbol: String, brsymbol: String, exchange: &str, expiry: &str, strike: f64, it: &str| {
+            SymToken {
+                symbol,
+                brsymbol,
+                name: "NIFTY".into(),
+                exchange: exchange.into(),
+                brexchange: "NSE".into(),
+                token: String::new(),
+                expiry: expiry.into(),
+                strike,
+                lot_size: 65,
+                instrument_type: it.into(),
+                tick_size: 0.05,
+            }
+        };
+    let mut rows = vec![row(
+        "NIFTY".into(),
+        "NSE:NIFTY50-INDEX".into(),
+        "NSE_INDEX",
+        "",
+        0.0,
+        "INDEX",
+    )];
+    for (code, br, expiry) in [
+        ("13OCT26", "26O13", "13-OCT-26"),
+        ("20OCT26", "26O20", "20-OCT-26"),
+    ] {
+        for i in 0..91 {
+            let k = 22_750.0 + 50.0 * i as f64;
+            for t in ["CE", "PE"] {
+                rows.push(row(
+                    format!("NIFTY{}{}{}", code, k as i64, t),
+                    format!("NSE:NIFTY{}{}{}", br, k as i64, t),
+                    "NFO",
+                    expiry,
+                    k,
+                    t,
+                ));
+            }
+        }
+    }
+    // Each contract has its own token: the master keeps one row per
+    // (exchange, token).
+    for (i, r) in rows.iter_mut().enumerate() {
+        r.token = format!("{}", 100_000 + i);
+    }
+    let r = SymbolResolver::new();
+    r.load(rows);
+    r
+}
+
+/// The native chain answer for one expiry: every leg with OI = its index.
+fn native_chain(br: &str) -> String {
+    let mut legs = vec![
+        json!({"symbol": "NSE:NIFTY50-INDEX", "option_type": "", "strike_price": -1, "ltp": 25010}),
+    ];
+    for i in 0..91 {
+        let k = 22_750 + 50 * i;
+        for (j, t) in ["CE", "PE"].iter().enumerate() {
+            legs.push(json!({
+                "symbol": format!("NSE:NIFTY{}{}{}", br, k, t),
+                "option_type": t, "strike_price": k,
+                "ltp": 100.0, "ltpch": 5.0, "ltpchp": 5.26, "bid": 99.5, "ask": 100.5,
+                "volume": 10, "oi": 1000 + 2 * i + j,
+            }));
+        }
+    }
+    json!({
+        "s": "ok", "code": 200, "message": "",
+        "data": {
+            "expiryData": [
+                {"date": "13-10-2026", "expiry": "1760349600"},
+                {"date": "20-10-2026", "expiry": "1760954400"},
+            ],
+            "optionsChain": legs,
+        }
+    })
+    .to_string()
+}
+
+fn chain_request(code: &str, expiry: (i32, u32, u32)) -> ChainQuoteRequest {
+    let mut keys = Vec::new();
+    for i in 0..91 {
+        let k = 22_750 + 50 * i;
+        for t in ["CE", "PE"] {
+            keys.push(QuoteKey::new("NFO", format!("NIFTY{}{}{}", code, k, t)));
+        }
+    }
+    ChainQuoteRequest {
+        underlying: QuoteKey::new("NSE_INDEX", "NIFTY"),
+        expiry: NaiveDate::from_ymd_opt(expiry.0, expiry.1, expiry.2).unwrap(),
+        keys,
+        strikes_each_side: Some(45),
+    }
+}
+
+fn chain_broker(base: &str) -> FyersBroker {
+    FyersBroker::with_urls(
+        chain_master(),
+        FyersUrls {
+            api: base.to_string(),
+            public: format!("{}/sym_details", base),
+            ..FyersUrls::default()
+        },
+    )
+    .with_retry_base(Duration::from_millis(1))
+}
+
+/// TOOLS-04, BRL-02: a 182-option chain (GEX's 45 strikes a side) gets
+/// every leg's LTP and open interest in one native request, with no
+/// per-option depth call; it used to read OI 0 for every leg above 100
+/// options and send one depth call per option below.
+/// TOOLS-05: a later expiry is asked for with its timestamp, and an
+/// answer whose contracts belong to another expiry is not used: those
+/// legs come from the batch quotes, reported without open interest.
+#[tokio::test]
+async fn the_native_chain_gives_every_legs_oi_for_the_requested_expiry() {
+    let fake = Fake::default();
+    fake.once(
+        "GET",
+        "/data/options-chain-v3",
+        (200, vec![], native_chain("26O13")),
+    );
+    fake.once(
+        "GET",
+        "/data/options-chain-v3",
+        (200, vec![], native_chain("26O20")),
+    );
+    let b = chain_broker(&fake.serve().await);
+    let req = chain_request("13OCT26", (2026, 10, 13));
+    let got = b.get_chain_quotes(&auth(), &req).await.unwrap();
+    assert!(got.oi_missing.is_empty());
+    assert_eq!(got.quotes.len(), 182);
+    let first = got.quotes[0].data.as_ref().unwrap();
+    assert_eq!(
+        (first.symbol.as_str(), first.oi, first.ltp, first.close),
+        ("NIFTY13OCT2622750CE", 1000, 100.0, 95.0)
+    );
+    assert_eq!(got.quotes[181].data.as_ref().unwrap().oi, 1000 + 2 * 90 + 1);
+    let sent = fake.requests("GET", "/data/options-chain-v3");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].query, "symbol=NSE%3ANIFTY50-INDEX&strikecount=47");
+    assert!(fake.requests("GET", "/data/depth").is_empty());
+    assert!(fake.requests("GET", "/data/quotes").is_empty());
+
+    // The next expiry is asked for directly with the timestamp the first
+    // answer listed: one request again.
+    let got = b
+        .get_chain_quotes(&auth(), &chain_request("20OCT26", (2026, 10, 20)))
+        .await
+        .unwrap();
+    assert!(got.oi_missing.is_empty());
+    assert_eq!(
+        got.quotes[0].data.as_ref().unwrap().symbol,
+        "NIFTY20OCT2622750CE"
+    );
+    let sent = fake.requests("GET", "/data/options-chain-v3");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1].query,
+        "symbol=NSE%3ANIFTY50-INDEX&strikecount=47&timestamp=1760954400"
+    );
+
+    // A broker that answers the nearest expiry whatever is asked: the
+    // answer is not mapped onto the later expiry's contracts.
+    let fake = Fake::default();
+    fake.on("GET", "/data/options-chain-v3", &native_chain("26O13"))
+        .on(
+            "GET",
+            "/data/quotes",
+            &json!({"s": "ok", "d": []}).to_string(),
+        );
+    let b = chain_broker(&fake.serve().await);
+    let req = chain_request("20OCT26", (2026, 10, 20));
+    let got = b.get_chain_quotes(&auth(), &req).await.unwrap();
+    assert_eq!(got.oi_missing.len(), 182);
+    assert!(got.quotes.iter().all(|q| q.data.is_none()));
+    let sent = fake.requests("GET", "/data/options-chain-v3");
+    assert_eq!(sent.len(), 2, "asked again with the expiry's timestamp");
+    assert!(sent[1].query.ends_with("&timestamp=1760954400"));
+    assert_eq!(
+        fake.requests("GET", "/data/quotes").len(),
+        4,
+        "182 legs in batches of 50"
+    );
+    assert!(fake.requests("GET", "/data/depth").is_empty());
+}
+
 #[tokio::test]
 async fn margin_uses_multiorder_endpoint() {
     let fake = Fake::default();

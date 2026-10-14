@@ -422,6 +422,22 @@ pub trait Broker: Send + Sync {
         Ok(out)
     }
 
+    /// Quotes for the legs of one option chain, in request order, saying
+    /// which legs came back without their open interest. Default:
+    /// `get_multiquotes`, whose open interest the adapter vouches for. An
+    /// adapter whose batch quotes carry no open interest overrides it
+    /// (Fyers: its native chain, checked against the requested expiry).
+    async fn get_chain_quotes(
+        &self,
+        auth: &AuthToken,
+        req: &ChainQuoteRequest,
+    ) -> Result<ChainQuotes> {
+        Ok(ChainQuotes {
+            quotes: self.get_multiquotes(auth, &req.keys).await?,
+            oi_missing: Default::default(),
+        })
+    }
+
     /// Five-level depth (padded with zero levels).
     async fn get_market_depth(&self, auth: &AuthToken, key: &QuoteKey) -> Result<MarketDepth>;
 

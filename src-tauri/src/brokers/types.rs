@@ -672,6 +672,30 @@ impl QuoteKey {
     }
 }
 
+/// The options of one chain (one underlying, one expiry) whose quotes a
+/// chain tool needs (`Broker::get_chain_quotes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainQuoteRequest {
+    /// The underlying the chain is quoted around (index, stock or future).
+    pub underlying: QuoteKey,
+    /// The expiry every leg belongs to.
+    pub expiry: NaiveDate,
+    /// The option legs, in the order the answer keeps.
+    pub keys: Vec<QuoteKey>,
+    /// Strikes on each side of ATM the chain covers, `None` for all.
+    pub strikes_each_side: Option<usize>,
+}
+
+/// Quotes for a chain's legs, saying which ones came back without their
+/// open interest: for those the `oi` in `quotes` is not a reading
+/// (TOOLS-04, TOOLS-13).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChainQuotes {
+    pub quotes: Vec<QuoteResult>,
+    /// Symbols (OpenAlgo) whose open interest was not obtained.
+    pub oi_missing: std::collections::HashSet<String>,
+}
+
 /// Quote (web `/quotes` data; `close` is the previous close).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Quote {

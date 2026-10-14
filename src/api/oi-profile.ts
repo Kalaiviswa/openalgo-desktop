@@ -15,8 +15,12 @@ export interface OIProfileChainItem {
   strike: number
   ce_oi: number
   pe_oi: number
-  ce_oi_change: number
-  pe_oi_change: number
+  /**
+   * Desktop: null when the previous day's OI could not be had for this
+   * contract (TOOLS-14); the web sends 0, which read as no change.
+   */
+  ce_oi_change: number | null
+  pe_oi_change: number | null
 }
 
 export interface OIProfileDataResponse {

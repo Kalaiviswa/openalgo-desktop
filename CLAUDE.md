@@ -819,6 +819,16 @@ and add each new one here.
   `acquire_unbounded`; a new call site decides which it is.
   The web bounds the wait only under its gthread worker: a recorded
   deviation.
+- **A missing open interest is not a zero.** Chains are quoted through
+  `Broker::get_chain_quotes`, which says which legs came back without OI
+  (`ChainQuotes::oi_missing`). Fyers answers from its native
+  `/data/options-chain-v3` with the requested expiry's timestamp, and a
+  returned contract is used only when the master puts it in that expiry
+  (the web's fast path maps the nearest expiry onto any expiry by strike).
+  The OI tools (`chain_tools_service::require_oi`) refuse a figure over a
+  leg without OI, Max Pain refuses all-zero OI, and an OI change whose
+  previous day could not be read is null, never the whole OI. The
+  `/api/v1/optionchain` body keeps the web's zeros.
 
 ### Security work
 
