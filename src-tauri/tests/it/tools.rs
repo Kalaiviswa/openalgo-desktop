@@ -13,7 +13,6 @@ use axum::http::{header, Method, Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
 use http_body_util::BodyExt;
-use openalgo_desktop_lib::analytics::chain::{max_pain, StrikeOi};
 use openalgo_desktop_lib::brokers::common::symbols::{SymToken, SymbolResolver};
 use openalgo_desktop_lib::brokers::mock::{MockBroker, MockCall};
 use openalgo_desktop_lib::brokers::types::{Candle, Quote};
@@ -707,18 +706,22 @@ async fn oi_tracker_and_max_pain() {
 
     let (s, v) = h.post("/oitracker/api/maxpain", nifty()).await;
     assert_eq!(s, StatusCode::OK);
-    let chain: Vec<StrikeOi> = STRIKES
-        .iter()
-        .enumerate()
-        .map(|(i, k)| StrikeOi {
-            strike: *k,
-            ce_oi: ce_oi(i) as f64,
-            pe_oi: pe_oi(i) as f64,
-        })
-        .collect();
-    let (want, pain) = max_pain(&chain).unwrap();
-    assert_eq!(v["max_pain_strike"], json!(want));
-    assert_eq!(v["pain_data"], serde_json::to_value(&pain).unwrap());
+    // Worked by hand, not by the kernel under test (TOOLS-15): CE OI
+    // 1000..5000 and PE OI 5000..1000 on 24800..25200. At 25000 CE writers
+    // lose 200 x 1000 + 100 x 2000 and PE writers 100 x 2000 + 200 x 1000:
+    // 800,000, the least of the five.
+    assert_eq!(v["max_pain_strike"], json!(25000.0));
+    let pain = |strike: f64, ce: f64, pe: f64, cr: f64| json!({"strike": strike, "ce_pain": ce, "pe_pain": pe, "total_pain": ce + pe, "total_pain_cr": cr});
+    assert_eq!(
+        v["pain_data"],
+        json!([
+            pain(24800.0, 0.0, 2_000_000.0, 0.2),
+            pain(24900.0, 100_000.0, 1_000_000.0, 0.11),
+            pain(25000.0, 400_000.0, 400_000.0, 0.08),
+            pain(25100.0, 1_000_000.0, 100_000.0, 0.11),
+            pain(25200.0, 2_000_000.0, 0.0, 0.2),
+        ])
+    );
     assert_eq!(
         keys(&v["pain_data"][0]),
         vec![
@@ -789,9 +792,11 @@ async fn gex_smile_and_gamma_density() {
         keys(&v),
         vec![
             "atm_iv",
+            "atm_iv_source",
             "atm_strike",
             "chain",
             "dte_days",
+            "estimated_iv_legs",
             "exchange",
             "expiry_band",
             "expiry_date",
@@ -802,6 +807,7 @@ async fn gex_smile_and_gamma_density() {
             "one_sigma_low",
             "peak_expiry_strike",
             "peak_intraday_strike",
+            "pricing_reference",
             "sigma_move",
             "spot_price",
             "status",
@@ -810,6 +816,10 @@ async fn gex_smile_and_gamma_density() {
             "underlying"
         ]
     );
+    // Desktop provenance (TOOLS-15): every leg priced, against the forward.
+    assert_eq!(v["atm_iv_source"], "atm");
+    assert_eq!(v["estimated_iv_legs"], 0);
+    assert_eq!(v["pricing_reference"], "forward");
     assert_eq!(
         keys(&v["chain"][0]),
         vec![
@@ -825,6 +835,38 @@ async fn gex_smile_and_gamma_density() {
     assert_eq!(v["forward_price"], json!(25020.0));
     assert_eq!(v["sigma_move"], v["intraday_band"]["sigma_move"]);
     assert!(v["dte_days"].as_f64().unwrap() > 25.0);
+}
+
+/// TOOLS-15: with no option price to invert, Gamma Density says its IV is
+/// the assumed 15% and how many legs that covers, instead of presenting the
+/// bands as market-implied. Band worked by hand: 25010 x 0.15 x
+/// sqrt(1/365) = 196.3625.
+#[tokio::test]
+async fn gamma_density_says_when_its_iv_is_assumed() {
+    let h = H::new(true);
+    for (i, k) in STRIKES.iter().enumerate() {
+        for (t, oi) in [("CE", ce_oi(i)), ("PE", pe_oi(i))] {
+            h.mock.set_quote(quote(
+                &format!("NIFTY30OCT26{}{}", *k as i64, t),
+                "NFO",
+                0.0,
+                oi,
+            ));
+        }
+    }
+    let (s, v) = h.post("/gammadensity/api/gamma-data", nifty()).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["atm_iv_source"], "assumed");
+    assert_eq!(v["atm_iv"], json!(15.0));
+    assert_eq!(v["estimated_iv_legs"], 10);
+    assert_eq!(v["sigma_move"], json!(196.36));
+    assert_eq!(v["one_sigma_low"], json!(24813.64));
+    assert_eq!(v["one_sigma_high"], json!(25206.36));
+    assert!(v["chain"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["iv"].is_null()));
 }
 
 #[tokio::test]

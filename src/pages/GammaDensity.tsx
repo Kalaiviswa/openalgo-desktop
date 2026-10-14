@@ -459,11 +459,33 @@ export default function GammaDensity() {
 
       <ExpiryLookupNotice lookup={expiryLookup} />
 
+      {hasData && data?.atm_iv_source === 'assumed' && (
+        <p
+          role="status"
+          className="text-sm text-amber-600 dark:text-amber-400"
+          data-testid="gamma-assumed-iv"
+        >
+          No option price in this chain gave an implied volatility, so the bands and densities use
+          an assumed {formatNum(data?.atm_iv)}% IV. Treat them as estimates, not what the market
+          implies.
+        </p>
+      )}
+
       {/* Stat cards */}
       {hasData && (
         <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3">
           <StatCard label="Spot" value={formatNum(data?.spot_price, 1)} />
-          <StatCard label="ATM IV" value={`${formatNum(data?.atm_iv)}%`} />
+          <StatCard
+            label="ATM IV"
+            value={`${formatNum(data?.atm_iv)}%`}
+            sub={
+              data?.atm_iv_source === 'assumed'
+                ? 'assumed, not from prices'
+                : data?.atm_iv_source === 'median'
+                  ? 'median of strikes'
+                  : undefined
+            }
+          />
           <StatCard
             label="Sigma Move"
             value={`±${formatNum(data?.sigma_move)}`}
@@ -518,7 +540,25 @@ export default function GammaDensity() {
       <p className="text-xs text-muted-foreground">
         Shaded band = ±1σ expected range. The density curve marks strikes where dealer Γ×OI is
         concentrated — spot gravitates to (long gamma) or accelerates away from (short gamma) these
-        zones. Greeks use the Black-76 model (opengreeks).
+        zones. Greeks use the Black-76 model (opengreeks)
+        {data?.pricing_reference === 'spot'
+          ? ' on the spot price, because no synthetic future price was available'
+          : ' on the synthetic future price'}
+        .
+        {hasData && (
+          <span className="ml-1" data-testid="gamma-model-scope">
+            Densities cover the {data?.chain?.length} strikes around the ATM strike shown here, not
+            the whole option chain.
+            {data?.atm_iv_source !== 'assumed' && (data?.estimated_iv_legs ?? 0) > 0 && (
+              <>
+                {' '}
+                {data?.estimated_iv_legs} option
+                {data?.estimated_iv_legs === 1 ? ' has' : 's have'} no usable price and use the ATM
+                IV.
+              </>
+            )}
+          </span>
+        )}
         {lastUpdated && (
           <span className="ml-1">Last updated: {lastUpdated.toLocaleTimeString()}.</span>
         )}

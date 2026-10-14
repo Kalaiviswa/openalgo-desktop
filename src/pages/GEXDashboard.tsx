@@ -3,6 +3,7 @@ import type * as PlotlyTypes from 'plotly.js'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type GEXDataResponse, gexApi } from '@/api/gex'
 import { ExpiryLookupNotice } from '@/components/tools/ExpiryLookupNotice'
+import { ToolModelNote } from '@/components/tools/ToolModelNote'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -792,6 +793,7 @@ export default function GEXDashboard() {
           </CardContent>
         </Card>
       )}
+      <ToolModelNote model="gex" strikes={gexData?.chain?.length ?? 0} />
     </div>
   )
 }

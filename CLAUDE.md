@@ -781,6 +781,15 @@ and add each new one here.
   the symbol afresh, so an old depth never comes back stamped as current.
   "Streaming" means prices arrived recently, not that symbols were asked
   for.
+- **A chain tool says what its numbers assume.** Gamma Density reports
+  `atm_iv_source` (`atm`, `median`, or `assumed` for the 15% default),
+  `estimated_iv_legs` and `pricing_reference`, and the page says when the
+  IV is assumed; GEX, IV Smile, OI Tracker and Max Pain state their model,
+  price reference and strike window (`ToolModelNote`). Straddle days to
+  expiry count to the venue's cut-off (`options_service::listing_cutoff`);
+  the web uses 15:30 everywhere. The public Greeks keep the web's
+  `cutoff` table. Test the arithmetic against values worked by hand,
+  never against the kernel under test.
 
 ### Security work
 

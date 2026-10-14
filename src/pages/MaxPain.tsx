@@ -3,6 +3,7 @@ import type * as PlotlyTypes from 'plotly.js'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type MaxPainResponse, oiTrackerApi } from '@/api/oi-tracker'
 import { ExpiryLookupNotice } from '@/components/tools/ExpiryLookupNotice'
+import { ToolModelNote } from '@/components/tools/ToolModelNote'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -442,6 +443,7 @@ export default function MaxPain() {
           )}
         </CardContent>
       </Card>
+      <ToolModelNote model="maxpain" strikes={maxPainData?.pain_data?.length ?? 0} />
     </div>
   )
 }

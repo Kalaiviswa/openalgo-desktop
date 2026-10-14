@@ -125,7 +125,7 @@ pub fn cutoff(exchange: &str) -> NaiveTime {
 /// in the option tools: the venue's expiry cut-off (IST). Delta Exchange
 /// settles crypto contracts at 12:00 UTC (17:30 IST, the product master's
 /// `settlement_time`); BSE currency options expire at 12:30 like CDS.
-fn listing_cutoff(exchange: &str) -> NaiveTime {
+pub fn listing_cutoff(exchange: &str) -> NaiveTime {
     match exchange.to_ascii_uppercase().as_str() {
         "CRYPTO" => NaiveTime::from_hms_opt(17, 30, 0).unwrap_or_default(),
         "BCD" => cutoff("CDS"),
