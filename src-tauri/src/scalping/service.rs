@@ -661,6 +661,95 @@ fn accepted(r: &Reply) -> bool {
     r.is_success() && r.body.get("status").and_then(Value::as_str) != Some("error")
 }
 
+/// Refuse an order for a contract the page has an unconfirmed order for:
+/// it may already be at the broker (LOG-08).
+fn unconfirmed_guard(
+    ctx: &AppState,
+    mode: &str,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> Option<Reply> {
+    match super::unconfirmed::open_for(&ctx.sqlite, mode, symbol, exchange, product) {
+        Ok(false) => None,
+        Ok(true) => Some(err(409, super::unconfirmed::repeat_refusal(symbol))),
+        Err(e) => {
+            tracing::error!("Unconfirmed scalping orders could not be read: {}", e);
+            Some(err(
+                500,
+                "The scalping orders could not be read just now, so nothing was sent. Try again in a moment.",
+            ))
+        }
+    }
+}
+
+/// Record an order the broker did not confirm, so a retry is refused until
+/// the order book settles it, and tell the trader so.
+#[allow(clippy::too_many_arguments)]
+fn note_unconfirmed(
+    ctx: &AppState,
+    mode: &str,
+    kind: &str,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+    action: &str,
+    quantity: i64,
+    client_tag: Option<&str>,
+) -> Reply {
+    let recorded = super::unconfirmed::record(
+        &ctx.sqlite,
+        &super::unconfirmed::NewPending {
+            mode,
+            kind,
+            symbol,
+            exchange,
+            product,
+            action,
+            quantity,
+            client_tag,
+        },
+        ctx.now(),
+    );
+    if let Err(e) = recorded {
+        tracing::error!(
+            "The unconfirmed scalping {} {} {} could not be recorded: {}",
+            action,
+            quantity,
+            symbol,
+            e
+        );
+    }
+    ctx.reconciler.request_pass();
+    err(500, super::unconfirmed::NOT_CONFIRMED)
+}
+
+/// The quantity of the split chunk with no definite answer: the last one
+/// sent, as the chunks after it are reported not sent.
+fn uncertain_chunk(r: &Reply) -> Option<i64> {
+    r.body
+        .get("results")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|row| {
+            row.get("message").and_then(Value::as_str)
+                != Some(crate::services::batch_order_service::SPLIT_HELD)
+        })?
+        .get("quantity")?
+        .as_i64()
+}
+
+/// The client tag an uncertain placement was sent with.
+fn client_tag_of(r: &Reply) -> Option<String> {
+    match &r.placement {
+        Some(crate::brokers::common::outcome::PlaceOutcome::Uncertain { client_tag, .. }) => {
+            client_tag.clone()
+        }
+        _ => None,
+    }
+}
+
 /// `POST /scalping/api/order`: one MARKET entry.
 pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
     let f = match order_fields(body, "MIS") {
@@ -699,6 +788,10 @@ pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
         Ok(a) => a,
         Err(r) => return r,
     };
+    if let Some(r) = unconfirmed_guard(ctx, mode_name(analyze), &f.symbol, &f.exchange, &f.product)
+    {
+        return r;
+    }
     let r = crate::services::order_service::place_order_decided(
         ctx,
         &req,
@@ -707,6 +800,19 @@ pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
         true,
     )
     .await;
+    if r.is_uncertain() {
+        return note_unconfirmed(
+            ctx,
+            mode_name(analyze),
+            "entry",
+            &f.symbol,
+            &f.exchange,
+            &f.product,
+            &f.action,
+            f.quantity,
+            client_tag_of(&r).as_deref(),
+        );
+    }
     if accepted(&r) {
         let mode = mode_name(analyze);
         if let Err(e) = ctx
@@ -731,6 +837,10 @@ pub async fn reducing_exit(
     action: &str,
     quantity: i64,
 ) -> Reply {
+    let mode = mode_name(analyze);
+    if let Some(r) = unconfirmed_guard(ctx, mode, symbol, exchange, product) {
+        return r;
+    }
     let chunk = match exit_chunk(&ctx.symbols, symbol, exchange, quantity) {
         Ok(c) => c,
         Err(e) => return err(400, e),
@@ -746,13 +856,22 @@ pub async fn reducing_exit(
             "pricetype": "MARKET",
             "product": product,
         });
-        return crate::services::batch_order_service::split_order_decided(
+        let reply = crate::services::batch_order_service::split_order_decided(
             ctx,
             &req,
             Route::INTERNAL,
             analyze,
         )
         .await;
+        if !reply.is_uncertain() {
+            return reply;
+        }
+        // The split stopped at the first chunk with no definite answer and
+        // sent nothing after it: that chunk may be at the broker.
+        let q = uncertain_chunk(&reply).unwrap_or(quantity);
+        return note_unconfirmed(
+            ctx, mode, "exit", symbol, exchange, product, action, q, None,
+        );
     }
     let req = json!({
         "strategy": SCALPING_STRATEGY,
@@ -766,8 +885,28 @@ pub async fn reducing_exit(
         "trigger_price": 0,
         "disclosed_quantity": 0,
     });
-    crate::services::order_service::place_order_decided(ctx, &req, Route::INTERNAL, analyze, true)
-        .await
+    let r = crate::services::order_service::place_order_decided(
+        ctx,
+        &req,
+        Route::INTERNAL,
+        analyze,
+        true,
+    )
+    .await;
+    if r.is_uncertain() {
+        return note_unconfirmed(
+            ctx,
+            mode,
+            "exit",
+            symbol,
+            exchange,
+            product,
+            action,
+            quantity,
+            client_tag_of(&r).as_deref(),
+        );
+    }
+    r
 }
 
 /// `POST /scalping/api/close_leg`.

@@ -1939,3 +1939,312 @@ async fn an_entry_is_tracked_on_the_side_it_was_sent_to() {
         json!([{"symbol": OPT, "exchange": "NFO", "product": "NRML", "mode": "live"}])
     );
 }
+
+/// The scalping page's MARKET entry body for the test contract.
+fn page_entry() -> Value {
+    json!({"symbol": OPT, "exchange": "NFO", "action": "BUY", "product": "NRML", "quantity": 65, "lots": 1})
+}
+
+/// LOG-08: an entry from the scalping page reaches the broker and its answer
+/// is lost. The page got the raw error and a click to retry sent it again.
+/// Now the trader reads that the broker did not confirm it, a retry (and an
+/// exit for that contract) is refused while it is unconfirmed, and once the
+/// order book shows it the entry joins the scalping list and the page trades
+/// again.
+#[tokio::test]
+async fn an_unconfirmed_entry_is_not_sent_again_until_the_book_settles_it() {
+    let h = H::new().await;
+    // Book reads are driven by hand.
+    h.ctx.reconciler.stop();
+    let (cookie, csrf) = session(&h);
+    h.mock.after_send.lock().push_back((
+        openalgo_desktop_lib::brokers::mock::AfterSend::Dropped,
+        "complete",
+    ));
+    *h.mock.after_send_time.lock() = "2026-10-03 09:42:05".into();
+    let order = |b: &Value| {
+        req(
+            Method::POST,
+            "/scalping/api/order",
+            Some(b.clone()),
+            Some(&cookie),
+            Some(&csrf),
+        )
+    };
+    let (s, b) = call(&h, order(&page_entry())).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", b);
+    assert_eq!(
+        b["message"],
+        openalgo_desktop_lib::scalping::unconfirmed::NOT_CONFIRMED
+    );
+    assert_eq!(placed(&h).len(), 1);
+
+    // The click to retry, and an exit for that contract, are refused.
+    let (s, b) = call(&h, order(&page_entry())).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", b);
+    assert!(b["message"].as_str().unwrap().contains("was not confirmed"));
+    let (s, _) = call(
+        &h,
+        req(
+            Method::POST,
+            "/scalping/api/close_leg",
+            Some(json!({"symbol": OPT, "exchange": "NFO", "action": "SELL", "product": "NRML", "quantity": 65})),
+            Some(&cookie),
+            Some(&csrf),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(placed(&h).len(), 1, "nothing more reached the broker");
+
+    // The order book settles it: tracked, and the page trades again.
+    h.ctx.reconciler.pass().await;
+    let (_, b) = call(
+        &h,
+        req(
+            Method::GET,
+            "/scalping/api/tracked",
+            None,
+            Some(&cookie),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        b["data"],
+        json!([{"symbol": OPT, "exchange": "NFO", "product": "NRML", "mode": "live"}])
+    );
+    let (s, b) = call(&h, order(&page_entry())).await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    assert_eq!(placed(&h).len(), 2);
+}
+
+/// LOG-08 across a restart: an order from the scalping page that the broker
+/// did not confirm is kept in the database. After the app reopens, a repeat
+/// for that contract is still refused, and once the broker's order book shows
+/// the order it joins the scalping list and the page trades again.
+#[tokio::test]
+async fn an_unconfirmed_scalping_order_survives_a_restart() {
+    use openalgo_desktop_lib::scalping::unconfirmed::{record, NewPending};
+    // The app stopped with an unconfirmed live entry on record.
+    let h = H::new_with(|dir| {
+        let db = SqliteDb::new(&dir.join("openalgo.db")).unwrap();
+        record(
+            &db,
+            &NewPending {
+                mode: "live",
+                kind: "entry",
+                symbol: OPT,
+                exchange: "NFO",
+                product: "NRML",
+                action: "BUY",
+                quantity: 65,
+                client_tag: None,
+            },
+            crate::api_v1_support::session_time(),
+        )
+        .unwrap();
+    })
+    .await;
+    h.ctx.reconciler.stop();
+    let (cookie, csrf) = session(&h);
+    let order = |b: &Value| {
+        req(
+            Method::POST,
+            "/scalping/api/order",
+            Some(b.clone()),
+            Some(&cookie),
+            Some(&csrf),
+        )
+    };
+    let (s, b) = call(&h, order(&page_entry())).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", b);
+    assert!(b["message"].as_str().unwrap().contains("was not confirmed"));
+    assert!(placed(&h).is_empty(), "nothing reached the broker");
+
+    // The broker's book holds it: the reconciler settles it.
+    *h.mock.order_book.lock() = Some(Ok(vec![openalgo_desktop_lib::brokers::types::Order {
+        order_id: "BRK-77".into(),
+        exchange_order_id: None,
+        symbol: OPT.into(),
+        exchange: "NFO".into(),
+        side: "BUY".into(),
+        quantity: 65,
+        filled_quantity: 65,
+        pending_quantity: 0,
+        price: 0.0,
+        trigger_price: 0.0,
+        average_price: 120.0,
+        order_type: "MARKET".into(),
+        product: "NRML".into(),
+        status: "complete".into(),
+        validity: "DAY".into(),
+        order_timestamp: "2026-10-03 09:42:05".into(),
+        exchange_timestamp: None,
+        rejection_reason: None,
+        order_tag: None,
+    }]));
+    h.ctx.reconciler.pass().await;
+    let (_, b) = call(
+        &h,
+        req(
+            Method::GET,
+            "/scalping/api/tracked",
+            None,
+            Some(&cookie),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        b["data"],
+        json!([{"symbol": OPT, "exchange": "NFO", "product": "NRML", "mode": "live"}])
+    );
+    let (s, b) = call(&h, order(&page_entry())).await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    assert_eq!(placed(&h).len(), 1);
+}
+
+/// LOG-08 P0-3 on the scalping page: a live entry whose answer was lost and
+/// that the broker's book never shows is never released on absence alone,
+/// however long. It is listed under Unconfirmed Orders on the Health page
+/// with a critical alert, the contract stays refused, and the trader's "not
+/// placed" there releases it.
+#[tokio::test]
+async fn a_held_page_order_is_released_only_by_the_traders_not_placed() {
+    use openalgo_desktop_lib::services::order_reconciler::{
+        ABSENT_READS, ABSENT_SPAN_SECS, LIVE_RELEASE_SECS,
+    };
+    let h = H::new().await;
+    h.ctx.reconciler.stop();
+    let (cookie, csrf) = session(&h);
+    let get = |path: &str| req(Method::GET, path, None, Some(&cookie), None);
+    let order = || {
+        req(
+            Method::POST,
+            "/scalping/api/order",
+            Some(page_entry()),
+            Some(&cookie),
+            Some(&csrf),
+        )
+    };
+    h.mock.after_send.lock().push_back((
+        openalgo_desktop_lib::brokers::mock::AfterSend::Dropped,
+        "open",
+    ));
+    let (s, _) = call(&h, order()).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+    // The broker's book never shows it.
+    *h.mock.order_book.lock() = Some(Ok(Vec::new()));
+    for _ in 0..=ABSENT_READS {
+        h.clock.advance(chrono::Duration::seconds(ABSENT_SPAN_SECS));
+        h.ctx.reconciler.pass().await;
+    }
+    let (_, body) = call(&h, get("/health/api/held-orders")).await;
+    let rows = body["data"].as_array().cloned().unwrap_or_default();
+    assert_eq!(rows.len(), 1, "{}", body);
+    assert_eq!(rows[0]["owner"], "scalping-page");
+    assert_eq!(rows[0]["action"], "BUY");
+    assert_eq!(rows[0]["quantity"], 65);
+    assert!(rows[0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Scalping page"));
+    let (_, alerts) = call(&h, get("/health/api/alerts")).await;
+    assert!(
+        alerts.to_string().contains("order_unconfirmed_held"),
+        "{}",
+        alerts
+    );
+    // Long past the release window: still held, still refused.
+    h.clock
+        .advance(chrono::Duration::seconds(LIVE_RELEASE_SECS + 60));
+    h.ctx.reconciler.pass().await;
+    let (s, _) = call(&h, order()).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(placed(&h).len(), 1);
+
+    // The trader checked the books and marks it not placed.
+    let confirm = json!({"owner": "scalping-page", "id": rows[0]["id"]});
+    let (s, b) = call(
+        &h,
+        req(
+            Method::POST,
+            "/health/api/held-orders/not-placed",
+            Some(confirm.clone()),
+            Some(&cookie),
+            Some(&csrf),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    let (_, body) = call(&h, get("/health/api/held-orders")).await;
+    assert!(body["data"].as_array().unwrap().is_empty(), "{}", body);
+    let (s, b) = call(&h, order()).await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    assert_eq!(placed(&h).len(), 2);
+}
+
+/// LOG-08 with a freeze-split exit from the scalping page: the first
+/// chunk's answer is lost. The split sends nothing after it, the
+/// chunk is recorded as unconfirmed with its own quantity, and the order
+/// book settles it.
+#[tokio::test]
+async fn a_split_exit_records_the_chunk_the_broker_did_not_confirm() {
+    let h = H::new().await;
+    h.ctx.reconciler.stop();
+    let (cookie, csrf) = session(&h);
+    h.mock.after_send.lock().push_back((
+        openalgo_desktop_lib::brokers::mock::AfterSend::Dropped,
+        "open",
+    ));
+    *h.mock.after_send_time.lock() = "2026-10-03 09:42:05".into();
+    // 60 lots: above the NIFTY freeze (1,800 before 5 October 2026, 3,510
+    // after), so the exit goes out in at least two freeze-sized chunks.
+    let close = || {
+        req(
+            Method::POST,
+            "/scalping/api/close_leg",
+            Some(
+                json!({"symbol": OPT, "exchange": "NFO", "action": "SELL", "product": "NRML", "quantity": 65 * 60}),
+            ),
+            Some(&cookie),
+            Some(&csrf),
+        )
+    };
+    let (s, b) = call(&h, close()).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", b);
+    assert_eq!(
+        b["message"],
+        openalgo_desktop_lib::scalping::unconfirmed::NOT_CONFIRMED
+    );
+    let sent = placed(&h);
+    assert_eq!(sent.len(), 1, "nothing after the first chunk: {:?}", sent);
+    let (action, first) = sent[0].clone();
+    assert_eq!(action, "SELL");
+    assert!(
+        first < 65 * 60 && first % 65 == 0,
+        "a freeze-sized chunk: {}",
+        first
+    );
+    let pending =
+        openalgo_desktop_lib::scalping::unconfirmed::pending(&h.ctx.sqlite, "live").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        (pending[0].kind.as_str(), pending[0].quantity),
+        ("exit", first)
+    );
+    let (s, _) = call(&h, close()).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(placed(&h).len(), 1, "nothing more reached the broker");
+
+    // The book shows the chunk: settled, and the page can exit again.
+    h.ctx.reconciler.pass().await;
+    assert!(
+        openalgo_desktop_lib::scalping::unconfirmed::pending(&h.ctx.sqlite, "live")
+            .unwrap()
+            .is_empty()
+    );
+    let (s, b) = call(&h, close()).await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+}
