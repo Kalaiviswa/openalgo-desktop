@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::NaiveDate;
-use openalgo_desktop_lib::services::order_reconciler::{BookSnapshot, OrderOwner};
+use openalgo_desktop_lib::services::order_reconciler::{
+    BookSnapshot, EntryGate, OrderOwner, ENTRIES_PAUSED,
+};
 use openalgo_desktop_lib::strategy::dispatch::{
     Book, BookOrder, DispatchResult, OrderStatusResult, RunMode,
 };
@@ -61,6 +63,9 @@ struct Fake {
     lose_reply: AtomicU64,
     /// Placements with no definite answer that never reached it.
     never_arrives: AtomicU64,
+    /// Who decides whether new entries wait (the app's order reconciler in
+    /// the tests that set it).
+    gate: Mutex<Option<Arc<dyn EntryGate>>>,
 }
 
 /// A placement the destination neither accepted nor refused.
@@ -353,6 +358,12 @@ impl RunnerServices for Fake {
     }
     fn signed_in(&self) -> bool {
         !self.nobody.load(Ordering::SeqCst)
+    }
+    fn entry_refusal(&self, mode: RunMode) -> Option<String> {
+        self.gate
+            .lock()
+            .as_ref()
+            .and_then(|g| g.entry_refusal(mode))
     }
 }
 
@@ -2051,4 +2062,75 @@ async fn the_reconciler_settles_the_runners_unconfirmed_rows() {
     }
     assert_eq!(t.row_status(1).0, "rejected", "{}", report);
     assert_eq!(report["unresolved"], 0);
+}
+
+/// An owner holding an open order on both sides, so a lost order fact
+/// opens a gap there.
+struct Holder;
+
+#[async_trait]
+impl OrderOwner for Holder {
+    fn name(&self) -> &'static str {
+        "test-holder"
+    }
+    fn has_open_orders(&self, _mode: RunMode) -> bool {
+        true
+    }
+    fn owns_order(&self, _order_id: &str) -> bool {
+        false
+    }
+    async fn reconcile(&self, _mode: RunMode, _book: &BookSnapshot) -> usize {
+        0
+    }
+}
+
+/// ARCH-01 for OpenScript (maintainer decision): while the order reconciler
+/// repairs a gap in order facts on a run's side (order updates were lost),
+/// the run's new entries wait, as a strategy's do. An order that only
+/// reduces what the run holds, and Stop, still go; once the book has been
+/// read the run trades again.
+#[tokio::test]
+async fn new_entries_wait_while_order_facts_are_repaired() {
+    let t = setup().await;
+    let reconciler = t.h.ctx.reconciler.clone();
+    reconciler.stop();
+    *t.fake.gate.lock() = Some(reconciler.clone());
+    let id = t.deploy("SBIN").await;
+    t.fake.fill_at_once.store(true, Ordering::SeqCst);
+    t.start(&id).await;
+    t.buy(&id, 1, 3).await;
+    t.h.ctx.trading.runner.pump_once(&id).await;
+
+    // An order fact is lost while someone holds open orders.
+    reconciler.register(Arc::new(Holder));
+    reconciler.report_fact_loss(false);
+    assert!(reconciler.gap_open(RunMode::Sandbox));
+
+    // A new entry waits, and the script is told why.
+    let v = t.buy(&id, 2, 1).await;
+    assert_eq!(v["sent"], 0, "{}", v);
+    let frames = t.frames(&id, 2).await;
+    assert_eq!(frames.last().unwrap()["status"], "rejected");
+    assert_eq!(frames.last().unwrap()["text"], ENTRIES_PAUSED);
+    // A sell larger than the run holds would open a short: it waits too.
+    assert_eq!(t.order(&id, 3, "sell", 4).await["sent"], 0);
+    // An order that only reduces the position goes.
+    assert_eq!(t.order(&id, 4, "sell", 1).await["sent"], 1);
+    assert_eq!(t.fake.placed_on(RunMode::Sandbox).len(), 2);
+
+    // The sandbox book is read: the gap closes and entries go again.
+    reconciler.pass().await;
+    assert!(!reconciler.gap_open(RunMode::Sandbox));
+    assert_eq!(t.buy(&id, 5, 1).await["sent"], 1);
+
+    // Stop is never held by a gap.
+    t.h.ctx.trading.runner.pump_once(&id).await;
+    reconciler.report_fact_loss(false);
+    assert!(reconciler.gap_open(RunMode::Sandbox));
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let sent = t.fake.placed_on(RunMode::Sandbox);
+    assert_eq!(sent.len(), 4);
+    assert_eq!(sent[3]["action"], "SELL");
+    assert_eq!(sent[3]["quantity"], 3);
 }

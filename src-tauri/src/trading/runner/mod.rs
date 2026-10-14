@@ -1890,19 +1890,40 @@ impl Runner {
             exchange: &info.exchange,
             product: &product,
         };
+        // Order facts on this side may be missing after lost order updates
+        // (ARCH-01): no new exposure until the order book has been read
+        // again. An order that only reduces what this run holds still goes,
+        // as a strategy's exits do; Stop is never held by this.
+        let paused = services.entry_refusal(info.mode);
+        let mut room = orders::ExitRoom::of(&own, &info.symbol, &info.exchange, &product);
         let mut sent = 0;
         for p in planned {
             match p {
-                Planned::Place(placement) => match self
-                    .send(&info, &target, &placement, Some(&entry), false)
-                    .await
-                {
-                    Ok((_, r)) => sent += usize::from(r.ok),
-                    Err(e) => {
-                        tracing::error!("Could not record an OpenScript order: {}", e);
-                        reject(placement.intent_id, "the order could not be recorded");
+                Planned::Place(placement) => {
+                    if let Some(why) = paused.as_deref() {
+                        if !room.take(placement.action, placement.quantity) {
+                            self.write_log(
+                                &info,
+                                &[format!(
+                                    "{} {} {} was not sent: {}",
+                                    placement.action, placement.quantity, info.symbol, why
+                                )],
+                            );
+                            reject(placement.intent_id, why);
+                            continue;
+                        }
                     }
-                },
+                    match self
+                        .send(&info, &target, &placement, Some(&entry), false)
+                        .await
+                    {
+                        Ok((_, r)) => sent += usize::from(r.ok),
+                        Err(e) => {
+                            tracing::error!("Could not record an OpenScript order: {}", e);
+                            reject(placement.intent_id, "the order could not be recorded");
+                        }
+                    }
+                }
                 Planned::Cancel { tag, .. } => {
                     let rows = match self.read_own(&info) {
                         Ok(rows) => rows,
