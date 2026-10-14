@@ -514,6 +514,41 @@ async fn shoonya_books_funds_and_cancel_all() {
     assert_eq!(exits[1].jdata["qty"], "75");
 }
 
+/// BR-03 sentinels: a position book reply that is not a list (an object,
+/// an `Ok` without rows, text) is never read as flat by the smart-order
+/// read or close all; the broker's own "no data" answer is.
+#[tokio::test]
+async fn a_malformed_position_book_is_never_flat() {
+    for body in [
+        "{}",
+        "{\"stat\":\"Ok\"}",
+        "\"x\"",
+        "{\"stat\":\"Not_Ok\",\"emsg\":\"Session Expired : Invalid Session Key\"}",
+    ] {
+        let (b, fake, auth) = noren(shoonya::config()).await;
+        fake.bodies.lock().push(("PositionBook", body));
+        assert!(
+            b.get_open_position(&auth, "RELIANCE", Exchange::Nse, Product::Mis)
+                .await
+                .is_err(),
+            "{}",
+            body
+        );
+        assert!(b.close_all_positions(&auth).await.is_err(), "{}", body);
+        assert!(fake.calls("/PlaceOrder").is_empty(), "{}", body);
+    }
+    let (b, fake, auth) = noren(shoonya::config()).await;
+    fake.bodies
+        .lock()
+        .push(("PositionBook", "{\"stat\":\"Not_Ok\",\"emsg\":\"no data\"}"));
+    assert_eq!(
+        b.get_open_position(&auth, "RELIANCE", Exchange::Nse, Product::Mis)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn shoonya_modify_and_basket_margin() {
     let (b, fake, auth) = noren(shoonya::config()).await;
