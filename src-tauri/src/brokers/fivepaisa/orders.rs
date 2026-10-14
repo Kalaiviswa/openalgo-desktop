@@ -118,9 +118,12 @@ pub fn strict_rows(v: &Value) -> Result<Vec<Value>> {
 /// LIMIT price for a MARKET order: the LTP plus/minus the MPP slab, rounded
 /// to the tick (5paisa refuses plain market orders from API keys). Falls
 /// back to the request price when no LTP is available, like the web.
+/// Read before the order is sent: a server error on the quote never counts
+/// against the order's own answer (review P2-3).
 async fn market_price(b: &FivepaisaBroker, auth: &AuthToken, o: &ResolvedOrder) -> f64 {
     let key = QuoteKey::new(o.exchange.as_str(), o.symbol.clone());
-    match super::data::get_quote(b, auth, &key).await {
+    match crate::brokers::common::outcome::before_send(super::data::get_quote(b, auth, &key)).await
+    {
         Ok(q) if q.ltp > 0.0 => {
             let tick = (o.instrument.tick_size > 0.0).then_some(o.instrument.tick_size);
             protected_price(

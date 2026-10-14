@@ -24,7 +24,12 @@ Every adapter `place_order` runs inside `outcome::placing`. In there:
 - **A server error taints the placement.** `http::read_json` (and adapters
   with their own transport, through `outcome::note_server_error`) record a
   5xx; a `refusal` after it in the same placement stays uncertain, so an
-  error body on a 5xx never reads as "not placed".
+  error body on a 5xx never reads as "not placed". A session error
+  (`AppError::Auth`) after a 5xx in the same placement is uncertain too
+  (review P2-4: XTS, Noren, Firstock, HDFC Sky, Motilal, HDFC Securities
+  and Upstox read a session error from the body whatever the status);
+  `outcome::placing` settles it before returning, and the wire keeps the
+  session error's 403.
 - **A success status (2xx) is a refusal only with the broker's explicit
   failure marker.** `outcome::not_accepted` decides an answer without an
   order id: 5xx uncertain, 4xx refused, 2xx refused only when the adapter
@@ -33,7 +38,10 @@ Every adapter `place_order` runs inside `outcome::placing`. In there:
 - **Steps before the send do not count against the order.**
   `outcome::before_send` wraps a quote read for market protection, a
   client-id lookup and similar: its failure is a refusal (nothing was sent)
-  and a 5xx it met does not taint the order's own answer.
+  and a 5xx it met does not taint the order's own answer. Firstock's and
+  5paisa's MARKET price quotes run there too (review P2-3).
+- **A rate limit (429) on an order is a refusal**: the broker turned it
+  away before processing (Groww, INDmoney and the shared `read_json`).
 - Outside a placement (books, quotes, modify, cancel) a refusal is an
   ordinary `AppError::Broker`, as before.
 

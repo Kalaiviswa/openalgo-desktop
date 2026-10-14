@@ -29,6 +29,8 @@ struct Answer {
 
 struct Fake {
     answer: Arc<Mutex<Answer>>,
+    /// Answers for the paths that contain a key, before `answer`.
+    routes: Arc<Mutex<Vec<(&'static str, Answer)>>>,
     base: String,
     task: tokio::task::JoinHandle<()>,
 }
@@ -45,8 +47,15 @@ async fn fake() -> Fake {
         body: "{}".into(),
     }));
     let a = answer.clone();
-    let app = Router::new().fallback(move || {
-        let a = a.lock().clone();
+    let routes: Arc<Mutex<Vec<(&'static str, Answer)>>> = Arc::default();
+    let r = routes.clone();
+    let app = Router::new().fallback(move |uri: axum::http::Uri| {
+        let a = r
+            .lock()
+            .iter()
+            .find(|(p, _)| uri.path().contains(p))
+            .map(|(_, a)| a.clone())
+            .unwrap_or_else(|| a.lock().clone());
         async move {
             let r: Response = (
                 StatusCode::from_u16(a.status).unwrap(),
@@ -62,7 +71,12 @@ async fn fake() -> Fake {
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    Fake { answer, base, task }
+    Fake {
+        answer,
+        routes,
+        base,
+        task,
+    }
 }
 
 fn symbols() -> SymbolResolver {
@@ -428,4 +442,141 @@ async fn pocketful_lost_answers_are_uncertain() {
         },
     )
     .await;
+}
+
+// ------------------------------------------------ review P2-3 and P2-4
+
+fn market_order(symbols: &SymbolResolver) -> ResolvedOrder {
+    ResolvedOrder::resolve(
+        &OrderRequest {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            side: "BUY".into(),
+            quantity: 1,
+            price: 0.0,
+            order_type: "MARKET".into(),
+            product: "MIS".into(),
+            validity: "DAY".into(),
+            trigger_price: None,
+            disclosed_quantity: None,
+            amo: false,
+        },
+        symbols,
+    )
+    .unwrap()
+}
+
+fn answer(status: u16, body: &str) -> Answer {
+    Answer {
+        status,
+        body: body.to_string(),
+    }
+}
+
+/// Review P2-3: the quote a MARKET order is priced from is read before the
+/// order is sent. Its server error never makes the order's own readable
+/// refusal "may have been placed".
+#[tokio::test]
+async fn firstock_a_failed_price_quote_does_not_taint_the_refusal() {
+    use openalgo_desktop_lib::brokers::firstock::FirstockBroker;
+    let f = fake().await;
+    let b = FirstockBroker::with_urls(symbols(), &f.base, "ws://127.0.0.1:1");
+    f.routes.lock().push((
+        "/getQuote",
+        answer(503, r#"{"status":"failed","error":{"message":"busy"}}"#),
+    ));
+    *f.answer.lock() = answer(
+        200,
+        r#"{"status":"failed","error":{"message":"RMS: margin exceeds"}}"#,
+    );
+    let r = placing(b.place_order(
+        &AuthToken::new("AB1234:::jkey-1"),
+        &market_order(&symbols()),
+    ))
+    .await;
+    assert!(
+        matches!(classify(&r), PlaceOutcome::Refused { .. }),
+        "{:?}",
+        r
+    );
+}
+
+#[tokio::test]
+async fn fivepaisa_a_failed_price_quote_does_not_taint_the_refusal() {
+    use openalgo_desktop_lib::brokers::fivepaisa::{FivepaisaBroker, Session};
+    let f = fake().await;
+    let b = FivepaisaBroker::with_urls(symbols(), &f.base, format!("{}/master.csv", f.base));
+    let auth = AuthToken::new(
+        Session {
+            api_key: "APPKEY".into(),
+            client_code: "50001234".into(),
+            access_token: "eyJhbGciOiJIUzI1NiJ9.e30.sig".into(),
+        }
+        .encode(),
+    );
+    f.routes.lock().push((
+        "MarketSnapshot",
+        answer(503, r#"{"head":{"statusDescription":"Error"},"body":{}}"#),
+    ));
+    *f.answer.lock() = answer(
+        200,
+        r#"{"head":{"statusDescription":"Success"},"body":{"Status":1,"Message":"Insufficient funds"}}"#,
+    );
+    let r = placing(b.place_order(&auth, &market_order(&symbols()))).await;
+    assert!(
+        matches!(classify(&r), PlaceOutcome::Refused { .. }),
+        "{:?}",
+        r
+    );
+}
+
+/// Review P2-4: a server error whose body says the session ended says
+/// nothing about the order: uncertain, never "not placed". A session error
+/// with no server error is still a refusal.
+#[tokio::test]
+async fn xts_a_session_error_on_a_server_error_is_uncertain() {
+    use openalgo_desktop_lib::brokers::families::xts::XtsBroker;
+    let f = fake().await;
+    let b = XtsBroker::with_base_url(
+        &openalgo_desktop_lib::brokers::fivepaisaxts::CONFIG,
+        symbols(),
+        &f.base,
+    );
+    let auth = AuthToken::new("eyJhbGciOiJIUzI1NiJ9.interactive.sig");
+    let r = attempt(
+        &b,
+        &auth,
+        &f,
+        503,
+        r#"{"type":"error","code":"e-session-0002","description":"Invalid Token"}"#,
+    )
+    .await;
+    assert!(r.is_uncertain(), "{:?}", r);
+    let r = attempt(
+        &b,
+        &auth,
+        &f,
+        401,
+        r#"{"type":"error","code":"e-session-0002","description":"Invalid Token"}"#,
+    )
+    .await;
+    assert!(matches!(r, PlaceOutcome::Refused { .. }), "{:?}", r);
+}
+
+#[tokio::test]
+async fn noren_a_session_error_on_a_server_error_is_uncertain() {
+    use openalgo_desktop_lib::brokers::families::noren::{NorenBroker, NorenEndpoints};
+    use openalgo_desktop_lib::brokers::shoonya;
+    let f = fake().await;
+    let b = NorenBroker::with_endpoints(
+        &shoonya::CONFIG,
+        symbols(),
+        NorenEndpoints::rebased(&shoonya::CONFIG, &f.base, "ws://127.0.0.1:1"),
+    );
+    let auth = AuthToken::new("AB1234:::sess-tok");
+    let expired = r#"{"stat":"Not_Ok","emsg":"Session Expired :  Invalid Session Key"}"#;
+    let r = attempt(&b, &auth, &f, 502, expired).await;
+    assert!(r.is_uncertain(), "{:?}", r);
+    let r = attempt(&b, &auth, &f, 200, expired).await;
+    assert!(matches!(r, PlaceOutcome::Refused { .. }), "{:?}", r);
 }

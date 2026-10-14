@@ -28,7 +28,10 @@
 //!
 //! Inside [`placing`], [`super::http::read_json`] notes a server error
 //! (5xx); a [`refusal`] after one in the same placement stays uncertain, so
-//! a broker's error body on a 5xx never reads as "not placed".
+//! a broker's error body on a 5xx never reads as "not placed". So does a
+//! session error ([`AppError::Auth`]) after one (review P2-4): a 5xx whose
+//! body says the session ended, or a sign-in refused after a 5xx, says
+//! nothing about the order. It keeps its session-error wire answer.
 //!
 //! The uncertainty never reaches the `/api/v1` wire: the order service
 //! answers exactly as before (a broker's text with 400, a transport failure
@@ -81,8 +84,51 @@ tokio::task_local! {
 
 /// Run `fut` as one order placement: inside it, any adapter error that is
 /// not a marked refusal is uncertain.
-pub async fn placing<F: Future>(fut: F) -> F::Output {
-    PLACING.scope(Scope::default(), fut).await
+pub async fn placing<F>(fut: F) -> F::Output
+where
+    F: Future,
+    F::Output: Placed,
+{
+    PLACING
+        .scope(Scope::default(), async { fut.await.settle() })
+        .await
+}
+
+/// What a placement answers: settled inside the placement, while what
+/// happened in it is still known.
+pub trait Placed {
+    fn settle(self) -> Self;
+}
+
+impl<T> Placed for Result<T> {
+    fn settle(self) -> Self {
+        self.map_err(settle)
+    }
+}
+
+impl Placed for AppError {
+    fn settle(self) -> Self {
+        settle(self)
+    }
+}
+
+/// A session error after a server error in the same placement is
+/// uncertain (review P2-4); everything else is already what it is.
+fn settle(e: AppError) -> AppError {
+    match e {
+        AppError::Auth(m) if saw_server_error() => {
+            tracing::warn!(
+                "A session error followed a server error inside a placement; the order may have been placed"
+            );
+            AppError::Uncertain(Box::new(UncertainOrder {
+                message: m,
+                client_tag: None,
+                internal: false,
+                session: true,
+            }))
+        }
+        other => other,
+    }
 }
 
 /// Whether the current task is inside [`placing`].
@@ -210,6 +256,8 @@ pub fn uncertain_cause(e: &AppError) -> Option<Option<String>> {
         AppError::Uncertain(u) => Some(u.client_tag.clone()),
         AppError::Http(re) if after_send(re) => Some(None),
         AppError::Http(_) => None,
+        // A session error after a server error in this placement (P2-4).
+        AppError::Auth(_) if saw_server_error() => Some(None),
         // The default: a broker error not marked as a refusal, an answer
         // that could not be parsed, a socket failure, an unnamed error.
         AppError::Broker(_)
@@ -240,7 +288,7 @@ pub fn uncertain_cause(e: &AppError) -> Option<Option<String>> {
 fn uncertain_reason(e: &AppError) -> String {
     match e {
         AppError::Uncertain(u) => u.message.clone(),
-        AppError::Broker(m) => m.clone(),
+        AppError::Broker(m) | AppError::Auth(m) => m.clone(),
         _ => UNCERTAIN_MESSAGE.to_string(),
     }
 }
@@ -286,15 +334,17 @@ pub fn with_client_tag(result: Result<OrderResponse>, client_tag: &str) -> Resul
                     client_tag,
                     e.code()
                 );
-                let internal = match &e {
-                    AppError::Broker(_) => false,
-                    AppError::Uncertain(u) => u.internal,
-                    _ => true,
+                let (internal, session) = match &e {
+                    AppError::Broker(_) => (false, false),
+                    AppError::Auth(_) => (false, true),
+                    AppError::Uncertain(u) => (u.internal, u.session),
+                    _ => (true, false),
                 };
                 Err(AppError::Uncertain(Box::new(UncertainOrder {
                     message: uncertain_reason(&e),
                     client_tag: Some(client_tag.into()),
                     internal,
+                    session,
                 })))
             }
             _ => Err(e),
@@ -631,5 +681,65 @@ mod tests {
         let t = new_client_tag();
         assert_eq!(t.len(), 18);
         assert!(t.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Review P2-4: a session error after a server error in the same
+    /// placement says nothing about the order. It is uncertain, keeps its
+    /// text (and a tagging adapter's tag), and is answered on the wire as
+    /// the session error it reads as.
+    #[tokio::test]
+    async fn a_session_error_after_a_server_error_is_uncertain() {
+        let expired = || AppError::Auth("Your session has expired.".into());
+        let r: Result<OrderResponse> = placing(async {
+            note_server_error();
+            Err(expired())
+        })
+        .await;
+        assert!(classify(&r).is_uncertain(), "{:?}", r);
+        match &r {
+            Err(AppError::Uncertain(u)) => {
+                assert!(u.session && !u.internal, "{:?}", u);
+                assert_eq!(u.message, "Your session has expired.");
+            }
+            other => panic!("{:?}", other),
+        }
+        let wire = crate::services::order_service::broker_error_reply(r.as_ref().unwrap_err(), "x");
+        assert_eq!(wire.status, 403);
+        // A tagging adapter keeps its tag.
+        let r = placing(async {
+            note_server_error();
+            with_client_tag(Err(expired()), "oa0123456789abcdef")
+        })
+        .await;
+        match &r {
+            Err(AppError::Uncertain(u)) => {
+                assert_eq!(u.client_tag.as_deref(), Some("oa0123456789abcdef"));
+                assert!(u.session && !u.internal, "{:?}", u);
+            }
+            other => panic!("{:?}", other),
+        }
+        // No server error: the session was refused before anything was
+        // placed.
+        let r: Result<OrderResponse> = placing(async { Err(expired()) }).await;
+        assert!(
+            matches!(classify(&r), PlaceOutcome::Refused { .. }),
+            "{:?}",
+            r
+        );
+        // A server error in a step before sending does not count.
+        let r: Result<OrderResponse> = placing(async {
+            let _ = before_send(async {
+                note_server_error();
+                Ok::<_, AppError>(1.0)
+            })
+            .await;
+            Err(expired())
+        })
+        .await;
+        assert!(
+            matches!(classify(&r), PlaceOutcome::Refused { .. }),
+            "{:?}",
+            r
+        );
     }
 }

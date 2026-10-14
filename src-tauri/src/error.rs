@@ -116,6 +116,10 @@ pub struct UncertainOrder {
     /// text); otherwise the wire carries `message` with 400, as a broker
     /// error always has. The uncertainty itself never reaches the wire.
     pub internal: bool,
+    /// The broker said the session had ended, but only after a server
+    /// error in the same placement (review P2-4): the order service
+    /// answers it as the session error it reads as (403, `message`).
+    pub session: bool,
 }
 
 impl AppError {
@@ -125,6 +129,7 @@ impl AppError {
             message: message.into(),
             client_tag,
             internal: false,
+            session: false,
         }))
     }
 }
