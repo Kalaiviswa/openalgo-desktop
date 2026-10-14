@@ -27,6 +27,12 @@ export interface GammaDensityResponse {
   forward_price?: number
   atm_strike?: number
   atm_iv?: number
+  /** Desktop (TOOLS-15): where the ATM IV came from. */
+  atm_iv_source?: 'atm' | 'median' | 'assumed'
+  /** Desktop: legs with open interest priced with the ATM IV, not their own. */
+  estimated_iv_legs?: number
+  /** Desktop: what the options were priced against. */
+  pricing_reference?: 'forward' | 'spot'
   dte_days?: number
   interest_rate?: number
   peak_intraday_strike?: number | null
