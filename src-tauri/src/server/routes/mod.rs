@@ -34,6 +34,7 @@ pub mod strategy_module;
 pub mod strategy_portfolio;
 pub mod telegram;
 pub mod traffic;
+pub mod update;
 pub mod watchlist;
 pub mod websocket_example;
 pub mod webui;
@@ -232,6 +233,11 @@ pub fn table() -> Vec<RouteSpec> {
         r!(POST, "/settings/api/server", User, settings::save_server),
         r!(GET, "/api/desktop/settings", User, settings::get_server),
         r!(POST, "/api/desktop/settings", User, settings::save_server),
+        // In-app updates (desktop only; services::update_service)
+        r!(GET, "/api/update/status", User, update::status),
+        r!(POST, "/api/update/check", User, update::check),
+        r!(POST, "/api/update/install", User, update::install),
+        r!(POST, "/api/update/cancel", User, update::cancel),
         r!(GET, "/settings/analyze-mode", User, settings::analyze_mode),
         r!(
             GET,

@@ -399,18 +399,37 @@ name or a password was right.
 
 ## Updating OpenAlgo Desktop
 
-Download the new version for your system from
-[Releases](https://github.com/marketcalls/openalgo-desktop/releases) and
-install it over the old one, as in [Download and install](#download-and-install).
-Your account, settings, broker keys, strategies, sandbox data and Historify
-data are kept.
+OpenAlgo Desktop checks for a newer version each time it starts; to check at
+any time, open the profile menu and choose **Check for Updates**. When one is
+available a small notice shows the version and its release notes. It only
+tells you: **nothing is downloaded until you choose Update**.
+
+**Update** downloads the new version, checks its signature against the key
+built into the app (an update that does not match is refused), installs it
+and restarts. Before it downloads, and again before it restarts, OpenAlgo
+names anything a restart would interrupt (running Live strategies, OpenScript
+runs, scalping stops, open orders at your broker) and asks you to confirm;
+sandbox-only activity gets a lighter warning. It never restarts on its own.
+
+| Installed from | How it updates |
+| --- | --- |
+| macOS `.dmg` | In the app: replaces OpenAlgo Desktop |
+| Windows setup `.exe` | In the app: runs the new installer (passive, for your user only) |
+| Linux or Raspberry Pi AppImage | In the app: replaces the `.AppImage` file |
+| Linux or Raspberry Pi `.deb` | The app tells you and links to the release page; download the new `.deb` there and install it over the old one |
+
+You can always install a newer version by hand over the old one from
+[Releases](https://github.com/marketcalls/openalgo-desktop/releases). Your
+account, settings, broker keys, strategies, sandbox data and Historify data
+are kept either way.
 
 The first time the new version starts, it backs up your data before it
 changes anything, and if it then cannot open the data it puts that copy back
 and says so. The copy is deleted as soon as the new version has opened your
 data. An older version never opens data that a newer version has used; it
 says so and changes nothing. Details:
-[Updating OpenAlgo Desktop](docs/user/updating.md).
+[Updating OpenAlgo Desktop](docs/user/updating.md). Maintainers:
+[how a release reaches installed copies](docs/release/updates.md).
 
 ## Supported brokers
 
@@ -462,6 +481,7 @@ connected at a time.
 - [Broker sign-in](docs/user/brokers.md)
 - [Sandbox mode (analyzer mode)](docs/user/sandbox.md)
 - [Connecting Claude Desktop and Claude Code (MCP)](docs/user/mcp.md)
+- [Updating OpenAlgo Desktop](docs/user/updating.md)
 - [Troubleshooting](docs/user/troubleshooting.md)
 - [Changelog](CHANGELOG.md)
 - OpenAlgo documentation: [docs.openalgo.in](https://docs.openalgo.in)

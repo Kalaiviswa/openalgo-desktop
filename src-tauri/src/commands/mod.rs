@@ -9,16 +9,50 @@
 //! | `reset_account`  | the main window on the app's own page, after a native confirmation | start over with a new account |
 //! | `start_fresh`    | the main window on the app's own page, after a native confirmation | a new password without the old one: forgotten, or an earlier build's keys unreadable (KEY-01) |
 //! | `window_proof`   | the main window on the app's own page | the proof its sign-in carries, so only the app window moves an earlier build's keys and hears why keys could not be opened (KEY-01) |
+//! | `restart_to_update` | signed-in user, the main window on the app's own page | install the downloaded, verified update and restart (`services::update_service` decides; it asks again if new activity appeared) |
 
 use crate::error::{AppError, Result};
 use crate::server::{self, ServerHandle};
+use crate::services::update_service::{Activity, Decision, Warning};
 use crate::state::{AppState, ServerStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
 pub struct ShellState {
     pub ctx: Arc<AppState>,
     pub server: tokio::sync::Mutex<Option<ServerHandle>>,
+    /// Everything was stopped (`stop_app` ran): on exit, or before the
+    /// Windows installer replaces the app.
+    pub stopped: AtomicBool,
+}
+
+impl ShellState {
+    pub fn new(ctx: Arc<AppState>, server: Option<ServerHandle>) -> Self {
+        Self {
+            ctx,
+            server: tokio::sync::Mutex::new(server),
+            stopped: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Stop the market data feed, the server and every service, once. Runs on
+/// exit, and before the Windows update installer replaces the app.
+pub async fn stop_app(handle: &AppHandle) {
+    let Some(shell) = handle.try_state::<ShellState>() else {
+        return;
+    };
+    if shell.stopped.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(f) = handle.try_state::<Arc<crate::feed::FeedService>>() {
+        f.stop().await;
+    }
+    if let Some(h) = shell.server.lock().await.take() {
+        h.stop().await;
+    }
+    shell.ctx.shutdown().await;
 }
 
 /// The guard every non-bootstrap command calls first.
@@ -31,7 +65,7 @@ pub fn require_user(ctx: &AppState) -> Result<String> {
 /// basics, opening http(s) links, and the account reset. Granted at run
 /// time to the exact origin the server listens on, never to every port on
 /// loopback (security review S-08).
-pub const REMOTE_APP_PERMISSIONS: [&str; 10] = [
+pub const REMOTE_APP_PERMISSIONS: [&str; 11] = [
     "core:app:allow-version",
     "core:window:allow-set-title",
     "core:window:allow-minimize",
@@ -42,6 +76,7 @@ pub const REMOTE_APP_PERMISSIONS: [&str; 10] = [
     "allow-reset-account",
     "allow-start-fresh",
     "allow-window-proof",
+    "allow-restart-to-update",
 ];
 
 /// The page addresses trusted with [`REMOTE_APP_PERMISSIONS`]: the server's
@@ -481,7 +516,99 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         reset_account,
         start_fresh,
         window_proof,
+        restart_to_update,
     ]
+}
+
+/// The answer the update dialog gets back from `restart_to_update`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RestartOutcome {
+    /// `restarting`, `confirm` (something new runs: show `warning`, send
+    /// `activity` back to go ahead), `refused` or `failed`.
+    pub status: &'static str,
+    pub message: Option<String>,
+    pub activity: Option<Activity>,
+    pub warning: Option<Warning>,
+}
+
+impl RestartOutcome {
+    fn of(status: &'static str, message: Option<String>) -> Self {
+        Self {
+            status,
+            message,
+            activity: None,
+            warning: None,
+        }
+    }
+}
+
+/// Install the downloaded, verified update and restart into it. Only the
+/// trader in the desktop window can: the window must be the main one on
+/// the app's own page, and the update service goes ahead only while
+/// everything running is within what the trader confirmed (it answers
+/// `confirm` again otherwise). OpenScript runs are paused first, and on
+/// exit the feed, the server and every service stop as on any exit.
+#[tauri::command]
+pub async fn restart_to_update(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    shell: State<'_, ShellState>,
+    confirmed: Option<Activity>,
+) -> Result<RestartOutcome> {
+    require_user(&shell.ctx)?;
+    require_app_window(
+        &window,
+        &shell.ctx,
+        "Update restart",
+        "Updates are installed only from the OpenAlgo Desktop window on this computer.",
+    )?;
+    let Some(backend) = app.try_state::<Arc<crate::updater::PluginBackend<tauri::Wry>>>() else {
+        return Ok(RestartOutcome::of(
+            "refused",
+            Some("This copy of OpenAlgo cannot install updates.".into()),
+        ));
+    };
+    let ctx = shell.ctx.clone();
+    match ctx.updates.begin_restart(&ctx, confirmed).await {
+        Decision::Proceed(_) => {}
+        Decision::Confirm { activity, warning } => {
+            return Ok(RestartOutcome {
+                status: "confirm",
+                message: None,
+                activity: Some(activity),
+                warning: Some(warning),
+            })
+        }
+        Decision::Refused(m) => return Ok(RestartOutcome::of("refused", Some(m))),
+    }
+    let paused = ctx
+        .trading
+        .runner
+        .pause_all("Paused because OpenAlgo restarted to install an update");
+    if !paused.is_empty() {
+        tracing::info!("Paused {} OpenScript run(s) for the update", paused.len());
+    }
+    if cfg!(windows) {
+        // The installer replaces the app and starts it again, and starting
+        // it exits this process: stop everything first.
+        stop_app(&app).await;
+        if let Err(f) = backend.install() {
+            // Still here: the installer did not start. Come back on this
+            // version rather than stay stopped.
+            tracing::error!("Update installer did not start: {}", f.detail());
+            app.request_restart();
+        }
+        return Ok(RestartOutcome::of("restarting", None));
+    }
+    // macOS and the AppImage: replace the app on disk, then restart into
+    // it (the exit handler stops everything first).
+    if let Err(f) = backend.install() {
+        ctx.updates.install_failed(&ctx, f).await;
+        return Ok(RestartOutcome::of("failed", ctx.updates.status().message));
+    }
+    tracing::info!("Update installed; restarting");
+    app.request_restart();
+    Ok(RestartOutcome::of("restarting", None))
 }
 
 #[cfg(test)]

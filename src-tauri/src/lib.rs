@@ -44,6 +44,7 @@ pub mod session;
 pub mod state;
 pub mod strategy;
 pub mod trading;
+pub mod updater;
 pub mod webhook;
 pub mod websocket;
 
@@ -63,6 +64,24 @@ pub(crate) fn log_filter(development: bool) -> &'static str {
         "openalgo_desktop_lib=debug,openalgo_desktop=debug,tauri=info,tungstenite=info,tokio_tungstenite=info,warn"
     } else {
         "openalgo_desktop_lib=info,openalgo_desktop=info,tauri=warn,tungstenite=info,tokio_tungstenite=info,warn"
+    }
+}
+
+/// How long after start the automatic update check waits, so start-up
+/// work (the server, a broker session resuming) goes first.
+const STARTUP_UPDATE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether the AppImage runtime started this process (it names the
+/// `.AppImage` file, which an update replaces).
+fn runs_as_appimage<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        app.env().appimage.is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        false
     }
 }
 
@@ -144,6 +163,15 @@ pub fn run() {
             .plugin(tauri_plugin_shell::init())
             // Rust-side native dialogs only (account reset); no JS permission.
             .plugin(tauri_plugin_dialog::init())
+            // In-app updates, driven from Rust only (`updater`): no page is
+            // granted the plugin's own commands.
+            .plugin(
+                tauri_plugin_updater::Builder::new()
+                    .default_version_comparator(|current, release| {
+                        services::update_service::is_newer(&current, &release.version)
+                    })
+                    .build(),
+            )
             .setup(|app| {
                 let Some(ctx) = open_data_folder(app)? else {
                     return Ok(());
@@ -171,6 +199,34 @@ pub fn run() {
                 app.manage(feed);
                 if let Some(h) = &server {
                     commands::trust_app_origin(app.handle(), h.addr.port());
+                }
+
+                // In-app updates: notify only. Release builds check once
+                // shortly after start; nothing downloads before the trader
+                // clicks Update.
+                let updates = Arc::new(updater::PluginBackend::new(
+                    app.handle().clone(),
+                    updater::package_of(
+                        tauri::utils::platform::bundle_type(),
+                        cfg!(debug_assertions),
+                        runs_as_appimage(app.handle()),
+                        std::env::current_exe().ok().as_deref(),
+                    ),
+                ));
+                ctx.updates.set_backend(updates.clone());
+                app.manage(updates);
+                if !cfg!(debug_assertions) {
+                    // An owned task (stopped by `AppState::shutdown`),
+                    // spawned inside the runtime like the others above.
+                    let weak = Arc::downgrade(&ctx);
+                    tauri::async_runtime::block_on(async {
+                        ctx.spawn(async move {
+                            tokio::time::sleep(STARTUP_UPDATE_CHECK_DELAY).await;
+                            if let Some(c) = weak.upgrade() {
+                                c.updates.check(&c).await;
+                            }
+                        });
+                    });
                 }
 
                 let url = if server.is_none() {
@@ -229,10 +285,7 @@ pub fn run() {
                     ));
                 }
 
-                app.manage(ShellState {
-                    ctx,
-                    server: tokio::sync::Mutex::new(server),
-                });
+                app.manage(ShellState::new(ctx, server));
                 Ok(())
             })
             .invoke_handler(commands::handler())
@@ -267,18 +320,8 @@ pub fn run() {
             }
         }
         if let RunEvent::Exit = event {
-            if let Some(shell) = handle.try_state::<ShellState>() {
-                let ctx: Arc<AppState> = shell.ctx.clone();
-                let feed = handle.try_state::<Arc<feed::FeedService>>();
-                tauri::async_runtime::block_on(async {
-                    if let Some(f) = feed {
-                        f.stop().await;
-                    }
-                    if let Some(h) = shell.server.lock().await.take() {
-                        h.stop().await;
-                    }
-                    ctx.shutdown().await;
-                });
+            if handle.try_state::<ShellState>().is_some() {
+                tauri::async_runtime::block_on(commands::stop_app(handle));
                 tracing::info!("OpenAlgo Desktop stopped");
             }
         }

@@ -23,7 +23,11 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 # Native confirmation for account reset (called from Rust only; no JS permission)
 tauri-plugin-dialog = "2.8"
-# Version precedence for the data-folder version check (db::upgrade).
+# In-app updates (crate::updater), driven from Rust only; no page is granted
+# its commands. rustls only (the default `zip` feature is for the old v1
+# Windows artifacts; `system-proxy` is not used by the app's other clients).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls"] }
+# Version precedence for updates and the data-folder version check.
 semver = "1"
 
 # Database
@@ -144,6 +148,15 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 [target.'cfg(target_os = "macos")'.dependencies]
 # Thread count for the health monitor (proc_pidinfo).
 libc = "0.2"
+
+# The update plugin's tests (crate::updater::plugin_tests) run on Tauri's
+# mock runtime, off Windows only: an app built on it links window code that
+# needs the common-controls v6 manifest, which test executables lack there.
+[target.'cfg(not(windows))'.dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+# Minisign prehashes with BLAKE2b-512: those tests sign with a key pair made
+# in the test, as the Tauri CLI signs a release.
+blake2 = "0.10"
 
 [target.'cfg(unix)'.dev-dependencies]
 # close(2) in the integration-test child isolation (tests/it/isolate.rs).

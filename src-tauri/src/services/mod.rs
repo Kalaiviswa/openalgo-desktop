@@ -63,6 +63,7 @@ pub mod symbol_service;
 pub mod system_info;
 pub mod tools_service;
 pub mod ui_order_service;
+pub mod update_service;
 
 pub use analyzer_service::{AnalyzerService, AnalyzerStatus};
 pub use core::Reply;

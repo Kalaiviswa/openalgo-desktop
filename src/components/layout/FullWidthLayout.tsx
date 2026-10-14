@@ -1,4 +1,5 @@
 import { Navigate, Outlet, useLocation } from 'react-router'
+import { UpdateNotice } from '@/components/desktop/UpdateNotice'
 import { SocketProvider } from '@/components/socket/SocketProvider'
 import { layoutRedirect } from '@/lib/desktop'
 import { useAuthStore } from '@/stores/authStore'
@@ -22,6 +23,8 @@ export function FullWidthLayout() {
     <SocketProvider>
       <div className="h-screen bg-background flex flex-col overflow-hidden">
         <Outlet />
+        {/* Desktop: the in-app update banner and dialog. */}
+        <UpdateNotice />
       </div>
     </SocketProvider>
   )

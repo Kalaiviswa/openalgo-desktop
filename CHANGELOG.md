@@ -101,6 +101,13 @@ up, no Python runtime and no `.env` file.
   CI on every platform.
 - Release builds attach the installers and a `SHA256SUMS.txt` to a draft
   GitHub release. The installers are not yet code-signed.
+- In-app updates: OpenAlgo checks for a newer version at start and from
+  Check for Updates in the profile menu, shows the release notes, and
+  downloads nothing until you choose Update. The update's signature is
+  checked before it is installed, and a restart that would interrupt Live
+  strategies, OpenScript runs, scalping protection or open orders is
+  confirmed first. macOS, Windows and AppImage copies update themselves; a
+  `.deb` install is pointed to the release page.
 - Your data is backed up before a new version changes it, put back if the
   new version cannot open it, and the copy is deleted as soon as the new
   version has opened your data. An older version refuses data that a newer

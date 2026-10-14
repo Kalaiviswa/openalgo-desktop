@@ -14,6 +14,7 @@
 
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { Server } from 'lucide-react'
+import type { UpdateActivity, UpdateWarning } from '@/api/updates'
 import type { NavItem } from '@/config/navigation'
 
 /** True when running inside the Tauri window rather than a plain browser tab. */
@@ -474,4 +475,46 @@ export function keyRecoveryOf(body: unknown): KeyRecovery[] | null {
     (r): r is KeyRecovery => r === 'retry_keychain' || r === 'start_fresh'
   )
   return known.length ? known : null
+}
+
+// ============================================================================
+// In-app updates: the restart (desktop window only)
+// ============================================================================
+
+/** What the desktop window answers to a restart into the downloaded update. */
+export interface RestartOutcome {
+  /** confirm: something new runs since the trader confirmed; show `warning`. */
+  status: 'restarting' | 'confirm' | 'refused' | 'failed'
+  message: string | null
+  activity: UpdateActivity | null
+  warning: UpdateWarning | null
+}
+
+/**
+ * Install the downloaded, verified update and restart into it. Only the
+ * desktop window can: the local server downloads and checks the update, but
+ * replacing the app and restarting is the shell's job. `confirmed` is the
+ * activity the trader saw in the warning, if there was one.
+ */
+export async function restartToUpdate(confirmed?: UpdateActivity | null): Promise<RestartOutcome> {
+  if (!isDesktopShell()) {
+    return {
+      status: 'refused',
+      message: 'Open OpenAlgo Desktop on this computer to finish the update.',
+      activity: null,
+      warning: null,
+    }
+  }
+  try {
+    return await invoke<RestartOutcome>('restart_to_update', { confirmed: confirmed ?? null })
+  } catch (e) {
+    const message =
+      typeof e === 'object' && e !== null && 'message' in e ? String(e.message) : undefined
+    return {
+      status: 'failed',
+      message: message || 'OpenAlgo could not restart to install the update. Try again.',
+      activity: null,
+      warning: null,
+    }
+  }
 }

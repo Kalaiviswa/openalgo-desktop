@@ -1,4 +1,4 @@
-import { BarChart3, BookOpen, LogOut, Moon, Sun, Zap } from 'lucide-react'
+import { BarChart3, BookOpen, LogOut, Moon, RefreshCw, Sun, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { authApi } from '@/api/auth'
@@ -16,6 +16,7 @@ import { useProfileMenuItems } from '@/hooks/useProfileMenuItems'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { useUpdateStore } from '@/stores/updateStore'
 import { showToast } from '@/utils/toast'
 
 /**
@@ -183,6 +184,14 @@ export function AccountControls({ variant = 'navbar' }: { variant?: 'navbar' | '
               </DropdownMenuItem>
             )
           )}
+          {/* Desktop: in-app updates (the web is updated with git pull). */}
+          <DropdownMenuItem
+            onSelect={() => void useUpdateStore.getState().checkNow()}
+            className="cursor-pointer"
+          >
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Check for Updates
+          </DropdownMenuItem>
           <DropdownMenuItem asChild>
             <a
               href="https://docs.openalgo.in"

@@ -1,22 +1,99 @@
 # Updating OpenAlgo Desktop
 
-- [Installing a new version](#installing-a-new-version)
+- [How you hear about a new version](#how-you-hear-about-a-new-version)
+- [Installing an update](#installing-an-update)
+- [If something is running](#if-something-is-running)
+- [Linux .deb installs](#linux-deb-installs)
+- [If an update fails](#if-an-update-fails)
+- [Installing by hand](#installing-by-hand)
 - [Your data is backed up before an update](#your-data-is-backed-up-before-an-update)
 - [Going back to an earlier version](#going-back-to-an-earlier-version)
 
-## Installing a new version
+## How you hear about a new version
 
-Every version is on the
+Each time OpenAlgo Desktop starts, it asks GitHub whether a newer version has
+been published. You can also ask at any time: open the profile menu (your
+initial, top right) and choose **Check for Updates**.
+
+When there is a newer version, a small notice appears in the bottom-right
+corner. **See what is new** shows the version and its release notes;
+**Later** hides the notice until OpenAlgo starts again.
+
+Checking only reads the version and its notes. **Nothing is downloaded until
+you choose Update**, and OpenAlgo never restarts on its own.
+
+## Installing an update
+
+Choose **Update** in the update window. OpenAlgo then:
+
+1. downloads the new version;
+2. checks its signature against the key built into OpenAlgo Desktop, and
+   refuses anything that does not match;
+3. installs it and restarts. You may need to sign in again.
+
+| System | What the update does |
+| --- | --- |
+| macOS | Replaces OpenAlgo Desktop in your Applications folder. If it lives where your account cannot write, macOS asks for an administrator password. |
+| Windows | Runs the new installer in passive mode (a progress window, no questions) for your user only, then starts OpenAlgo again. |
+| Linux AppImage, Raspberry Pi | Replaces the `.AppImage` file you started, then starts it again. |
+| Linux `.deb` | Not updated in place; see below. |
+
+Your account, settings, broker keys, strategies, sandbox data and Historify
+data are kept.
+
+## If something is running
+
+Restarting stops OpenAlgo from watching your trades until it opens again,
+usually within a minute. Before it restarts, OpenAlgo lists what would be
+interrupted and asks you to confirm:
+
+- **Live trading** (shown as a red warning): running Live strategies (their
+  stops, targets and exits are not checked until OpenAlgo opens; then they
+  resume), Live OpenScript runs (paused; start them again after the update),
+  Live positions under scalping protection, open orders at your broker (they
+  stay at your broker; OpenAlgo follows them again once it opens) and orders
+  whose outcome is not known yet. Choose **Update and restart anyway** only if
+  that is acceptable; otherwise choose **Not now** and update after the market
+  closes.
+- **Sandbox activity only** (a lighter warning): sandbox strategies, runs,
+  protection and open orders pause until OpenAlgo opens again. Nothing is sent
+  to your broker, and sandbox orders and positions are kept.
+
+If something new starts while the update downloads (a strategy enters, an
+order is placed), OpenAlgo asks again before restarting.
+
+## Linux .deb installs
+
+A copy installed from a `.deb` package belongs to your package manager, so
+OpenAlgo cannot replace it. It still tells you about new versions; the update
+window says so and offers **Open the release page**. Download the new `.deb`
+there and install it over the old one (for example by opening it with your
+software installer). Your data is kept.
+
+## If an update fails
+
+OpenAlgo stays on the version you have and says why:
+
+- **Could not reach the update server**: check your internet connection and
+  try again.
+- **Could not read the update information**: try again later, or install by
+  hand (below).
+- **Failed its signature check**: the download was not what OpenAlgo
+  published, so it was not installed. Try again later; if it keeps happening,
+  install by hand from the release page.
+- **Could not be installed**: install by hand from the release page.
+
+## Installing by hand
+
+Every version is also on the
 [releases page](https://github.com/marketcalls/openalgo-desktop/releases).
-Close OpenAlgo Desktop, download the installer for your system and install it
-over the old version, as described in the README under "Download and
-install". Your account, settings, broker keys, strategies, sandbox data and
-Historify data are kept.
+Download the installer for your system and install it over the old version,
+as described in the README under "Download and install". Your data is kept.
 
 ## Your data is backed up before an update
 
-The first time a new version opens your data folder, it backs up your data
-before changing anything:
+However a new version arrives (in the app or by hand), the first time it
+opens your data folder it backs up your data before changing anything:
 
 - every database (`openalgo.db`, `logs.db`, `sandbox.db`,
   `historify.duckdb`) and the key file (`vault.json`, when you use one) is

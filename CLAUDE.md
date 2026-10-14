@@ -171,7 +171,7 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
   frontend talks to Flask. Tauri `invoke` is reserved for things only the shell
   can do (window control, opening the browser, the account reset and the
   fresh start confirmed in a native dialog, the window proof a sign-in in
-  the app window carries). This is
+  the app window carries, restarting into a downloaded update). This is
   what lets the web frontend be carried over with minimal edits, and what lets a
   browser open the same dashboard.
 - **Event driven, like the web.** Every order operation publishes an event on
@@ -697,6 +697,19 @@ worktree onto master. CI builds fresh and is unaffected.
   use.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
+- In-app update bundles are made only by the release workflow, which adds
+  `src-tauri/updater-artifacts.conf.json` to the build. Never put
+  `createUpdaterArtifacts` in `tauri.conf.json`: CI and local bundle builds
+  have no signing key, and the Tauri build fails without one. The update
+  plugin's own commands are granted to no page (a test pins it): pages reach
+  updates through `/api/update/*` and the `restart_to_update` command.
+  `docs/release/updates.md` has the whole chain.
+- `tauri` carries its `test` feature as a dev-dependency off Windows (the
+  mock runtime the updater tests drive the real plugin with), so
+  `clippy --all-targets` and the test builds compile `tauri` a second time.
+  Not on Windows: an app built on the mock runtime links window code that
+  needs the common-controls v6 manifest, and a test executable without it
+  fails to load (`0xc0000139`, STATUS_ENTRYPOINT_NOT_FOUND).
 
 ### Tests that pass locally and fail in CI
 

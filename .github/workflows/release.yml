@@ -1,8 +1,13 @@
 name: Release
 
 # Builds OpenAlgo Desktop for every supported platform when a v* tag is pushed
-# and attaches the installers, plus a SHA256SUMS.txt covering them, to a DRAFT
-# GitHub release. A maintainer reviews the draft and publishes it by hand.
+# and attaches the installers, the in-app update bundles with their
+# signatures, latest.json (the update manifest) and a SHA256SUMS.txt covering
+# them all to a DRAFT GitHub release. A maintainer reviews the draft and
+# publishes it by hand. Publishing is what makes the update visible to
+# installed copies: they ask releases/latest/download/latest.json, which
+# GitHub serves from the newest published, non-prerelease release only
+# (docs/release/updates.md).
 #
 # Release gate (the `verify` job, which every other job waits for): the tag
 # must point at a commit on master, the CI workflow's `ci-ok` check must have
@@ -40,8 +45,15 @@ name: Release
 # Windows code signing (Authenticode, both together):
 #   WINDOWS_CERTIFICATE          base64 of the code-signing .pfx
 #   WINDOWS_CERTIFICATE_PASSWORD password of that .pfx
-# Tauri updater artifacts (only once the updater plugin is enabled):
+# In-app update signing (REQUIRED: the release gate fails without it):
 #   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#   The private half of the key in src-tauri/tauri.conf.json
+#   (plugins.updater.pubkey). Release builds add
+#   src-tauri/updater-artifacts.conf.json (createUpdaterArtifacts), so each
+#   platform also produces its update bundle (.app.tar.gz, the NSIS
+#   -setup.exe, the AppImage) and a .sig. The checksums job builds
+#   latest.json from those and refuses a signature that does not verify
+#   against the key built into the app.
 #
 # Empty secrets are never exported: Tauri treats a present-but-empty
 # APPLE_CERTIFICATE or APPLE_ID as "configured" and would fail the build.
@@ -154,6 +166,17 @@ jobs:
         run: python3 scripts/ci/smoke_gate.py release "$SHA"
       - name: The tag equals the app version everywhere
         run: python3 .claude/skills/version-bump/check_versions.py --tag "$TAG"
+      - name: The update signing key is configured
+        # Every release carries signed update bundles; without the key the
+        # build fails late, on every platform. Only whether it is set is
+        # read here, never its value.
+        env:
+          HAS_UPDATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_UPDATE_KEY" != "true" ]; then
+            echo "::error title=Release gate::The TAURI_SIGNING_PRIVATE_KEY secret is not set. In-app updates are signed with it; see docs/release/updates.md."
+            exit 1
+          fi
 
   create-release:
     name: create draft release
@@ -187,7 +210,7 @@ jobs:
               -f tag_name="$TAG" \
               -f name="OpenAlgo Desktop ${TAG}" \
               -f body="$(printf '%s\n\n%s\n%s\n%s\n' \
-                'Installers for Windows, macOS (Apple Silicon and Intel), Linux x64 and Raspberry Pi (Linux arm64). SHA256SUMS.txt lists the checksum of every installer.' \
+                'Installers for Windows, macOS (Apple Silicon and Intel), Linux x64 and Raspberry Pi (Linux arm64). SHA256SUMS.txt lists the checksum of every file. Installed copies of OpenAlgo Desktop offer this version as an in-app update once the release is published (latest.json).' \
                 '<!-- signing:start -->' \
                 'Code signing: not checked yet. This note is replaced once every installer is built and its signature checked.' \
                 '<!-- signing:end -->')" \
@@ -342,9 +365,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: npx tauri
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci ${{ env.TAURI_EXTRA_ARGS }}
+          # updater-artifacts.conf.json: the signed update bundles, made
+          # only here (CI and local builds have no signing key).
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci --config src-tauri/updater-artifacts.conf.json ${{ env.TAURI_EXTRA_ARGS }}
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
+          # The update bundles and their .sig files go up; latest.json is
+          # built once, from every platform, by the checksums job (parallel
+          # jobs each rewriting it would race).
+          uploadUpdaterSignatures: true
+          uploadUpdaterJson: false
+
+      - name: The update bundle is signed
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundle="src-tauri/target/${TARGET}/release/bundle"
+          case "$RUNNER_OS" in
+            macOS) sigs=("$bundle"/macos/*.app.tar.gz.sig) ;;
+            Windows) sigs=("$bundle"/nsis/*-setup.exe.sig) ;;
+            *) sigs=("$bundle"/appimage/*.AppImage.sig) ;;
+          esac
+          if [ "${#sigs[@]}" -ne 1 ]; then
+            echo "::error::Expected one signed update bundle in ${bundle}, found ${#sigs[@]}."
+            exit 1
+          fi
+          echo "Update bundle signature: ${sigs[0]}"
 
       - name: Remove notarization key
         if: always() && runner.os == 'macOS'
@@ -452,14 +500,21 @@ jobs:
           retention-days: 30
 
   checksums:
-    name: checksums and signing notes
+    name: update manifest, checksums and signing notes
     needs: [create-release, build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     steps:
-      - name: Attach SHA256SUMS.txt to the draft release
+      # The app's public key, CHANGELOG.md and the manifest script.
+      - uses: actions/checkout@v7
+      - name: Install minisign
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q minisign
+          minisign -v
+      - name: Download the release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
@@ -468,10 +523,11 @@ jobs:
           work="${RUNNER_TEMP}/release-assets"
           rm -rf "$work"
           mkdir -p "$work"
-          # Checksums of the files exactly as published (GitHub renames
-          # spaces in asset names), so they match what a trader downloads.
+          # The files exactly as published (GitHub renames spaces in asset
+          # names), so checksums and update addresses match what a trader
+          # downloads. Files this job writes are made again.
           gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
-            --jq '.[] | select(.name != "SHA256SUMS.txt") | "\(.id)\t\(.name)"' \
+            --jq '.[] | select(.name != "SHA256SUMS.txt" and .name != "latest.json") | "\(.id)\t\(.name)"' \
             > "${RUNNER_TEMP}/assets.tsv"
           count=0
           while IFS=$'\t' read -r id name; do
@@ -486,6 +542,41 @@ jobs:
             echo "Expected at least 7 installers on the release, found ${count}."
             exit 1
           fi
+
+      - name: Attach latest.json (the in-app update manifest)
+        # Every platform's update bundle, its address on this release and
+        # its signature; each signature must verify against the key built
+        # into the app and name this version (scripts/ci/updater_manifest.py).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/release-assets"
+          python3 scripts/ci/updater_manifest.py \
+            --assets "$work" --tag "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --changelog CHANGELOG.md --config src-tauri/tauri.conf.json \
+            --minisign minisign --out "${RUNNER_TEMP}/latest.json"
+          old=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" --paginate \
+            --jq '.[] | select(.name == "latest.json") | .id')
+          for id in $old; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${id}"
+          done
+          upload_url=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .upload_url)
+          upload_url="${upload_url%%\{*}"
+          gh api -X POST "${upload_url}?name=latest.json" \
+            -H "Content-Type: application/json" \
+            --input "${RUNNER_TEMP}/latest.json" --jq .browser_download_url
+          cp "${RUNNER_TEMP}/latest.json" "$work/latest.json"
+
+      - name: Attach SHA256SUMS.txt to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/release-assets"
           (cd "$work" && sha256sum -- * | sort -k2) > "${RUNNER_TEMP}/SHA256SUMS.txt"
           cat "${RUNNER_TEMP}/SHA256SUMS.txt"
           # A re-run replaces the previous checksum file.
