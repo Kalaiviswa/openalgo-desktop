@@ -269,6 +269,63 @@ pub fn exit_cap(own: i64, actual: i64) -> ExitCap {
     }
 }
 
+/// What a run may still send while new entries wait (the order
+/// reconciler repairing a gap in order facts; ARCH-01): only orders that
+/// reduce the position its own fills hold in its contract, net of the
+/// reducing orders it already has working. A strategy's exits run through
+/// a gap the same way; an order that opens or adds to a position waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitRoom {
+    /// The side that reduces (`SELL` for a long, `BUY` for a short), if the
+    /// run holds anything.
+    side: Option<&'static str>,
+    /// Units that side may still send.
+    left: i64,
+}
+
+impl ExitRoom {
+    /// From the run's own rows on one side, for one contract.
+    pub fn of(
+        rows: &[super::store::OrderRow],
+        symbol: &str,
+        exchange: &str,
+        product: &str,
+    ) -> Self {
+        let same = |o: &super::store::OrderRow| {
+            o.symbol == symbol && o.exchange == exchange && o.product == product
+        };
+        let mine: Vec<super::store::OrderRow> = rows.iter().filter(|o| same(o)).cloned().collect();
+        let net = super::store::holdings(&mine)
+            .iter()
+            .map(|h| h.quantity)
+            .sum::<i64>();
+        let side = match net.signum() {
+            1 => Some("SELL"),
+            -1 => Some("BUY"),
+            _ => None,
+        };
+        let working: i64 = mine
+            .iter()
+            .filter(|o| Some(o.action.as_str()) == side)
+            .filter(|o| !super::store::TERMINAL.contains(&o.status.as_str()))
+            .map(|o| (o.quantity - o.filled_quantity).max(0))
+            .sum();
+        Self {
+            side,
+            left: (net.abs() - working).max(0),
+        }
+    }
+
+    /// Whether this order only reduces what is held; if so it is counted.
+    pub fn take(&mut self, action: &str, quantity: i64) -> bool {
+        if self.side != Some(action) || quantity <= 0 || quantity > self.left {
+            return false;
+        }
+        self.left -= quantity;
+        true
+    }
+}
+
 /// What the platform says about an order now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
@@ -343,6 +400,50 @@ pub fn frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(
+        action: &str,
+        quantity: i64,
+        filled: i64,
+        status: &str,
+    ) -> super::super::store::OrderRow {
+        super::super::store::OrderRow {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            product: "MIS".into(),
+            action: action.into(),
+            quantity,
+            filled_quantity: filled,
+            average_price: Some(100.0),
+            status: status.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ARCH-01: while entries wait, only what reduces the run's own
+    /// position goes, net of reducing orders already working.
+    #[test]
+    fn exit_room_lets_only_reducing_orders_through() {
+        // Flat: everything is an entry.
+        let mut room = ExitRoom::of(&[], "SBIN", "NSE", "MIS");
+        assert!(!room.take("BUY", 1));
+        assert!(!room.take("SELL", 1));
+        // Long 5 with a working SELL 2: SELL 3 more at most, never BUY.
+        let rows = vec![row("BUY", 5, 5, "filled"), row("SELL", 2, 0, "working")];
+        let mut room = ExitRoom::of(&rows, "SBIN", "NSE", "MIS");
+        assert!(!room.take("BUY", 1), "adds to the long");
+        assert!(!room.take("SELL", 4), "would turn it short");
+        assert!(room.take("SELL", 2));
+        assert!(room.take("SELL", 1));
+        assert!(!room.take("SELL", 1), "nothing left to reduce");
+        // Short 3: BUY reduces. Another contract does not count.
+        let mut other = row("BUY", 9, 9, "filled");
+        other.symbol = "INFY".into();
+        let rows = vec![row("SELL", 3, 3, "filled"), other];
+        let mut room = ExitRoom::of(&rows, "SBIN", "NSE", "MIS");
+        assert!(!room.take("SELL", 1));
+        assert!(room.take("BUY", 3));
+    }
 
     fn intent(kind: &str, ty: &str, qty: f64, qty_type: &str) -> Value {
         json!({

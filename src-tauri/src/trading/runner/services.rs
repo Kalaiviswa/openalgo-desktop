@@ -88,6 +88,11 @@ pub trait RunnerServices: Send + Sync {
     /// Ask the order reconciler to read the order book now (an uncertain
     /// placement was just recorded).
     fn request_reconcile(&self) {}
+    /// Why new entries must wait on this side right now (the order
+    /// reconciler is repairing a gap in order facts; ARCH-01), or `None`.
+    fn entry_refusal(&self, _mode: RunMode) -> Option<String> {
+        None
+    }
 }
 
 /// The production services, over the app context.
@@ -305,6 +310,13 @@ impl RunnerServices for AppServices {
         if let Some(ctx) = self.ctx.upgrade() {
             ctx.reconciler.request_pass();
         }
+    }
+
+    fn entry_refusal(&self, mode: RunMode) -> Option<String> {
+        use crate::services::order_reconciler::EntryGate;
+        self.ctx
+            .upgrade()
+            .and_then(|ctx| ctx.reconciler.entry_refusal(mode))
     }
 }
 
