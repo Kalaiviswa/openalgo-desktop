@@ -13,35 +13,6 @@ pub const WRONG_CURRENT_PASSWORD: &str = "Current password is incorrect";
 pub const PASSWORD_CHANGED_MEANWHILE: &str =
     "Your password was changed while this change was being saved. Sign in with the new password and try again.";
 
-/// Pepper of the stand-in hash checked for a name that is not the
-/// account's (see [`AuthService::verify_credentials`]): random per process,
-/// so no fixed value exists anywhere. It guards nothing; it only makes the
-/// stand-in check cost the same as a real one.
-fn stand_in_pepper() -> &'static [u8; 32] {
-    static PEPPER: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    PEPPER.get_or_init(|| {
-        use rand::RngCore;
-        let mut p = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut p);
-        p
-    })
-}
-
-/// An Argon2id hash with the same parameters as the account's, of a random
-/// password nobody knows, made once per process, that every password for a
-/// name that is not the account's is checked against: the same work as a
-/// wrong password.
-fn stand_in_hash() -> &'static str {
-    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        use rand::RngCore;
-        let mut secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
-        let password: String = secret.iter().map(|b| format!("{:02x}", b)).collect();
-        crate::security::hashing::hash_password(stand_in_pepper(), &password).unwrap_or_default()
-    })
-}
-
 /// How many sign-ins were checked against the stand-in hash (tests read
 /// it to see the unknown-name path ran the same work).
 pub static STAND_IN_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -153,17 +124,16 @@ impl AuthService {
             user::find_by_username(&conn, username)?
         };
         let Some(row) = row else {
-            // A name that is not the account's is checked against a fixed
-            // stand-in hash with the account's Argon2 parameters: the same
-            // work, the same answer and (in the caller) the same budget as
-            // a wrong password, so nothing tells which names exist. The
-            // keychain of an earlier build is never read for it.
+            // A name that is not the account's costs what the account's
+            // name costs: opening a vault and checking a hash, both with
+            // the account's Argon2 parameters (KEY-01: two runs, as for a
+            // right or a wrong password). The same work, the same answer
+            // and (in the caller) the same budget as a wrong password, so
+            // nothing tells which names exist. The keychain of an earlier
+            // build is never read for it.
             STAND_IN_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = crate::security::hashing::verify_password(
-                stand_in_pepper(),
-                password,
-                stand_in_hash(),
-            );
+            crate::security::hashing::stand_in_vault_open(password);
+            crate::security::hashing::stand_in_password_check(password);
             return Ok(LoginOutcome::Invalid);
         };
         #[cfg(test)]
@@ -188,6 +158,18 @@ impl AuthService {
         } else {
             Ok(LoginOutcome::Success(row.username, keys))
         }
+    }
+
+    /// Whether the keys of an earlier build still have to move into
+    /// openalgo.db (keychain, `vault.json` or `secrets.dat`): an account
+    /// exists and no vault row does. Read from the database and the folder
+    /// only; never from the keychain.
+    pub fn keys_must_move(state: &AppState) -> Result<bool> {
+        let conn = state.sqlite.conn()?;
+        Ok(!matches!(
+            state.security.key_source(&conn)?,
+            crate::security::KeySource::Vault | crate::security::KeySource::NoAccount
+        ))
     }
 
     /// Accounts created by earlier desktop builds have no TOTP secret.

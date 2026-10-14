@@ -15,6 +15,8 @@ pub const PEPPER_SIZE: usize = 32;
 /// OWASP baseline for Argon2id. Parameters are stored in the PHC string, so
 /// verification of older hashes keeps working if these change.
 fn argon2() -> Result<Argon2<'static>> {
+    #[cfg(test)]
+    ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let params = Params::new(19456, 2, 1, None)
         .map_err(|e| AppError::Internal(format!("argon2 params: {}", e)))?;
     Ok(Argon2::new(
@@ -38,6 +40,8 @@ pub fn hash_password(pepper: &[u8], password: &str) -> Result<String> {
 }
 
 pub fn verify_password(pepper: &[u8], password: &str, hash: &str) -> Result<bool> {
+    #[cfg(test)]
+    ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let parsed = PasswordHash::new(hash)
         .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
     match Argon2::default().verify_password(peppered(pepper, password).as_bytes(), &parsed) {
@@ -61,14 +65,65 @@ pub fn lookup_hmac(pepper: &[u8], api_key: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Raw 32-byte key derived from a password, used to wrap the key vault when
-/// no OS keychain is available.
+/// Raw 32-byte key derived from a password, used to wrap the key vault
+/// (KEY-01).
 pub fn derive_kek(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     argon2()?
         .hash_password_into(password.as_bytes(), salt, &mut out)
         .map_err(|e| AppError::Encryption(format!("key derivation failed: {}", e)))?;
     Ok(out)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Argon2 runs on this thread (tests: a sign-in costs the same whatever
+    /// it finds).
+    pub static ARGON2_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A random pepper per process for the stand-in checks: it guards
+/// nothing, it only makes them cost what a real check costs.
+fn stand_in_pepper() -> &'static [u8; 32] {
+    static PEPPER: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    PEPPER.get_or_init(|| {
+        let mut p = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut p);
+        p
+    })
+}
+
+/// An Argon2id hash with the account's parameters, of a random password
+/// nobody knows, made once per process.
+fn stand_in_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut secret = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        hash_password(stand_in_pepper(), &hex::encode(secret)).unwrap_or_default()
+    })
+}
+
+/// The work of checking `password` against the account's password hash,
+/// spent where there is no hash to check it against (a name that is not
+/// the account's) or where the check is already decided (a password that
+/// did not open the key vault), so that every sign-in costs the same and
+/// its timing tells nothing about the name or the password (KEY-01).
+pub fn stand_in_password_check(password: &str) {
+    let _ = verify_password(stand_in_pepper(), password, stand_in_hash());
+}
+
+/// The work of opening the key vault with `password` (the key-encryption
+/// key's Argon2id), spent where there is no vault to open, for the same
+/// reason.
+pub fn stand_in_vault_open(password: &str) {
+    static SALT: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let salt = SALT.get_or_init(|| {
+        let mut s = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut s);
+        s
+    });
+    let _ = derive_kek(password, salt).map(|mut k| zeroize::Zeroize::zeroize(&mut k));
 }
 
 #[cfg(test)]

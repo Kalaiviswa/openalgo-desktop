@@ -364,13 +364,20 @@ impl SecurityManager {
             )
         };
         let Some(account) = account else {
+            hashing::stand_in_vault_open(password);
+            hashing::stand_in_password_check(password);
             return Ok(Opened::WrongPassword);
         };
         let hash = account.password_hash.as_str();
         if let Some(row) = row {
             let keys = match key_vault::unwrap(&row, password) {
                 Ok(Some((k, p))) => Keys::new(k, p)?,
-                Ok(None) => return Ok(Opened::WrongPassword),
+                Ok(None) => {
+                    // The hash check a password that opens the vault runs:
+                    // a wrong password costs what a right one does.
+                    hashing::stand_in_password_check(password);
+                    return Ok(Opened::WrongPassword);
+                }
                 Err(e) => {
                     tracing::error!("The key vault could not be read: {}", e);
                     return Err(AppError::VaultUnreadable);

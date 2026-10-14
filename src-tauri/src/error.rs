@@ -310,4 +310,26 @@ mod tests {
         );
         assert_eq!(e.code(), "UNSUPPORTED");
     }
+
+    /// KEY-01 security review: OS and key errors carry file paths, the
+    /// keychain service and item names; HTTP and window answers carry the
+    /// trader's sentence only (the detail goes to the log).
+    #[test]
+    fn key_and_os_errors_never_reach_an_answer() {
+        let detail = "/Users/t/Library/Keychains/login.keychain-db com.openalgo.desktop data-key";
+        for e in [
+            AppError::Keychain(detail.into()),
+            AppError::Encryption(detail.into()),
+            AppError::Io(std::io::Error::other(detail)),
+            AppError::Config(detail.into()),
+            AppError::KeychainUnavailable,
+            AppError::KeysDoNotMatch,
+            AppError::VaultUnreadable,
+        ] {
+            let answer = serde_json::to_string(&e).unwrap();
+            for word in ["/Users/", "keychain-db", "com.openalgo.desktop", "data-key"] {
+                assert!(!answer.contains(word), "{}: {}", word, answer);
+            }
+        }
+    }
 }

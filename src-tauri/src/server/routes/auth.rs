@@ -164,6 +164,12 @@ async fn finish_sign_in(
     with_cookie(ok(body), &s.id)
 }
 
+/// What a sign-in from another device answers while the keys of an earlier
+/// build still have to move into openalgo.db (KEY-01): the move happens at
+/// a sign-in on this computer only.
+pub const SIGN_IN_HERE_FIRST: &str = "Sign in once on the computer where OpenAlgo Desktop is \
+installed: OpenAlgo is moving its saved keys there. After that you can sign in from here.";
+
 /// POST /auth/login (form: username, password)
 pub async fn login(
     State(ctx): Ctx,
@@ -213,6 +219,27 @@ pub async fn login(
         Ok(a) => a,
         Err(r) => return r,
     };
+    // KEY-01: a caller on another device (the network, a tunnel) never
+    // moves an earlier build's keys. The keychain would ask on this
+    // computer's screen, and how a move ends (keys that open none of the
+    // data, a failed write) comes only after the password was proven, so
+    // it would tell a right password from a wrong one. Refused before any
+    // name or password is looked at: one answer for every name and
+    // password, counted like a failure.
+    if !source.is_local() {
+        match AuthService::keys_must_move(&ctx) {
+            Ok(false) => {}
+            Ok(true) => {
+                attempt.failed();
+                tracing::info!("Sign-in from another device refused: the keys still have to move");
+                return error(StatusCode::FORBIDDEN, SIGN_IN_HERE_FIRST);
+            }
+            Err(e) => {
+                attempt.released();
+                return e.into_response();
+            }
+        }
+    }
     let password = Secret::new(form.get("password").unwrap_or_default());
     // Read before the account is: a password change that lands while the
     // password is checked voids this sign-in (`finish_sign_in`).
@@ -283,7 +310,28 @@ pub async fn login(
             );
             error(StatusCode::UNAUTHORIZED, "Invalid credentials")
         }
+        Ok(Err(e)) if !source.is_local() => {
+            // KEY-01: to a caller on another device, any failure reads as a
+            // wrong password and spends the same budget. An error raised
+            // after the password was proven (a write that failed, keys that
+            // open none of the data) would otherwise tell it the password
+            // was right. The detail goes to the log; the ways out (retry,
+            // start fresh) are offered on this computer only.
+            attempt.failed();
+            tracing::warn!("Sign-in from another device failed: {}", e);
+            crate::services::security_service::record_login(
+                &ctx,
+                &username,
+                ip,
+                "failed",
+                "password",
+                Some("invalid_credentials"),
+            );
+            error(StatusCode::UNAUTHORIZED, "Invalid credentials")
+        }
         Ok(Err(e)) => {
+            // This computer: the trader, who could copy openalgo.db and try
+            // passwords against it anyway, gets the ways out.
             attempt.released();
             e.into_response()
         }

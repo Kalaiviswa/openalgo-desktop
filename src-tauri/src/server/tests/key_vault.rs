@@ -946,3 +946,135 @@ async fn a_logout_clears_every_cache() {
     assert!(!ctx.security.is_unlocked());
     close(ctx).await;
 }
+
+// ------------------------------------------- what a sign-in gives away
+
+/// The request as a browser on another device of the network sends it from
+/// the app's page.
+fn from_another_device(mut r: Request<Body>) -> Request<Body> {
+    r.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            "192.168.1.50".parse().unwrap(),
+            50000,
+        )));
+    let port = if crate::config::dev_ports_enabled() {
+        crate::config::DEV_HTTP_PORT
+    } else {
+        crate::config::DEFAULT_HTTP_PORT
+    };
+    r.headers_mut()
+        .insert(header::HOST, format!("127.0.0.1:{}", port).parse().unwrap());
+    in_app(r)
+}
+
+async fn sign_in_from_another_device(ctx: &Arc<AppState>, password: &str) -> (StatusCode, Value) {
+    let (s, _, v) = send_to(
+        ctx,
+        from_another_device(multipart(
+            "/auth/login",
+            &[("username", USER), ("password", password)],
+        )),
+    )
+    .await;
+    (s, v)
+}
+
+fn lan_failures(ctx: &AppState) -> u32 {
+    ctx.limiter
+        .backoff
+        .failures(crate::server::middleware::sign_in_source(
+            crate::server::middleware::Source::Lan("192.168.1.50".parse().unwrap()),
+        ))
+}
+
+/// KEY-01 security review: a caller on another device learns nothing about
+/// a password from how a sign-in fails. While an earlier build's keys still
+/// have to move, every name and password gets the same refusal before
+/// anything is checked (no keychain call, nothing moved); with the vault in
+/// place, an error after the password was proven reads as a wrong password.
+/// Each such attempt spends the caller's budget. The trader at this
+/// computer still gets the ways out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_device_cannot_tell_a_right_password_from_a_wrong_one() {
+    // Keys still in the keychain of an earlier build.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(CountingKeyStore::default());
+    keychain_install(dir.path(), &store);
+    let ctx = open_with(dir.path(), store.clone());
+    let right = sign_in_from_another_device(&ctx, PASSWORD).await;
+    let wrong = sign_in_from_another_device(&ctx, "Wrong@1234").await;
+    assert_eq!(right, wrong, "a right password answered differently");
+    assert_eq!(right.0, StatusCode::FORBIDDEN, "{}", right.1);
+    assert_eq!(
+        right.1["message"],
+        crate::server::routes::auth::SIGN_IN_HERE_FIRST
+    );
+    assert_eq!(store.calls(), 0, "another device reached the keychain");
+    assert!(vault(&ctx).is_none() && !ctx.security.is_unlocked());
+    assert_eq!(lan_failures(&ctx), 2, "the attempts were not counted");
+    close(ctx).await;
+
+    // The vault in place; the account's TOTP secret is missing and cannot
+    // be written, so a proven password fails after its check.
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = open_with(dir.path(), store.clone());
+    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    ctx.sqlite
+        .conn()
+        .unwrap()
+        .execute_batch(
+            "UPDATE users SET totp_secret_encrypted = NULL, totp_nonce = NULL;
+             CREATE TRIGGER test_no_user_writes BEFORE UPDATE ON users
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let right = sign_in_from_another_device(&ctx, PASSWORD).await;
+    let wrong = sign_in_from_another_device(&ctx, "Wrong@1234").await;
+    assert_eq!(right, wrong, "a right password answered differently");
+    assert_eq!(
+        right,
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({"status": "error", "message": "Invalid credentials"})
+        )
+    );
+    assert_eq!(lan_failures(&ctx), 2, "the attempts were not counted");
+    assert_eq!(ctx.sessions.authenticated_count(), 0);
+    // This computer still sees that something is wrong (not "Invalid").
+    let (s, v, _) = sign_in(&ctx, PASSWORD).await;
+    assert_ne!(s, StatusCode::UNAUTHORIZED, "{}", v);
+    assert_ne!(s, StatusCode::OK, "{}", v);
+    close(ctx).await;
+}
+
+/// KEY-01 security review: a sign-in costs the same Argon2 work whatever it
+/// finds: a name that is not the account's, a wrong password and the right
+/// one each run two (open the vault, check the hash), so its timing tells
+/// neither which names exist nor which password is right.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_costs_the_same_whatever_it_finds() {
+    use crate::security::hashing::ARGON2_RUNS;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = open_with(dir.path(), Arc::new(CountingKeyStore::default()));
+    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    let runs = |name: &str, password: &str| {
+        ARGON2_RUNS.with(|n| n.set(0));
+        let outcome = AuthService::verify_credentials(&ctx, name, password).unwrap();
+        (ARGON2_RUNS.with(|n| n.get()), outcome)
+    };
+    // The stand-in hash is made once per process: make it now.
+    let _ = runs("someone", PASSWORD);
+    let (unknown, o) = runs("someone-else", PASSWORD);
+    assert_eq!(o, LoginOutcome::Invalid);
+    let (wrong, o) = runs(USER, "Wrong@1234");
+    assert_eq!(o, LoginOutcome::Invalid);
+    let (right, o) = runs(USER, PASSWORD);
+    assert!(matches!(o, LoginOutcome::Success(..)), "{:?}", o);
+    assert_eq!(right, 2, "open the vault, check the hash");
+    assert_eq!(
+        (unknown, wrong),
+        (right, right),
+        "Argon2 runs: unknown name, wrong password, right password"
+    );
+    close(ctx).await;
+}
