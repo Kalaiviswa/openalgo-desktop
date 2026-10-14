@@ -370,6 +370,13 @@ One JSON object per line: `{ts, iso, direction: send|recv|note, message|raw, ...
 - **Server bugs found** (web app, analyze mode): (1) `cancelallorder` filters on `"trigger_pending"` but stored status is `"trigger pending"`, so SL/SL-M trigger-pending orders are NOT cancelled (`services/sandbox_service.py` sandbox_cancel_all_orders). (2) Any failed sandbox `modifygttorder` returns 500 because `GTTModifyFailedEvent` (events/order_events.py) has no `exchange` field but `services/modify_gtt_order_service.py` passes `exchange=`. (3) After an OCO GTT modify raised `margin_blocked` (1059.1 -> 1106.8) and a later closeposition, `cancelgttorder` returns 500 "Could not release 1106.80 margin ... more than the reserved margin"; the GTT `GTT-261003-56ad1482` stays `active` in the sandbox and could not be cleaned up via API.
 
 
+### Web broker behaviour deliberately hardened (Codex evaluation D)
+The web shares each of these defects; the desktop answers differently on purpose.
+- **Cancel all and close all never read an unread book as empty (BR-02, BR-03)**: Samco and AliceBlue cancel all (and AliceBlue close all) report an error when the book could not be read, where the web reports success with nothing done; Zerodha's smart-order read, close all and cancel all refuse a success reply without `data.net` (or the order list).
+- **`/api/v1/margin` refuses a basket with a leg missing from the master (BR-01)**: `400 "Position N: Symbol X not found on EX. ..."`; the web's adapters drop the leg and total the rest.
+- **HDFC Sky `user_order_id` (BR-05)**: distinct per order (`max(clock, last + 1)` below 1e9); the web's clock-only id repeats for legs placed in the same millisecond.
+- **XTS subscription batches (BF-03)**: a batch that failed with a server error or rate limit is sent again (1 s doubling to 30 s, five times) for every XTS member, not only RMoney; a refused token reconnects the feed.
+
 ### Web broker changes deliberately not copied
 - **Angel daily candles (web 4c8ee632c, #2176, 2026-10-06)**: the web dropped the +05:30 shift on Angel `D` candles, so they are now stamped at IST midnight (18:30 UTC of the previous day). Every other web broker, and `history/nifty_index_D.json` above (`1788220800` = 2026-09-01 00:00 UTC), stamps a daily candle at 00:00 UTC of its date. The desktop keeps 00:00 UTC for Angel (`brokers/angel/data.rs` `parse_candles`). The IST request window from the same commit is ported.
 
