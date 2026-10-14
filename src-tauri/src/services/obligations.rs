@@ -19,27 +19,29 @@
 //! Live only (Sandbox runs keep running on the new broker's quotes).
 //! Synchronous: SQLite reads and in-memory registries, nothing across an
 //! await and no network call.
+//!
+//! [`OutcomesGuard`] is the broker switch's guard (`AppState::switch_guard`,
+//! `services::broker_switch`): every way a broker session ends for another
+//! broker asks it first.
 
 use crate::error::Result;
 use crate::scalping::monitor::{ChildState, ExitAttempt};
 use crate::scalping::store::MODE_LIVE;
+use crate::services::broker_switch::{SwitchBlockers, SwitchGuard};
 use crate::state::AppState;
 use crate::strategy::dispatch::RunMode;
 
-/// Open Live obligations on one broker.
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct OpenObligations {
-    pub strategy_runs: u32,
-    pub openscript_runs: u32,
-    pub scalping_stops: u32,
-    pub uncertain_placements: u32,
-    pub partial_exits: u32,
-}
+/// Open Live obligations on one broker: what blocks a switch away from it.
+pub type OpenObligations = SwitchBlockers;
 
-impl OpenObligations {
-    /// Nothing is open: a switch leaves nothing unmanaged.
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
+/// The broker switch's guard: the open Live obligations on the logged-in
+/// broker. A store that cannot be read is an error, and the switch is
+/// refused on it (`broker_switch::refusal`).
+pub struct OutcomesGuard;
+
+impl SwitchGuard for OutcomesGuard {
+    fn blockers(&self, state: &AppState, broker: &str) -> Result<SwitchBlockers> {
+        open_live_obligations(state, broker)
     }
 }
 
