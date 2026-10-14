@@ -518,7 +518,7 @@ fn placement_answers_and_write_bodies() {
     assert!(place_outcome(429, &Value::Null)
         .unwrap_err()
         .client_message()
-        .contains("not resent"));
+        .contains("limiting orders"));
     let m = ResolvedModify::resolve(
         "EQ-777",
         &ModifyOrderRequest {
@@ -886,4 +886,24 @@ fn identity_and_capabilities() {
     assert!(b.create_feed(&AuthToken::new("tok")).is_ok());
     assert!(b.order_socket(&AuthToken::new("tok")).is_ok());
     assert!(b.create_feed(&AuthToken::new(" ")).is_err());
+}
+
+/// Review P2-3: INDmoney's 429 on an order turned it away before it was
+/// processed: inside a placement it is a refusal, like every other
+/// adapter's rate limit, never "may have been placed".
+#[tokio::test]
+async fn a_rate_limited_order_is_refused() {
+    use crate::brokers::common::outcome::{classify, placing, PlaceOutcome};
+    let r = placing(async {
+        place_outcome(429, &Value::Null).map(|order_id| OrderResponse {
+            order_id,
+            message: None,
+        })
+    })
+    .await;
+    assert!(
+        matches!(classify(&r), PlaceOutcome::Refused { .. }),
+        "{:?}",
+        r
+    );
 }

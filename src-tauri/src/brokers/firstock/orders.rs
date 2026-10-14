@@ -33,11 +33,15 @@ async fn book(b: &FirstockBroker, s: &Session, endpoint: &str) -> Result<Vec<Val
     Err(super::firstock_error(&v))
 }
 
-/// LTP for MPP (`None` when the quote cannot be read).
+/// LTP for MPP (`None` when the quote cannot be read). Read before the
+/// order is sent: a server error on the quote never counts against the
+/// order's own answer (review P2-3).
 async fn ltp(b: &FirstockBroker, s: &Session, exchange: &str, brsymbol: &str) -> Option<f64> {
-    let q = super::data::quote_data(b, s, exchange, brsymbol)
-        .await
-        .ok()?;
+    let q = crate::brokers::common::outcome::before_send(super::data::quote_data(
+        b, s, exchange, brsymbol,
+    ))
+    .await
+    .ok()?;
     Some(f(&q, "lastTradedPrice"))
 }
 

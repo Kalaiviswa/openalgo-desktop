@@ -181,6 +181,9 @@ pub fn broker_error_reply(e: &AppError, internal: &str) -> Reply {
             tracing::error!("Broker call failed with no definite answer: {}", e);
             Reply::error(500, internal)
         }
+        // A session error after a server error keeps its session answer
+        // (review P2-4).
+        AppError::Uncertain(u) if u.session => Reply::error(403, u.message.clone()),
         AppError::Uncertain(u) => Reply::error(400, u.message.clone()),
         AppError::NotFound(m) => Reply::error(404, m.clone()),
         AppError::Auth(m) => Reply::error(403, m.clone()),

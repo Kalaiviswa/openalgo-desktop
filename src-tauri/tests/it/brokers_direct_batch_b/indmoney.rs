@@ -379,7 +379,8 @@ async fn order_writes_are_never_retried_on_429() {
         .place_order(&auth, &order("SBIN", "NSE", "BUY", "LIMIT", 812.0, 0.0))
         .await
         .unwrap_err();
-    assert!(e.client_message().contains("not resent"));
+    // Turned away before processing: refused, and never sent again (P2-3).
+    assert!(e.client_message().contains("limiting orders"), "{:?}", e);
     assert_eq!(fake.calls("/order").len(), 1);
 }
 

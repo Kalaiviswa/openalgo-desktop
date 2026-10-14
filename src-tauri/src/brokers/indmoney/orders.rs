@@ -168,8 +168,10 @@ pub fn place_outcome(status: u16, v: &Value) -> Result<String> {
         }
     }
     if status == 429 {
-        return Err(AppError::Broker(
-            "INDmoney is limiting orders right now. The order was not resent; check the order book before trying again.".into(),
+        // Turned away before processing: not placed (review P2-3), like
+        // every other adapter's rate limit.
+        return Err(outcome::refusal(
+            "INDmoney is limiting orders right now. Wait a moment and try again.",
         ));
     }
     let message = super::error_message(v).unwrap_or_else(|| "INDmoney rejected the order.".into());
