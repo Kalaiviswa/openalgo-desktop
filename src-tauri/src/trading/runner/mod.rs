@@ -49,6 +49,7 @@ pub mod books;
 pub mod host;
 pub mod inbox;
 pub mod orders;
+pub mod reconcile;
 pub mod schedule;
 pub mod services;
 pub mod store;
@@ -233,8 +234,10 @@ const ACK_ATTEMPTS: u32 = 3;
 struct Unsaved {
     row_id: i64,
     orderid: Option<String>,
+    /// `working`, `rejected` or [`store::UNCONFIRMED`].
     status: &'static str,
     message: Option<String>,
+    client_tag: Option<String>,
 }
 
 /// Why a Stop did not close, and whether anything of it may still fill.
@@ -299,6 +302,11 @@ pub struct Runner {
     shutting_down: AtomicBool,
     scheduler: Mutex<Option<JoinHandle<()>>>,
     last_tick: Mutex<Option<DateTime<Utc>>>,
+    /// Book reads that missed each unconfirmed row, and the Live rows held
+    /// for the trader (the order reconciler; LOG-08).
+    absence: crate::services::order_reconciler::AbsenceTracker,
+    /// Unconfirmed rows matching several book orders the trader was told of.
+    ambiguous: Mutex<HashSet<String>>,
     cancel: CancellationToken,
 }
 
@@ -346,6 +354,8 @@ impl Runner {
             shutting_down: AtomicBool::new(false),
             scheduler: Mutex::new(None),
             last_tick: Mutex::new(None),
+            absence: crate::services::order_reconciler::AbsenceTracker::new(),
+            ambiguous: Mutex::new(HashSet::new()),
             cancel: CancellationToken::new(),
         })
     }
@@ -896,6 +906,19 @@ impl Runner {
                     )))
                 }
             };
+            if result.uncertain {
+                // It may be at the broker: a Stop pressed again must not send
+                // a second one (LOG-08). The order book settles it.
+                return Err(CloseFailure::pending(format!(
+                    "The {} did not confirm the order closing this strategy's position, so it may have been placed. It is not sent again until the order book settles it. {}",
+                    if info.mode == RunMode::Live {
+                        "broker"
+                    } else {
+                        "sandbox"
+                    },
+                    CLOSE_PENDING_TAIL
+                )));
+            }
             if !result.ok {
                 return Err(failed(format!(
                     "This strategy's position could not be closed: {}.{}",
@@ -1025,7 +1048,7 @@ impl Runner {
                 )],
             );
             return Err(CloseFailure::pending(format!(
-                "The order {} of this strategy has no order number from {} (its answer was not saved, or it is waiting for approval in the Action Center), so this close cannot follow it and nothing was closed. {}",
+                "The order {} of this strategy has no order number from {} (it was not confirmed, its answer was not saved, or it is waiting for approval in the Action Center), so this close cannot follow it and nothing was closed. {}",
                 unnumbered.join(", "),
                 from,
                 CLOSE_PENDING_TAIL
@@ -1385,6 +1408,8 @@ impl Runner {
                     action: p.action.into(),
                     quantity: p.quantity,
                     pricetype: p.pricetype.into(),
+                    price: p.price,
+                    trigger_price: p.trigger_price,
                     product: target.product.into(),
                     is_exit: internal,
                 },
@@ -1395,7 +1420,17 @@ impl Runner {
         let result = services
             .place(info.mode, &target.request(p), internal)
             .await;
-        let status = if result.ok { "working" } else { "rejected" };
+        // Three outcomes (LOG-08): an answer that is neither an acceptance nor
+        // a refusal means the order may be at the destination. Its row is
+        // unconfirmed, never rejected: it is not sent again, not counted as
+        // flat, and the order book settles it.
+        let status = if result.ok {
+            "working"
+        } else if result.uncertain {
+            store::UNCONFIRMED
+        } else {
+            "rejected"
+        };
         // The destination's answer is what lets this run follow the order:
         // unsaved, its row has no id, so its fill would never be counted.
         let ack = Unsaved {
@@ -1403,6 +1438,7 @@ impl Runner {
             orderid: result.broker_order_id.clone(),
             status,
             message: result.error.clone(),
+            client_tag: result.client_tag.clone(),
         };
         if !self.save_ack(&ack).await {
             self.write_log(
@@ -1427,6 +1463,23 @@ impl Runner {
                 info.mode.as_str(),
                 result.broker_order_id.as_deref().unwrap_or("not numbered")
             )
+        } else if result.uncertain {
+            format!(
+                "The {} did not confirm {} {} {} ({}). It may have been placed, so it is not sent again, and nothing new is sent, until the order book settles it.",
+                if info.mode == RunMode::Live {
+                    "broker"
+                } else {
+                    "sandbox"
+                },
+                p.action,
+                p.quantity,
+                target.symbol,
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or("no answer came back")
+                    .trim_end_matches('.')
+            )
         } else {
             format!(
                 "An order was not sent: {}",
@@ -1434,13 +1487,23 @@ impl Runner {
             )
         };
         self.write_log(info, &[line]);
+        if result.uncertain {
+            self.services().request_reconcile();
+        }
         if let Some(e) = entry {
             if p.intent_id >= 0 {
+                // The engine's own word for an order sent and not yet
+                // acknowledged: the intent stays pending, never rejected.
+                let word = if status == store::UNCONFIRMED {
+                    "placed"
+                } else {
+                    status
+                };
                 e.inbox.push(Message::Frame {
                     intent_id: p.intent_id,
                     frame: orders::frame(
                         p.intent_id,
-                        status,
+                        word,
                         0,
                         None,
                         result.broker_order_id.as_deref(),
@@ -1455,6 +1518,15 @@ impl Runner {
 
     fn try_save(&self, ack: &Unsaved) -> crate::error::Result<()> {
         let conn = self.db.conn()?;
+        if ack.status == store::UNCONFIRMED {
+            return store::unconfirmed(
+                &conn,
+                ack.row_id,
+                ack.client_tag.as_deref(),
+                ack.message.as_deref(),
+                self.clock.now(),
+            );
+        }
         store::placed(
             &conn,
             ack.row_id,
@@ -1762,6 +1834,33 @@ impl Runner {
                 );
             }
             return Some(json!({"status": "success", "sent": 0, "unsaved": true}));
+        }
+        // An order the destination did not confirm may be there: a new
+        // order would be sized without it, so nothing is sent until the
+        // order book settles it (LOG-08). A ledger that cannot be read is
+        // treated the same way.
+        let own = match self.read_own(&info) {
+            Ok(rows) => rows,
+            Err(_) => {
+                for i in intents {
+                    reject(
+                        i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
+                        "this run's own orders could not be read, so nothing new is sent",
+                    );
+                }
+                return Some(json!({"status": "success", "sent": 0, "unconfirmed": true}));
+            }
+        };
+        if own.iter().any(|o| {
+            o.orderid.is_none() && (o.status == store::UNCONFIRMED || o.status == "placed")
+        }) {
+            for i in intents {
+                reject(
+                    i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
+                    "an earlier order of this run was not confirmed, so nothing new is sent until the order book settles it",
+                );
+            }
+            return Some(json!({"status": "success", "sent": 0, "unconfirmed": true}));
         }
         let services = self.services();
         let lot = services.lot_size(&info.symbol, &info.exchange);
