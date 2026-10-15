@@ -355,6 +355,90 @@ struct Recovered {
     priced: bool,
 }
 
+/// What a leg's entry filled: the quantity the broker reported, whether it
+/// filled (reported, a filled status, or the checkpoint saying so while
+/// the order is not dead), the entry quantity and its average price.
+fn entry_fill(entry: &OrderRow, cp: &Value) -> (Option<i64>, bool, i64, f64) {
+    let reported = entry.filled_qty.filter(|q| *q > 0);
+    let cp_filled = cp["entry_status"].as_str() == Some("complete");
+    let entry_filled = reported.is_some()
+        || order_is_filled(&entry.status)
+        || (!order_is_dead(&entry.status) && cp_filled);
+    let mut entry_qty = entry.qty.max(0);
+    if let Some(r) = reported {
+        entry_qty = if entry_qty > 0 { entry_qty.min(r) } else { r };
+    }
+    let entry_avg = if entry_filled {
+        entry
+            .avg_fill_price
+            .filter(|p| *p > 0.0)
+            .or_else(|| cp["entry_avg"].as_f64().filter(|p| *p > 0.0))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    (reported, entry_filled, entry_qty, entry_avg)
+}
+
+/// The exits' fills against what the entry opened: the quantity left, the
+/// realized P&L, whether every applied exit was priced, and the last
+/// exit price.
+fn apply_exits(
+    exits: &[&&OrderRow],
+    position: &str,
+    entry_avg: f64,
+    opened: i64,
+) -> (i64, f64, bool, Option<f64>) {
+    let mut remaining = opened;
+    let mut realized = 0.0;
+    let mut priced = true;
+    let mut last_exit_avg = None;
+    for x in exits {
+        let applied = match x.filled_qty.filter(|q| *q > 0) {
+            Some(r) => remaining.min(r),
+            None if order_is_filled(&x.status) => {
+                remaining.min(if x.qty > 0 { x.qty } else { remaining })
+            }
+            None => 0,
+        };
+        if applied <= 0 {
+            continue;
+        }
+        remaining -= applied;
+        let price = x.avg_fill_price.filter(|p| *p > 0.0);
+        if price.is_some() {
+            last_exit_avg = price;
+        }
+        match price {
+            Some(p) if entry_avg > 0.0 => {
+                let sign = if position == "B" { 1.0 } else { -1.0 };
+                realized += (p - entry_avg) * applied as f64 * sign;
+            }
+            _ => priced = false,
+        }
+    }
+    (remaining, realized, priced, last_exit_avg)
+}
+
+/// The rebuilt leg's status, entry status and quantity: open with what is
+/// left, closed, rejected (a dead entry) or still configured.
+fn rebuilt_status(
+    entry: &OrderRow,
+    entry_filled: bool,
+    remaining: i64,
+) -> (&'static str, String, i64) {
+    let entry_status_norm = normalise_order_status(&entry.status);
+    if entry_filled && remaining > 0 {
+        ("open", "complete".to_string(), remaining)
+    } else if entry_filled {
+        ("closed", "complete".to_string(), 0)
+    } else if order_is_dead(&entry.status) {
+        ("rejected", entry_status_norm.to_string(), entry.qty)
+    } else {
+        ("configured", entry_status_norm.to_string(), entry.qty)
+    }
+}
+
 fn rebuild_position(
     leg_id: i64,
     position_ref: Option<String>,
@@ -383,68 +467,17 @@ fn rebuild_position(
         )));
     }
     let position = position_from_action(&entry.action)?;
-    let reported = entry.filled_qty.filter(|q| *q > 0);
-    let cp_filled = cp["entry_status"].as_str() == Some("complete");
-    let entry_filled = reported.is_some()
-        || order_is_filled(&entry.status)
-        || (!order_is_dead(&entry.status) && cp_filled);
-    let mut entry_qty = entry.qty.max(0);
-    if let Some(r) = reported {
-        entry_qty = if entry_qty > 0 { entry_qty.min(r) } else { r };
-    }
-    let entry_avg = if entry_filled {
-        entry
-            .avg_fill_price
-            .filter(|p| *p > 0.0)
-            .or_else(|| cp["entry_avg"].as_f64().filter(|p| *p > 0.0))
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    let mut remaining = if entry_filled { entry_qty } else { 0 };
-    let mut realized = 0.0;
-    let mut priced = true;
-    let mut last_exit_avg = None;
-    for x in &exits {
-        let applied = match x.filled_qty.filter(|q| *q > 0) {
-            Some(r) => remaining.min(r),
-            None if order_is_filled(&x.status) => {
-                remaining.min(if x.qty > 0 { x.qty } else { remaining })
-            }
-            None => 0,
-        };
-        if applied <= 0 {
-            continue;
-        }
-        remaining -= applied;
-        let price = x.avg_fill_price.filter(|p| *p > 0.0);
-        if price.is_some() {
-            last_exit_avg = price;
-        }
-        match price {
-            Some(p) if entry_avg > 0.0 => {
-                let sign = if position == "B" { 1.0 } else { -1.0 };
-                realized += (p - entry_avg) * applied as f64 * sign;
-            }
-            _ => priced = false,
-        }
-    }
+    let (reported, entry_filled, entry_qty, entry_avg) = entry_fill(entry, cp);
+    let opened = if entry_filled { entry_qty } else { 0 };
+    let (remaining, realized, priced, last_exit_avg) =
+        apply_exits(&exits, &position, entry_avg, opened);
     if !working.is_empty() && (!entry_filled || remaining <= 0) {
         return Err(RecoveryError::Managed(format!(
             "leg {} has a working exit without a confirmed position behind it",
             leg_id
         )));
     }
-    let entry_status_norm = normalise_order_status(&entry.status);
-    let (status, entry_status, qty) = if entry_filled && remaining > 0 {
-        ("open", "complete".to_string(), remaining)
-    } else if entry_filled {
-        ("closed", "complete".to_string(), 0)
-    } else if order_is_dead(&entry.status) {
-        ("rejected", entry_status_norm.to_string(), entry.qty)
-    } else {
-        ("configured", entry_status_norm.to_string(), entry.qty)
-    };
+    let (status, entry_status, qty) = rebuilt_status(entry, entry_filled, remaining);
     let active = working.last().map(|o| (o.id, o.kind.clone()));
     let num = |k: &str| cp[k].as_f64().or_else(|| cfg[k].as_f64());
     let trail = |k: &str| {
