@@ -333,3 +333,48 @@ async fn the_webhook_answers_only_telegram() {
     );
     h.shutdown().await;
 }
+
+/// The web's limits on the namespace: 30 per minute per caller, and 5 per
+/// minute for a broadcast, so a script cannot flood the linked chats.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_namespace_keeps_the_web_limits() {
+    let h = H::new().await;
+    let caller: std::net::IpAddr = "10.9.9.9".parse().unwrap();
+    let stats = || {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/telegram/stats")
+            .header("x-api-key", h.key.as_str())
+            .body(Body::empty())
+            .unwrap()
+    };
+    for _ in 0..30 {
+        assert_eq!(h.send_from(stats(), caller).await.0.as_u16(), 200);
+    }
+    let (s, _, b) = h.send_from(stats(), caller).await;
+    assert_eq!(s.as_u16(), 429);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b).unwrap(),
+        json!({"message": "30 per 1 minute"})
+    );
+
+    let other: std::net::IpAddr = "10.9.9.10".parse().unwrap();
+    let broadcast = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/telegram/broadcast")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(h.with_key(json!({"message": "hi"})).to_string()))
+            .unwrap()
+    };
+    for _ in 0..5 {
+        assert_eq!(h.send_from(broadcast(), other).await.0.as_u16(), 200);
+    }
+    let (s, _, b) = h.send_from(broadcast(), other).await;
+    assert_eq!(s.as_u16(), 429);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b).unwrap(),
+        json!({"message": "5 per 1 minute"})
+    );
+    h.shutdown().await;
+}
