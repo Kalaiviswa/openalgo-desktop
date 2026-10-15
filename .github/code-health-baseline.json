@@ -38,11 +38,9 @@
     "src-tauri/src/strategy/recovery.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/strategy/resolver.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/strategy/signals.rs::clippy::too_many_arguments": 1,
-    "src-tauri/src/strategy/store.rs::clippy::too_many_arguments": 1
+    "src-tauri/src/strategy/store/webhook_audit.rs::clippy::too_many_arguments": 1
   },
-  "rust_files": {
-    "src-tauri/src/strategy/store.rs": 1784
-  },
+  "rust_files": {},
   "rust_functions": {
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
@@ -62,8 +60,8 @@
     "src-tauri/src/strategy/signals.rs::signal_exit": 118,
     "src-tauri/src/strategy/signals.rs::signal_place_entry": 136,
     "src-tauri/src/strategy/signals.rs::signal_place_exit": 155,
-    "src-tauri/src/strategy/store.rs::fold_order_broker_frame": 106,
     "src-tauri/src/strategy/store.rs::migrate": 136,
+    "src-tauri/src/strategy/store/orders.rs::fold_order_broker_frame": 106,
     "src-tauri/src/strategy/validate.rs::validate_leg": 112,
     "src-tauri/src/strategy/validate.rs::validate_strategy_config": 182,
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338

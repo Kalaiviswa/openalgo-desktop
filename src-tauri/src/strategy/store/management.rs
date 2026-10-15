@@ -1,6 +1,7 @@
 //! Management writes on a strategy: edit, delete, the start claim and its
 //! release, the webhook token, the Live opt-in and the webhook lock. The
-//! reads and the run, order and event bookkeeping stay in `store.rs`.
+//! reads and the run, order and event bookkeeping are in the store's other
+//! modules (`strategies`, `runs`, `orders`, `events`).
 //!
 //! Every write here checks the status it refuses on in its own UPDATE, or
 //! reads it inside its own `BEGIN IMMEDIATE` transaction, never in a read
