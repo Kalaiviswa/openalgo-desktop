@@ -138,55 +138,36 @@ enum TsSource {
     DateTime(String, Option<String>),
 }
 
-/// Read the file into candles. `Ok(Err(message))` is a trader-facing
-/// rejection of the file's content.
-pub fn read_file(
-    c: &Connection,
-    path: &Path,
-    kind: FileKind,
-) -> Result<std::result::Result<Parsed, String>> {
-    let src = match kind {
-        FileKind::Csv => format!(
-            "read_csv({}, header = true, all_varchar = true)",
-            sql_str(&path.to_string_lossy())
-        ),
-        FileKind::Parquet => format!("read_parquet({})", sql_str(&path.to_string_lossy())),
-    };
-    let unreadable = format!(
-        "The file could not be read. Check that it is a valid {} file with a header row.",
-        kind.label()
-    );
-    // Column names and types.
-    let cols: Vec<(String, String)> = match (|| -> Result<Vec<(String, String)>> {
-        let mut st = c.prepare(&format!("DESCRIBE SELECT * FROM {}", src))?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    })() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Historify import could not read the file: {}", e);
-            return Ok(Err(unreadable));
-        }
-    };
-    let total: i64 = match c.query_row(&format!("SELECT COUNT(*) FROM {}", src), [], |r| r.get(0)) {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!("Historify import could not count rows: {}", e);
-            return Ok(Err(unreadable));
-        }
-    };
-    if total == 0 || cols.is_empty() {
-        return Ok(Err(format!("{} file is empty", kind.label())));
-    }
+/// The file's column names and types.
+fn describe(c: &Connection, src: &str) -> Result<Vec<(String, String)>> {
+    let mut st = c.prepare(&format!("DESCRIBE SELECT * FROM {}", src))?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// The columns by their trimmed lower-case name (the first one wins), with
+/// their own name and type.
+fn by_lower_name(cols: &[(String, String)]) -> HashMap<String, (String, String)> {
     let mut by_name: HashMap<String, (String, String)> = HashMap::new();
-    for (name, ty) in &cols {
+    for (name, ty) in cols {
         by_name
             .entry(name.trim().to_lowercase())
             .or_insert((name.clone(), ty.clone()));
     }
-    let col = |k: &str| by_name.get(k).cloned();
+    by_name
+}
 
-    let ts = if let Some((name, ty)) = col("timestamp") {
+/// Where the timestamp comes from: `timestamp` (a number when every value
+/// casts to one, else a typed or text time), `datetime`, or `date` with an
+/// optional `time`. `None` when the file has none of them.
+fn ts_source(
+    c: &Connection,
+    src: &str,
+    kind: FileKind,
+    by_name: &HashMap<String, (String, String)>,
+) -> Result<Option<TsSource>> {
+    let col = |k: &str| by_name.get(k).cloned();
+    Ok(Some(if let Some((name, ty)) = col("timestamp") {
         let numeric = if kind == FileKind::Parquet {
             is_numeric_type(&ty)
         } else {
@@ -217,6 +198,126 @@ pub fn read_file(
     } else if let Some((name, _)) = col("date") {
         TsSource::DateTime(name, col("time").map(|t| t.0))
     } else {
+        return Ok(None);
+    }))
+}
+
+/// The query reading each row as the timestamp's parts, then open, high,
+/// low, close, volume and oi cast leniently to numbers (a missing column
+/// reads as zero).
+fn select_sql(ts: &TsSource, by_name: &HashMap<String, (String, String)>, src: &str) -> String {
+    let col = |k: &str| by_name.get(k).cloned();
+    let num = |k: &str| match col(k) {
+        Some((n, _)) => format!("TRY_CAST({} AS DOUBLE)", ident(&n)),
+        None => "CAST(0 AS DOUBLE)".into(),
+    };
+    let (ts_a, ts_b) = match ts {
+        TsSource::Number(n) => (format!("TRY_CAST({} AS DOUBLE)", ident(n)), "NULL".into()),
+        TsSource::Typed(n) => (
+            format!("CAST(epoch_ms({}) // 1000 AS DOUBLE)", ident(n)),
+            "NULL".into(),
+        ),
+        TsSource::Text(n) => (format!("CAST({} AS VARCHAR)", ident(n)), "NULL".into()),
+        TsSource::DateTime(d, t) => (
+            format!("CAST({} AS VARCHAR)", ident(d)),
+            t.as_ref()
+                .map(|t| format!("CAST({} AS VARCHAR)", ident(t)))
+                .unwrap_or_else(|| "NULL".into()),
+        ),
+    };
+    format!(
+        "SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {}",
+        ts_a,
+        ts_b,
+        num("open"),
+        num("high"),
+        num("low"),
+        num("close"),
+        num("volume"),
+        num("oi"),
+        src
+    )
+}
+
+/// One row's timestamp in epoch seconds, `None` when it cannot be read. A
+/// numeric column is in milliseconds when its first value is above 1e12
+/// (decided once, in `ms`).
+fn row_timestamp(r: &duckdb::Row<'_>, ts: &TsSource, ms: &mut Option<bool>) -> Result<Option<i64>> {
+    Ok(Some(match ts {
+        TsSource::Number(_) | TsSource::Typed(_) => {
+            let Some(v) = r.get::<_, Option<f64>>(0)? else {
+                return Ok(None);
+            };
+            let is_ms = *ms.get_or_insert(matches!(ts, TsSource::Number(_)) && v > 1e12);
+            if is_ms {
+                (v / 1000.0).floor() as i64
+            } else {
+                v as i64
+            }
+        }
+        TsSource::Text(_) => {
+            let s: Option<String> = r.get(0)?;
+            match s.as_deref().and_then(parse_datetime) {
+                Some(t) => t,
+                None => return Ok(None),
+            }
+        }
+        TsSource::DateTime(..) => {
+            let d: Option<String> = r.get(0)?;
+            let t: Option<String> = r.get(1)?;
+            let text = match (d, t) {
+                (Some(d), Some(t)) => format!("{} {}", d.trim(), t.trim()),
+                (Some(d), None) => d,
+                _ => return Ok(None),
+            };
+            match parse_datetime(&text) {
+                Some(t) => t,
+                None => return Ok(None),
+            }
+        }
+    }))
+}
+
+/// Read the file into candles. `Ok(Err(message))` is a trader-facing
+/// rejection of the file's content.
+pub fn read_file(
+    c: &Connection,
+    path: &Path,
+    kind: FileKind,
+) -> Result<std::result::Result<Parsed, String>> {
+    let src = match kind {
+        FileKind::Csv => format!(
+            "read_csv({}, header = true, all_varchar = true)",
+            sql_str(&path.to_string_lossy())
+        ),
+        FileKind::Parquet => format!("read_parquet({})", sql_str(&path.to_string_lossy())),
+    };
+    let unreadable = format!(
+        "The file could not be read. Check that it is a valid {} file with a header row.",
+        kind.label()
+    );
+    // Column names and types.
+    let cols: Vec<(String, String)> = match describe(c, &src) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Historify import could not read the file: {}", e);
+            return Ok(Err(unreadable));
+        }
+    };
+    let total: i64 = match c.query_row(&format!("SELECT COUNT(*) FROM {}", src), [], |r| r.get(0)) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("Historify import could not count rows: {}", e);
+            return Ok(Err(unreadable));
+        }
+    };
+    if total == 0 || cols.is_empty() {
+        return Ok(Err(format!("{} file is empty", kind.label())));
+    }
+    let by_name = by_lower_name(&cols);
+    let col = |k: &str| by_name.get(k).cloned();
+
+    let Some(ts) = ts_source(c, &src, kind, &by_name)? else {
         return Ok(Err(format!(
             "{} must have 'timestamp', 'datetime', or 'date' column",
             kind.label()
@@ -235,36 +336,7 @@ pub fn read_file(
             missing.join(", ")
         )));
     }
-    let num = |k: &str| match col(k) {
-        Some((n, _)) => format!("TRY_CAST({} AS DOUBLE)", ident(&n)),
-        None => "CAST(0 AS DOUBLE)".into(),
-    };
-    let (ts_a, ts_b) = match &ts {
-        TsSource::Number(n) => (format!("TRY_CAST({} AS DOUBLE)", ident(n)), "NULL".into()),
-        TsSource::Typed(n) => (
-            format!("CAST(epoch_ms({}) // 1000 AS DOUBLE)", ident(n)),
-            "NULL".into(),
-        ),
-        TsSource::Text(n) => (format!("CAST({} AS VARCHAR)", ident(n)), "NULL".into()),
-        TsSource::DateTime(d, t) => (
-            format!("CAST({} AS VARCHAR)", ident(d)),
-            t.as_ref()
-                .map(|t| format!("CAST({} AS VARCHAR)", ident(t)))
-                .unwrap_or_else(|| "NULL".into()),
-        ),
-    };
-    let sql = format!(
-        "SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {}",
-        ts_a,
-        ts_b,
-        num("open"),
-        num("high"),
-        num("low"),
-        num("close"),
-        num("volume"),
-        num("oi"),
-        src
-    );
+    let sql = select_sql(&ts, &by_name, &src);
     let mut st = c.prepare(&sql)?;
     let mut rows = st.query([])?;
     let mut bars = Vec::with_capacity(total.clamp(0, 1 << 20) as usize);
@@ -279,38 +351,8 @@ pub fn read_file(
     };
     while let Some(r) = rows.next()? {
         line += 1;
-        let ts = match &ts {
-            TsSource::Number(_) | TsSource::Typed(_) => {
-                let Some(v) = r.get::<_, Option<f64>>(0)? else {
-                    return Ok(Err(bad_time(line)));
-                };
-                let is_ms = *ms.get_or_insert(matches!(ts, TsSource::Number(_)) && v > 1e12);
-                if is_ms {
-                    (v / 1000.0).floor() as i64
-                } else {
-                    v as i64
-                }
-            }
-            TsSource::Text(_) => {
-                let s: Option<String> = r.get(0)?;
-                match s.as_deref().and_then(parse_datetime) {
-                    Some(t) => t,
-                    None => return Ok(Err(bad_time(line))),
-                }
-            }
-            TsSource::DateTime(..) => {
-                let d: Option<String> = r.get(0)?;
-                let t: Option<String> = r.get(1)?;
-                let text = match (d, t) {
-                    (Some(d), Some(t)) => format!("{} {}", d.trim(), t.trim()),
-                    (Some(d), None) => d,
-                    _ => return Ok(Err(bad_time(line))),
-                };
-                match parse_datetime(&text) {
-                    Some(t) => t,
-                    None => return Ok(Err(bad_time(line))),
-                }
-            }
+        let Some(ts) = row_timestamp(r, &ts, &mut ms)? else {
+            return Ok(Err(bad_time(line)));
         };
         let f = |i: usize| -> std::result::Result<Option<f64>, duckdb::Error> {
             Ok(r.get::<_, Option<f64>>(i)?.filter(|v| v.is_finite()))

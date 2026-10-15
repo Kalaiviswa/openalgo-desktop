@@ -60,7 +60,6 @@
   "rust_functions": {
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/feed/server/mod.rs::serve_conn": 248,
-    "src-tauri/src/historify/import.rs::read_file": 194,
     "src-tauri/src/historify/jobs/processor.rs::run": 214,
     "src-tauri/src/sandbox/gtt.rs::fire": 181,
     "src-tauri/src/sandbox/gtt.rs::place": 103,
