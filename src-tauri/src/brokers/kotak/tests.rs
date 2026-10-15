@@ -1009,10 +1009,14 @@ fn feed_config_and_dividers() {
         feed_url_from_config(&cfg, "E21").1,
         "wss://cdtstream-e21.kotaksecurities.com/feed"
     );
-    // HSM routes fall back to the SFeed default, as on the web.
-    assert_eq!(
-        feed_url_from_config(&cfg, "E10"),
-        (Some("hs".into()), DEFAULT_SFEED_URL.into())
+    // HSM routes fall back to the SFeed default and say so, as on the web.
+    let (hs, kept) = crate::services::error_log::kept_while(|| feed_url_from_config(&cfg, "E10"));
+    assert_eq!(hs, (Some("hs".into()), DEFAULT_SFEED_URL.into()));
+    assert!(
+        kept.iter()
+            .any(|m| m.contains("E10 selects the legacy HSM feed")),
+        "{:?}",
+        kept
     );
     assert_eq!(
         feed_url_from_config(&cfg, "E99"),
