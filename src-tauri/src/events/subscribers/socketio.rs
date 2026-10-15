@@ -134,19 +134,9 @@ fn is_analyze(meta: &OrderMeta) -> bool {
     meta.mode == crate::events::Mode::Analyze
 }
 
-/// The Socket.IO event (name, payload) the web emits for `event`, if any.
-pub fn translate(event: &Event) -> Option<(&'static str, Value)> {
-    if let Some(meta) = event.meta() {
-        let always_analyzer = matches!(
-            event,
-            Event::SandboxOrderFilled { .. }
-                | Event::SandboxAutoSquareoff { .. }
-                | Event::SandboxT1Settlement { .. }
-        );
-        if is_analyze(meta) || always_analyzer {
-            return Some(("analyzer_update", analyzer_update(meta)));
-        }
-    }
+/// A single live order's event: placed, no action, unconfirmed,
+/// modified, cancelled, all cancelled, or positions closed.
+fn order_event(event: &Event) -> Option<(&'static str, Value)> {
     match event {
         Event::OrderPlaced {
             symbol,
@@ -207,6 +197,13 @@ pub fn translate(event: &Event) -> Option<(&'static str, Value)> {
                 "mode": "live",
             }),
         )),
+        _ => None,
+    }
+}
+
+/// A batch's completion: basket, split, options and multi-leg orders.
+fn batch_event(event: &Event) -> Option<(&'static str, Value)> {
+    match event {
         Event::BasketCompleted {
             strategy,
             successful,
@@ -283,6 +280,14 @@ pub fn translate(event: &Event) -> Option<(&'static str, Value)> {
                 "successful_legs": successful_legs, "failed_legs": failed_legs,
             }),
         )),
+        _ => None,
+    }
+}
+
+/// GTT, order updates, the master contract, caches, sessions, pending
+/// orders and Historify.
+fn other_event(event: &Event) -> Option<(&'static str, Value)> {
+    match event {
         Event::Gtt {
             kind,
             symbol,
@@ -338,6 +343,24 @@ pub fn translate(event: &Event) -> Option<(&'static str, Value)> {
         // Live failures have no Socket.IO event on the web.
         _ => None,
     }
+}
+
+/// The Socket.IO event (name, payload) the web emits for `event`, if any.
+pub fn translate(event: &Event) -> Option<(&'static str, Value)> {
+    if let Some(meta) = event.meta() {
+        let always_analyzer = matches!(
+            event,
+            Event::SandboxOrderFilled { .. }
+                | Event::SandboxAutoSquareoff { .. }
+                | Event::SandboxT1Settlement { .. }
+        );
+        if is_analyze(meta) || always_analyzer {
+            return Some(("analyzer_update", analyzer_update(meta)));
+        }
+    }
+    order_event(event)
+        .or_else(|| batch_event(event))
+        .or_else(|| other_event(event))
 }
 
 #[async_trait::async_trait]

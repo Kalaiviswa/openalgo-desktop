@@ -52,7 +52,6 @@
     "src-tauri/src/strategy/store.rs": 1784
   },
   "rust_functions": {
-    "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/sandbox/gtt.rs::fire": 181,
     "src-tauri/src/sandbox/gtt.rs::place": 103,
     "src-tauri/src/sandbox/mod.rs::mypnl": 111,
