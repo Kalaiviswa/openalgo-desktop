@@ -59,7 +59,6 @@
   },
   "rust_functions": {
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
-    "src-tauri/src/feed/server/mod.rs::serve_conn": 248,
     "src-tauri/src/sandbox/gtt.rs::fire": 181,
     "src-tauri/src/sandbox/gtt.rs::place": 103,
     "src-tauri/src/sandbox/mod.rs::mypnl": 111,
