@@ -87,18 +87,32 @@ fn base_of(trading_symbol: &str) -> &str {
     trading_symbol.split('-').next().unwrap_or(trading_symbol)
 }
 
-/// web `reformat_symbol`.
-#[allow(clippy::too_many_arguments)]
-pub fn reformat_symbol(
-    instrument: &str,
-    option_type: &str,
-    symbol_name: &str,
-    trading_symbol: &str,
-    segment: &str,
-    expiry: &str,
+/// The columns of an instruments CSV row the OpenAlgo symbol is made from.
+#[derive(Clone, Copy)]
+struct SymbolParts<'a> {
+    instrument: &'a str,
+    option_type: &'a str,
+    symbol_name: &'a str,
+    trading_symbol: &'a str,
+    segment: &'a str,
+    expiry: &'a str,
     strike: f64,
+    /// The row is from the index file.
     index_file: bool,
-) -> String {
+}
+
+/// web `reformat_symbol`.
+fn reformat_symbol(parts: SymbolParts<'_>) -> String {
+    let SymbolParts {
+        instrument,
+        option_type,
+        symbol_name,
+        trading_symbol,
+        segment,
+        expiry,
+        strike,
+        index_file,
+    } = parts;
     let exp = expiry.replace('-', "").to_ascii_uppercase();
     if instrument == "EQUITY" {
         trading_symbol.to_string()
@@ -182,16 +196,16 @@ pub fn parse_csv(source: &str, text: &str) -> Vec<SymbolData> {
         let strike: f64 = get(c_strike).parse().unwrap_or(0.0);
         let strike = if strike.is_finite() { strike } else { 0.0 };
         let trading_symbol = get(c_ts);
-        let raw_symbol = reformat_symbol(
-            &instrument,
-            &option_type,
-            &get(c_name),
-            &trading_symbol,
-            &segment,
-            &expiry,
+        let raw_symbol = reformat_symbol(SymbolParts {
+            instrument: &instrument,
+            option_type: &option_type,
+            symbol_name: &get(c_name),
+            trading_symbol: &trading_symbol,
+            segment: &segment,
+            expiry: &expiry,
             strike,
             index_file,
-        );
+        });
         let symbol = RENAMES
             .iter()
             .find(|(from, _)| *from == raw_symbol)

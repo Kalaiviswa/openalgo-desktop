@@ -202,16 +202,16 @@ fn fields(pt: PriceType, price: f64, trig: f64) -> OrderFields<'static> {
 
 #[test]
 fn order_payloads_match_transform_data() {
-    let p = mapping::order_payload(
-        "3045",
-        "NSE",
-        &fields(PriceType::Limit, 812.5, 0.0),
-        10,
-        Product::Mis,
-        Validity::Day,
-        0,
-        None,
-    )
+    let p = mapping::order_payload(&mapping::OrderRequest {
+        token: "3045",
+        exchange: "NSE",
+        fields: fields(PriceType::Limit, 812.5, 0.0),
+        quantity: 10,
+        product: Product::Mis,
+        validity: Validity::Day,
+        disclosed_quantity: 0,
+        tag: None,
+    })
     .unwrap();
     assert_eq!(
         p,
@@ -219,16 +219,16 @@ fn order_payloads_match_transform_data() {
                "orderComplexity":"REGULAR","product":"INTRADAY","validity":"DAY",
                "apiOrderSource":"openalgo","orderType":"LIMIT","price":812.5})
     );
-    let m = mapping::order_payload(
-        "35001",
-        "NFO",
-        &fields(PriceType::Market, 0.0, 0.0),
-        75,
-        Product::Nrml,
-        Validity::Ioc,
-        25,
-        Some(&"x".repeat(60)),
-    )
+    let m = mapping::order_payload(&mapping::OrderRequest {
+        token: "35001",
+        exchange: "NFO",
+        fields: fields(PriceType::Market, 0.0, 0.0),
+        quantity: 75,
+        product: Product::Nrml,
+        validity: Validity::Ioc,
+        disclosed_quantity: 25,
+        tag: Some(&"x".repeat(60)),
+    })
     .unwrap();
     assert_eq!(m["orderType"], "MARKET");
     assert!(m.get("price").is_none() && m.get("slTriggerPrice").is_none());
@@ -236,31 +236,31 @@ fn order_payloads_match_transform_data() {
     assert_eq!(m["validity"], "IOC");
     assert_eq!(m["disclosedQuantity"], "25");
     assert_eq!(m["orderTag"].as_str().unwrap().len(), 50);
-    let s = mapping::order_payload(
-        "3045",
-        "NSE",
-        &fields(PriceType::SlM, 0.0, 100.0),
-        1,
-        Product::Cnc,
-        Validity::Day,
-        0,
-        None,
-    )
+    let s = mapping::order_payload(&mapping::OrderRequest {
+        token: "3045",
+        exchange: "NSE",
+        fields: fields(PriceType::SlM, 0.0, 100.0),
+        quantity: 1,
+        product: Product::Cnc,
+        validity: Validity::Day,
+        disclosed_quantity: 0,
+        tag: None,
+    })
     .unwrap();
     assert_eq!(s["orderType"], "SL");
     assert_eq!(s["slTriggerPrice"], 100.0);
     assert_eq!(s["price"], 101.0);
     assert_eq!(s["product"], "DELIVERY");
-    let sl = mapping::order_payload(
-        "3045",
-        "NSE",
-        &fields(PriceType::Sl, 99.0, 98.5),
-        1,
-        Product::Mis,
-        Validity::Day,
-        0,
-        None,
-    )
+    let sl = mapping::order_payload(&mapping::OrderRequest {
+        token: "3045",
+        exchange: "NSE",
+        fields: fields(PriceType::Sl, 99.0, 98.5),
+        quantity: 1,
+        product: Product::Mis,
+        validity: Validity::Day,
+        disclosed_quantity: 0,
+        tag: None,
+    })
     .unwrap();
     assert_eq!(
         (sl["price"].clone(), sl["slTriggerPrice"].clone()),

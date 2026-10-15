@@ -400,18 +400,30 @@ fn put_price_fields(m: &mut Map<String, Value>, f: &OrderFields<'_>) -> Result<(
     Ok(())
 }
 
+/// An order to place, as [`order_payload`] sends it.
+pub struct OrderRequest<'a> {
+    pub token: &'a str,
+    pub exchange: &'a str,
+    pub fields: OrderFields<'a>,
+    pub quantity: i64,
+    pub product: Product,
+    pub validity: Validity,
+    pub disclosed_quantity: i64,
+    pub tag: Option<&'a str>,
+}
+
 /// Place-order body (one element of the `POST /orders` list).
-#[allow(clippy::too_many_arguments)]
-pub fn order_payload(
-    token: &str,
-    exchange: &str,
-    fields: &OrderFields<'_>,
-    quantity: i64,
-    product: Product,
-    validity: Validity,
-    disclosed_quantity: i64,
-    tag: Option<&str>,
-) -> Result<Value> {
+pub fn order_payload(o: &OrderRequest<'_>) -> Result<Value> {
+    let OrderRequest {
+        token,
+        exchange,
+        ref fields,
+        quantity,
+        product,
+        validity,
+        disclosed_quantity,
+        tag,
+    } = *o;
     let mut m = Map::new();
     m.insert("instrumentId".into(), json!(token));
     m.insert("exchange".into(), json!(to_segment(exchange)));

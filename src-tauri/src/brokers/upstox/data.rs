@@ -554,19 +554,34 @@ async fn candles_at(b: &UpstoxBroker, auth: &AuthToken, path: &str) -> Result<Ve
         .unwrap_or_default())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The candle series a history request reads, chunk after chunk.
+struct Series<'a> {
+    key: &'a QuoteKey,
+    /// Upstox's instrument key.
+    ik: &'a str,
+    /// Upstox's unit and count (`minutes`, 5).
+    unit: &'a str,
+    n: u32,
+    /// The OpenAlgo interval asked for.
+    interval: &'a str,
+    today: NaiveDate,
+}
+
 async fn fetch_chunk(
     b: &UpstoxBroker,
     auth: &AuthToken,
-    key: &QuoteKey,
-    ik: &str,
-    unit: &str,
-    n: u32,
+    series: &Series<'_>,
     start: NaiveDate,
     end: NaiveDate,
-    interval: &str,
-    today: NaiveDate,
 ) -> Result<Vec<Candle>> {
+    let Series {
+        key,
+        ik,
+        unit,
+        n,
+        interval,
+        today,
+    } = *series;
     let enc = urlencoding::encode(ik).into_owned();
     let mut all: Vec<Vec<Value>> = Vec::new();
     if matches!(unit, "minutes" | "hours") && end == today {
@@ -617,10 +632,17 @@ pub async fn get_history(
     let (unit, n) = upstox_interval(&req.interval)?;
     let key = normalise_key(&req.key);
     let ik = instrument_key(b, &key.symbol, &key.exchange).ok_or_else(|| not_found(&key))?;
-    let today = today_ist();
+    let series = Series {
+        key: &key,
+        ik: &ik,
+        unit,
+        n,
+        interval: &req.interval,
+        today: today_ist(),
+    };
     let mut out = Vec::new();
     for (from, to) in chunks(req.start, req.end, chunk_days(unit, n)) {
-        out.extend(fetch_chunk(b, auth, &key, &ik, unit, n, from, to, &req.interval, today).await?);
+        out.extend(fetch_chunk(b, auth, &series, from, to).await?);
     }
     Ok(sort_dedupe(out))
 }

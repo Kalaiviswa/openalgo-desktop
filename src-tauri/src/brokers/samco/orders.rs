@@ -10,18 +10,27 @@ use crate::error::{AppError, Result};
 use reqwest::Method;
 use serde_json::Value;
 
-/// MPP for MARKET / SL-M, fetching the LTP for a MARKET order.
-#[allow(clippy::too_many_arguments)]
-async fn resolve(
-    b: &SamcoBroker,
-    auth: &AuthToken,
-    key: &QuoteKey,
+/// The prices of an order to place or modify, before market price
+/// protection.
+struct OrderPrices<'a> {
+    key: &'a QuoteKey,
     instrument_tick: f64,
     pricetype: PriceType,
     action: crate::brokers::common::mapping::Action,
     price: f64,
     trigger_price: f64,
-) -> Result<Resolved> {
+}
+
+/// MPP for MARKET / SL-M, fetching the LTP for a MARKET order.
+async fn resolve(b: &SamcoBroker, auth: &AuthToken, o: OrderPrices<'_>) -> Result<Resolved> {
+    let OrderPrices {
+        key,
+        instrument_tick,
+        pricetype,
+        action,
+        price,
+        trigger_price,
+    } = o;
     let ltp = if pricetype == PriceType::Market {
         match data::get_quote(b, auth, key).await {
             Ok(q) => Some(q.ltp),
@@ -63,12 +72,14 @@ pub async fn place_order(
     let r = outcome::before_send(resolve(
         b,
         auth,
-        &key,
-        o.instrument.tick_size,
-        o.pricetype,
-        o.action,
-        o.price,
-        o.trigger_price,
+        OrderPrices {
+            key: &key,
+            instrument_tick: o.instrument.tick_size,
+            pricetype: o.pricetype,
+            action: o.action,
+            price: o.price,
+            trigger_price: o.trigger_price,
+        },
     ))
     .await?;
     let body = mapping::place_body(o, &r);
@@ -119,12 +130,14 @@ pub async fn modify_order(
     let r = resolve(
         b,
         auth,
-        &key,
-        m.instrument.tick_size,
-        m.pricetype,
-        m.action,
-        m.price,
-        m.trigger_price,
+        OrderPrices {
+            key: &key,
+            instrument_tick: m.instrument.tick_size,
+            pricetype: m.pricetype,
+            action: m.action,
+            price: m.price,
+            trigger_price: m.trigger_price,
+        },
     )
     .await?;
     let body = mapping::modify_body(m, &r);

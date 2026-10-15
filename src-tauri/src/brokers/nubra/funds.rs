@@ -40,16 +40,16 @@ pub fn margin_payload(b: &NubraBroker, legs: &[MarginLeg]) -> Option<Value> {
                 );
                 return None;
             };
-            Some(mapping::order_item(
-                rid,
-                l.quantity,
-                l.action,
-                l.product,
-                l.pricetype,
-                l.price,
-                l.trigger_price,
-                &tag,
-            ))
+            Some(mapping::order_item(&mapping::OrderItem {
+                ref_id: rid,
+                quantity: l.quantity,
+                action: l.action,
+                product: l.product,
+                price_type: l.pricetype,
+                price: l.price,
+                trigger: l.trigger_price,
+                tag: &tag,
+            }))
         })
         .collect();
     if items.is_empty() {
