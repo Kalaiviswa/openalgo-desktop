@@ -481,6 +481,66 @@ fn validate_signal_leg(raw: &Value, index: usize, g: &SymbolGeneration) -> R<Val
     Ok(Value::Object(c))
 }
 
+/// An options leg's contract fields: the option type, and either the ATM
+/// offset or a fixed strike (never both).
+fn option_fields(leg: &Map<String, Value>, c: &mut Map<String, Value>, label: &str) -> R<()> {
+    c.insert(
+        "option_type".into(),
+        json!(choice(
+            required(leg, "option_type", label)?,
+            LEG_OPTION_TYPES,
+            &format!("{}.option_type", label)
+        )?),
+    );
+    let mode = choice(
+        get(leg, "strike_mode").unwrap_or(&json!("atm")),
+        LEG_STRIKE_MODES,
+        &format!("{}.strike_mode", label),
+    )?;
+    c.insert("strike_mode".into(), json!(mode));
+    if mode == "atm" {
+        if get(leg, "strike").is_some() {
+            return Err(format!(
+                "{}.strike is only used when strike_mode is 'strike'. Set strike_mode to 'strike', or remove the strike.",
+                label
+            ));
+        }
+        let offsets: Vec<String> = std::iter::once("ATM".to_string())
+            .chain((1..=5).map(|n| format!("ITM{}", n)))
+            .chain((1..=5).map(|n| format!("OTM{}", n)))
+            .collect();
+        let raw_off = get(leg, "atm_offset").cloned().unwrap_or(json!("ATM"));
+        let t = raw_off.as_str().unwrap_or("").trim().to_ascii_uppercase();
+        if !offsets.contains(&t) {
+            return Err(format!(
+                "{}.atm_offset must be one of: {}. Got {}",
+                label,
+                offsets.join(", "),
+                py_repr(&raw_off)
+            ));
+        }
+        c.insert("atm_offset".into(), json!(t));
+    } else {
+        if get(leg, "atm_offset").is_some() {
+            return Err(format!(
+                "{}.atm_offset is only used when strike_mode is 'atm'. Set strike_mode to 'atm', or remove the offset.",
+                label
+            ));
+        }
+        c.insert(
+            "strike".into(),
+            number(
+                required(leg, "strike", label)?,
+                &format!("{}.strike", label),
+                None,
+                None,
+                Some(0.0),
+            )?,
+        );
+    }
+    Ok(())
+}
+
 fn validate_leg(raw: &Value, index: usize) -> R<Value> {
     let label = format!("legs[{}]", index);
     let leg = mapping(raw, &label)?;
@@ -515,60 +575,7 @@ fn validate_leg(raw: &Value, index: usize) -> R<Value> {
         )?),
     );
     if segment == "options" {
-        c.insert(
-            "option_type".into(),
-            json!(choice(
-                required(leg, "option_type", &label)?,
-                LEG_OPTION_TYPES,
-                &format!("{}.option_type", label)
-            )?),
-        );
-        let mode = choice(
-            get(leg, "strike_mode").unwrap_or(&json!("atm")),
-            LEG_STRIKE_MODES,
-            &format!("{}.strike_mode", label),
-        )?;
-        c.insert("strike_mode".into(), json!(mode));
-        if mode == "atm" {
-            if get(leg, "strike").is_some() {
-                return Err(format!(
-                    "{}.strike is only used when strike_mode is 'strike'. Set strike_mode to 'strike', or remove the strike.",
-                    label
-                ));
-            }
-            let offsets: Vec<String> = std::iter::once("ATM".to_string())
-                .chain((1..=5).map(|n| format!("ITM{}", n)))
-                .chain((1..=5).map(|n| format!("OTM{}", n)))
-                .collect();
-            let raw_off = get(leg, "atm_offset").cloned().unwrap_or(json!("ATM"));
-            let t = raw_off.as_str().unwrap_or("").trim().to_ascii_uppercase();
-            if !offsets.contains(&t) {
-                return Err(format!(
-                    "{}.atm_offset must be one of: {}. Got {}",
-                    label,
-                    offsets.join(", "),
-                    py_repr(&raw_off)
-                ));
-            }
-            c.insert("atm_offset".into(), json!(t));
-        } else {
-            if get(leg, "atm_offset").is_some() {
-                return Err(format!(
-                    "{}.atm_offset is only used when strike_mode is 'atm'. Set strike_mode to 'atm', or remove the offset.",
-                    label
-                ));
-            }
-            c.insert(
-                "strike".into(),
-                number(
-                    required(leg, "strike", &label)?,
-                    &format!("{}.strike", label),
-                    None,
-                    None,
-                    Some(0.0),
-                )?,
-            );
-        }
+        option_fields(leg, &mut c, &label)?;
     } else {
         for f in ["option_type", "strike_mode", "atm_offset", "strike"] {
             if get(leg, f).is_some() {
