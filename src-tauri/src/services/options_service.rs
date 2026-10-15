@@ -8,12 +8,15 @@ use super::symbol_service::freeze_qty_for_option;
 use crate::analytics::black76::{self as bs, Flag};
 use crate::brokers::common::master_contract::{format_strike, parse_oa_expiry};
 use crate::brokers::common::symbols::SymToken;
-use crate::brokers::types::{ChainQuoteRequest, ChainQuotes, Quote, QuoteKey};
+use crate::brokers::types::{Quote, QuoteKey};
 use crate::state::AppState;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+mod chain_answer;
+pub use chain_answer::{option_chain_answer, ChainAnswer};
 
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -789,31 +792,6 @@ fn add_leg_greeks(leg: &mut Map<String, Value>, call: bool, f: f64, k: f64, t: f
     }
 }
 
-/// An option chain with what the broker could not supply: legs that came
-/// back without a quote, and legs whose open interest did not come back.
-/// The `/api/v1` body keeps the web's shape (those legs read zero there,
-/// as on the web); the chain tools read the sets and do not total a gap as
-/// zero (TOOLS-04, TOOLS-13).
-#[derive(Debug, Clone)]
-pub struct ChainAnswer {
-    pub body: Value,
-    /// Symbols (OpenAlgo) with no quote.
-    pub quote_missing: HashSet<String>,
-    /// Symbols (OpenAlgo) quoted without their open interest.
-    pub oi_missing: HashSet<String>,
-}
-
-impl ChainAnswer {
-    /// Legs in the chain whose open interest is not a reading.
-    pub fn oi_unknown(&self) -> HashSet<&str> {
-        self.quote_missing
-            .iter()
-            .chain(self.oi_missing.iter())
-            .map(String::as_str)
-            .collect()
-    }
-}
-
 /// `optionchain`.
 pub async fn option_chain(
     ctx: &AppState,
@@ -838,171 +816,6 @@ pub async fn option_chain(
         Ok(a) => Reply::ok(a.body),
         Err(r) => r,
     }
-}
-
-/// [`option_chain`] with the legs the broker could not supply.
-pub async fn option_chain_answer(
-    ctx: &AppState,
-    underlying: &str,
-    exchange: &str,
-    expiry_date: &str,
-    strike_count: Option<i64>,
-    with_greeks: bool,
-    interest_rate: Option<f64>,
-) -> Result<ChainAnswer, Reply> {
-    let h = broker_handle(ctx)?;
-    let u = resolve_underlying(ctx, underlying, exchange, Some(expiry_date), true)?;
-    let uq = underlying_ltp(ctx, &h, &u, ":").await?;
-    let opt_ex = option_exchange(&u.quote_exchange);
-    let snap = ctx.symbols.snapshot();
-    let strikes = available_strikes(snap.rows(), &u.base, &u.expiry, "CE", &opt_ex);
-    if strikes.is_empty() {
-        return Err(no_strikes(&u.base, &u.expiry));
-    }
-    let Some(atm) = atm_index(&strikes, uq.ltp) else {
-        return Err(Reply::error(500, "Failed to determine ATM strike"));
-    };
-    let (start, end) = match strike_count {
-        Some(sc) if sc > 0 => {
-            let sc = sc as usize;
-            (atm.saturating_sub(sc), (atm + sc + 1).min(strikes.len()))
-        }
-        _ => (0, strikes.len()),
-    };
-    let window = &strikes[start..end];
-    let mut legs: Vec<(f64, Option<SymToken>, Option<SymToken>, usize)> = Vec::new();
-    let mut keys = Vec::new();
-    for (off, k) in window.iter().enumerate() {
-        let idx = start + off;
-        let find = |t: &str| {
-            let sym = format!("{}{}{}{}", u.base, u.expiry, format_strike(*k), t);
-            snap.by_symbol(&opt_ex, &sym).cloned()
-        };
-        let (ce, pe) = (find("CE"), find("PE"));
-        for r in [&ce, &pe].into_iter().flatten() {
-            keys.push(QuoteKey::new(r.exchange.clone(), r.symbol.clone()));
-        }
-        legs.push((*k, ce, pe, idx));
-    }
-    if keys.is_empty() {
-        return Err(Reply::error(
-            404,
-            "No valid option symbols found for the given parameters",
-        ));
-    }
-    let fetched = match parse_compact_expiry(&u.expiry) {
-        Some(expiry) => {
-            let req = ChainQuoteRequest {
-                underlying: QuoteKey::new(u.quote_exchange.clone(), u.quote_symbol.clone()),
-                expiry,
-                keys: keys.clone(),
-                strikes_each_side: strike_count.filter(|n| *n > 0).map(|n| n as usize),
-            };
-            h.broker.get_chain_quotes(&h.auth, &req).await
-        }
-        None => h
-            .broker
-            .get_multiquotes(&h.auth, &keys)
-            .await
-            .map(|quotes| ChainQuotes {
-                quotes,
-                oi_missing: HashSet::new(),
-            }),
-    };
-    let fetched = match fetched {
-        Ok(f) => f,
-        Err(e) => {
-            return Err(Reply::error(
-                500,
-                format!(
-                    "An error occurred while fetching option chain: {}",
-                    e.client_message()
-                ),
-            ))
-        }
-    };
-    let oi_missing = fetched.oi_missing;
-    let quotes: HashMap<String, Quote> = fetched
-        .quotes
-        .into_iter()
-        .filter_map(|r| r.data.map(|q| (r.symbol, q)))
-        .collect();
-    let quote_missing: HashSet<String> = keys
-        .iter()
-        .filter(|k| !quotes.contains_key(&k.symbol))
-        .map(|k| k.symbol.clone())
-        .collect();
-    let mut chain: Vec<Value> = Vec::with_capacity(legs.len());
-    let mut rows_m: Vec<ChainRow> = Vec::new();
-    for (k, ce, pe, idx) in &legs {
-        let ce_leg = ce
-            .as_ref()
-            .map(|r| leg_json(r, &label(*idx, atm, true), quotes.get(&r.symbol)));
-        let pe_leg = pe
-            .as_ref()
-            .map(|r| leg_json(r, &label(*idx, atm, false), quotes.get(&r.symbol)));
-        rows_m.push((*k, ce_leg, pe_leg));
-    }
-    let now = ctx.now();
-    let expiry_dt = expiry_datetime(&u.expiry, &opt_ex, None);
-    let mut forward: Option<f64> = None;
-    if with_greeks {
-        let atm_strike = strikes[atm];
-        let atm_row = rows_m
-            .iter()
-            .find(|(k, _, _)| (*k - atm_strike).abs() < 1e-9);
-        let leg_ltp = |l: &Option<Map<String, Value>>| {
-            l.as_ref()
-                .and_then(|m| m.get("ltp"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-        };
-        forward = Some(match atm_row {
-            Some((k, c, p)) if leg_ltp(c) > 0.0 && leg_ltp(p) > 0.0 => {
-                bs::py_round(k + leg_ltp(c) - leg_ltp(p), 4)
-            }
-            _ => uq.ltp,
-        });
-        if let (Some(f), Some(t)) = (forward, expiry_dt.and_then(|e| time_to_expiry(e, now))) {
-            let r = interest_rate.unwrap_or(0.0) / 100.0;
-            for (k, c, p) in rows_m.iter_mut() {
-                if let Some(c) = c.as_mut() {
-                    add_leg_greeks(c, true, f, *k, t.1, r);
-                }
-                if let Some(p) = p.as_mut() {
-                    add_leg_greeks(p, false, f, *k, t.1, r);
-                }
-            }
-        }
-    }
-    for (k, c, p) in rows_m {
-        chain.push(json!({
-            "strike": float(k),
-            "ce": c.map(Value::Object).unwrap_or(Value::Null),
-            "pe": p.map(Value::Object).unwrap_or(Value::Null),
-        }));
-    }
-    let body = json!({
-        "status": "success",
-        "underlying": u.base,
-        "underlying_symbol": u.quote_symbol,
-        "underlying_exchange": u.quote_exchange,
-        "underlying_ltp": num(uq.ltp),
-        "underlying_prev_close": num(uq.close),
-        "expiry_date": u.expiry,
-        "expiry_ts": expiry_dt.map(|e| json!(e.timestamp())).unwrap_or(Value::Null),
-        "server_ts": now.timestamp(),
-        "atm_strike": float(strikes[atm]),
-        "quotes_included": true,
-        "greeks_included": with_greeks,
-        "forward_price": forward.map(num).unwrap_or(Value::Null),
-        "chain": chain,
-    });
-    Ok(ChainAnswer {
-        body,
-        quote_missing,
-        oi_missing,
-    })
 }
 
 // ------------------------------------------------------------------ greeks

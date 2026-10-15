@@ -726,24 +726,13 @@ pub async fn oi_profile(
 
     wanted.sort();
     wanted.dedup();
-    let requested = wanted.len();
     let wanted_set: std::collections::HashSet<String> = wanted.iter().cloned().collect();
     let prev = previous_day_oi(ctx, wanted, &opt_ex, OI_CHANGE_BUDGET).await;
-    let loaded = prev.values.len();
 
     let oi_chain: Vec<Value> = chain_rows
         .into_iter()
         .map(|(k, ce_oi, pe_oi, ce_sym, pe_sym)| {
-            // A contract whose previous OI was asked for and not had has no
-            // change (null), not a change of its whole OI. One with no OI
-            // now is not looked up and keeps the web's 0.
-            let change = |oi: f64, s: &Option<String>| match s.as_ref() {
-                Some(s) if wanted_set.contains(s) => match prev.values.get(s) {
-                    Some(p) => float(oi - p),
-                    None => Value::Null,
-                },
-                _ => json!(0),
-            };
+            let change = |oi: f64, s: &Option<String>| oi_change(oi, s, &wanted_set, &prev);
             json!({
                 "strike": k,
                 "ce_oi": num(ce_oi),
@@ -765,36 +754,63 @@ pub async fn oi_profile(
         "candles": candles,
         "oi_chain": oi_chain,
     });
-    if loaded < requested {
-        tracing::warn!(
-            "OI Profile previous-day OI: {} of {} contracts ({} failed, {} past the time budget)",
+    note_partial_oi_change(&mut out, &prev, wanted_set.len());
+    Reply::ok(out)
+}
+
+/// A contract's OI change since the previous day. One whose previous OI
+/// was asked for and not had has no change (null), not a change of its
+/// whole OI (TOOLS-14); one with no OI now is not looked up and keeps the
+/// web's 0.
+fn oi_change(
+    oi: f64,
+    symbol: &Option<String>,
+    wanted: &std::collections::HashSet<String>,
+    prev: &PreviousOi,
+) -> Value {
+    match symbol.as_ref() {
+        Some(s) if wanted.contains(s) => match prev.values.get(s) {
+            Some(p) => float(oi - p),
+            None => Value::Null,
+        },
+        _ => json!(0),
+    }
+}
+
+/// When some previous-day OI is missing, say for how many contracts and
+/// why: failed histories apart from those past the time budget.
+fn note_partial_oi_change(out: &mut Value, prev: &PreviousOi, requested: usize) {
+    let loaded = prev.values.len();
+    if loaded >= requested {
+        return;
+    }
+    tracing::warn!(
+        "OI Profile previous-day OI: {} of {} contracts ({} failed, {} past the time budget)",
+        loaded,
+        requested,
+        prev.failed,
+        prev.omitted
+    );
+    let mut why = Vec::new();
+    if prev.failed > 0 {
+        why.push(format!(
+            "the broker's history did not give the previous day for {}",
+            prev.failed
+        ));
+    }
+    if prev.omitted > 0 {
+        why.push(format!("loading took too long for {}", prev.omitted));
+    }
+    if let Some(m) = out.as_object_mut() {
+        m.insert("message".into(), json!(format!(
+            "The daily OI change is shown for {} of {} option contracts: {}. The others show no change rather than a guess. Refresh in a minute to try again.",
             loaded,
             requested,
-            prev.failed,
-            prev.omitted
-        );
-        let mut why = Vec::new();
-        if prev.failed > 0 {
-            why.push(format!(
-                "the broker's history did not give the previous day for {}",
-                prev.failed
-            ));
-        }
-        if prev.omitted > 0 {
-            why.push(format!("loading took too long for {}", prev.omitted));
-        }
-        if let Some(m) = out.as_object_mut() {
-            m.insert("message".into(), json!(format!(
-                "The daily OI change is shown for {} of {} option contracts: {}. The others show no change rather than a guess. Refresh in a minute to try again.",
-                loaded,
-                requested,
-                why.join(", and ")
-            )));
-            m.insert("oi_change_loaded".into(), json!(loaded));
-            m.insert("oi_change_requested".into(), json!(requested));
-            m.insert("oi_change_failed".into(), json!(prev.failed));
-            m.insert("oi_change_omitted".into(), json!(prev.omitted));
-        }
+            why.join(", and ")
+        )));
+        m.insert("oi_change_loaded".into(), json!(loaded));
+        m.insert("oi_change_requested".into(), json!(requested));
+        m.insert("oi_change_failed".into(), json!(prev.failed));
+        m.insert("oi_change_omitted".into(), json!(prev.omitted));
     }
-    Reply::ok(out)
 }
