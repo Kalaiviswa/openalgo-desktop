@@ -222,43 +222,34 @@ fn from_open(c: &Candles, now: Ist) -> Vec<(i64, f64)> {
         .collect()
 }
 
-/// The tracker body. `trades` and `positions` are the trade and position
-/// book rows; `history(symbol, exchange, date)` returns 1-minute candles
-/// (`None` when the broker had none).
-pub async fn compute<F, Fut>(
-    trades: &[Value],
-    positions: &[Value],
-    now_utc: DateTime<Utc>,
-    history: F,
-) -> Value
-where
-    F: Fn(String, String, NaiveDate) -> Fut,
-    Fut: Future<Output = Option<Candles>>,
-{
-    let now = now_utc.with_timezone(&Kolkata);
-    let today = now.date_naive();
-    let current = positions_from(positions);
-    if trades.is_empty() && current.is_empty() {
-        return zero();
-    }
-    let stamp = |t: &Value| {
-        ["timestamp", "fill_timestamp", "fill_time"]
-            .iter()
-            .find_map(|k| t.get(*k).filter(|v| !v.is_null() && *v != "").cloned())
-    };
+/// A trade's time field: the first of `timestamp`, `fill_timestamp` and
+/// `fill_time` that is set.
+fn trade_stamp(t: &Value) -> Option<Value> {
+    ["timestamp", "fill_timestamp", "fill_time"]
+        .iter()
+        .find_map(|k| t.get(*k).filter(|v| !v.is_null() && *v != "").cloned())
+}
+
+/// The earliest trade time, else 09:15 today (or now).
+fn first_trade(trades: &[Value], today: NaiveDate, now: Ist) -> Ist {
     let mut first: Option<Ist> = None;
     for t in trades {
-        if let Some(tt) = stamp(t).and_then(|v| parse_trade_timestamp(&v, today)) {
+        if let Some(tt) = trade_stamp(t).and_then(|v| parse_trade_timestamp(&v, today)) {
             if first.is_none_or(|f| tt < f) {
                 first = Some(tt);
             }
         }
     }
-    let first = first.unwrap_or_else(|| at_915(now).unwrap_or(now));
-    let date = first.date_naive();
+    first.unwrap_or_else(|| at_915(now).unwrap_or(now))
+}
 
-    // Trades grouped by SYMBOL_EXCHANGE, first-seen order.
-    let mut groups: Vec<(String, String, String, Vec<Trade>)> = Vec::new();
+/// A symbol's trades, keyed `SYMBOL_EXCHANGE`.
+type TradeGroup = (String, String, String, Vec<Trade>);
+
+/// Trades grouped by SYMBOL_EXCHANGE, first-seen order, each group in time
+/// order. A missing quantity is read from the trade value.
+fn group_trades(trades: &[Value], today: NaiveDate) -> Vec<TradeGroup> {
+    let mut groups: Vec<TradeGroup> = Vec::new();
     for t in trades {
         let (sym, ex) = (text(t.get("symbol")), text(t.get("exchange")));
         if sym.is_empty() || ex.is_empty() {
@@ -279,299 +270,270 @@ where
             action: text(t.get("action")),
             qty,
             price,
-            time: stamp(t).and_then(|v| parse_trade_timestamp(&v, today)),
+            time: trade_stamp(t).and_then(|v| parse_trade_timestamp(&v, today)),
         };
         match groups.iter_mut().find(|g| g.0 == key) {
             Some(g) => g.3.push(trade),
             None => groups.push((key, sym, ex, vec![trade])),
         }
     }
-
-    let mut frame = Frame::default();
-    for (_, symbol, exchange, list) in groups.iter_mut() {
+    for (_, _, _, list) in groups.iter_mut() {
         list.sort_by_key(|t| t.time);
-        let mut net = 0.0;
-        let mut windows: Vec<Window> = Vec::new();
-        for t in list.iter() {
-            if t.qty <= 0.0 {
-                continue;
-            }
-            if t.action == "BUY" {
-                windows.push(Window {
-                    start: t.time,
-                    end: None,
-                    qty: t.qty,
-                    price: t.price,
-                    buy: true,
-                    exit_price: None,
-                });
-                net += t.qty;
-            } else if net > 0.0 {
-                let mut remaining = t.qty;
-                let mut i = 0;
-                while i < windows.len() {
-                    if windows[i].buy && windows[i].end.is_none() && remaining > 0.0 {
-                        let close = windows[i].qty.min(remaining);
-                        if close == windows[i].qty {
-                            windows[i].end = t.time;
-                            windows[i].exit_price = Some(t.price);
-                        } else {
-                            windows[i].qty -= close;
-                            let mut closed = windows[i].clone();
-                            closed.qty = close;
-                            closed.end = t.time;
-                            closed.exit_price = Some(t.price);
-                            windows.push(closed);
-                        }
-                        remaining -= close;
-                    }
-                    i += 1;
-                }
-                net -= t.qty;
-            } else {
-                windows.push(Window {
-                    start: t.time,
-                    end: None,
-                    qty: t.qty,
-                    price: t.price,
-                    buy: false,
-                    exit_price: None,
-                });
-                net -= t.qty;
-            }
+    }
+    groups
+}
+
+/// A symbol's position windows from its trades, by start time: a buy
+/// opens a long window, a sell closes long windows first in first out
+/// (splitting one it closes in part) or, with none open, opens a short one.
+fn windows_of(list: &[Trade]) -> Vec<Window> {
+    let mut net = 0.0;
+    let mut windows: Vec<Window> = Vec::new();
+    for t in list.iter() {
+        if t.qty <= 0.0 {
+            continue;
         }
-        let Some(candles) = history(symbol.clone(), exchange.clone(), date)
-            .await
-            .filter(|c| !c.is_empty())
-        else {
+        if t.action == "BUY" {
+            windows.push(Window {
+                start: t.time,
+                end: None,
+                qty: t.qty,
+                price: t.price,
+                buy: true,
+                exit_price: None,
+            });
+            net += t.qty;
+        } else if net > 0.0 {
+            let mut remaining = t.qty;
+            let mut i = 0;
+            while i < windows.len() {
+                if windows[i].buy && windows[i].end.is_none() && remaining > 0.0 {
+                    let close = windows[i].qty.min(remaining);
+                    if close == windows[i].qty {
+                        windows[i].end = t.time;
+                        windows[i].exit_price = Some(t.price);
+                    } else {
+                        windows[i].qty -= close;
+                        let mut closed = windows[i].clone();
+                        closed.qty = close;
+                        closed.end = t.time;
+                        closed.exit_price = Some(t.price);
+                        windows.push(closed);
+                    }
+                    remaining -= close;
+                }
+                i += 1;
+            }
+            net -= t.qty;
+        } else {
+            windows.push(Window {
+                start: t.time,
+                end: None,
+                qty: t.qty,
+                price: t.price,
+                buy: false,
+                exit_price: None,
+            });
+            net -= t.qty;
+        }
+    }
+    windows.sort_by_key(|w| w.start);
+    windows
+}
+
+/// The candles from the first trade to now, with their IST time.
+fn bars_between(candles: &Candles, first: Ist, now: Ist) -> Vec<(Ist, i64, f64)> {
+    candles
+        .iter()
+        .filter_map(|(t, c)| ist_of(*t).map(|i| (i, *t, *c)))
+        .filter(|(i, _, _)| *i >= first && *i <= now)
+        .collect()
+}
+
+/// Each bar's P&L from the windows: the open P&L of every window the bar
+/// falls in, and after a window closes, the P&L realized so far.
+fn bars_pnl(bars: &[(Ist, i64, f64)], windows: &[Window], now: Ist) -> Vec<f64> {
+    let mut pnl = vec![0.0f64; bars.len()];
+    let mut realized = 0.0;
+    for w in windows {
+        let Some(start) = w.start else {
             continue;
         };
-        let bars: Vec<(Ist, i64, f64)> = candles
-            .iter()
-            .filter_map(|(t, c)| ist_of(*t).map(|i| (i, *t, *c)))
-            .filter(|(i, _, _)| *i >= first && *i <= now)
+        let end = w.end.unwrap_or(now);
+        let in_window: Vec<usize> = (0..bars.len())
+            .filter(|i| bars[*i].0 >= start && bars[*i].0 <= end)
             .collect();
-        let mut pnl = vec![0.0f64; bars.len()];
-        let mut realized = 0.0;
-        windows.sort_by_key(|w| w.start);
-        for w in &windows {
-            let Some(start) = w.start else {
-                continue;
+        let closed = w.end.is_some() && w.exit_price.is_some();
+        if in_window.is_empty() && !closed {
+            continue;
+        }
+        for i in &in_window {
+            let px = bars[*i].2;
+            pnl[*i] += if w.buy {
+                (px - w.price) * w.qty
+            } else {
+                (w.price - px) * w.qty
             };
-            let end = w.end.unwrap_or(now);
-            let in_window: Vec<usize> = (0..bars.len())
-                .filter(|i| bars[*i].0 >= start && bars[*i].0 <= end)
-                .collect();
-            let closed = w.end.is_some() && w.exit_price.is_some();
-            if in_window.is_empty() && !closed {
-                continue;
-            }
-            for i in &in_window {
-                let px = bars[*i].2;
-                pnl[*i] += if w.buy {
-                    (px - w.price) * w.qty
-                } else {
-                    (w.price - px) * w.qty
-                };
-            }
-            if let (true, Some(exit)) = (closed, w.exit_price) {
-                realized += if w.buy {
-                    (exit - w.price) * w.qty
-                } else {
-                    (w.price - exit) * w.qty
-                };
-            }
-            if let Some(e) = w.end {
-                let future: Vec<usize> = (0..bars.len()).filter(|i| bars[*i].0 > e).collect();
-                if !future.is_empty() {
-                    for i in future {
-                        pnl[i] = realized;
-                    }
-                } else if realized != 0.0 {
-                    if let Some(last) = pnl.last_mut() {
-                        *last = realized;
-                    }
+        }
+        if let (true, Some(exit)) = (closed, w.exit_price) {
+            realized += if w.buy {
+                (exit - w.price) * w.qty
+            } else {
+                (w.price - exit) * w.qty
+            };
+        }
+        if let Some(e) = w.end {
+            let future: Vec<usize> = (0..bars.len()).filter(|i| bars[*i].0 > e).collect();
+            if !future.is_empty() {
+                for i in future {
+                    pnl[i] = realized;
+                }
+            } else if realized != 0.0 {
+                if let Some(last) = pnl.last_mut() {
+                    *last = realized;
                 }
             }
         }
-        let series: Vec<(i64, f64)> = bars.iter().zip(&pnl).map(|(b, p)| (b.1, *p)).collect();
-        frame.join(&format!("{}_pnl", symbol), &series);
     }
+    pnl
+}
 
-    // Carried-forward positions.
-    let mut carried = false;
-    for (key, pos) in &current {
-        let Some((symbol, exchange)) = key.rsplit_once('_') else {
-            continue;
-        };
-        let col = format!("{}_pnl", symbol);
-        let traded = groups.iter().find(|g| &g.0 == key);
-        if pos.quantity != 0.0 && traded.is_none() {
-            let Some(c) = history(symbol.into(), exchange.into(), date)
-                .await
-                .filter(|c| !c.is_empty())
-            else {
-                continue;
-            };
-            let series: Vec<(i64, f64)> = from_open(&c, now)
-                .into_iter()
-                .map(|(t, px)| {
-                    let v = if pos.quantity > 0.0 {
-                        (px - pos.average_price) * pos.quantity
-                    } else {
-                        (pos.average_price - px) * pos.quantity.abs()
-                    };
-                    (t, v)
-                })
-                .collect();
-            if frame.join(&col, &series) {
-                carried = true;
-            }
-        } else if pos.quantity == 0.0 && pos.pnl != 0.0 {
-            let Some(list) = traded.map(|g| &g.3) else {
-                continue;
-            };
-            if list.is_empty() {
-                continue;
-            }
-            let buys = list.iter().any(|t| t.action == "BUY");
-            let sells = list.iter().any(|t| t.action == "SELL");
-            if buys && sells {
-                continue;
-            }
-            let was_long = if list.iter().all(|t| t.action == "SELL") {
-                true
-            } else if list.iter().all(|t| t.action == "BUY") {
-                false
+/// An open position's P&L at each candle from market open.
+fn open_position_series(c: &Candles, now: Ist, pos: &PositionNow) -> Vec<(i64, f64)> {
+    from_open(c, now)
+        .into_iter()
+        .map(|(t, px)| {
+            let v = if pos.quantity > 0.0 {
+                (px - pos.average_price) * pos.quantity
             } else {
-                continue;
+                (pos.average_price - px) * pos.quantity.abs()
             };
-            let total_qty: f64 = list.iter().map(|t| t.qty).sum();
-            if total_qty == 0.0 {
-                continue;
-            }
-            let exit = list.iter().map(|t| t.price * t.qty).sum::<f64>() / total_qty;
-            let entry = if was_long {
-                exit - pos.pnl / total_qty
-            } else {
-                exit + pos.pnl / total_qty
-            };
-            let close_time = list.last().and_then(|t| t.time);
-            let Some(c) = history(symbol.into(), exchange.into(), date)
-                .await
-                .filter(|c| !c.is_empty())
-            else {
-                continue;
-            };
-            let series: Vec<(i64, f64)> = from_open(&c, now)
-                .into_iter()
-                .map(|(t, px)| {
-                    let before = close_time.is_none_or(|ct| ist_of(t).is_some_and(|x| x <= ct));
-                    let v = if before {
-                        if was_long {
-                            (px - entry) * total_qty
-                        } else {
-                            (entry - px) * total_qty
-                        }
-                    } else {
-                        pos.pnl
-                    };
-                    (t, v)
-                })
-                .collect();
-            if frame.has(&col) {
-                frame.drop(&col);
-            }
-            if frame.join(&col, &series) {
-                carried = true;
-            }
-        }
+            (t, v)
+        })
+        .collect()
+}
+
+/// A carried position that today's trades closed, all on one side: its
+/// side, quantity, entry (from the book's P&L) and close time.
+struct ClosedLeg {
+    was_long: bool,
+    total_qty: f64,
+    entry: f64,
+    close_time: Option<Ist>,
+}
+
+/// The closed carried position behind a symbol's trades, when they are all
+/// on one side and have a quantity.
+fn closed_leg(list: &[Trade], pnl: f64) -> Option<ClosedLeg> {
+    if list.is_empty() {
+        return None;
     }
+    let buys = list.iter().any(|t| t.action == "BUY");
+    let sells = list.iter().any(|t| t.action == "SELL");
+    if buys && sells {
+        return None;
+    }
+    let was_long = if list.iter().all(|t| t.action == "SELL") {
+        true
+    } else if list.iter().all(|t| t.action == "BUY") {
+        false
+    } else {
+        return None;
+    };
+    let total_qty: f64 = list.iter().map(|t| t.qty).sum();
+    if total_qty == 0.0 {
+        return None;
+    }
+    let exit = list.iter().map(|t| t.price * t.qty).sum::<f64>() / total_qty;
+    let entry = if was_long {
+        exit - pnl / total_qty
+    } else {
+        exit + pnl / total_qty
+    };
+    Some(ClosedLeg {
+        was_long,
+        total_qty,
+        entry,
+        close_time: list.last().and_then(|t| t.time),
+    })
+}
 
-    let totals: Vec<(i64, f64)> = if frame.cols.is_empty() && !current.is_empty() {
-        let mut frame2 = Frame::default();
-        for (key, pos) in &current {
-            let Some((symbol, exchange)) = key.rsplit_once('_') else {
-                continue;
-            };
-            if pos.quantity == 0.0 {
-                continue;
-            }
-            let Some(c) = history(symbol.into(), exchange.into(), date)
-                .await
-                .filter(|c| !c.is_empty())
-            else {
-                continue;
-            };
-            let series: Vec<(i64, f64)> = from_open(&c, now)
-                .into_iter()
-                .map(|(t, px)| {
-                    let v = if pos.quantity > 0.0 {
-                        (px - pos.average_price) * pos.quantity
-                    } else {
-                        (pos.average_price - px) * pos.quantity.abs()
-                    };
-                    (t, v)
-                })
-                .collect();
-            frame2.join(&format!("{}_pnl", symbol), &series);
-        }
-        if frame2.cols.is_empty() {
-            // A flat line at the current P&L from 09:00 to now.
-            let total: f64 = current.iter().map(|(_, p)| p.pnl).sum();
-            let start = Kolkata
-                .from_local_datetime(&today.and_hms_opt(9, 0, 0).unwrap_or_default())
-                .single()
-                .unwrap_or(now);
-            let end = if now <= start {
-                start + chrono::Duration::minutes(1)
+/// A closed carried position's P&L at each candle from market open: open
+/// P&L until it closed, then the book's P&L.
+fn closed_leg_series(leg: &ClosedLeg, c: &Candles, now: Ist, pnl: f64) -> Vec<(i64, f64)> {
+    from_open(c, now)
+        .into_iter()
+        .map(|(t, px)| {
+            let before = leg
+                .close_time
+                .is_none_or(|ct| ist_of(t).is_some_and(|x| x <= ct));
+            let v = if before {
+                if leg.was_long {
+                    (px - leg.entry) * leg.total_qty
+                } else {
+                    (leg.entry - px) * leg.total_qty
+                }
             } else {
-                now
+                pnl
             };
-            let mut out = Vec::new();
-            let mut t = start;
-            while t <= end {
-                out.push((t.timestamp(), total));
+            (t, v)
+        })
+        .collect()
+}
+
+/// A flat line at the current P&L, minute by minute from 09:00 to now (at
+/// least one minute).
+fn flat_line(current: &[(String, PositionNow)], today: NaiveDate, now: Ist) -> Vec<(i64, f64)> {
+    let total: f64 = current.iter().map(|(_, p)| p.pnl).sum();
+    let start = Kolkata
+        .from_local_datetime(&today.and_hms_opt(9, 0, 0).unwrap_or_default())
+        .single()
+        .unwrap_or(now);
+    let end = if now <= start {
+        start + chrono::Duration::minutes(1)
+    } else {
+        now
+    };
+    let mut out = Vec::new();
+    let mut t = start;
+    while t <= end {
+        out.push((t.timestamp(), total));
+        t += chrono::Duration::minutes(1);
+    }
+    out
+}
+
+/// Zero rows for every minute from 09:15 up to (not including) the first
+/// trade, so the chart starts at the open.
+fn pad_before_first(frame: &mut Frame, first: Ist) {
+    if let Some(open) = at_915(first) {
+        if first > open {
+            let mut t = open;
+            let mut pre = Vec::new();
+            while t <= first {
+                pre.push(t.timestamp());
                 t += chrono::Duration::minutes(1);
             }
-            out
-        } else {
-            frame2.totals()
-        }
-    } else if !frame.cols.is_empty() {
-        if !trades.is_empty() && !carried {
-            if let Some(open) = at_915(first) {
-                if first > open {
-                    let mut t = open;
-                    let mut pre = Vec::new();
-                    while t <= first {
-                        pre.push(t.timestamp());
-                        t += chrono::Duration::minutes(1);
-                    }
-                    pre.pop();
-                    for ts in pre {
-                        let row = frame.rows.entry(ts).or_default();
-                        for c in &frame.cols {
-                            row.entry(c.clone()).or_insert(0.0);
-                        }
-                    }
+            pre.pop();
+            for ts in pre {
+                let row = frame.rows.entry(ts).or_default();
+                for c in &frame.cols {
+                    row.entry(c.clone()).or_insert(0.0);
                 }
             }
         }
-        frame.totals()
-    } else {
-        return zero();
-    };
-    if totals.is_empty() {
-        return zero();
     }
+}
 
+/// The reply for a total P&L series: the latest, best and worst marks
+/// with their times, the maximum drawdown, and both series.
+fn summary(totals: &[(i64, f64)]) -> Value {
     let mut peak = f64::NEG_INFINITY;
     let mut pnl_series = Vec::with_capacity(totals.len());
     let mut dd_series = Vec::with_capacity(totals.len());
     let (mut max, mut min, mut max_dd) = (f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY);
     let (mut max_t, mut min_t) = (totals[0].0, totals[0].0);
-    for (t, v) in &totals {
+    for (t, v) in totals {
         peak = peak.max(*v);
         let dd = v - peak;
         if *v > max {
@@ -598,6 +560,137 @@ where
         "pnl_series": pnl_series,
         "drawdown_series": dd_series,
     }})
+}
+
+/// The open positions' P&L from market open, one column each (a
+/// position without candles is left out).
+async fn open_positions_frame<F, Fut>(
+    current: &[(String, PositionNow)],
+    history: &F,
+    date: NaiveDate,
+    now: Ist,
+) -> Frame
+where
+    F: Fn(String, String, NaiveDate) -> Fut,
+    Fut: Future<Output = Option<Candles>>,
+{
+    let mut frame2 = Frame::default();
+    for (key, pos) in current {
+        let Some((symbol, exchange)) = key.rsplit_once('_') else {
+            continue;
+        };
+        if pos.quantity == 0.0 {
+            continue;
+        }
+        let Some(c) = history(symbol.into(), exchange.into(), date)
+            .await
+            .filter(|c| !c.is_empty())
+        else {
+            continue;
+        };
+        frame2.join(
+            &format!("{}_pnl", symbol),
+            &open_position_series(&c, now, pos),
+        );
+    }
+    frame2
+}
+
+/// The tracker body. `trades` and `positions` are the trade and position
+/// book rows; `history(symbol, exchange, date)` returns 1-minute candles
+/// (`None` when the broker had none).
+pub async fn compute<F, Fut>(
+    trades: &[Value],
+    positions: &[Value],
+    now_utc: DateTime<Utc>,
+    history: F,
+) -> Value
+where
+    F: Fn(String, String, NaiveDate) -> Fut,
+    Fut: Future<Output = Option<Candles>>,
+{
+    let now = now_utc.with_timezone(&Kolkata);
+    let today = now.date_naive();
+    let current = positions_from(positions);
+    if trades.is_empty() && current.is_empty() {
+        return zero();
+    }
+    let first = first_trade(trades, today, now);
+    let date = first.date_naive();
+    let groups = group_trades(trades, today);
+
+    let mut frame = Frame::default();
+    for (_, symbol, exchange, list) in &groups {
+        let windows = windows_of(list);
+        let Some(candles) = history(symbol.clone(), exchange.clone(), date)
+            .await
+            .filter(|c| !c.is_empty())
+        else {
+            continue;
+        };
+        let bars = bars_between(&candles, first, now);
+        let pnl = bars_pnl(&bars, &windows, now);
+        let series: Vec<(i64, f64)> = bars.iter().zip(&pnl).map(|(b, p)| (b.1, *p)).collect();
+        frame.join(&format!("{}_pnl", symbol), &series);
+    }
+
+    // Carried-forward positions.
+    let mut carried = false;
+    for (key, pos) in &current {
+        let Some((symbol, exchange)) = key.rsplit_once('_') else {
+            continue;
+        };
+        let col = format!("{}_pnl", symbol);
+        let traded = groups.iter().find(|g| &g.0 == key);
+        if pos.quantity != 0.0 && traded.is_none() {
+            let Some(c) = history(symbol.into(), exchange.into(), date)
+                .await
+                .filter(|c| !c.is_empty())
+            else {
+                continue;
+            };
+            if frame.join(&col, &open_position_series(&c, now, pos)) {
+                carried = true;
+            }
+        } else if pos.quantity == 0.0 && pos.pnl != 0.0 {
+            let Some(leg) = traded.and_then(|g| closed_leg(&g.3, pos.pnl)) else {
+                continue;
+            };
+            let Some(c) = history(symbol.into(), exchange.into(), date)
+                .await
+                .filter(|c| !c.is_empty())
+            else {
+                continue;
+            };
+            let series = closed_leg_series(&leg, &c, now, pos.pnl);
+            if frame.has(&col) {
+                frame.drop(&col);
+            }
+            if frame.join(&col, &series) {
+                carried = true;
+            }
+        }
+    }
+
+    let totals: Vec<(i64, f64)> = if frame.cols.is_empty() && !current.is_empty() {
+        let frame2 = open_positions_frame(&current, &history, date, now).await;
+        if frame2.cols.is_empty() {
+            flat_line(&current, today, now)
+        } else {
+            frame2.totals()
+        }
+    } else if !frame.cols.is_empty() {
+        if !trades.is_empty() && !carried {
+            pad_before_first(&mut frame, first);
+        }
+        frame.totals()
+    } else {
+        return zero();
+    };
+    if totals.is_empty() {
+        return zero();
+    }
+    summary(&totals)
 }
 
 #[cfg(test)]

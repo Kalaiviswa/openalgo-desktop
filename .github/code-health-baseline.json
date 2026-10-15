@@ -68,7 +68,6 @@
     "src-tauri/src/sandbox/squareoff.rs::sweep": 133,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
-    "src-tauri/src/services/pnl_tracker_service.rs::compute": 374,
     "src-tauri/src/strategy/book.rs::apply_fill_locked": 126,
     "src-tauri/src/strategy/engine.rs::apply_fill_inner": 241,
     "src-tauri/src/strategy/engine.rs::exit_legs": 261,
