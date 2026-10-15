@@ -189,6 +189,72 @@ pub async fn recover_run(module: &StrategyModule, run_id: i64) -> RecoveredRun {
     }
 }
 
+/// The crash window between creating a run and linking it: no order can
+/// have been dispatched, so the empty claim is safe to release. `None`
+/// when the strategy is not in that window.
+fn release_unlinked(
+    module: &StrategyModule,
+    run_id: i64,
+    strategy: Option<&super::store::StrategyRow>,
+) -> Option<RecoveredRun> {
+    let s = strategy?;
+    if s.status == "running" && s.current_run_id.is_none() {
+        let finalised = module
+            .store
+            .finish_unlinked_run_and_release_claim(run_id, s.id, "error")
+            .unwrap_or(false);
+        return Some(RecoveredRun {
+            run_id,
+            strategy_id: Some(s.id),
+            finalised,
+            ..Default::default()
+        });
+    }
+    None
+}
+
+/// Every leg closed or refused: the process died between the last exit
+/// fill and the finalise it would have triggered, so the run is finished
+/// now (its state dropped again if that fails).
+async fn finish_flat(
+    module: &StrategyModule,
+    run: &super::store::RunRow,
+    user_id: &str,
+    rebuilt: RunState,
+    legs: usize,
+) -> RecoveredRun {
+    let run_id = run.id;
+    let pending = run.stop_requested_reason.is_some();
+    let reason = run
+        .stop_requested_reason
+        .clone()
+        .unwrap_or_else(|| "manual".to_string());
+    module.state.install(rebuilt);
+    let finalised = module
+        .finalise(
+            run_id,
+            run.strategy_id,
+            user_id,
+            &reason,
+            &if pending {
+                format!("Run stopped ({}); recovery confirmed it was flat", reason)
+            } else {
+                "Recovered flat: every leg had already closed, so the run was finished".into()
+            },
+        )
+        .await;
+    if !finalised {
+        module.state.clear(run_id);
+    }
+    RecoveredRun {
+        run_id,
+        strategy_id: Some(run.strategy_id),
+        finalised,
+        legs,
+        ..Default::default()
+    }
+}
+
 async fn recover_inner(
     module: &StrategyModule,
     run: &super::store::RunRow,
@@ -206,22 +272,9 @@ async fn recover_inner(
         .list_orders(run_id)
         .map_err(|e| RecoveryError::Other(e.to_string()))?;
 
-    // The crash window between creating a run and linking it: no order can
-    // have been dispatched, so the empty claim is safe to release.
     if orders.is_empty() {
-        if let Some(s) = strategy {
-            if s.status == "running" && s.current_run_id.is_none() {
-                let finalised = module
-                    .store
-                    .finish_unlinked_run_and_release_claim(run_id, s.id, "error")
-                    .unwrap_or(false);
-                return Ok(RecoveredRun {
-                    run_id,
-                    strategy_id: Some(s.id),
-                    finalised,
-                    ..Default::default()
-                });
-            }
+        if let Some(released) = release_unlinked(module, run_id, strategy) {
+            return Ok(released);
         }
     }
 
@@ -239,37 +292,7 @@ async fn recover_inner(
     let legs = rebuilt.legs.len();
     let open = rebuilt.open_legs().len();
     if !rebuilt.requires_management() {
-        // Every leg closed or refused: the process died between the last
-        // exit fill and the finalise it would have triggered.
-        let pending = run.stop_requested_reason.is_some();
-        let reason = run
-            .stop_requested_reason
-            .clone()
-            .unwrap_or_else(|| "manual".to_string());
-        module.state.install(rebuilt);
-        let finalised = module
-            .finalise(
-                run_id,
-                run.strategy_id,
-                &user_id,
-                &reason,
-                &if pending {
-                    format!("Run stopped ({}); recovery confirmed it was flat", reason)
-                } else {
-                    "Recovered flat: every leg had already closed, so the run was finished".into()
-                },
-            )
-            .await;
-        if !finalised {
-            module.state.clear(run_id);
-        }
-        return Ok(RecoveredRun {
-            run_id,
-            strategy_id: Some(run.strategy_id),
-            finalised,
-            legs,
-            ..Default::default()
-        });
+        return Ok(finish_flat(module, run, &user_id, rebuilt, legs).await);
     }
     if !module.state.hydrate_if_absent(rebuilt) {
         return Ok(RecoveredRun {
