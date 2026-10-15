@@ -169,10 +169,8 @@ pub const UPDATABLE_FIELDS: &[&str] = &[
 
 // ---------------------------------------------------------------- migration
 
-/// Migration `072_strategy_module`: the six `sm_` tables. Idempotent.
-pub fn migrate(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sm_strategy (
+/// The six `sm_` tables and their indexes, each created only when absent.
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sm_strategy (
             id INTEGER PRIMARY KEY,
             user_id VARCHAR(80) NOT NULL,
             name VARCHAR(200) NOT NULL,
@@ -302,8 +300,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS ix_sm_strategy_event_strategy_id ON sm_strategy_event (strategy_id);
         CREATE INDEX IF NOT EXISTS ix_sm_strategy_event_user_id ON sm_strategy_event (user_id);
         CREATE INDEX IF NOT EXISTS ix_sm_event_strategy_ts ON sm_strategy_event (strategy_id, ts);
-        CREATE INDEX IF NOT EXISTS ix_sm_event_run_ts ON sm_strategy_event (run_id, ts);",
-    )?;
+        CREATE INDEX IF NOT EXISTS ix_sm_event_run_ts ON sm_strategy_event (run_id, ts);";
+
+/// Migration `072_strategy_module`: the six `sm_` tables. Idempotent.
+pub fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA)?;
     Ok(())
 }
 
