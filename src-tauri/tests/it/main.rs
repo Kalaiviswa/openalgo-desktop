@@ -45,6 +45,7 @@ mod webui_support;
 mod analyzer_mode;
 mod api_v1_contract;
 mod api_v1_events;
+mod api_v1_quantity;
 mod broker_angel_http;
 mod broker_contract;
 mod broker_deltaexchange;
