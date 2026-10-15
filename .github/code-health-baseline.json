@@ -61,7 +61,6 @@
     "src-tauri/src/analytics/straddle.rs::simulate": 144,
     "src-tauri/src/brokers/angel/orders.rs::place_order": 113,
     "src-tauri/src/brokers/common/relay.rs::serve": 105,
-    "src-tauri/src/brokers/dhan/data.rs::get_history": 146,
     "src-tauri/src/brokers/families/noren/auth.rs::authenticate": 101,
     "src-tauri/src/brokers/families/noren/data.rs::get_history": 129,
     "src-tauri/src/brokers/groww/data.rs::ohlc_batch": 101,

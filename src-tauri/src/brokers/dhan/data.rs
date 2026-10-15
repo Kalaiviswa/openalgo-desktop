@@ -568,6 +568,81 @@ pub(crate) fn ist_today() -> NaiveDate {
     (chrono::Utc::now() + chrono::Duration::seconds(IST_OFFSET_SECS)).date_naive()
 }
 
+/// One intraday chunk, retried with a backoff (an empty answer over a
+/// trading window is retried too before it is accepted). An auth or
+/// validation error ends the download at once.
+async fn intraday_chunk(
+    b: &DhanBroker,
+    s: &DhanSession,
+    body: &Value,
+    cs: NaiveDate,
+    ce: NaiveDate,
+) -> Result<Vec<Candle>> {
+    let mut last_err: Option<AppError> = None;
+    for attempt in 0..CHUNK_MAX_RETRIES {
+        match data_call(b, s, "/v2/charts/intraday", body).await {
+            Ok(v) => {
+                let rows = parse_chart(&v, false);
+                // An empty 200 over a trading window is suspect:
+                // retry it before accepting.
+                if rows.is_empty() && attempt < CHUNK_MAX_RETRIES - 1 {
+                    tokio::time::sleep(b.retry_base * (1 << attempt)).await;
+                    continue;
+                }
+                return Ok(rows);
+            }
+            Err(e) => {
+                if matches!(e, AppError::Auth(_) | AppError::Validation(_)) {
+                    return Err(e);
+                }
+                if attempt < CHUNK_MAX_RETRIES - 1 {
+                    tokio::time::sleep(b.retry_base * (1 << attempt)).await;
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    let code = last_err.map(|e| e.code()).unwrap_or_default();
+    tracing::warn!(
+        "Dhan history chunk {} to {} failed after {} attempts: {}",
+        cs,
+        ce,
+        CHUNK_MAX_RETRIES,
+        code
+    );
+    Err(AppError::Broker(format!(
+        "Dhan did not return history for {} to {}. Try again shortly.",
+        cs, ce
+    )))
+}
+
+/// An empty chunk between chunks with data is a bad answer, not a holiday:
+/// a history with a hole in it is refused.
+fn no_interior_gaps(counts: &[(NaiveDate, NaiveDate, usize)]) -> Result<()> {
+    let nonempty: Vec<usize> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.2 > 0)
+        .map(|(i, _)| i)
+        .collect();
+    if let (Some(first), Some(last)) = (nonempty.first(), nonempty.last()) {
+        let gaps: Vec<String> = counts
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.2 == 0 && first < i && i < last)
+            .map(|(_, c)| format!("{} to {}", c.0, c.1))
+            .collect();
+        if !gaps.is_empty() {
+            tracing::warn!("Dhan returned empty interior chunks: {}", gaps.join(", "));
+            return Err(AppError::Broker(format!(
+                "Dhan returned no data for {} while the surrounding dates had data. Retry the download.",
+                gaps.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_history(
     b: &DhanBroker,
     auth: &AuthToken,
@@ -645,72 +720,11 @@ pub async fn get_history(
                 continue;
             }
             let body = chart_body(&row, seg, instrument, Some(resolution), cs, ce);
-            let mut last_err: Option<AppError> = None;
-            let mut got = 0usize;
-            for attempt in 0..CHUNK_MAX_RETRIES {
-                match data_call(b, &s, "/v2/charts/intraday", &body).await {
-                    Ok(v) => {
-                        let rows = parse_chart(&v, false);
-                        // An empty 200 over a trading window is suspect:
-                        // retry it before accepting.
-                        if rows.is_empty() && attempt < CHUNK_MAX_RETRIES - 1 {
-                            tokio::time::sleep(b.retry_base * (1 << attempt)).await;
-                            continue;
-                        }
-                        got = rows.len();
-                        candles.extend(rows);
-                        last_err = None;
-                        break;
-                    }
-                    Err(e) => {
-                        if matches!(e, AppError::Auth(_) | AppError::Validation(_)) {
-                            return Err(e);
-                        }
-                        if attempt < CHUNK_MAX_RETRIES - 1 {
-                            tokio::time::sleep(b.retry_base * (1 << attempt)).await;
-                        }
-                        last_err = Some(e);
-                    }
-                }
-            }
-            if let Some(e) = last_err {
-                tracing::warn!(
-                    "Dhan history chunk {} to {} failed after {} attempts: {}",
-                    cs,
-                    ce,
-                    CHUNK_MAX_RETRIES,
-                    e.code()
-                );
-                return Err(AppError::Broker(format!(
-                    "Dhan did not return history for {} to {}. Try again shortly.",
-                    cs, ce
-                )));
-            }
-            counts.push((cs, ce, got));
+            let rows = intraday_chunk(b, &s, &body, cs, ce).await?;
+            counts.push((cs, ce, rows.len()));
+            candles.extend(rows);
         }
-        // An empty chunk between chunks with data is a bad answer, not a
-        // holiday: refuse to return a history with a hole in it.
-        let nonempty: Vec<usize> = counts
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.2 > 0)
-            .map(|(i, _)| i)
-            .collect();
-        if let (Some(first), Some(last)) = (nonempty.first(), nonempty.last()) {
-            let gaps: Vec<String> = counts
-                .iter()
-                .enumerate()
-                .filter(|(i, c)| c.2 == 0 && first < i && i < last)
-                .map(|(_, c)| format!("{} to {}", c.0, c.1))
-                .collect();
-            if !gaps.is_empty() {
-                tracing::warn!("Dhan returned empty interior chunks: {}", gaps.join(", "));
-                return Err(AppError::Broker(format!(
-                    "Dhan returned no data for {} while the surrounding dates had data. Retry the download.",
-                    gaps.join(", ")
-                )));
-            }
-        }
+        no_interior_gaps(&counts)?;
     }
     Ok(crate::brokers::common::history::sort_dedupe(candles))
 }
