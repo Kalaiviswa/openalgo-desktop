@@ -20,6 +20,7 @@ use crate::brokers::types::{
 use crate::error::AppError;
 use crate::events::{Event, Mode};
 use crate::sandbox::types::dec_from_f64;
+use crate::services::latency_probe::broker_call;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -286,12 +287,12 @@ pub async fn place_live(h: &BrokerHandle, ctx: &AppState, req: &Value) -> Reply 
     };
     // One placement: what happens inside is classified accepted, refused or
     // uncertain (LOG-08).
-    let placed = outcome::placing(async {
+    let placed = outcome::placing(broker_call(&h.id, async {
         match &crypto {
             Some(q) => h.broker.place_order_exact(&h.auth, &order, q).await,
             None => h.broker.place_order(&h.auth, &order).await,
         }
-    })
+    }))
     .await;
     let reply = placement_reply(&order, placed);
     if reply.placement.as_ref().is_some_and(|p| p.is_uncertain()) {
@@ -700,10 +701,10 @@ pub async fn modify_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
     };
     let result = match ResolvedModify::resolve(&orderid, &m, &ctx.symbols) {
         Ok(r) if r.exchange == Exchange::Crypto => match crypto_quantity(req) {
-            Ok(q) => h.broker.modify_order_exact(&h.auth, &r, &q).await,
+            Ok(q) => broker_call(&h.id, h.broker.modify_order_exact(&h.auth, &r, &q)).await,
             Err(e) => Err(e),
         },
-        Ok(r) => h.broker.modify_order(&h.auth, &r).await,
+        Ok(r) => broker_call(&h.id, h.broker.modify_order(&h.auth, &r)).await,
         Err(e) => Err(e),
     };
     let reply = match result {
@@ -777,7 +778,7 @@ pub async fn cancel_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         Ok(h) => h,
         Err(r) => return r,
     };
-    let reply = match h.broker.cancel_order(&h.auth, &orderid).await {
+    let reply = match broker_call(&h.id, h.broker.cancel_order(&h.auth, &orderid)).await {
         Ok(_) => Reply::ok(json!({"status": "success", "orderid": orderid})),
         Err(e) => broker_error_reply(&e, "Failed to cancel order due to internal error"),
     };
@@ -848,7 +849,7 @@ pub async fn cancel_all_orders(ctx: &AppState, req: &Value, route: Route) -> Rep
         Ok(h) => h,
         Err(r) => return r,
     };
-    match h.broker.cancel_all_orders(&h.auth).await {
+    match broker_call(&h.id, h.broker.cancel_all_orders(&h.auth)).await {
         Ok(r) => {
             let reply = Reply::ok(json!({
                 "status": "success",
@@ -911,7 +912,7 @@ pub async fn close_position(ctx: &AppState, req: &Value, route: Route) -> Reply 
         Ok(h) => h,
         Err(r) => return r,
     };
-    let reply = match h.broker.close_all_positions(&h.auth).await {
+    let reply = match broker_call(&h.id, h.broker.close_all_positions(&h.auth)).await {
         Ok(r) if r.failed.is_empty() => {
             Reply::ok(json!({"status": "success", "message": "All Open Positions Squared Off"}))
         }

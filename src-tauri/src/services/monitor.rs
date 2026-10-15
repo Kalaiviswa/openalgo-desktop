@@ -10,13 +10,15 @@
 //!
 //! What is recorded: method, path without its query string, status, time
 //! taken, client address and Host header. Never a request or response body,
-//! a query string, or an API key. For `/api/v1` calls the latency recorder
-//! reads only `symbol` from the request and `orderid` / `message` from the
-//! response.
+//! a query string, or an API key. For `/api/v1` calls and the orders a
+//! trader sends from a page the latency recorder reads only `symbol` from
+//! the request and `orderid` / `request_id` / `message` from the response,
+//! and takes the broker time from `services::latency_probe`.
 
 use crate::db::sqlite::monitor::{self as store, LatencyRow, TrafficRow};
 use crate::db::sqlite::webui::{self, SecuritySettings};
 use crate::server::middleware::client_ip;
+use crate::services::latency_probe::{self, BrokerTime};
 use crate::state::AppState;
 use axum::{
     body::{Body, Bytes},
@@ -482,6 +484,32 @@ fn too_large() -> Response {
     crate::server::envelope::error(StatusCode::PAYLOAD_TOO_LARGE, "The request is too large.")
 }
 
+/// Orders a trader sends from a page, which the latency log records like
+/// `/api/v1` calls (web: the `@track_latency` scalping and Positions
+/// routes, OBS-04), with the web's order types.
+const PAGE_ORDER_ROUTES: &[(&str, &str)] = &[
+    ("/scalping/api/order", "PLACE"),
+    ("/scalping/api/close_leg", "CLOSE"),
+    ("/scalping/api/close_all", "CLOSE"),
+    ("/scalping/api/cancel_all", "CANCEL_ALL"),
+    ("/close_position", "CLOSE"),
+    ("/close_all_positions", "CLOSE"),
+];
+
+/// The latency row type of a request the latency log records, if it does.
+fn latency_type(method: &Method, path: &str) -> Option<String> {
+    if path.starts_with("/api/v1/") {
+        return Some(api_type(path));
+    }
+    if method != Method::POST {
+        return None;
+    }
+    PAGE_ORDER_ROUTES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, t)| (*t).to_string())
+}
+
 /// The monitoring middleware (outermost application layer).
 pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     // The stored caller (`middleware::Source`). Bans apply to a device on
@@ -508,36 +536,28 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .map(String::from);
-    let is_api = path.starts_with("/api/v1/");
     let started = Instant::now();
 
-    let (req, symbol) = if is_api && method == Method::POST {
-        match with_symbol(req).await {
-            Ok(r) => r,
-            Err(r) => return r,
+    let resp = match latency_type(&method, &path) {
+        Some(order_type) => {
+            let call = Timed {
+                now,
+                path: &path,
+                order_type,
+            };
+            match timed(&ctx, req, next, call).await {
+                Ok(r) => r,
+                Err(r) => return r,
+            }
         }
-    } else {
-        (req, None)
+        None => next.run(req).await,
     };
-
-    let resp = next.run(req).await;
     let status = resp.status();
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let elapsed_ms = ms_since(started);
 
-    let resp = if is_api {
-        let call = ApiCall {
-            now,
-            path: &path,
-            status,
-            elapsed_ms,
-            symbol,
-            ip: &ip,
-        };
-        record_api_reply(&ctx, resp, call).await
-    } else {
-        resp
-    };
-
+    if status == StatusCode::FORBIDDEN && path.starts_with("/api/v1/") {
+        ctx.monitor.send(Record::InvalidKey { ip: ip.clone() });
+    }
     if status == StatusCode::NOT_FOUND {
         ctx.monitor.send(Record::NotFound {
             ip: ip.clone(),
@@ -555,6 +575,10 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
         error: None,
     }));
     resp
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
 }
 
 /// The plain-text 403 a banned address gets.
@@ -585,64 +609,139 @@ async fn with_symbol(req: Request) -> Result<(Request, Option<String>), Response
     Ok((Request::from_parts(parts, Body::from(bytes)), symbol))
 }
 
-/// One `/api/v1` call, as its latency row records it.
-struct ApiCall<'a> {
+/// A request the latency log records.
+struct Timed<'a> {
     now: DateTime<Utc>,
     path: &'a str,
-    status: StatusCode,
-    elapsed_ms: f64,
-    symbol: Option<String>,
-    ip: &'a str,
+    order_type: String,
 }
 
-/// Record an `/api/v1` reply's latency (not for a path no route answers)
-/// and an invalid key (403); the reply passes through.
-async fn record_api_reply(ctx: &AppState, resp: Response, call: ApiCall<'_>) -> Response {
+/// Where a recorded request's time went, in ms (web `LatencyTracker`
+/// stages): reading the request, the handler, reading the reply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Stages {
+    validation_ms: f64,
+    handler_ms: f64,
+    response_ms: f64,
+}
+
+/// A latency row's times, in ms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Timings {
+    rtt_ms: f64,
+    overhead_ms: f64,
+    total_ms: f64,
+}
+
+/// The row's times (web `track_latency`, OBS-03). For an order, `rtt_ms`
+/// is the time its broker order calls were in flight, none when nothing
+/// reached a broker (the sandbox, a refusal, an order queued for
+/// approval), and the overhead is the rest. The web reports the handler's
+/// own time, or a quote the sandbox fetched, as broker time then. Any
+/// other call keeps the web's fallback: the handler's time as `rtt_ms`,
+/// reading the request and the reply as overhead.
+fn timings(stages: Stages, broker: &BrokerTime, order: bool) -> Timings {
+    let total_ms = stages.validation_ms + stages.handler_ms + stages.response_ms;
+    if order {
+        let rtt_ms = (broker.busy.as_secs_f64() * 1000.0).min(total_ms);
+        return Timings {
+            rtt_ms,
+            overhead_ms: total_ms - rtt_ms,
+            total_ms,
+        };
+    }
+    Timings {
+        rtt_ms: stages.handler_ms,
+        overhead_ms: stages.validation_ms + stages.response_ms,
+        total_ms,
+    }
+}
+
+/// Run a recorded request: its POST body read for the symbol, the handler
+/// under the broker-time probe, the reply read for its order id; then
+/// queue its latency row. `Err` is the reply for a body over the limit.
+async fn timed(
+    ctx: &AppState,
+    req: Request,
+    next: Next,
+    call: Timed<'_>,
+) -> Result<Response, Response> {
+    let t = Instant::now();
+    let (req, symbol) = if req.method() == Method::POST {
+        with_symbol(req).await?
+    } else {
+        (req, None)
+    };
+    let validation_ms = ms_since(t);
+    let t = Instant::now();
+    let (resp, broker) = latency_probe::measure(next.run(req)).await;
+    let handler_ms = ms_since(t);
+    let t = Instant::now();
     let (resp, body) = scan_body(resp).await;
-    let not_route =
-        call.status == StatusCode::NOT_FOUND && body.as_ref().and_then(|b| b.get("path")).is_some();
-    if !not_route {
-        let field = |k: &str| {
-            body.as_ref().and_then(|b| b.get(k)).and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        };
-        let order_id = field("orderid")
-            .or_else(|| field("request_id"))
-            .unwrap_or_else(|| "unknown".into());
-        let error = if call.status.as_u16() >= 400 {
-            field("message")
-        } else {
-            None
-        };
+    let stages = Stages {
+        validation_ms,
+        handler_ms,
+        response_ms: ms_since(t),
+    };
+    if let Some(row) = latency_row(ctx, &call, resp.status(), body.as_ref(), symbol) {
+        let order = store::LATENCY_ORDER_TYPES.contains(&row.order_type.as_str());
+        let t = timings(stages, &broker, order);
         ctx.monitor.send(Record::Latency(LatencyRow {
-            timestamp: store::ts(call.now),
-            order_id,
-            broker: ctx.get_broker_session().map(|b| b.broker_id),
-            symbol: call.symbol,
-            order_type: api_type(call.path),
-            rtt_ms: call.elapsed_ms,
-            validation_latency_ms: 0.0,
-            response_latency_ms: 0.0,
-            overhead_ms: 0.0,
-            total_latency_ms: call.elapsed_ms,
-            status: if call.status.as_u16() < 400 {
-                "SUCCESS".into()
-            } else {
-                "FAILED".into()
-            },
-            error,
-            ..Default::default()
+            broker: broker.broker.or(row.broker),
+            rtt_ms: t.rtt_ms,
+            validation_latency_ms: stages.validation_ms,
+            response_latency_ms: stages.response_ms,
+            overhead_ms: t.overhead_ms,
+            total_latency_ms: t.total_ms,
+            ..row
         }));
     }
-    if call.status == StatusCode::FORBIDDEN {
-        ctx.monitor.send(Record::InvalidKey {
-            ip: call.ip.to_string(),
-        });
+    Ok(resp)
+}
+
+/// The row for a recorded reply, without its times; `None` when the web
+/// would not have recorded it: a path no API route answers, or a page's
+/// order refused before it reached the order (not signed in, a missing
+/// CSRF token, the request limit). The broker is the session's, for a call
+/// that sent nothing to a broker.
+fn latency_row(
+    ctx: &AppState,
+    call: &Timed<'_>,
+    status: StatusCode,
+    body: Option<&Value>,
+    symbol: Option<String>,
+) -> Option<LatencyRow> {
+    let field = |k: &str| {
+        body.and_then(|b| b.get(k)).and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    };
+    let api = call.path.starts_with("/api/v1/");
+    let not_route =
+        api && status == StatusCode::NOT_FOUND && body.and_then(|b| b.get("path")).is_some();
+    let refused = !api
+        && matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+        );
+    if not_route || refused {
+        return None;
     }
-    resp
+    let failed = status.as_u16() >= 400;
+    Some(LatencyRow {
+        timestamp: store::ts(call.now),
+        order_id: field("orderid")
+            .or_else(|| field("request_id"))
+            .unwrap_or_else(|| "unknown".into()),
+        broker: ctx.get_broker_session().map(|b| b.broker_id),
+        symbol,
+        order_type: call.order_type.clone(),
+        status: if failed { "FAILED" } else { "SUCCESS" }.into(),
+        error: if failed { field("message") } else { None },
+        ..Default::default()
+    })
 }
 
 /// Read a small JSON response body (rebuilding the response); larger or
@@ -690,6 +789,51 @@ mod tests {
     }
 
     use super::*;
+
+    fn stages(validation_ms: f64, handler_ms: f64, response_ms: f64) -> Stages {
+        Stages {
+            validation_ms,
+            handler_ms,
+            response_ms,
+        }
+    }
+
+    /// OBS-03: an order's rtt is its broker time and the overhead the rest;
+    /// an order that reached no broker has no broker time; other calls keep
+    /// the web's fallback.
+    #[test]
+    fn latency_times_split_broker_time_from_the_platform() {
+        let broker = BrokerTime {
+            calls: 1,
+            busy: Duration::from_millis(100),
+            broker: Some("zerodha".into()),
+        };
+        let t = timings(stages(2.0, 145.0, 3.0), &broker, true);
+        assert_eq!((t.rtt_ms, t.overhead_ms, t.total_ms), (100.0, 50.0, 150.0));
+        let none = BrokerTime::default();
+        let t = timings(stages(2.0, 40.0, 3.0), &none, true);
+        assert_eq!((t.rtt_ms, t.overhead_ms, t.total_ms), (0.0, 45.0, 45.0));
+        let t = timings(stages(2.0, 40.0, 3.0), &none, false);
+        assert_eq!((t.rtt_ms, t.overhead_ms, t.total_ms), (40.0, 5.0, 45.0));
+    }
+
+    /// OBS-04: the page order routes the web decorates, and only those.
+    #[test]
+    fn page_orders_are_recorded_with_the_web_types() {
+        let post = |p| latency_type(&Method::POST, p);
+        assert_eq!(post("/scalping/api/order").as_deref(), Some("PLACE"));
+        assert_eq!(post("/scalping/api/close_leg").as_deref(), Some("CLOSE"));
+        assert_eq!(post("/scalping/api/close_all").as_deref(), Some("CLOSE"));
+        assert_eq!(
+            post("/scalping/api/cancel_all").as_deref(),
+            Some("CANCEL_ALL")
+        );
+        assert_eq!(post("/close_position").as_deref(), Some("CLOSE"));
+        assert_eq!(post("/close_all_positions").as_deref(), Some("CLOSE"));
+        assert_eq!(post("/cancel_all_orders"), None);
+        assert_eq!(latency_type(&Method::GET, "/close_position"), None);
+        assert_eq!(post("/api/v1/placeorder").as_deref(), Some("PLACE"));
+    }
 
     #[test]
     fn api_types_follow_the_web_map() {
