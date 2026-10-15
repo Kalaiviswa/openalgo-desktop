@@ -7,6 +7,35 @@ use super::{
 use crate::error::Result;
 use rusqlite::{params, OptionalExtension};
 
+/// A broker frame's status, lower case; anything unknown reads as working
+/// (`open`).
+fn frame_status(status: &str) -> String {
+    let mut incoming = status.trim().to_ascii_lowercase();
+    if !["open", "complete", "cancelled", "rejected"].contains(&incoming.as_str()) {
+        incoming = "open".into();
+    }
+    incoming
+}
+
+/// The row's status after a frame: `complete` stays; a dead row comes back
+/// only as `complete` with strictly more filled quantity (`delta`); a
+/// working row takes a terminal frame's status, else stays `open`.
+fn folded_status(previous_status: &str, incoming: &str, delta: i64) -> String {
+    if previous_status == "complete" {
+        "complete".to_string()
+    } else if previous_status == "cancelled" || previous_status == "rejected" {
+        if incoming == "complete" && delta > 0 {
+            "complete".to_string()
+        } else {
+            previous_status.to_string()
+        }
+    } else if TERMINAL_ORDER_STATUSES.contains(&incoming) {
+        incoming.to_string()
+    } else {
+        "open".to_string()
+    }
+}
+
 impl Store {
     /// Write an order row at placement time, before the broker answers.
     pub fn record_order(&self, run_id: i64, leg_id: i64, kind: &str, o: &NewOrder) -> Result<i64> {
@@ -119,10 +148,7 @@ impl Store {
         filled_qty: Option<i64>,
         reject_reason: Option<&str>,
     ) -> Result<Option<OrderFactFold>> {
-        let mut incoming = status.trim().to_ascii_lowercase();
-        if !["open", "complete", "cancelled", "rejected"].contains(&incoming.as_str()) {
-            incoming = "open".into();
-        }
+        let incoming = frame_status(status);
         let incoming_qty = filled_qty.unwrap_or(0).max(0);
         for _ in 0..8 {
             let Some(row) = self.get_order(order_id)? else {
@@ -139,19 +165,7 @@ impl Store {
             }
             let cumulative = previous_qty.max(evidence);
             let delta = cumulative - previous_qty;
-            let next_status = if previous_status == "complete" {
-                "complete".to_string()
-            } else if previous_status == "cancelled" || previous_status == "rejected" {
-                if incoming == "complete" && delta > 0 {
-                    "complete".to_string()
-                } else {
-                    previous_status.clone()
-                }
-            } else if TERMINAL_ORDER_STATUSES.contains(&incoming.as_str()) {
-                incoming.clone()
-            } else {
-                "open".to_string()
-            };
+            let next_status = folded_status(&previous_status, &incoming, delta);
             let status_changed = next_status != previous_status;
             if !status_changed && delta <= 0 {
                 return Ok(Some(OrderFactFold {
