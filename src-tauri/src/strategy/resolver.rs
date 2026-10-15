@@ -360,46 +360,11 @@ pub async fn resolve_leg(
             ),
         ));
     }
-    let lots = match &leg["lots"] {
-        Value::Null => 1,
-        v => match crate::risk::value_to_f64(v) {
-            Some(f) if f.is_finite() && f > 0.0 && f.fract() == 0.0 => f as i64,
-            _ => {
-                return Err(fail(
-                    "invalid_lots",
-                    format!(
-                        "Lots on a {} {} leg must be a whole number above zero, got {}.",
-                        base, segment, v
-                    ),
-                ))
-            }
-        },
-    };
+    let lots = leg_lots(leg, &base, &segment)?;
 
     let uex = underlying_exchange.trim().to_ascii_uppercase();
     if segment == "cash" {
-        let exchange = match uex.as_str() {
-            "NSE_INDEX" => "NSE".to_string(),
-            "BSE_INDEX" => "BSE".to_string(),
-            other => other.to_string(),
-        };
-        let Some(row) = g.by_symbol(&exchange, &base) else {
-            let index = uex.ends_with("_INDEX");
-            return Err(fail(
-                "contract_not_found",
-                format!(
-                    "No cash contract found for {} on {}.{}",
-                    base,
-                    exchange,
-                    if index {
-                        " An index has no cash instrument of its own and cannot be traded directly."
-                    } else {
-                        ""
-                    }
-                ),
-            ));
-        };
-        return finish(row, lots, None, None, None);
+        return cash_leg(g, &base, &uex, lots);
     }
 
     let exchange = derivatives_exchange(&uex);
@@ -415,19 +380,109 @@ pub async fn resolve_leg(
     };
 
     if segment == "futures" {
-        let symbol = format!("{}{}FUT", base, expiry.expiry_symbol);
-        let Some(row) = g.by_symbol(&exchange, &symbol) else {
-            return Err(fail(
-                "contract_not_found",
-                format!(
-                    "No futures contract found for {} {} on {} (looked for {}).",
-                    base, expiry.expiry, exchange, symbol
-                ),
-            ));
-        };
+        let row = futures_row(g, &exchange, &base, &expiry)?;
         return finish(row, lots, None, Some(&expiry), None);
     }
 
+    let option_type = option_type_of(leg)?;
+    let strike_mode = leg["strike_mode"]
+        .as_str()
+        .unwrap_or("atm")
+        .to_ascii_lowercase();
+    let mut ltp = None;
+    let strike = if strike_mode == "strike" {
+        fixed_strike(leg, &base)?
+    } else if strike_mode == "atm" {
+        let offset = atm_offset(leg, &base)?;
+        let price = reference_price(g, gateway, (&base, &uex), today, shared_ltp).await?;
+        ltp = Some(price);
+        atm_strike(g, (&base, &exchange), &expiry, &option_type, &offset, price)?
+    } else {
+        return Err(fail(
+            "invalid_strike_mode",
+            format!(
+                "Unknown strike mode {:?} on a {} option leg. Supported modes are atm, strike.",
+                strike_mode, base
+            ),
+        ));
+    };
+    let row = option_row(g, (&base, &exchange), &expiry, strike, &option_type)?;
+    finish(row, lots, Some(strike), Some(&expiry), ltp)
+}
+
+/// A leg's lots: one when absent, else a whole number above zero.
+fn leg_lots(leg: &Value, base: &str, segment: &str) -> Result<i64, Failure> {
+    Ok(match &leg["lots"] {
+        Value::Null => 1,
+        v => match crate::risk::value_to_f64(v) {
+            Some(f) if f.is_finite() && f > 0.0 && f.fract() == 0.0 => f as i64,
+            _ => {
+                return Err(fail(
+                    "invalid_lots",
+                    format!(
+                        "Lots on a {} {} leg must be a whole number above zero, got {}.",
+                        base, segment, v
+                    ),
+                ))
+            }
+        },
+    })
+}
+
+/// A cash leg's contract: the underlying itself on the cash exchange (an
+/// index has no cash instrument).
+fn cash_leg(
+    g: &SymbolGeneration,
+    base: &str,
+    uex: &str,
+    lots: i64,
+) -> Result<ResolvedLeg, Failure> {
+    let exchange = match uex {
+        "NSE_INDEX" => "NSE".to_string(),
+        "BSE_INDEX" => "BSE".to_string(),
+        other => other.to_string(),
+    };
+    let Some(row) = g.by_symbol(&exchange, base) else {
+        let index = uex.ends_with("_INDEX");
+        return Err(fail(
+            "contract_not_found",
+            format!(
+                "No cash contract found for {} on {}.{}",
+                base,
+                exchange,
+                if index {
+                    " An index has no cash instrument of its own and cannot be traded directly."
+                } else {
+                    ""
+                }
+            ),
+        ));
+    };
+    finish(row, lots, None, None, None)
+}
+
+/// A futures leg's contract for the expiry.
+fn futures_row<'a>(
+    g: &'a SymbolGeneration,
+    exchange: &str,
+    base: &str,
+    expiry: &ExpiryResult,
+) -> Result<&'a SymToken, Failure> {
+    let symbol = format!("{}{}FUT", base, expiry.expiry_symbol);
+    let Some(row) = g.by_symbol(exchange, &symbol) else {
+        return Err(fail(
+            "contract_not_found",
+            format!(
+                "No futures contract found for {} {} on {} (looked for {}).",
+                base, expiry.expiry, exchange, symbol
+            ),
+        ));
+    };
+    Ok(row)
+}
+
+/// An option leg's type, CE or PE.
+fn option_type_of(leg: &Value) -> Result<String, Failure> {
     let option_type = leg["option_type"]
         .as_str()
         .unwrap_or_default()
@@ -441,125 +496,143 @@ pub async fn resolve_leg(
             ),
         ));
     }
-    let strike_mode = leg["strike_mode"]
-        .as_str()
-        .unwrap_or("atm")
-        .to_ascii_lowercase();
-    let mut ltp = None;
-    let strike = if strike_mode == "strike" {
-        match crate::risk::value_to_f64(&leg["strike"]) {
-            Some(k) if k.is_finite() && k > 0.0 => k,
-            _ => {
-                return Err(fail(
-                    "invalid_strike",
-                    format!(
-                        "Strike {} on a {} option leg is not a usable price. A strike must be a positive number, and may be fractional.",
-                        leg["strike"], base
-                    ),
-                ))
-            }
-        }
-    } else if strike_mode == "atm" {
-        let offset = leg["atm_offset"]
-            .as_str()
-            .unwrap_or("ATM")
-            .trim()
-            .to_ascii_uppercase();
-        let valid = offset == "ATM"
-            || ["ITM", "OTM"].iter().any(|p| {
-                offset
-                    .strip_prefix(p)
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .is_some_and(|n| (1..=5).contains(&n))
-            });
-        if !valid {
-            return Err(fail(
-                "invalid_offset",
-                format!(
-                    "Unknown offset {:?} on a {} option leg. Supported offsets are ATM, ITM1 to ITM5 and OTM1 to OTM5.",
-                    offset, base
-                ),
-            ));
-        }
-        let price = match shared_ltp {
-            Some(p) => p,
-            None => {
-                let Some((qs, qx)) = quote_target(g, &base, &uex, today) else {
-                    return Err(fail(
-                        "no_underlying_contract",
-                        format!(
-                            "No unexpired futures contract for {} on {}, so there is no reference price for the ATM strike. Check the symbol, or re-download the master contract.",
-                            base, uex
-                        ),
-                    ));
-                };
-                gateway
-                    .ltp(&qs, &qx)
-                    .await
-                    .map_err(|e| fail("quote_failed", e))?
-            }
-        };
-        ltp = Some(price);
-        let strikes = available_strikes(
-            g.rows(),
-            &base,
-            &expiry.expiry_symbol,
-            &option_type,
-            &exchange,
-        );
-        if strikes.is_empty() {
-            return Err(fail(
-                "no_strikes",
-                format!(
-                    "No {} strikes listed for {} expiring {} on {}. Check the expiry, or re-download the master contract.",
-                    option_type, base, expiry.expiry_symbol, exchange
-                ),
-            ));
-        }
-        let Some(atm) = atm_index(&strikes, price) else {
-            return Err(fail(
-                "no_atm_strike",
-                format!(
-                    "Could not pick an ATM strike for {} from a last price of {}.",
-                    base, price
-                ),
-            ));
-        };
-        let n: i64 = offset.get(3..).and_then(|n| n.parse().ok()).unwrap_or(0);
-        let call = option_type == "CE";
-        // PE ITM and CE OTM move up the ladder.
-        let up = offset.starts_with("ITM") != call;
-        let idx = if offset == "ATM" {
-            atm as i64
-        } else if up {
-            atm as i64 + n
-        } else {
-            atm as i64 - n
-        };
-        if idx < 0 || idx >= strikes.len() as i64 {
-            return Err(fail(
-                "offset_out_of_range",
-                format!(
-                    "Offset {} runs off the end of the {} {} {} chain, which lists {} strikes around an ATM of {}.",
-                    offset,
-                    base,
-                    expiry.expiry_symbol,
-                    option_type,
-                    strikes.len(),
-                    format_strike(strikes[atm])
-                ),
-            ));
-        }
-        strikes[idx as usize]
-    } else {
-        return Err(fail(
-            "invalid_strike_mode",
+    Ok(option_type)
+}
+
+/// A fixed strike: a positive number, possibly fractional.
+fn fixed_strike(leg: &Value, base: &str) -> Result<f64, Failure> {
+    match crate::risk::value_to_f64(&leg["strike"]) {
+        Some(k) if k.is_finite() && k > 0.0 => Ok(k),
+        _ => Err(fail(
+            "invalid_strike",
             format!(
-                "Unknown strike mode {:?} on a {} option leg. Supported modes are atm, strike.",
-                strike_mode, base
+                "Strike {} on a {} option leg is not a usable price. A strike must be a positive number, and may be fractional.",
+                leg["strike"], base
+            ),
+        )),
+    }
+}
+
+/// The ATM offset: ATM, ITM1 to ITM5 or OTM1 to OTM5.
+fn atm_offset(leg: &Value, base: &str) -> Result<String, Failure> {
+    let offset = leg["atm_offset"]
+        .as_str()
+        .unwrap_or("ATM")
+        .trim()
+        .to_ascii_uppercase();
+    let valid = offset == "ATM"
+        || ["ITM", "OTM"].iter().any(|p| {
+            offset
+                .strip_prefix(p)
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some_and(|n| (1..=5).contains(&n))
+        });
+    if !valid {
+        return Err(fail(
+            "invalid_offset",
+            format!(
+                "Unknown offset {:?} on a {} option leg. Supported offsets are ATM, ITM1 to ITM5 and OTM1 to OTM5.",
+                offset, base
+            ),
+        ));
+    }
+    Ok(offset)
+}
+
+/// The underlying's price the ATM strike is measured against: the first
+/// leg's when shared, else a quote of the reference instrument.
+async fn reference_price(
+    g: &SymbolGeneration,
+    gateway: &dyn OrderGateway,
+    (base, uex): (&str, &str),
+    today: NaiveDate,
+    shared_ltp: Option<f64>,
+) -> Result<f64, Failure> {
+    Ok(match shared_ltp {
+        Some(p) => p,
+        None => {
+            let Some((qs, qx)) = quote_target(g, base, uex, today) else {
+                return Err(fail(
+                    "no_underlying_contract",
+                    format!(
+                        "No unexpired futures contract for {} on {}, so there is no reference price for the ATM strike. Check the symbol, or re-download the master contract.",
+                        base, uex
+                    ),
+                ));
+            };
+            gateway
+                .ltp(&qs, &qx)
+                .await
+                .map_err(|e| fail("quote_failed", e))?
+        }
+    })
+}
+
+/// The strike `offset` steps from the ATM on the expiry's chain (PE ITM
+/// and CE OTM move up the ladder).
+fn atm_strike(
+    g: &SymbolGeneration,
+    (base, exchange): (&str, &str),
+    expiry: &ExpiryResult,
+    option_type: &str,
+    offset: &str,
+    price: f64,
+) -> Result<f64, Failure> {
+    let strikes = available_strikes(g.rows(), base, &expiry.expiry_symbol, option_type, exchange);
+    if strikes.is_empty() {
+        return Err(fail(
+            "no_strikes",
+            format!(
+                "No {} strikes listed for {} expiring {} on {}. Check the expiry, or re-download the master contract.",
+                option_type, base, expiry.expiry_symbol, exchange
+            ),
+        ));
+    }
+    let Some(atm) = atm_index(&strikes, price) else {
+        return Err(fail(
+            "no_atm_strike",
+            format!(
+                "Could not pick an ATM strike for {} from a last price of {}.",
+                base, price
             ),
         ));
     };
+    let n: i64 = offset.get(3..).and_then(|n| n.parse().ok()).unwrap_or(0);
+    let call = option_type == "CE";
+    // PE ITM and CE OTM move up the ladder.
+    let up = offset.starts_with("ITM") != call;
+    let idx = if offset == "ATM" {
+        atm as i64
+    } else if up {
+        atm as i64 + n
+    } else {
+        atm as i64 - n
+    };
+    if idx < 0 || idx >= strikes.len() as i64 {
+        return Err(fail(
+            "offset_out_of_range",
+            format!(
+                "Offset {} runs off the end of the {} {} {} chain, which lists {} strikes around an ATM of {}.",
+                offset,
+                base,
+                expiry.expiry_symbol,
+                option_type,
+                strikes.len(),
+                format_strike(strikes[atm])
+            ),
+        ));
+    }
+    Ok(strikes[idx as usize])
+}
+
+/// An option leg's contract at the strike.
+fn option_row<'a>(
+    g: &'a SymbolGeneration,
+    (base, exchange): (&str, &str),
+    expiry: &ExpiryResult,
+    strike: f64,
+    option_type: &str,
+) -> Result<&'a SymToken, Failure> {
     let symbol = format!(
         "{}{}{}{}",
         base,
@@ -567,7 +640,7 @@ pub async fn resolve_leg(
         format_strike(strike),
         option_type
     );
-    let Some(row) = g.by_symbol(&exchange, &symbol) else {
+    let Some(row) = g.by_symbol(exchange, &symbol) else {
         return Err(fail(
             "contract_not_found",
             format!(
@@ -581,7 +654,7 @@ pub async fn resolve_leg(
             ),
         ));
     };
-    finish(row, lots, Some(strike), Some(&expiry), ltp)
+    Ok(row)
 }
 
 /// A literal `DD-MMM-YY` / `DDMMMYY` (two or four digit year) expiry.
