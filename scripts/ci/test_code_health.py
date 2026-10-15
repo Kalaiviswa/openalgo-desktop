@@ -156,6 +156,7 @@ class Measure(unittest.TestCase):
 
 class Ratchet(unittest.TestCase):
     def setUp(self):
+        self._may_grow = ch.EXISTING_MAY_GROW
         self.t = Tree()
         self.t.write("src-tauri/src/a.rs", long_fn("old_long", 150) + "pub fn user() { old_long(); }\n")
         code, _ = self.t.run("--init")
@@ -163,7 +164,7 @@ class Ratchet(unittest.TestCase):
 
     def tearDown(self):
         self.t.close()
-        ch.EXISTING_MAY_GROW = True
+        ch.EXISTING_MAY_GROW = self._may_grow
 
     def test_unchanged_tree_passes(self):
         self.assertEqual(self.t.run()[0], 0)
@@ -174,13 +175,22 @@ class Ratchet(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("new_long", out)
 
-    def test_growth_is_a_warning_until_the_pass_then_fails(self):
+    def test_growth_is_a_warning_only_while_the_flag_allows_it(self):
         self.t.write("src-tauri/src/a.rs", long_fn("old_long", 160) + "pub fn user() { old_long(); }\n")
+        ch.EXISTING_MAY_GROW = True
         code, out = self.t.run()
         self.assertEqual(code, 0)
         self.assertIn("warning", out)
         ch.EXISTING_MAY_GROW = False
         self.assertEqual(self.t.run()[0], 1)
+
+    def test_the_pass_is_done_so_a_listed_item_that_grows_fails(self):
+        # The module's own setting, not one a test chose.
+        self.assertFalse(self._may_grow)
+        self.t.write("src-tauri/src/a.rs", long_fn("old_long", 151) + "pub fn user() { old_long(); }\n")
+        code, out = self.t.run()
+        self.assertEqual(code, 1)
+        self.assertIn("old_long grew to", out)
 
     def test_an_improvement_must_be_written_back_and_update_never_raises(self):
         self.t.write("src-tauri/src/a.rs", long_fn("old_long", 120) + "pub fn user() { old_long(); }\n")

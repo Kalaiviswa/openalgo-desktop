@@ -43,11 +43,13 @@ RUST_FILE_LINES = 1000
 RUST_FN_LINES = 100
 HANDLER_FN_LINES = 60
 TS_FILE_LINES = 1000
-# Until the code-health pass (docs: CLAUDE.md, "Code health") splits what is
-# already listed, a listed item that grows is a warning, so pull requests in
-# flight when the gate started are not turned into refactors. The pass sets
-# this to False; from then on a listed item may only shrink.
-EXISTING_MAY_GROW = True
+# The code-health pass (docs: CLAUDE.md, "Code health") is done: what stays
+# listed is generated code, an allow kept on purpose with its reason, or a
+# frontend file carried over from the web. A listed item may only shrink; one
+# that grows fails, and a pull request that cannot avoid it needs the
+# maintainer's code-health-exception label. (True turned growth into a
+# warning while the pass was under way.)
+EXISTING_MAY_GROW = False
 
 BASELINE = ".github/code-health-baseline.json"
 RUST_ROOT = "src-tauri/src"
@@ -686,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     for f in findings:
         p, line = where.get(f"{f.check}:{f.key}", (BASELINE, 1))
         if f.grew and EXISTING_MAY_GROW:
-            _annotate("warning", p, line, f.message + " (A warning until the code-health pass.)")
+            _annotate("warning", p, line, f.message)
         elif f.stale:
             failures += 1
             _annotate(
