@@ -97,7 +97,6 @@
     "src-tauri/src/brokers/groww/streaming.rs::on_msg": 105,
     "src-tauri/src/brokers/hdfcsecurities/master_contract.rs::parse_security_master": 179,
     "src-tauri/src/brokers/hdfcsecurities/streaming.rs::parse_packet": 103,
-    "src-tauri/src/brokers/hdfcsky/master_contract.rs::parse_row": 130,
     "src-tauri/src/brokers/iiflcapital/data.rs::get_multiquotes": 105,
     "src-tauri/src/brokers/iiflcapital/master_contract.rs::parse_segment": 110,
     "src-tauri/src/brokers/iiflcapital/mqtt_relay.rs::serve": 164,
