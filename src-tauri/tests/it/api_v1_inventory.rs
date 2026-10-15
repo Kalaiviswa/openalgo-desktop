@@ -21,17 +21,6 @@ const NOT_SERVED: &[(&str, &str)] = &[
         "/api/v1/sip/",
         "the SIP Backtester needs pandas: out of scope (same decision)",
     ),
-    (
-        "/api/v1/telegram/broadcast",
-        "API-01: the Telegram bot management API is not served yet",
-    ),
-    ("/api/v1/telegram/config", "API-01, as above"),
-    ("/api/v1/telegram/preferences", "API-01, as above"),
-    ("/api/v1/telegram/start", "API-01, as above"),
-    ("/api/v1/telegram/stats", "API-01, as above"),
-    ("/api/v1/telegram/stop", "API-01, as above"),
-    ("/api/v1/telegram/users", "API-01, as above"),
-    ("/api/v1/telegram/webhook", "API-01, as above"),
 ];
 
 fn web_routes() -> Vec<(Method, String)> {

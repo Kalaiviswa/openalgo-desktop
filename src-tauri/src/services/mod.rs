@@ -70,6 +70,7 @@ pub mod settings_service;
 pub mod strategy_portfolio_service;
 pub mod symbol_service;
 pub mod system_info;
+pub mod telegram_admin_service;
 pub mod tools_service;
 pub mod traffic_service;
 pub mod ui_order_service;

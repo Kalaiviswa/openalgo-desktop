@@ -17,13 +17,14 @@
 //!
 //! | `chart.rs` | chart (GET and POST) |
 //! | `notify.rs` | telegram/notify, whatsapp/notify |
+//! | `telegram.rs` | telegram/config, start, stop, users, broadcast, stats, preferences, webhook |
 //! | `strategy.rs` | strategy/* |
 //!
 //! `market/holidays` and `market/timings` are served by
 //! `crate::server::routes::market_calendar` and mounted here. Not served:
-//! portfolio and SIP (the web's pandas backtesters, out of scope) and the
-//! Telegram bot management endpoints; `tests/it/api_v1_inventory.rs` holds
-//! the router to the web's list with those exceptions named.
+//! portfolio and SIP (the web's pandas backtesters, out of scope);
+//! `tests/it/api_v1_inventory.rs` holds the router to the web's list with
+//! those exceptions named.
 
 mod account;
 mod chart;
@@ -33,6 +34,7 @@ mod notify;
 mod options;
 mod orders;
 mod strategy;
+mod telegram;
 
 use crate::events::{Event, GttKind, Mode};
 use crate::server::envelope::{json_response, not_found, read_json_object, EarlyReply};
@@ -343,6 +345,20 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         // Telegram and WhatsApp
         .route("/api/v1/telegram/notify", post(notify::telegram_notify))
+        .route(
+            "/api/v1/telegram/config",
+            get(telegram::config).post(telegram::update_config),
+        )
+        .route("/api/v1/telegram/start", post(telegram::start))
+        .route("/api/v1/telegram/stop", post(telegram::stop))
+        .route("/api/v1/telegram/users", get(telegram::users))
+        .route("/api/v1/telegram/broadcast", post(telegram::broadcast))
+        .route("/api/v1/telegram/stats", get(telegram::stats))
+        .route(
+            "/api/v1/telegram/preferences",
+            get(telegram::preferences).post(telegram::update_preferences),
+        )
+        .route("/api/v1/telegram/webhook", post(telegram::webhook))
         .route("/api/v1/whatsapp/notify", post(notify::whatsapp_notify))
         // strategy module (web restx_api/strategy.py)
         .route("/api/v1/strategy/list", post(strategy::list))

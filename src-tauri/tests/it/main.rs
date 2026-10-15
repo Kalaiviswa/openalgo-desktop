@@ -48,6 +48,7 @@ mod api_v1_contract;
 mod api_v1_events;
 mod api_v1_inventory;
 mod api_v1_quantity;
+mod api_v1_telegram;
 mod broker_angel_http;
 mod broker_contract;
 mod broker_deltaexchange;
