@@ -8,14 +8,14 @@ use super::data::{
     is_no_data_fault, kotak_segment, match_multiquotes, normalize_candles, quote_from_row,
     repair_candles,
 };
+use super::feed_config::{feed_url_from_config, to_wss, DEFAULT_SFEED_URL};
 use super::funds::{funds_from_limits, parse_margin, LIMITS_BODY};
 use super::mapping::*;
 use super::master_contract::{
     combine_details, expiry_from_epoch, fallback_urls, file_key, parse_file, parse_file_paths,
 };
 use super::streaming::{
-    decode_packet, feed_url_from_config, parse_dividers, realtime_url, split_batch, to_wss,
-    KotakFeed, KotakOrderFeed, Sfeed, DEFAULT_SFEED_URL,
+    decode_packet, parse_dividers, realtime_url, split_batch, KotakFeed, KotakOrderFeed, Sfeed,
 };
 use super::*;
 use crate::brokers::common::mapping::{Action, PriceType};
@@ -1029,7 +1029,7 @@ fn feed_config_and_dividers() {
     assert_eq!(d.get(&3), Some(&10_000_000.0));
     assert_eq!(d.get(&1), Some(&100.0));
     let b = KotakBroker::new(SymbolResolver::new());
-    assert_eq!(streaming::cached_feed_url(&b, "E43"), DEFAULT_SFEED_URL);
+    assert_eq!(feed_config::cached_feed_url(&b, "E43"), DEFAULT_SFEED_URL);
 }
 
 // ---------------------------------------------------------------------------

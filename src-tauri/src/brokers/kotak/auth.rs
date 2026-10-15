@@ -193,7 +193,7 @@ pub async fn authenticate(b: &KotakBroker, creds: BrokerCredentials) -> Result<A
     let session = validate_mpin(b, &access_token, &view, &mpin).await?;
     *b.ucc.lock() = Some(ucc.clone());
     // Resolve this data centre's feed host now, while we are async.
-    super::streaming::resolve_feed_url(b, &session.data_center).await;
+    super::feed_config::resolve_feed_url(b, &session.data_center).await;
     Ok(AuthResponse {
         auth_token: session.compose(),
         feed_token: None,
