@@ -3,6 +3,74 @@
 use crate::error::Result;
 use rusqlite::Connection;
 
+/// One migration's work on the connection it is given.
+type Step = fn(&Connection) -> Result<()>;
+
+/// The migrations after the legacy schema, in order: a name recorded in the
+/// `migrations` table once its step has run in one transaction. A new
+/// migration is one more row; never rename one that has shipped.
+const RUST_MIGRATIONS: &[(&str, Step)] = &[
+    ("037_users_email_totp", m037_users_email_totp),
+    ("038_auth_session_columns", m038_auth_session_columns),
+    ("039_api_keys_lookup", m039_api_keys_lookup),
+    ("040_pending_oauth", m040_pending_oauth),
+    ("041_server_settings", m041_server_settings),
+    (
+        "042_broker_credentials_market",
+        m042_broker_credentials_market,
+    ),
+    ("043_symtoken_master", super::symbol::migrate_symtoken),
+    ("050_market_calendar", super::market_calendar::migrate),
+    (
+        "051_security_settings",
+        super::webui::migrate_security_settings,
+    ),
+    ("052_leverage_config", super::webui::migrate_leverage),
+    (
+        "060_action_center_pending_orders",
+        super::action_center::migrate,
+    ),
+    ("061_watchlists", super::watchlist::migrate),
+    ("062_alert_log", super::alert_log::migrate),
+    ("063_strategy_portfolio", super::strategy_portfolio::migrate),
+    ("064_pending_oauth_redirect", m064_pending_oauth_redirect),
+    (
+        "065_symtoken_contract_value",
+        super::symbol::migrate_contract_value,
+    ),
+    (
+        "066_master_contract_status",
+        super::master_contract_status::migrate,
+    ),
+    ("070_telegram", crate::messaging::telegram::db::migrate),
+    ("071_whatsapp", crate::messaging::whatsapp::db::migrate),
+    ("072_strategy_module", crate::strategy::store::migrate),
+    ("073_strategy_book", crate::strategy::book::migrate),
+    (
+        "074_openscript_runner",
+        crate::trading::runner::store::migrate,
+    ),
+    ("075_scalping", crate::scalping::store::migrate),
+    ("076_chartink", crate::chartink::store::migrate),
+    ("077_mcp", crate::mcp::store::migrate),
+    (
+        "078_scalping_exit_attempts",
+        crate::scalping::store::migrate_exit_attempts,
+    ),
+    ("080_broker_redirect_url", m080_broker_redirect_url),
+    ("081_broker_rate_plan", super::rate_plan::migrate),
+    ("082_key_vault", super::key_vault::migrate),
+    ("083_symtoken_owner", super::symbol::migrate_owner),
+    (
+        "084_openscript_unconfirmed",
+        crate::trading::runner::store::migrate_unconfirmed,
+    ),
+    (
+        "085_scalping_unconfirmed",
+        crate::scalping::unconfirmed::migrate,
+    ),
+];
+
 /// Run all database migrations
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Create migrations table
@@ -16,90 +84,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     )?;
 
     run_legacy_schema(conn)?;
-    run_rust_migration(conn, "037_users_email_totp", m037_users_email_totp)?;
-    run_rust_migration(conn, "038_auth_session_columns", m038_auth_session_columns)?;
-    run_rust_migration(conn, "039_api_keys_lookup", m039_api_keys_lookup)?;
-    run_rust_migration(conn, "040_pending_oauth", m040_pending_oauth)?;
-    run_rust_migration(conn, "041_server_settings", m041_server_settings)?;
-    run_rust_migration(
-        conn,
-        "042_broker_credentials_market",
-        m042_broker_credentials_market,
-    )?;
-    run_rust_migration(conn, "043_symtoken_master", super::symbol::migrate_symtoken)?;
-    run_rust_migration(conn, "050_market_calendar", super::market_calendar::migrate)?;
-    run_rust_migration(
-        conn,
-        "051_security_settings",
-        super::webui::migrate_security_settings,
-    )?;
-    run_rust_migration(conn, "052_leverage_config", super::webui::migrate_leverage)?;
-    run_rust_migration(
-        conn,
-        "060_action_center_pending_orders",
-        super::action_center::migrate,
-    )?;
-    run_rust_migration(conn, "061_watchlists", super::watchlist::migrate)?;
-    run_rust_migration(conn, "062_alert_log", super::alert_log::migrate)?;
-    run_rust_migration(
-        conn,
-        "063_strategy_portfolio",
-        super::strategy_portfolio::migrate,
-    )?;
-    run_rust_migration(
-        conn,
-        "064_pending_oauth_redirect",
-        m064_pending_oauth_redirect,
-    )?;
-    run_rust_migration(
-        conn,
-        "065_symtoken_contract_value",
-        super::symbol::migrate_contract_value,
-    )?;
-    run_rust_migration(
-        conn,
-        "066_master_contract_status",
-        super::master_contract_status::migrate,
-    )?;
-    run_rust_migration(
-        conn,
-        "070_telegram",
-        crate::messaging::telegram::db::migrate,
-    )?;
-    run_rust_migration(
-        conn,
-        "071_whatsapp",
-        crate::messaging::whatsapp::db::migrate,
-    )?;
-    run_rust_migration(conn, "072_strategy_module", crate::strategy::store::migrate)?;
-    run_rust_migration(conn, "073_strategy_book", crate::strategy::book::migrate)?;
-    run_rust_migration(
-        conn,
-        "074_openscript_runner",
-        crate::trading::runner::store::migrate,
-    )?;
-    run_rust_migration(conn, "075_scalping", crate::scalping::store::migrate)?;
-    run_rust_migration(conn, "076_chartink", crate::chartink::store::migrate)?;
-    run_rust_migration(conn, "077_mcp", crate::mcp::store::migrate)?;
-    run_rust_migration(
-        conn,
-        "078_scalping_exit_attempts",
-        crate::scalping::store::migrate_exit_attempts,
-    )?;
-    run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
-    run_rust_migration(conn, "081_broker_rate_plan", super::rate_plan::migrate)?;
-    run_rust_migration(conn, "082_key_vault", super::key_vault::migrate)?;
-    run_rust_migration(conn, "083_symtoken_owner", super::symbol::migrate_owner)?;
-    run_rust_migration(
-        conn,
-        "084_openscript_unconfirmed",
-        crate::trading::runner::store::migrate_unconfirmed,
-    )?;
-    run_rust_migration(
-        conn,
-        "085_scalping_unconfirmed",
-        crate::scalping::unconfirmed::migrate,
-    )?;
+    for (name, step) in RUST_MIGRATIONS {
+        run_rust_migration(conn, name, *step)?;
+    }
 
     tracing::info!("Database migrations completed");
     Ok(())
@@ -211,11 +198,7 @@ pub fn mark_applied(conn: &Connection, name: &str) -> Result<()> {
 }
 
 /// Run a migration written in Rust, inside one transaction, once.
-fn run_rust_migration(
-    conn: &Connection,
-    name: &str,
-    f: fn(&Connection) -> Result<()>,
-) -> Result<()> {
+fn run_rust_migration(conn: &Connection, name: &str, f: Step) -> Result<()> {
     if is_applied(conn, name)? {
         return Ok(());
     }
