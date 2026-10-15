@@ -19,14 +19,20 @@ use std::sync::Arc;
 type Ctx = State<Arc<AppState>>;
 type Q = Query<HashMap<String, String>>;
 
-#[allow(clippy::result_large_err)]
-fn requests(ctx: &AppState, q: &HashMap<String, String>) -> Result<Vec<Value>, Response> {
-    let parse = |k: &str| -> Result<Option<NaiveDate>, Response> {
+/// The logged requests in the asked date range, or the error reply (boxed:
+/// a reply is large).
+fn requests(ctx: &AppState, q: &HashMap<String, String>) -> Result<Vec<Value>, Box<Response>> {
+    let parse = |k: &str| -> Result<Option<NaiveDate>, Box<Response>> {
         match q.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()) {
             None => Ok(None),
             Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .map(Some)
-                .map_err(|_| error(StatusCode::BAD_REQUEST, "Choose dates as YYYY-MM-DD.")),
+                .map_err(|_| {
+                    Box::new(error(
+                        StatusCode::BAD_REQUEST,
+                        "Choose dates as YYYY-MM-DD.",
+                    ))
+                }),
         }
     };
     let today = ctx.now().with_timezone(&Kolkata).date_naive();
@@ -34,11 +40,11 @@ fn requests(ctx: &AppState, q: &HashMap<String, String>) -> Result<Vec<Value>, R
     svc::rows_between(ctx, &from, &to)
         .map(|rows| rows.iter().map(svc::format_request).collect())
         .map_err(|e| {
-            failed(
+            Box::new(failed(
                 "Reading analyzer logs",
                 e,
                 "Could not load the analyzer logs. Try again.",
-            )
+            ))
         })
 }
 
@@ -46,7 +52,7 @@ fn requests(ctx: &AppState, q: &HashMap<String, String>) -> Result<Vec<Value>, R
 pub async fn data(State(ctx): Ctx, Query(q): Q) -> Response {
     let reqs = match requests(&ctx, &q) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let stats = match svc::stats(&ctx, ctx.now()) {
         Ok(s) => s,
@@ -64,7 +70,7 @@ pub async fn data(State(ctx): Ctx, Query(q): Q) -> Response {
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     let reqs = match requests(&ctx, &q) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let stamp = ctx.now().with_timezone(&Kolkata).format("%Y%m%d_%H%M%S");
     download(

@@ -35,7 +35,6 @@
     "src-tauri/src/commands/mod.rs::deprecated": 1,
     "src-tauri/src/mcp/stdio.rs::clippy::print_stderr": 1,
     "src-tauri/src/server/api_v1/strategy.rs::clippy::result_large_err": 1,
-    "src-tauri/src/server/routes/analyzer.rs::clippy::result_large_err": 1,
     "src-tauri/src/server/routes/strategy_module.rs::clippy::result_large_err": 3,
     "src-tauri/src/strategy/engine.rs::clippy::large_enum_variant": 1,
     "src-tauri/src/strategy/recovery.rs::clippy::too_many_arguments": 1,
