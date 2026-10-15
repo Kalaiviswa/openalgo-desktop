@@ -715,61 +715,72 @@ impl Scheduler {
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            if let Some(ex) = execution_id {
-                let jid = job_id.clone();
-                let _ = self
-                    .inner
-                    .db
-                    .write(move |c| {
-                        db::update_execution(
-                            c,
-                            ex,
-                            &ExecutionUpdate {
-                                download_job_id: Some(jid),
-                                symbols_processed: Some(total),
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .await;
-            }
-            tracing::info!("Scheduled download started: {} ({} symbols)", job_id, total);
-            self.inner.notify.notify(
-                "historify_schedule_execution_started",
-                json!({"schedule_id": id, "execution_id": execution_id, "job_id": job_id}),
-            );
+            self.record_started(id, execution_id, &job_id, total).await;
             true
         } else {
-            let msg = reply.message();
-            if let Some(ex) = execution_id {
-                let (m, now) = (msg.clone(), ist_naive(self.now()));
-                let _ = self
-                    .inner
-                    .db
-                    .write(move |c| {
-                        db::update_execution(
-                            c,
-                            ex,
-                            &ExecutionUpdate {
-                                status: Some("failed".into()),
-                                completed_at: Some(now),
-                                error_message: Some(m),
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .await;
-            }
-            self.set_state(id, "idle", Some("failed")).await;
-            let (idc, now) = (id.to_string(), ist_naive(self.now()));
+            self.record_failed(id, execution_id, reply.message()).await;
+            false
+        }
+    }
+
+    /// A scheduled download started: its job on the execution row, and the
+    /// page told.
+    async fn record_started(&self, id: &str, execution_id: Option<i64>, job_id: &str, total: i64) {
+        if let Some(ex) = execution_id {
+            let jid = job_id.to_string();
             let _ = self
                 .inner
                 .db
-                .write(move |c| db::count_run(c, &idc, false, now))
+                .write(move |c| {
+                    db::update_execution(
+                        c,
+                        ex,
+                        &ExecutionUpdate {
+                            download_job_id: Some(jid),
+                            symbols_processed: Some(total),
+                            ..Default::default()
+                        },
+                    )
+                })
                 .await;
-            tracing::error!("Scheduled download failed: {}", msg);
-            false
         }
+        tracing::info!("Scheduled download started: {} ({} symbols)", job_id, total);
+        self.inner.notify.notify(
+            "historify_schedule_execution_started",
+            json!({"schedule_id": id, "execution_id": execution_id, "job_id": job_id}),
+        );
+    }
+
+    /// A scheduled download that did not start: the execution failed, the
+    /// schedule idle, the run counted as failed.
+    async fn record_failed(&self, id: &str, execution_id: Option<i64>, msg: String) {
+        if let Some(ex) = execution_id {
+            let (m, now) = (msg.clone(), ist_naive(self.now()));
+            let _ = self
+                .inner
+                .db
+                .write(move |c| {
+                    db::update_execution(
+                        c,
+                        ex,
+                        &ExecutionUpdate {
+                            status: Some("failed".into()),
+                            completed_at: Some(now),
+                            error_message: Some(m),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .await;
+        }
+        self.set_state(id, "idle", Some("failed")).await;
+        let (idc, now) = (id.to_string(), ist_naive(self.now()));
+        let _ = self
+            .inner
+            .db
+            .write(move |c| db::count_run(c, &idc, false, now))
+            .await;
+        tracing::error!("Scheduled download failed: {}", msg);
     }
 
     /// Schedules with an entry (tests).
