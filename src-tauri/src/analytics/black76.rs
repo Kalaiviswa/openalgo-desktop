@@ -59,16 +59,6 @@ pub enum Flag {
     Put,
 }
 
-impl Flag {
-    pub fn from_type(t: &str) -> Self {
-        if t.eq_ignore_ascii_case("PE") {
-            Flag::Put
-        } else {
-            Flag::Call
-        }
-    }
-}
-
 fn d1d2(f: f64, k: f64, t: f64, sigma: f64) -> (f64, f64) {
     let st = sigma * t.sqrt();
     let d1 = ((f / k).ln() + sigma * sigma * t / 2.0) / st;

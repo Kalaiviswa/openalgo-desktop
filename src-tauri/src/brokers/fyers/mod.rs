@@ -593,15 +593,6 @@ impl FyersBroker {
         )?))
     }
 
-    /// The 50-level TBT depth socket at a known URL (see `tbt_socket_url`).
-    pub fn create_depth50_feed(&self, auth: &AuthToken, url: &str) -> Result<Box<dyn BrokerFeed>> {
-        Ok(Box::new(streaming::TbtFeed::new(
-            url,
-            auth,
-            self.symbols.clone(),
-        )?))
-    }
-
     /// web `_get_tbt_url`: ask Fyers for the TBT socket address, falling back
     /// to the documented default.
     pub async fn tbt_socket_url(&self, auth: &AuthToken) -> String {

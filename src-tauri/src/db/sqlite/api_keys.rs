@@ -84,11 +84,6 @@ pub fn get_plaintext(conn: &Connection, security: &SecurityManager) -> Result<Op
     }
 }
 
-pub fn has_key(conn: &Connection) -> Result<bool> {
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))?;
-    Ok(n > 0)
-}
-
 pub fn get_order_mode(conn: &Connection) -> Result<Option<String>> {
     Ok(conn
         .query_row(

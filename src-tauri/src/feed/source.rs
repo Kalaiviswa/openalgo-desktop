@@ -240,10 +240,6 @@ impl FakeSource {
         })
     }
 
-    pub fn set_supported_depths(&self, depths: Vec<u8>) {
-        *self.depths.lock() = depths;
-    }
-
     /// Broadcast an update; returns the number of receivers.
     pub fn publish(&self, update: MarketUpdate) -> usize {
         self.tx.send(Arc::new(update)).unwrap_or(0)

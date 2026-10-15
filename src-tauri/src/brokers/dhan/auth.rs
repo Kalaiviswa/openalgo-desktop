@@ -16,8 +16,7 @@
 //!
 //! The partner flow (`/partner/generate-consent`, `/consent-login`,
 //! `/partner/consume-consent`) exists in the web's `dhan_sandbox` only and
-//! is never called by its `authenticate_broker`; it is provided here for the
-//! same reason.
+//! is never called by its `authenticate_broker`, so it is not ported.
 
 use super::{split_api_key, DhanBroker, DhanSession, Variant};
 use crate::brokers::common::http;
@@ -148,54 +147,6 @@ pub async fn consume_consent(
         .header("app_id", app_id)
         .header("app_secret", secret)
         .header("Content-Type", "application/json")
-        .send()
-        .await?;
-    let (status, v): (StatusCode, Value) = http::read_json("dhan", resp).await?;
-    parse_consume(status, &v)
-}
-
-/// Partner flow, step 1 (web `dhan_sandbox` `generate_partner_consent`).
-pub async fn generate_partner_consent(
-    b: &DhanBroker,
-    partner_id: &str,
-    partner_secret: &str,
-) -> Result<String> {
-    let resp = b
-        .http
-        .post(format!("{}/partner/generate-consent", b.auth_base_url))
-        .header("partner_id", partner_id)
-        .header("partner_secret", partner_secret)
-        .send()
-        .await?;
-    let (status, v): (StatusCode, Value) = http::read_json("dhan", resp).await?;
-    match s(&v, "consentId") {
-        Some(id) if status == StatusCode::OK => Ok(format!(
-            "{}/consent-login?consentId={}",
-            b.auth_base_url,
-            urlencoding::encode(&id)
-        )),
-        _ => Err(AppError::Auth(
-            "Dhan did not start the partner login. Check the partner ID and secret.".into(),
-        )),
-    }
-}
-
-/// Partner flow, step 3.
-pub async fn consume_partner_consent(
-    b: &DhanBroker,
-    partner_id: &str,
-    partner_secret: &str,
-    token_id: &str,
-) -> Result<ConsentSession> {
-    let resp = b
-        .http
-        .post(format!(
-            "{}/partner/consume-consent?tokenId={}",
-            b.auth_base_url,
-            urlencoding::encode(token_id)
-        ))
-        .header("partner_id", partner_id)
-        .header("partner_secret", partner_secret)
         .send()
         .await?;
     let (status, v): (StatusCode, Value) = http::read_json("dhan", resp).await?;
