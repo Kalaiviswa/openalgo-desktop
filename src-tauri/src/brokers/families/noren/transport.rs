@@ -3,12 +3,11 @@
 
 use super::{Dialect, NorenBroker, NorenConfig, Window};
 use crate::brokers::common::http;
+use crate::brokers::common::outcome;
+use crate::brokers::common::ratelimit::{Budget, Limits, Rolling, BUSY_MESSAGE, MAX_QUEUE_WAIT};
 use crate::brokers::types::AuthToken;
 use crate::error::{AppError, Result};
 use serde_json::Value;
-use std::collections::VecDeque;
-use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 /// `emsg` fragments that mean the login is no longer valid (web
@@ -119,83 +118,54 @@ pub enum Category {
     Quote,
 }
 
-/// Rolling-window limiter: a send is allowed when fewer than `per_second`
-/// sends happened in the last second and fewer than `per_minute` in the
-/// last minute. Holds at most `per_minute` instants.
+/// Rolling-window limiter: at most `per_second` sends in any second and
+/// `per_minute` in any minute, one `common::ratelimit::Budget`. A send is
+/// claimed at the moment it may go, so a caller dropped while it waits
+/// books nothing, and a caller waits at most `ratelimit::MAX_QUEUE_WAIT`:
+/// past it the request is refused before sending, a definite refusal inside
+/// an order placement (BRL-05; it used to wait as long as the minute window
+/// needed). `None` is unpaced. State is the sends of the last minute,
+/// bounded by `per_minute`.
 #[derive(Debug)]
 pub struct Limiter {
-    window: Option<Window>,
-    sent: Mutex<VecDeque<Instant>>,
+    budget: Option<Budget>,
 }
 
 impl Limiter {
     pub fn new(window: Option<Window>) -> Self {
         Self {
-            window,
-            sent: Mutex::new(VecDeque::new()),
+            budget: window.map(|w| {
+                Budget::new(Limits {
+                    windows: vec![
+                        Rolling::per_second(w.per_second.max(1)),
+                        Rolling::per_minute(w.per_minute.max(1)),
+                    ],
+                    per_day: None,
+                })
+            }),
         }
     }
 
-    /// Wait for a send slot and claim it.
-    pub async fn acquire(&self) {
-        let Some(w) = self.window else {
-            return;
+    /// Wait for a send slot, at most `MAX_QUEUE_WAIT`, and claim it.
+    pub async fn acquire(&self) -> Result<()> {
+        self.acquire_until(Instant::now() + MAX_QUEUE_WAIT).await
+    }
+
+    /// Wait for a send slot until `deadline`, and claim it; refused before
+    /// sending when the slot comes later.
+    pub async fn acquire_until(&self, deadline: Instant) -> Result<()> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
         };
-        let per_sec = w.per_second.max(1) as usize;
-        let per_min = w.per_minute.max(1) as usize;
-        loop {
-            let wait = {
-                let mut q = self.sent.lock().await;
-                let now = Instant::now();
-                while q
-                    .front()
-                    .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
-                {
-                    q.pop_front();
-                }
-                let in_sec = q
-                    .iter()
-                    .rev()
-                    .take_while(|t| now.duration_since(**t) < Duration::from_secs(1))
-                    .count();
-                if in_sec < per_sec && q.len() < per_min {
-                    q.push_back(now);
-                    None
-                } else {
-                    let sec_wait = if in_sec >= per_sec {
-                        q.iter()
-                            .rev()
-                            .nth(per_sec - 1)
-                            .map(|t| Duration::from_secs(1).saturating_sub(now.duration_since(*t)))
-                    } else {
-                        None
-                    };
-                    let min_wait = if q.len() >= per_min {
-                        q.front()
-                            .map(|t| Duration::from_secs(60).saturating_sub(now.duration_since(*t)))
-                    } else {
-                        None
-                    };
-                    Some(
-                        sec_wait
-                            .into_iter()
-                            .chain(min_wait)
-                            .max()
-                            .unwrap_or(Duration::from_millis(10))
-                            .max(Duration::from_millis(1)),
-                    )
-                }
-            };
-            match wait {
-                None => return,
-                Some(d) => tokio::time::sleep(d).await,
-            }
-        }
+        budget.acquire(deadline).await.map_err(|d| {
+            tracing::warn!("A broker request was refused before sending: {:?}", d);
+            outcome::refusal(BUSY_MESSAGE)
+        })
     }
 
     #[cfg(test)]
-    pub(crate) async fn held(&self) -> usize {
-        self.sent.lock().await.len()
+    pub(crate) fn held(&self) -> usize {
+        self.budget.as_ref().map_or(0, Budget::recent)
     }
 }
 
@@ -226,7 +196,7 @@ impl NorenBroker {
             _ => self.cfg.dialect,
         };
         let (payload, content_type) = body(dialect, &jdata, &s.token);
-        self.limiter(cat).acquire().await;
+        self.limiter(cat).acquire().await?;
         let url = format!("{}{}", self.endpoints.rest, endpoint);
         let mut req = self
             .http
@@ -306,6 +276,7 @@ pub fn emsg(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn dialect_bodies() {
@@ -380,13 +351,13 @@ mod tests {
         );
         let start = Instant::now();
         for _ in 0..9 {
-            b.limiter(Category::Data).acquire().await;
+            b.limiter(Category::Data).acquire().await.unwrap();
         }
-        b.limiter(Category::Quote).acquire().await;
+        b.limiter(Category::Quote).acquire().await.unwrap();
         assert_eq!(start.elapsed(), Duration::from_secs(1));
         // Orders keep their own lane.
         let t = Instant::now();
-        b.limiter(Category::Order).acquire().await;
+        b.limiter(Category::Order).acquire().await.unwrap();
         assert_eq!(t.elapsed(), Duration::ZERO);
     }
 
@@ -399,12 +370,12 @@ mod tests {
         );
         let start = Instant::now();
         for _ in 0..8 {
-            b.limiter(Category::Data).acquire().await;
+            b.limiter(Category::Data).acquire().await.unwrap();
         }
         let q = Instant::now();
-        b.limiter(Category::Quote).acquire().await;
+        b.limiter(Category::Quote).acquire().await.unwrap();
         assert_eq!(q.elapsed(), Duration::ZERO, "quotes have their own budget");
-        b.limiter(Category::Order).acquire().await;
+        b.limiter(Category::Order).acquire().await.unwrap();
         assert_eq!(start.elapsed(), Duration::from_secs(1));
         assert!(
             b.cfg.rate.order.is_none(),
@@ -412,25 +383,56 @@ mod tests {
         );
     }
 
+    /// Both windows hold, and a send the minute window would hold past
+    /// the queue bound is refused at once, before sending, as a definite
+    /// refusal (BRL-05): it used to wait the 59 seconds. One that may wait
+    /// longer goes when the minute frees.
     #[tokio::test(start_paused = true)]
-    async fn limiter_respects_both_windows() {
+    async fn limiter_respects_both_windows_and_refuses_a_long_wait() {
         let l = Limiter::new(Some(Window {
             per_second: 3,
             per_minute: 5,
         }));
         let start = Instant::now();
         for _ in 0..3 {
-            l.acquire().await;
+            l.acquire().await.unwrap();
         }
         assert_eq!(start.elapsed(), Duration::ZERO);
-        l.acquire().await; // 4th waits for the second to roll
+        l.acquire().await.unwrap(); // 4th waits for the second to roll
         assert_eq!(start.elapsed(), Duration::from_secs(1));
-        l.acquire().await; // 5th fits the minute
-        l.acquire().await; // 6th waits for the minute
+        // The fifth fits the minute.
+        l.acquire().await.unwrap();
+        // The sixth is 59 s away: refused at once, and inside an order
+        // placement as a definite refusal (never sent).
+        let e = outcome::placing(l.acquire()).await.unwrap_err();
+        assert!(matches!(e, AppError::Refused(_)), "{:?}", e);
+        assert_eq!(e.client_message(), BUSY_MESSAGE);
+        assert_eq!(start.elapsed(), Duration::from_secs(1), "refused at once");
+        assert_eq!(l.held(), 5, "the refusal booked nothing");
+        l.acquire_until(start + Duration::from_secs(120))
+            .await
+            .unwrap();
         assert_eq!(start.elapsed(), Duration::from_secs(60));
-        assert!(l.held().await <= 5);
+        assert!(l.held() <= 5);
         let free = Limiter::new(None);
-        free.acquire().await;
-        assert_eq!(free.held().await, 0);
+        free.acquire().await.unwrap();
+        assert_eq!(free.held(), 0);
+    }
+
+    /// A caller dropped while it waits for its slot books nothing: the next
+    /// caller goes at the slot the dropped one was waiting for.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_waiter_books_nothing() {
+        let l = Limiter::new(Some(Window {
+            per_second: 1,
+            per_minute: 100,
+        }));
+        let start = Instant::now();
+        l.acquire().await.unwrap();
+        let gave_up = tokio::time::timeout(Duration::from_millis(100), l.acquire()).await;
+        assert!(gave_up.is_err());
+        l.acquire().await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert_eq!(l.held(), 2);
     }
 }

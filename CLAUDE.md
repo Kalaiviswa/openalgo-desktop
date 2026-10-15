@@ -810,8 +810,8 @@ and add each new one here.
   memory, so a restart starts the day's count again. The web paces one
   8-a-second lane: a recorded deviation.
 - **A broker request waits at most ten seconds for its turn.**
-  `common::ratelimit::Pacer::acquire` (and the Upstox and AliceBlue
-  window limiters, now on `common::ratelimit::Budget`) refuse a request
+  `common::ratelimit::Pacer::acquire` (and the Upstox, AliceBlue and
+  Noren window limiters, on `common::ratelimit::Budget`) refuse a request
   whose turn is further away, before sending (`outcome::refusal`: never an
   uncertain order), and book a slot only when its caller's wait is over,
   so a caller dropped while it waits delays nobody. Turns on a `Pacer` go
