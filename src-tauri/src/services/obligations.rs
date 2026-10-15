@@ -12,8 +12,9 @@
 //! * active Live scalping stops;
 //! * uncertain placements (LOG-08): strategy orders still `unconfirmed`,
 //!   scalping exit orders without a definite answer, OpenScript orders
-//!   still `unconfirmed`, and scalping exit attempts that cannot be read
-//!   back (counted, never assumed settled);
+//!   still `unconfirmed`, scalping page orders still unconfirmed
+//!   (`scalping::unconfirmed`), and scalping exit attempts that cannot be
+//!   read back (counted, never assumed settled);
 //! * partially filled exits still working.
 //!
 //! Live only (Sandbox runs keep running on the new broker's quotes).
@@ -135,5 +136,15 @@ pub fn open_live_obligations(state: &AppState, broker_id: &str) -> Result<OpenOb
     )?;
     o.uncertain_placements += u32::try_from(unconfirmed.max(0)).unwrap_or(u32::MAX);
     o.partial_exits += u32::try_from(partial.max(0)).unwrap_or(u32::MAX);
+
+    // Orders from the scalping page the broker did not confirm.
+    let page: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM scalping_unconfirmed WHERE status = 'unconfirmed' AND mode = ?1",
+        [MODE_LIVE],
+        |r| r.get(0),
+    )?;
+    o.uncertain_placements = o
+        .uncertain_placements
+        .saturating_add(u32::try_from(page.max(0)).unwrap_or(u32::MAX));
     Ok(o)
 }
