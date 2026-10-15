@@ -14,6 +14,7 @@ use crate::services::broker_config_service::BrokerConfigService;
 use crate::services::broker_settings_service::{
     self, SettingsError, SettingsOutcome, SettingsSave,
 };
+use crate::session::web::WebSession;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -111,6 +112,54 @@ pub async fn initiate_oauth(
     }
 }
 
+/// A form broker's callback opened with no parameters: the start of its
+/// in-app login, never its end.
+async fn form_login_open(
+    ctx: &AppState,
+    broker: &str,
+    ip: std::net::IpAddr,
+    sess: Option<&WebSession>,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    // Definedge and Nubra send their login OTP as the page opens (web
+    // brlogin), only for a browser session signed in to OpenAlgo, only
+    // when the app itself opened the page (a cross-site navigation
+    // carries the Lax session cookie too, and must not text the trader,
+    // replace a pending OTP or use up the login limit), and within the
+    // login limits (each open sends the trader a message). Otherwise
+    // the page opens with a Send OTP action, a CSRF-checked POST.
+    let signed_in = sess.is_some_and(|s| s.user.is_some());
+    if signed_in && catalog::sends_login_otp(broker) {
+        if !crate::server::middleware::same_origin_navigation(ctx, headers) {
+            tracing::info!(
+                "Not sending the {} login OTP: the page was not opened from OpenAlgo",
+                broker
+            );
+            return redirect(&format!("/broker/{}/totp?otp=send", broker));
+        }
+        if let Some(r) = login_limited(ctx, ip) {
+            return r;
+        }
+        if let Err(e) = BrokerAuthService::prepare_form_login(ctx, broker).await {
+            // Back to the broker page with the reason (web
+            // `handle_auth_failure` on a page navigation).
+            tracing::warn!("Preparing the {} sign-in failed: {}", broker, e.code());
+            return broker_page_with_error(broker, &e.client_message());
+        }
+    }
+    // The saved keys sign in from the broker page in one action (a
+    // CSRF-checked POST), never from this GET, which any site can make
+    // the browser send. Web brlogin signs these in here.
+    if catalog::sign_in(broker) == SignIn::SavedKeys {
+        return redirect("/broker");
+    }
+    // Samco's connect page (key exchange plus the static IP check).
+    if broker == "samco" {
+        return redirect("/broker/samco/auth");
+    }
+    redirect(&format!("/broker/{}/totp", broker))
+}
+
 /// GET /<broker>/callback: the broker's redirect. Public, but only a
 /// server-issued, unexpired, unused `state` is accepted. The code is
 /// exchanged here; the browser is sent to the dashboard.
@@ -126,43 +175,7 @@ pub async fn oauth_callback(
         return error(StatusCode::NOT_FOUND, "Unknown broker.");
     }
     if catalog::auth_type(&broker) == AuthType::Form && params.is_empty() {
-        // Definedge and Nubra send their login OTP as the page opens (web
-        // brlogin), only for a browser session signed in to OpenAlgo, only
-        // when the app itself opened the page (a cross-site navigation
-        // carries the Lax session cookie too, and must not text the trader,
-        // replace a pending OTP or use up the login limit), and within the
-        // login limits (each open sends the trader a message). Otherwise
-        // the page opens with a Send OTP action, a CSRF-checked POST.
-        let signed_in = sess.as_ref().is_some_and(|s| s.user.is_some());
-        if signed_in && catalog::sends_login_otp(&broker) {
-            if !crate::server::middleware::same_origin_navigation(&ctx, &headers) {
-                tracing::info!(
-                    "Not sending the {} login OTP: the page was not opened from OpenAlgo",
-                    broker
-                );
-                return redirect(&format!("/broker/{}/totp?otp=send", broker));
-            }
-            if let Some(r) = login_limited(&ctx, ip) {
-                return r;
-            }
-            if let Err(e) = BrokerAuthService::prepare_form_login(&ctx, &broker).await {
-                // Back to the broker page with the reason (web
-                // `handle_auth_failure` on a page navigation).
-                tracing::warn!("Preparing the {} sign-in failed: {}", broker, e.code());
-                return broker_page_with_error(&broker, &e.client_message());
-            }
-        }
-        // The saved keys sign in from the broker page in one action (a
-        // CSRF-checked POST), never from this GET, which any site can make
-        // the browser send. Web brlogin signs these in here.
-        if catalog::sign_in(&broker) == SignIn::SavedKeys {
-            return redirect("/broker");
-        }
-        // Samco's connect page (key exchange plus the static IP check).
-        if broker == "samco" {
-            return redirect("/broker/samco/auth");
-        }
-        return redirect(&format!("/broker/{}/totp", broker));
+        return form_login_open(&ctx, &broker, ip, sess.as_ref(), &headers).await;
     }
     // The broker's redirect is a top-level page load; an image or frame
     // from another site must not use up the sign-in limit (S-02).
