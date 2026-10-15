@@ -118,47 +118,52 @@ pub async fn close_position(ctx: &AppState, symbol: &str, exchange: &str, produc
                 m.insert("quantity".into(), quantity);
             }
             let placed = place_live(&h, ctx, &req).await;
-            let orderid = placed
-                .body
-                .get("orderid")
-                .and_then(Value::as_str)
-                .filter(|o| !o.is_empty())
-                .map(str::to_string);
-            match orderid {
-                Some(id) if placed.is_success() => {
-                    let message = "Position close order placed successfully.";
-                    let reply =
-                        Reply::ok(json!({"status": "success", "message": message, "orderid": id}));
-                    let mut request = order.clone();
-                    if let Some(m) = request.as_object_mut() {
-                        m.insert("api_type".into(), json!("closeposition"));
-                    }
-                    publish(
-                        ctx,
-                        Event::PositionClosed {
-                            meta: meta(Mode::Live, "closeposition", request, &reply.body),
-                            message: Some(message.to_string()),
-                        },
-                    );
-                    reply
-                }
-                _ => {
-                    let msg = placed.message();
-                    let status = if placed.status >= 400 {
-                        placed.status
-                    } else {
-                        400
-                    };
-                    Reply::error(
-                        status,
-                        if msg.is_empty() {
-                            "Failed to close position (broker did not return order ID).".to_string()
-                        } else {
-                            msg
-                        },
-                    )
-                }
+            close_reply(ctx, &order, placed)
+        }
+    }
+}
+
+/// The answer to a placed close: success with its order id (and the
+/// position-closed event), or the broker's refusal.
+fn close_reply(ctx: &AppState, order: &Value, placed: Reply) -> Reply {
+    let orderid = placed
+        .body
+        .get("orderid")
+        .and_then(Value::as_str)
+        .filter(|o| !o.is_empty())
+        .map(str::to_string);
+    match orderid {
+        Some(id) if placed.is_success() => {
+            let message = "Position close order placed successfully.";
+            let reply = Reply::ok(json!({"status": "success", "message": message, "orderid": id}));
+            let mut request = order.clone();
+            if let Some(m) = request.as_object_mut() {
+                m.insert("api_type".into(), json!("closeposition"));
             }
+            publish(
+                ctx,
+                Event::PositionClosed {
+                    meta: meta(Mode::Live, "closeposition", request, &reply.body),
+                    message: Some(message.to_string()),
+                },
+            );
+            reply
+        }
+        _ => {
+            let msg = placed.message();
+            let status = if placed.status >= 400 {
+                placed.status
+            } else {
+                400
+            };
+            Reply::error(
+                status,
+                if msg.is_empty() {
+                    "Failed to close position (broker did not return order ID).".to_string()
+                } else {
+                    msg
+                },
+            )
         }
     }
 }
