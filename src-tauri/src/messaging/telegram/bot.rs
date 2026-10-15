@@ -751,6 +751,12 @@ impl Bot {
         {
             let _ = self.api.delete_message(chat, mid).await;
         }
+        self.send_charts(chat, &symbol, photos).await;
+        Self::log(ctx, from.id, "chart", chat);
+    }
+
+    /// Send the charts made: one photo, an album, or why there is none.
+    async fn send_charts(&self, chat: i64, symbol: &str, mut photos: Vec<(Vec<u8>, String)>) {
         let sent = match photos.len() {
             0 => {
                 self.send(
@@ -778,7 +784,6 @@ impl Bot {
             )
             .await;
         }
-        Self::log(ctx, from.id, "chart", chat);
     }
 
     async fn on_callback(&mut self, ctx: &Arc<AppState>, q: &Value) {
