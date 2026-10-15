@@ -124,8 +124,8 @@ pub struct AppState {
     /// MCP transport state: per-token rate windows and event-stream slots.
     pub mcp: crate::mcp::McpRuntime,
     /// In-app updates: the check, the offer, the download and the restart
-    /// decision (`services::update_service`).
-    pub updates: Arc<crate::services::update_service::UpdateService>,
+    /// decision (`services::update`).
+    pub updates: Arc<crate::services::update::UpdateService>,
 }
 
 /// Health alert type raised when Historify had to drop an unreplayable WAL.
@@ -328,7 +328,7 @@ impl AppState {
             monitor: crate::services::monitor::Monitor::new(),
             messaging: crate::messaging::Messaging::new(),
             mcp: crate::mcp::McpRuntime::new(),
-            updates: crate::services::update_service::UpdateService::new(env!("CARGO_PKG_VERSION")),
+            updates: crate::services::update::UpdateService::new(env!("CARGO_PKG_VERSION")),
         });
         crate::messaging::register(&ctx);
         ctx.historify.start();

@@ -1,6 +1,6 @@
 //! In-app updates for the signed-in trader (desktop only: the web is
 //! updated with `git pull`). The decisions live in
-//! `services::update_service`; the restart itself is the shell's
+//! `services::update`; the restart itself is the shell's
 //! `restart_to_update` command, because only the desktop window can do it.
 //!
 //! | Route | Answer |
@@ -13,15 +13,37 @@
 //! Every route needs the signed-in user; the POSTs carry the CSRF token
 //! like every other state change.
 
+use super::{Access, RouteSpec};
 use crate::server::envelope::error;
 use crate::server::routes::webui::{no_store, ok, JsonBody};
-use crate::services::update_service::{Activity, Decision};
+use crate::services::update::{Activity, Decision};
 use crate::state::AppState;
-use axum::{extract::State, http::StatusCode, response::Response};
+use axum::{
+    extract::State,
+    http::{Method, StatusCode},
+    response::Response,
+    routing::{get, post, MethodRouter},
+};
 use serde_json::json;
 use std::sync::Arc;
 
 type Ctx = State<Arc<AppState>>;
+
+/// The update routes, each for the signed-in user.
+pub fn table() -> Vec<RouteSpec> {
+    let user = |path, method, make: fn() -> MethodRouter<Arc<AppState>>| RouteSpec {
+        path,
+        method,
+        access: Access::User,
+        make,
+    };
+    vec![
+        user("/api/update/status", Method::GET, || get(status)),
+        user("/api/update/check", Method::POST, || post(check)),
+        user("/api/update/install", Method::POST, || post(install)),
+        user("/api/update/cancel", Method::POST, || post(cancel)),
+    ]
+}
 
 /// GET /api/update/status
 pub async fn status(State(ctx): Ctx) -> Response {

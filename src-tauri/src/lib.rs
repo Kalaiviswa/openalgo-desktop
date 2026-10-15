@@ -67,24 +67,6 @@ pub(crate) fn log_filter(development: bool) -> &'static str {
     }
 }
 
-/// How long after start the automatic update check waits, so start-up
-/// work (the server, a broker session resuming) goes first.
-const STARTUP_UPDATE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Whether the AppImage runtime started this process (it names the
-/// `.AppImage` file, which an update replaces).
-fn runs_as_appimage<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        app.env().appimage.is_some()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = app;
-        false
-    }
-}
-
 /// The data folder was not opened: show the start-up page with the reason
 /// (the `startup_status` command reads it) and start nothing else.
 fn show_data_refusal(
@@ -165,13 +147,7 @@ pub fn run() {
             .plugin(tauri_plugin_dialog::init())
             // In-app updates, driven from Rust only (`updater`): no page is
             // granted the plugin's own commands.
-            .plugin(
-                tauri_plugin_updater::Builder::new()
-                    .default_version_comparator(|current, release| {
-                        services::update_service::is_newer(&current, &release.version)
-                    })
-                    .build(),
-            )
+            .plugin(updater::plugin())
             .setup(|app| {
                 let Some(ctx) = open_data_folder(app)? else {
                     return Ok(());
@@ -201,33 +177,7 @@ pub fn run() {
                     commands::trust_app_origin(app.handle(), h.addr.port());
                 }
 
-                // In-app updates: notify only. Release builds check once
-                // shortly after start; nothing downloads before the trader
-                // clicks Update.
-                let updates = Arc::new(updater::PluginBackend::new(
-                    app.handle().clone(),
-                    updater::package_of(
-                        tauri::utils::platform::bundle_type(),
-                        cfg!(debug_assertions),
-                        runs_as_appimage(app.handle()),
-                        std::env::current_exe().ok().as_deref(),
-                    ),
-                ));
-                ctx.updates.set_backend(updates.clone());
-                app.manage(updates);
-                if !cfg!(debug_assertions) {
-                    // An owned task (stopped by `AppState::shutdown`),
-                    // spawned inside the runtime like the others above.
-                    let weak = Arc::downgrade(&ctx);
-                    tauri::async_runtime::block_on(async {
-                        ctx.spawn(async move {
-                            tokio::time::sleep(STARTUP_UPDATE_CHECK_DELAY).await;
-                            if let Some(c) = weak.upgrade() {
-                                c.updates.check(&c).await;
-                            }
-                        });
-                    });
-                }
+                updater::start(app, &ctx);
 
                 let url = if server.is_none() {
                     // Start-up page explaining why the server is not running.

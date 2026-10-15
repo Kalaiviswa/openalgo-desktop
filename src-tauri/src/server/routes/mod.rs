@@ -233,11 +233,6 @@ pub fn table() -> Vec<RouteSpec> {
         r!(POST, "/settings/api/server", User, settings::save_server),
         r!(GET, "/api/desktop/settings", User, settings::get_server),
         r!(POST, "/api/desktop/settings", User, settings::save_server),
-        // In-app updates (desktop only; services::update_service)
-        r!(GET, "/api/update/status", User, update::status),
-        r!(POST, "/api/update/check", User, update::check),
-        r!(POST, "/api/update/install", User, update::install),
-        r!(POST, "/api/update/cancel", User, update::cancel),
         r!(GET, "/settings/analyze-mode", User, settings::analyze_mode),
         r!(
             GET,
@@ -826,6 +821,7 @@ pub fn table() -> Vec<RouteSpec> {
     t.extend(openscript_runner::table());
     t.extend(scalping::table());
     t.extend(chartink::table());
+    t.extend(update::table());
     t
 }
 

@@ -1,7 +1,7 @@
 //! The desktop shell's side of in-app updates: the Tauri update plugin
 //! behind [`UpdateBackend`]. The decisions (which version is newer, what a
 //! restart interrupts, what the trader confirmed) are in
-//! `services::update_service`.
+//! `services::update`.
 //!
 //! The plugin reads the update address and the public key from
 //! `tauri.conf.json` (`plugins.updater`). It fetches `latest.json`, picks
@@ -11,15 +11,18 @@
 //! pair a new version number with an older signed release. Pages get none
 //! of the plugin's commands: no capability names `updater:*`.
 
-use crate::services::update_service::{
+use crate::services::update::{
     is_newer, Offer, Package, ProgressFn, UpdateBackend, UpdateFailure, CHECK_TIMEOUT,
 };
+use crate::state::AppState;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tauri::plugin::TauriPlugin;
 use tauri::utils::config::BundleType;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// How long the download of an update may take in all (an AppImage is
@@ -207,6 +210,92 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
     fn discard(&self) {
         self.downloaded.lock().take();
     }
+}
+
+/// The update plugin as the app registers it, comparing versions by the
+/// update service's rule ([`is_newer`]). No page is granted its commands.
+pub fn plugin<R: Runtime>() -> TauriPlugin<R, tauri_plugin_updater::Config> {
+    tauri_plugin_updater::Builder::new()
+        .default_version_comparator(|current, release| is_newer(&current, &release.version))
+        .build()
+}
+
+/// How long after start the automatic update check waits, so start-up
+/// work (the server, a broker session resuming) goes first.
+const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(15);
+
+/// Give the update service its backend and, in a release build, check once
+/// shortly after start. Notify only: nothing downloads before the trader
+/// clicks Update. The check is an owned task, stopped by
+/// `AppState::shutdown`.
+pub fn start(app: &tauri::App, ctx: &Arc<AppState>) {
+    let package = package_of(
+        tauri::utils::platform::bundle_type(),
+        cfg!(debug_assertions),
+        runs_as_appimage(app.handle()),
+        std::env::current_exe().ok().as_deref(),
+    );
+    let backend = Arc::new(PluginBackend::new(app.handle().clone(), package));
+    ctx.updates.set_backend(backend.clone());
+    app.manage(backend);
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let weak = Arc::downgrade(ctx);
+    // Spawned inside the runtime, like the app's other start-up tasks.
+    tauri::async_runtime::block_on(async {
+        ctx.spawn(async move {
+            tokio::time::sleep(STARTUP_CHECK_DELAY).await;
+            if let Some(c) = weak.upgrade() {
+                c.updates.check(&c).await;
+            }
+        });
+    });
+}
+
+/// Whether the AppImage runtime started this process (it names the
+/// `.AppImage` file, which an update replaces).
+fn runs_as_appimage<R: Runtime>(app: &AppHandle<R>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        app.env().appimage.is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// Install the downloaded, verified update and restart into it, once the
+/// update service has let the restart go ahead. `Err` carries the trader's
+/// message when it could not be installed: OpenAlgo stays on this version.
+pub async fn install_and_restart(
+    app: &AppHandle,
+    backend: &PluginBackend<tauri::Wry>,
+    ctx: &AppState,
+) -> Result<(), String> {
+    if cfg!(windows) {
+        // The installer replaces the app and starts it again, and starting
+        // it exits this process: stop everything first.
+        crate::commands::stop_app(app).await;
+        if let Err(f) = backend.install() {
+            // Still here: the installer did not start. Come back on this
+            // version rather than stay stopped.
+            tracing::error!("Update installer did not start: {}", f.detail());
+            app.request_restart();
+        }
+        return Ok(());
+    }
+    // macOS and the AppImage: replace the app on disk, then restart into it
+    // (the exit handler stops everything first).
+    if let Err(f) = backend.install() {
+        ctx.updates.install_failed(ctx, f).await;
+        return Err(ctx.updates.status().message.unwrap_or_default());
+    }
+    tracing::info!("Update installed; restarting");
+    app.request_restart();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -464,16 +553,7 @@ mod plugin_tests {
             .plugins
             .0
             .insert("updater".into(), updater);
-        mock_builder()
-            .plugin(
-                tauri_plugin_updater::Builder::new()
-                    .default_version_comparator(|current, release| {
-                        is_newer(&current, &release.version)
-                    })
-                    .build(),
-            )
-            .build(context)
-            .unwrap()
+        mock_builder().plugin(plugin()).build(context).unwrap()
     }
 
     fn backend(app: &tauri::App<MockRuntime>, server: &FakeServer) -> PluginBackend<MockRuntime> {

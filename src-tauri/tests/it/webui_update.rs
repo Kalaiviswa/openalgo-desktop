@@ -9,7 +9,7 @@ use crate::webui_support;
 
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
-use openalgo_desktop_lib::services::update_service::{
+use openalgo_desktop_lib::services::update::{
     Activity, Decision, Offer, Package, ProgressFn, UpdateBackend, UpdateFailure,
 };
 use parking_lot::Mutex;

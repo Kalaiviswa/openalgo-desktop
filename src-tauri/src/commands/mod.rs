@@ -9,11 +9,11 @@
 //! | `reset_account`  | the main window on the app's own page, after a native confirmation | start over with a new account |
 //! | `start_fresh`    | the main window on the app's own page, after a native confirmation | a new password without the old one: forgotten, or an earlier build's keys unreadable (KEY-01) |
 //! | `window_proof`   | the main window on the app's own page | the proof its sign-in carries, so only the app window moves an earlier build's keys and hears why keys could not be opened (KEY-01) |
-//! | `restart_to_update` | signed-in user, the main window on the app's own page | install the downloaded, verified update and restart (`services::update_service` decides; it asks again if new activity appeared) |
+//! | `restart_to_update` | signed-in user, the main window on the app's own page | install the downloaded, verified update and restart (`services::update` decides; it asks again if new activity appeared) |
 
 use crate::error::{AppError, Result};
 use crate::server::{self, ServerHandle};
-use crate::services::update_service::{Activity, Decision, Warning};
+use crate::services::update::{Activity, Decision, Warning};
 use crate::state::{AppState, ServerStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -546,8 +546,8 @@ impl RestartOutcome {
 /// trader in the desktop window can: the window must be the main one on
 /// the app's own page, and the update service goes ahead only while
 /// everything running is within what the trader confirmed (it answers
-/// `confirm` again otherwise). OpenScript runs are paused first, and on
-/// exit the feed, the server and every service stop as on any exit.
+/// `confirm` again otherwise). On exit the feed, the server and every
+/// service stop as on any exit.
 #[tauri::command]
 pub async fn restart_to_update(
     app: AppHandle,
@@ -563,10 +563,8 @@ pub async fn restart_to_update(
         "Updates are installed only from the OpenAlgo Desktop window on this computer.",
     )?;
     let Some(backend) = app.try_state::<Arc<crate::updater::PluginBackend<tauri::Wry>>>() else {
-        return Ok(RestartOutcome::of(
-            "refused",
-            Some("This copy of OpenAlgo cannot install updates.".into()),
-        ));
+        let m = "This copy of OpenAlgo cannot install updates.";
+        return Ok(RestartOutcome::of("refused", Some(m.into())));
     };
     let ctx = shell.ctx.clone();
     match ctx.updates.begin_restart(&ctx, confirmed).await {
@@ -581,34 +579,12 @@ pub async fn restart_to_update(
         }
         Decision::Refused(m) => return Ok(RestartOutcome::of("refused", Some(m))),
     }
-    let paused = ctx
-        .trading
-        .runner
-        .pause_all("Paused because OpenAlgo restarted to install an update");
-    if !paused.is_empty() {
-        tracing::info!("Paused {} OpenScript run(s) for the update", paused.len());
-    }
-    if cfg!(windows) {
-        // The installer replaces the app and starts it again, and starting
-        // it exits this process: stop everything first.
-        stop_app(&app).await;
-        if let Err(f) = backend.install() {
-            // Still here: the installer did not start. Come back on this
-            // version rather than stay stopped.
-            tracing::error!("Update installer did not start: {}", f.detail());
-            app.request_restart();
-        }
-        return Ok(RestartOutcome::of("restarting", None));
-    }
-    // macOS and the AppImage: replace the app on disk, then restart into
-    // it (the exit handler stops everything first).
-    if let Err(f) = backend.install() {
-        ctx.updates.install_failed(&ctx, f).await;
-        return Ok(RestartOutcome::of("failed", ctx.updates.status().message));
-    }
-    tracing::info!("Update installed; restarting");
-    app.request_restart();
-    Ok(RestartOutcome::of("restarting", None))
+    Ok(
+        match crate::updater::install_and_restart(&app, &backend, &ctx).await {
+            Ok(()) => RestartOutcome::of("restarting", None),
+            Err(m) => RestartOutcome::of("failed", Some(m)),
+        },
+    )
 }
 
 #[cfg(test)]
