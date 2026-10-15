@@ -88,7 +88,6 @@
     "src-tauri/src/brokers/tradejini/master_contract.rs::parse_row": 125,
     "src-tauri/src/brokers/upstox/streaming.rs::normalise": 112,
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
-    "src-tauri/src/db/sqlite/monitor/mod.rs::import_from_main": 118,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/feed/server/mod.rs::serve_conn": 248,
     "src-tauri/src/feed/server/session.rs::subscribe": 136,

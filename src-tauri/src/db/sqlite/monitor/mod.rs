@@ -438,100 +438,9 @@ pub fn import_from_main(logs: &Connection, main: &Connection) -> Result<()> {
     }
     logs.execute_batch("BEGIN IMMEDIATE")?;
     let r = (|| -> Result<()> {
-        if main_has_table(main, "traffic_logs")? {
-            let mut st = main.prepare(
-                "SELECT timestamp, client_ip, method, path, status_code, duration_ms, host, error
-                 FROM traffic_logs ORDER BY id DESC LIMIT 100000",
-            )?;
-            let rows = st
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, i64>(4)?,
-                        r.get::<_, f64>(5)?,
-                        r.get::<_, Option<String>>(6)?,
-                        r.get::<_, Option<String>>(7)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            for row in rows.into_iter().rev() {
-                logs.execute(
-                    "INSERT INTO traffic_logs (timestamp, client_ip, method, path, status_code, duration_ms, host, error)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![row.0, row.1, row.2, strip_query(&row.3), row.4, row.5, row.6, row.7],
-                )?;
-            }
-        }
-        if main_has_table(main, "ip_bans")? {
-            let mut st = main.prepare(
-                "SELECT ip_address, ban_reason, ban_count, banned_at, expires_at, is_permanent, created_by
-                 FROM ip_bans",
-            )?;
-            let rows = st
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<bool>>(5)?,
-                        r.get::<_, Option<String>>(6)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            for b in rows {
-                logs.execute(
-                    "INSERT OR IGNORE INTO ip_bans (ip_address, ban_reason, ban_count, banned_at, expires_at, is_permanent, created_by)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        b.0,
-                        b.1,
-                        b.2.unwrap_or(1),
-                        b.3,
-                        b.4,
-                        b.5.unwrap_or(false),
-                        b.6.unwrap_or_else(|| "system".into())
-                    ],
-                )?;
-            }
-        }
-        if main_has_table(main, "latency_logs")? {
-            let mut st = main.prepare(
-                "SELECT timestamp, order_id, broker, symbol, order_type, rtt_ms, validation_ms,
-                        broker_response_ms, overhead_ms, total_ms, status, error
-                 FROM latency_logs ORDER BY id DESC LIMIT 200000",
-            )?;
-            let rows = st
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<f64>>(5)?,
-                        r.get::<_, Option<f64>>(6)?,
-                        r.get::<_, Option<f64>>(7)?,
-                        r.get::<_, Option<f64>>(8)?,
-                        r.get::<_, f64>(9)?,
-                        r.get::<_, Option<String>>(10)?,
-                        r.get::<_, Option<String>>(11)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            for l in rows.into_iter().rev() {
-                logs.execute(
-                    "INSERT INTO order_latency (timestamp, order_id, broker, symbol, order_type, rtt_ms,
-                        validation_latency_ms, response_latency_ms, overhead_ms, total_latency_ms, status, error)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                    params![l.0, l.1, l.2, l.3, l.4, l.5, l.6, l.7, l.8, l.9, l.10, l.11],
-                )?;
-            }
-        }
+        import_traffic(logs, main)?;
+        import_bans(logs, main)?;
+        import_latency(logs, main)?;
         logs.execute(
             "INSERT OR IGNORE INTO migrations (name) VALUES (?1)",
             [NAME],
@@ -548,6 +457,118 @@ pub fn import_from_main(logs: &Connection, main: &Connection) -> Result<()> {
             Err(e)
         }
     }
+}
+
+/// The request log, newest 100 000 rows, oldest first (queries stripped).
+fn import_traffic(logs: &Connection, main: &Connection) -> Result<()> {
+    if !main_has_table(main, "traffic_logs")? {
+        return Ok(());
+    }
+    let mut st = main.prepare(
+        "SELECT timestamp, client_ip, method, path, status_code, duration_ms, host, error
+             FROM traffic_logs ORDER BY id DESC LIMIT 100000",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for row in rows.into_iter().rev() {
+        logs.execute(
+                "INSERT INTO traffic_logs (timestamp, client_ip, method, path, status_code, duration_ms, host, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![row.0, row.1, row.2, strip_query(&row.3), row.4, row.5, row.6, row.7],
+            )?;
+    }
+    Ok(())
+}
+
+/// The banned addresses.
+fn import_bans(logs: &Connection, main: &Connection) -> Result<()> {
+    if !main_has_table(main, "ip_bans")? {
+        return Ok(());
+    }
+    let mut st = main.prepare(
+        "SELECT ip_address, ban_reason, ban_count, banned_at, expires_at, is_permanent, created_by
+             FROM ip_bans",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<bool>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for b in rows {
+        logs.execute(
+                "INSERT OR IGNORE INTO ip_bans (ip_address, ban_reason, ban_count, banned_at, expires_at, is_permanent, created_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    b.0,
+                    b.1,
+                    b.2.unwrap_or(1),
+                    b.3,
+                    b.4,
+                    b.5.unwrap_or(false),
+                    b.6.unwrap_or_else(|| "system".into())
+                ],
+            )?;
+    }
+    Ok(())
+}
+
+/// The order latency log, newest 200 000 rows, oldest first.
+fn import_latency(logs: &Connection, main: &Connection) -> Result<()> {
+    if !main_has_table(main, "latency_logs")? {
+        return Ok(());
+    }
+    let mut st = main.prepare(
+        "SELECT timestamp, order_id, broker, symbol, order_type, rtt_ms, validation_ms,
+                    broker_response_ms, overhead_ms, total_ms, status, error
+             FROM latency_logs ORDER BY id DESC LIMIT 200000",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<f64>>(5)?,
+                r.get::<_, Option<f64>>(6)?,
+                r.get::<_, Option<f64>>(7)?,
+                r.get::<_, Option<f64>>(8)?,
+                r.get::<_, f64>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for l in rows.into_iter().rev() {
+        logs.execute(
+                "INSERT INTO order_latency (timestamp, order_id, broker, symbol, order_type, rtt_ms,
+                    validation_latency_ms, response_latency_ms, overhead_ms, total_latency_ms, status, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![l.0, l.1, l.2, l.3, l.4, l.5, l.6, l.7, l.8, l.9, l.10, l.11],
+            )?;
+    }
+    Ok(())
 }
 
 /// Path without query string or fragment (queries may carry credentials).
