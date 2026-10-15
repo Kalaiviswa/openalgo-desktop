@@ -16,6 +16,22 @@ use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Weak;
 
+/// One leg as a reconcile pass follows its exit orders.
+struct LegPass<'a> {
+    key: &'a str,
+    sl: &'a SlState,
+    mode: RunMode,
+    book: &'a BookSnapshot,
+}
+
+/// What following one exit order found: whether it changed, and whether it
+/// is still unresolved.
+#[derive(Default)]
+struct Followed {
+    changed: bool,
+    unresolved: usize,
+}
+
 impl RiskMonitor {
     /// An attempt the reconciler still follows: an order of it may still
     /// fill, or every order ended a moment ago and the position book may
@@ -48,6 +64,144 @@ impl RiskMonitor {
         })
     }
 
+    /// An accepted exit order: folded from the book or, once the book no
+    /// longer shows it (a day order past the session, a book that dropped
+    /// it), judged absent; never left working silently (review P1-5).
+    async fn follow_accepted(
+        &self,
+        p: &LegPass<'_>,
+        akey: &str,
+        id: &str,
+        child: &mut ExitChild,
+        live: &mut HashSet<String>,
+    ) -> Followed {
+        let mut f = Followed::default();
+        if let Some(b) = p.book.by_id(id) {
+            self.absence.forget(akey);
+            let before = child.clone();
+            fold_child(child, b);
+            f.changed = *child != before;
+            return f;
+        }
+        live.insert(akey.to_string());
+        let u = exit_unconfirmed(p.sl, child);
+        match self.absence.judge(akey, akey, p.mode, p.book, &u).await {
+            Absence::NotPlaced => {
+                self.absence.forget(akey);
+                tracing::warn!(
+                    "Scalping exit order {} for {} is no longer in the broker's books; it ended",
+                    id,
+                    p.sl.symbol
+                );
+                child.state = ChildState::Dead;
+                f.changed = true;
+            }
+            Absence::Wait => {}
+            Absence::Hold { alert } => {
+                f.unresolved += 1;
+                if alert {
+                    let msg = format!(
+                        "Scalping stop for {}: exit order {} ({} {}) was accepted, but the broker's order book no longer shows it. It is not sent again. Check the order book and trade book; if it is not there, mark it as not placed on the Health page to resume protection.",
+                        p.sl.symbol, id, child.action, child.qty
+                    );
+                    self.absence.describe(akey, &msg);
+                    p.book.alert_held(msg);
+                }
+            }
+        }
+        f
+    }
+
+    /// An exit order the broker did not confirm: matched to one order in
+    /// the book, judged absent, or held when several orders match it.
+    async fn find_unconfirmed(
+        &self,
+        p: &LegPass<'_>,
+        akey: &str,
+        child: &mut ExitChild,
+        live: &mut HashSet<String>,
+        claimed: &mut HashSet<String>,
+    ) -> Followed {
+        let mut f = Followed::default();
+        live.insert(akey.to_string());
+        let u = exit_unconfirmed(p.sl, child);
+        let bound = |id: &str| claimed.contains(id) || p.book.owned(id);
+        match p.book.find(&u, &bound) {
+            Found::Order(b) => {
+                self.absence.forget(akey);
+                claimed.insert(b.order_id.clone());
+                child.order_id = Some(b.order_id.clone());
+                fold_child(child, b);
+                f.changed = true;
+            }
+            Found::Absent => {
+                match self.absence.judge(akey, akey, p.mode, p.book, &u).await {
+                    Absence::NotPlaced => {
+                        self.absence.forget(akey);
+                        tracing::warn!(
+                            "Unconfirmed scalping exit for {} is not in the broker's books after repeated checks: it was not placed",
+                            p.sl.symbol
+                        );
+                        child.state = ChildState::Dead;
+                        f.changed = true;
+                    }
+                    Absence::Wait => f.unresolved += 1,
+                    Absence::Hold { alert } => {
+                        // Live: never on absence alone (P0-3). The leg
+                        // stays protected and nothing more is sent for it.
+                        f.unresolved += 1;
+                        if alert {
+                            let msg =
+                                held_message(&format!("Scalping exit for {}", p.sl.symbol), &u);
+                            self.absence.describe(akey, &msg);
+                            p.book.alert_held(msg);
+                        }
+                    }
+                }
+            }
+            Found::Ambiguous(n) => {
+                f.unresolved += 1;
+                self.alert_once(
+                    p.key,
+                    "ambiguous",
+                    format!(
+                        "Scalping stop for {}: {} orders in the broker's order book match an exit order the broker did not confirm, and nothing tells them apart. It is not sent again and the stop stays; check the order book at the broker.",
+                        p.sl.symbol, n
+                    ),
+                );
+            }
+        }
+        f
+    }
+
+    /// Applies what this pass learned about a leg's exit orders to its
+    /// attempt, and settles the leg once every order of it has ended.
+    async fn apply_pass(&self, p: &LegPass<'_>, gen: Gen, a: &ExitAttempt, touched: &[usize]) {
+        // Only for the stop these orders belong to.
+        if self.inner.lock().states.get(p.key).map(|l| l.gen.0) != Some(gen.0) {
+            return;
+        }
+        // Fold this pass's facts into the attempt as it stands now: an
+        // exit may have added orders since the snapshot (they are kept).
+        let (now_attempt, _) = self.update_attempt(p.key, p.sl.id, |slot| {
+            if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
+                // Only the orders this pass learned about: an exit may
+                // have recorded answers on others meanwhile.
+                for &i in touched {
+                    if let (Some(cur), Some(folded)) = (c.children.get_mut(i), a.children.get(i)) {
+                        *cur = folded.clone();
+                    }
+                }
+                if !c.working() && c.settled_at.is_none() {
+                    c.settled_at = Some(p.book.read_at);
+                }
+            }
+        });
+        if now_attempt.is_some_and(|c| c.id == a.id && !c.working()) {
+            self.settle(p.key, gen, p.sl, p.mode).await;
+        }
+    }
+
     /// Follow every working exit order of `mode` in one order-book read
     /// (the order reconciler's pass). A leg whose exit orders have all
     /// ended is cleared once the position book shows it flat. Returns how
@@ -77,141 +231,34 @@ impl RiskMonitor {
                 self.settle(&key, gen, &sl, mode).await;
                 continue;
             }
-            let mut changed = false;
+            let p = LegPass {
+                key: &key,
+                sl: &sl,
+                mode,
+                book,
+            };
             let mut touched: Vec<usize> = Vec::new();
             for (i, child) in a.children.iter_mut().enumerate() {
                 if child.terminal() {
                     continue;
                 }
-                match (child.state, child.order_id.clone()) {
+                let akey = format!("{}#{}#{}", key, a.id, i);
+                let f = match (child.state, child.order_id.clone()) {
                     (ChildState::Working, Some(id)) => {
-                        let akey = format!("{}#{}#{}", key, a.id, i);
-                        if let Some(b) = book.by_id(&id) {
-                            self.absence.forget(&akey);
-                            let before = child.clone();
-                            fold_child(child, b);
-                            if *child != before {
-                                changed = true;
-                                touched.push(i);
-                            }
-                            continue;
-                        }
-                        // Accepted, and the book no longer shows it (a day
-                        // order past the session, a book that dropped it):
-                        // never left working silently (review P1-5).
-                        live.insert(akey.clone());
-                        let u = exit_unconfirmed(&sl, child);
-                        match self.absence.judge(&akey, &akey, mode, book, &u).await {
-                            Absence::NotPlaced => {
-                                self.absence.forget(&akey);
-                                tracing::warn!(
-                                    "Scalping exit order {} for {} is no longer in the broker's books; it ended",
-                                    id,
-                                    sl.symbol
-                                );
-                                child.state = ChildState::Dead;
-                                changed = true;
-                                touched.push(i);
-                            }
-                            Absence::Wait => {}
-                            Absence::Hold { alert } => {
-                                unresolved += 1;
-                                if alert {
-                                    let msg = format!(
-                                        "Scalping stop for {}: exit order {} ({} {}) was accepted, but the broker's order book no longer shows it. It is not sent again. Check the order book and trade book; if it is not there, mark it as not placed on the Health page to resume protection.",
-                                        sl.symbol, id, child.action, child.qty
-                                    );
-                                    self.absence.describe(&akey, &msg);
-                                    book.alert_held(msg);
-                                }
-                            }
-                        }
+                        self.follow_accepted(&p, &akey, &id, child, &mut live).await
                     }
                     _ => {
-                        let akey = format!("{}#{}#{}", key, a.id, i);
-                        live.insert(akey.clone());
-                        let u = exit_unconfirmed(&sl, child);
-                        let bound = |id: &str| claimed.contains(id) || book.owned(id);
-                        match book.find(&u, &bound) {
-                            Found::Order(b) => {
-                                self.absence.forget(&akey);
-                                claimed.insert(b.order_id.clone());
-                                child.order_id = Some(b.order_id.clone());
-                                fold_child(child, b);
-                                changed = true;
-                                touched.push(i);
-                            }
-                            Found::Absent => {
-                                match self.absence.judge(&akey, &akey, mode, book, &u).await {
-                                    Absence::NotPlaced => {
-                                        self.absence.forget(&akey);
-                                        tracing::warn!(
-                                            "Unconfirmed scalping exit for {} is not in the broker's books after repeated checks: it was not placed",
-                                            sl.symbol
-                                        );
-                                        child.state = ChildState::Dead;
-                                        changed = true;
-                                        touched.push(i);
-                                    }
-                                    Absence::Wait => unresolved += 1,
-                                    Absence::Hold { alert } => {
-                                        // Live: never on absence alone
-                                        // (P0-3). The leg stays protected and
-                                        // nothing more is sent for it.
-                                        unresolved += 1;
-                                        if alert {
-                                            let msg = held_message(
-                                                &format!("Scalping exit for {}", sl.symbol),
-                                                &u,
-                                            );
-                                            self.absence.describe(&akey, &msg);
-                                            book.alert_held(msg);
-                                        }
-                                    }
-                                }
-                            }
-                            Found::Ambiguous(n) => {
-                                unresolved += 1;
-                                self.alert_once(
-                                    &key,
-                                    "ambiguous",
-                                    format!(
-                                        "Scalping stop for {}: {} orders in the broker's order book match an exit order the broker did not confirm, and nothing tells them apart. It is not sent again and the stop stays; check the order book at the broker.",
-                                        sl.symbol, n
-                                    ),
-                                );
-                            }
-                        }
+                        self.find_unconfirmed(&p, &akey, child, &mut live, &mut claimed)
+                            .await
                     }
+                };
+                unresolved += f.unresolved;
+                if f.changed {
+                    touched.push(i);
                 }
             }
-            if !changed {
-                continue;
-            }
-            // Only for the stop these orders belong to.
-            if self.inner.lock().states.get(&key).map(|l| l.gen.0) != Some(gen.0) {
-                continue;
-            }
-            // Fold this pass's facts into the attempt as it stands now: an
-            // exit may have added orders since the snapshot (they are kept).
-            let (now_attempt, _) = self.update_attempt(&key, sl.id, |slot| {
-                if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
-                    // Only the orders this pass learned about: an exit may
-                    // have recorded answers on others meanwhile.
-                    for &i in &touched {
-                        if let (Some(cur), Some(folded)) =
-                            (c.children.get_mut(i), a.children.get(i))
-                        {
-                            *cur = folded.clone();
-                        }
-                    }
-                    if !c.working() && c.settled_at.is_none() {
-                        c.settled_at = Some(book.read_at);
-                    }
-                }
-            });
-            if now_attempt.is_some_and(|c| c.id == a.id && !c.working()) {
-                self.settle(&key, gen, &sl, mode).await;
+            if !touched.is_empty() {
+                self.apply_pass(&p, gen, &a, &touched).await;
             }
         }
         // This destination's keys only: the other's pass keeps its own.
