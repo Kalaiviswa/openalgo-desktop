@@ -592,22 +592,4 @@ impl FyersBroker {
             self.symbols.clone(),
         )?))
     }
-
-    /// web `_get_tbt_url`: ask Fyers for the TBT socket address, falling back
-    /// to the documented default.
-    pub async fn tbt_socket_url(&self, auth: &AuthToken) -> String {
-        match self.raw(Method::GET, "/indus/home/tbtws", auth, None).await {
-            Ok((status, v)) if status.is_success() => v
-                .pointer("/data/socket_url")
-                .and_then(Value::as_str)
-                .filter(|s| s.starts_with("wss://") || s.starts_with("ws://"))
-                .map(str::to_string)
-                .unwrap_or_else(|| self.urls.tbt.clone()),
-            Ok(_) => self.urls.tbt.clone(),
-            Err(e) => {
-                tracing::warn!("Fyers TBT address lookup failed: {}", e.code());
-                self.urls.tbt.clone()
-            }
-        }
-    }
 }

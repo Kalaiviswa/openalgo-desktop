@@ -1125,7 +1125,6 @@ async fn master_contract_download_and_tbt_address() {
         .find(|r| r.symbol == "NIFTY" && r.exchange == "NSE_INDEX")
         .unwrap();
     assert_eq!(nifty.name, "Nifty 50");
-    assert_eq!(b.tbt_socket_url(&auth()).await, "wss://tbt.example/versova");
     // The 50-level depth socket looks its address up before each connect.
     {
         let mut f = b.create_depth_feed(&auth(), 50).unwrap();
@@ -1146,9 +1145,11 @@ async fn master_contract_download_and_tbt_address() {
     fake.on("GET", "/sym_details/NSE_CM.csv", fx!("NSE_CM.csv"));
     let b = broker(&fake.serve().await);
     assert!(b.download_master_contract(&auth()).await.is_err());
-    // TBT address lookup falls back to the documented default.
+    // A failed depth address lookup keeps the documented default.
+    let mut f = b.create_depth_feed(&auth(), 50).unwrap();
+    f.prepare().await.unwrap();
     assert_eq!(
-        b.tbt_socket_url(&auth()).await,
+        f.ws_request().unwrap().uri().to_string(),
         "wss://rtsocket-api.fyers.in/versova"
     );
 }

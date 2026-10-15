@@ -1,7 +1,8 @@
 //! Kotak Neo market feed (SFeed `native_batch`), order-update feed and feed
 //! host lookup (web `streaming/sfeed_protocol.py`, `sfeed_websocket.py`,
 //! `kotak_adapter.py`, `kotak_feed_config.py`, `kotak_order_adapter.py`).
-//! The legacy HSM protocol is in `hsm.rs`.
+//! The legacy HSM protocol is not read: a data centre that selects it
+//! streams from SFeed ([`feed_url_from_config`]), as on the web.
 //!
 //! SFeed control plane is JSON text:
 //! * after connect: `{"user": <UCC>, "auth": <trading sid>, "format":
