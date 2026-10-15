@@ -463,7 +463,7 @@ impl Broker for XtsBroker {
     }
 
     async fn place_order(&self, auth: &AuthToken, order: &ResolvedOrder) -> Result<OrderResponse> {
-        self.order_pacer.acquire().await;
+        self.order_pacer.acquire().await?;
         orders::place_order(self, auth, order).await
     }
 
@@ -472,12 +472,12 @@ impl Broker for XtsBroker {
         auth: &AuthToken,
         order: &ResolvedModify,
     ) -> Result<OrderResponse> {
-        self.order_pacer.acquire().await;
+        self.order_pacer.acquire().await?;
         orders::modify_order(self, auth, order).await
     }
 
     async fn cancel_order(&self, auth: &AuthToken, order_id: &str) -> Result<OrderResponse> {
-        self.order_pacer.acquire().await;
+        self.order_pacer.acquire().await?;
         orders::cancel_order(self, auth, order_id).await
     }
 

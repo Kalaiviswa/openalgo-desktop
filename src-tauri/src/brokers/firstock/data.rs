@@ -30,7 +30,7 @@ pub(crate) async fn quote_data(
     exchange: &str,
     brsymbol: &str,
 ) -> Result<Value> {
-    b.quote_pacer.acquire().await;
+    b.quote_pacer.acquire().await?;
     let v = b
         .call_ok(
             "/getQuote",
@@ -130,7 +130,7 @@ pub async fn get_multiquotes(
         }
         let mut got = std::collections::HashMap::new();
         if !wanted.is_empty() {
-            b.quote_pacer.acquire().await;
+            b.quote_pacer.acquire().await?;
             let v = b
                 .call_ok("/getMultiQuotes", json!({"data": wanted}), &s)
                 .await?;

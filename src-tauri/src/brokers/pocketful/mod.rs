@@ -147,7 +147,7 @@ impl PocketfulBroker {
         body: Option<&Value>,
     ) -> Result<Value> {
         let token = Self::token(auth)?;
-        self.pacer.acquire().await;
+        self.pacer.acquire().await?;
         let url = format!("{}{}", self.urls.rest, path_and_query);
         let mut req = self
             .http

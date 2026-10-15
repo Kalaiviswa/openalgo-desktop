@@ -1032,7 +1032,7 @@ impl JobEngine {
             )));
         }
         let fetch = async {
-            self.inner.pacer.acquire().await;
+            self.inner.pacer.acquire_unbounded().await;
             self.inner
                 .source
                 .fetch(symbol, exchange, interval, start, end)

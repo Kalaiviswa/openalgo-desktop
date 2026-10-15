@@ -192,7 +192,7 @@ impl ArrowBroker {
         auth.pair().ok_or_else(session_expired)
     }
 
-    async fn pace(&self, cat: Category) {
+    async fn pace(&self, cat: Category) -> Result<()> {
         match cat {
             Category::Order => self.order_pacer.acquire().await,
             Category::Quote => self.quote_pacer.acquire().await,
@@ -211,7 +211,7 @@ impl ArrowBroker {
         cat: Category,
     ) -> Result<reqwest::Response> {
         let (app_id, jwt) = Self::credentials(auth)?;
-        self.pace(cat).await;
+        self.pace(cat).await?;
         let mut req = self
             .http
             .request(method, url)

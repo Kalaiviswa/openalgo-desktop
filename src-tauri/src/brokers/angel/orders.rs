@@ -104,7 +104,7 @@ pub async fn place_order(
     let (api_key, jwt) = auth.pair().ok_or_else(session_expired)?;
     let ordertag = mapping::new_ordertag();
     let body = mapping::place_order_body(o, &ordertag);
-    b.pace(Category::Order).await;
+    b.pace(Category::Order).await?;
     let sent = b
         .request(Method::POST, PLACE_PATH, api_key, Some(jwt))
         .json(&body)

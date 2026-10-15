@@ -134,8 +134,13 @@ pub(crate) async fn close_all_positions(b: &XtsBroker, auth: &AuthToken) -> Resu
                 .unwrap_or_else(|| mapping::s(p, "TradingSymbol"));
             format!("{} ({})", sym, ex)
         };
-        b.order_pacer.acquire().await;
-        let placed = crate::brokers::common::outcome::placing(place_raw(b, auth, &payload)).await;
+        // The pacer's refusal comes inside the placement: never sent, so a
+        // definite refusal (BRL-05).
+        let placed = crate::brokers::common::outcome::placing(async {
+            b.order_pacer.acquire().await?;
+            place_raw(b, auth, &payload).await
+        })
+        .await;
         out.record(&label, placed);
     }
     Ok(out)

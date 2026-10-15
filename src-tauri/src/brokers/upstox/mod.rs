@@ -172,7 +172,7 @@ impl UpstoxBroker {
             match category {
                 Category::Order => self.order_limiter.acquire().await,
                 Category::Standard => self.standard_limiter.acquire().await,
-            }
+            }?;
             let mut req = self
                 .http
                 .request(method.clone(), url)

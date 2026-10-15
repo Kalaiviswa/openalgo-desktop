@@ -178,7 +178,7 @@ impl FyersBroker {
         let url = format!("{}{}", self.urls.api, path_and_query);
         let mut attempt = 0;
         loop {
-            self.pacer.acquire().await;
+            self.pacer.acquire().await?;
             let mut req = self
                 .http
                 .request(method.clone(), &url)

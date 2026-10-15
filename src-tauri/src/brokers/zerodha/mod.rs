@@ -137,7 +137,7 @@ impl ZerodhaBroker {
             Category::Quote => self.quote_pacer.acquire().await,
             Category::History => self.history_pacer.acquire().await,
             Category::Other => self.other_pacer.acquire().await,
-        }
+        }?;
         let url = format!("{}{}", self.base_url, path_and_query);
         let mut req = self
             .http

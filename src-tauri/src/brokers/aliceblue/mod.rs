@@ -36,9 +36,7 @@ use crate::error::{AppError, Result};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde_json::Value;
-use std::collections::VecDeque;
 use std::time::Duration;
-use tokio::time::Instant;
 
 /// Trading and session REST host (web `order_api.BASE_URL`).
 pub const BASE_URL: &str = "https://a3.aliceblueonline.com";
@@ -142,21 +140,26 @@ impl Default for QuoteTiming {
 
 /// Reads share AliceBlue's "all other requests" budget of 1800 per 15
 /// minutes; the web keeps 50 in hand (`api/rate_limiter.py`). Orders are
-/// not limited. State is one timestamp per request in the window, so it is
-/// bounded by the budget itself.
+/// not limited. A read is claimed at the moment it goes and waits at most
+/// `ratelimit::MAX_QUEUE_WAIT` (BRL-05: it used to wait up to the whole
+/// window); past it, it is refused before sending. State is one instant per
+/// request in the window, bounded by the budget itself.
 #[derive(Debug)]
 pub struct WindowLimiter {
-    window: Duration,
-    max: usize,
-    stamps: tokio::sync::Mutex<VecDeque<Instant>>,
+    budget: crate::brokers::common::ratelimit::Budget,
 }
 
 impl WindowLimiter {
     pub fn new(window: Duration, max: usize) -> Self {
+        use crate::brokers::common::ratelimit::{Budget, Limits, Rolling};
         Self {
-            window,
-            max: max.max(1),
-            stamps: tokio::sync::Mutex::new(VecDeque::new()),
+            budget: Budget::new(Limits {
+                windows: vec![Rolling {
+                    max: u32::try_from(max.max(1)).unwrap_or(u32::MAX),
+                    span: window,
+                }],
+                per_day: None,
+            }),
         }
     }
 
@@ -165,34 +168,20 @@ impl WindowLimiter {
         Self::new(Duration::from_secs(15 * 60), 1800 - 50)
     }
 
-    /// Wait until a request fits in the trailing window, then claim it.
-    pub async fn acquire(&self) {
-        loop {
-            let wait = {
-                let mut q = self.stamps.lock().await;
-                let now = Instant::now();
-                while q
-                    .front()
-                    .is_some_and(|t| now.duration_since(*t) >= self.window)
-                {
-                    q.pop_front();
-                }
-                if q.len() < self.max {
-                    q.push_back(now);
-                    return;
-                }
-                match q.front() {
-                    Some(first) => self.window.saturating_sub(now.duration_since(*first)),
-                    None => Duration::ZERO,
-                }
-            };
-            tokio::time::sleep(wait.max(Duration::from_millis(1))).await;
-        }
+    /// Wait until a request fits in the trailing window, at most
+    /// `MAX_QUEUE_WAIT`, then claim it; refused before sending past that.
+    pub async fn acquire(&self) -> Result<()> {
+        use crate::brokers::common::ratelimit::{BUSY_MESSAGE, MAX_QUEUE_WAIT};
+        let deadline = tokio::time::Instant::now() + MAX_QUEUE_WAIT;
+        self.budget.acquire(deadline).await.map_err(|d| {
+            tracing::warn!("AliceBlue read refused before sending: {:?}", d);
+            crate::brokers::common::outcome::refusal(BUSY_MESSAGE)
+        })
     }
 
     /// Requests counted in the current window.
-    pub async fn in_window(&self) -> usize {
-        self.stamps.lock().await.len()
+    pub fn in_window(&self) -> usize {
+        self.budget.recent()
     }
 }
 
@@ -242,7 +231,7 @@ impl AliceBlueBroker {
         limited: bool,
     ) -> Result<(StatusCode, Value)> {
         if limited {
-            self.reads.acquire().await;
+            self.reads.acquire().await?;
         }
         let mut req = self
             .http
