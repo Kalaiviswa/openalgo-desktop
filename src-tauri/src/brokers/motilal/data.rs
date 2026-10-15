@@ -408,6 +408,69 @@ fn quote_from_scrip(d: &ScripData, key: &QuoteKey) -> Quote {
     q
 }
 
+/// Where one key's quote comes from: a scrip registration (shared by
+/// repeated keys), an index exchange's register, or a failure to resolve.
+fn target_for(
+    b: &MotilalBroker,
+    k: &QuoteKey,
+    regs: &mut Vec<Reg>,
+    indices: &mut Vec<&'static str>,
+) -> Target {
+    let Some(row) = b.resolver().by_symbol(&k.exchange, &k.symbol) else {
+        return Target::Failed("Could not resolve token".into());
+    };
+    if mapping::is_index(&k.exchange) {
+        return match mapping::index_exchange(&k.exchange) {
+            Some(ex) => {
+                if !indices.contains(&ex) {
+                    indices.push(ex);
+                }
+                Target::Index(ex, row.token.clone())
+            }
+            None => Target::Failed("IndexRegister supports NSE and BSE indices only".into()),
+        };
+    }
+    let Ok(scrip) = row.token.trim().parse::<i32>() else {
+        return Target::Failed("Could not resolve token".into());
+    };
+    let exchange = mapping::map_exchange(&k.exchange).to_string();
+    let segment = mapping::segment(&k.exchange);
+    let idx = match regs
+        .iter()
+        .position(|r| r.exchange == exchange && r.scrip == scrip)
+    {
+        Some(i) => i,
+        None => {
+            regs.push(Reg {
+                exchange,
+                segment,
+                scrip,
+                need_oi: segment == "DERIVATIVES",
+            });
+            regs.len() - 1
+        }
+    };
+    Target::Scrip(idx)
+}
+
+/// An index's quote: its rate as the price, with no book, volume or OI;
+/// none until the feed has sent a rate or OHLC.
+fn index_feed_quote(d: &ScripData, k: &QuoteKey) -> Option<Quote> {
+    if d.index_rate.unwrap_or(d.ltp) == 0.0 && !d.has_ohlc {
+        return None;
+    }
+    let mut q = quote_from_scrip(d, k);
+    q.ltp = d.index_rate.unwrap_or(d.ltp);
+    q.bid = 0.0;
+    q.ask = 0.0;
+    q.bid_qty = 0;
+    q.ask_qty = 0;
+    q.volume = 0;
+    q.oi = 0;
+    fill_change(&mut q);
+    Some(q)
+}
+
 async fn multiquote_batch(
     b: &MotilalBroker,
     s: &MotilalSession,
@@ -417,45 +480,7 @@ async fn multiquote_batch(
     let mut indices: Vec<&'static str> = Vec::new();
     let targets: Vec<Target> = keys
         .iter()
-        .map(|k| {
-            let Some(row) = b.resolver().by_symbol(&k.exchange, &k.symbol) else {
-                return Target::Failed("Could not resolve token".into());
-            };
-            if mapping::is_index(&k.exchange) {
-                return match mapping::index_exchange(&k.exchange) {
-                    Some(ex) => {
-                        if !indices.contains(&ex) {
-                            indices.push(ex);
-                        }
-                        Target::Index(ex, row.token.clone())
-                    }
-                    None => {
-                        Target::Failed("IndexRegister supports NSE and BSE indices only".into())
-                    }
-                };
-            }
-            let Ok(scrip) = row.token.trim().parse::<i32>() else {
-                return Target::Failed("Could not resolve token".into());
-            };
-            let exchange = mapping::map_exchange(&k.exchange).to_string();
-            let segment = mapping::segment(&k.exchange);
-            let idx = match regs
-                .iter()
-                .position(|r| r.exchange == exchange && r.scrip == scrip)
-            {
-                Some(i) => i,
-                None => {
-                    regs.push(Reg {
-                        exchange,
-                        segment,
-                        scrip,
-                        need_oi: segment == "DERIVATIVES",
-                    });
-                    regs.len() - 1
-                }
-            };
-            Target::Scrip(idx)
-        })
+        .map(|k| target_for(b, k, &mut regs, &mut indices))
         .collect();
 
     let pending = regs.len()
@@ -499,21 +524,8 @@ async fn multiquote_batch(
                         .parse::<i32>()
                         .ok()
                         .and_then(|c| state.get(ex, c));
-                    match d {
-                        Some(d) if d.index_rate.unwrap_or(d.ltp) != 0.0 || d.has_ohlc => {
-                            let mut q = quote_from_scrip(d, k);
-                            q.ltp = d.index_rate.unwrap_or(d.ltp);
-                            q.bid = 0.0;
-                            q.ask = 0.0;
-                            q.bid_qty = 0;
-                            q.ask_qty = 0;
-                            q.volume = 0;
-                            q.oi = 0;
-                            fill_change(&mut q);
-                            Ok(q)
-                        }
-                        _ => Err("No data received".to_string()),
-                    }
+                    d.and_then(|d| index_feed_quote(d, k))
+                        .ok_or_else(|| "No data received".to_string())
                 }
             };
             match data {
