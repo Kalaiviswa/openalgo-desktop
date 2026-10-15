@@ -34,7 +34,5 @@
     "src-tauri/src/mcp/stdio.rs::clippy::print_stderr": 1
   },
   "rust_files": {},
-  "rust_functions": {
-    "src-tauri/src/strategy/webhook/pipeline.rs::handle_webhook": 338
-  }
+  "rust_functions": {}
 }

@@ -7,7 +7,128 @@ use super::{
     WebhookOutcome, COOLING_OFF, DEDUPE_WINDOW, MAX_TRACKED_KEYS,
 };
 use crate::strategy::store::{StrategyRow, RUN_MODES};
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::time::Instant;
+
+/// A webhook's dedupe key: the strategy, the action and the mode.
+type WebhookKey = (i64, String, Option<String>);
+
+/// An outcome stamped with its strategy and audit row.
+fn stamped(mut o: WebhookOutcome, sid: i64, id: Option<i64>) -> WebhookOutcome {
+    o.strategy_id = Some(sid);
+    o.webhook_event_id = id;
+    o
+}
+
+/// The alert's action, one this strategy kind accepts. `Err`: the audited
+/// refusal.
+fn webhook_action(
+    audit: &Audit<'_>,
+    strategy: &StrategyRow,
+    payload: &Map<String, Value>,
+    safe: &Value,
+) -> Result<String, Box<WebhookOutcome>> {
+    let sid = strategy.id;
+    let allowed = crate::strategy::signals::actions_for(&strategy.strategy_kind);
+    let raw_action = payload.get("action");
+    let action = raw_action
+        .and_then(Value::as_str)
+        .map(|a| a.trim().to_ascii_lowercase());
+    let Some(action) = action.filter(|a| allowed.contains(&a.as_str())) else {
+        let shown = match raw_action {
+            Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
+            Some(Value::Null) | None => None,
+            Some(other) => Some(other.to_string()),
+        };
+        let id = audit.write(
+            "rejected_invalid_action",
+            Some(sid),
+            shown.as_deref(),
+            None,
+            Some(safe),
+            Some("Unrecognised action"),
+        );
+        return Err(Box::new(stamped(
+            WebhookOutcome::new(
+                "rejected_invalid_action",
+                format!("'action' must be one of {}", allowed.join(", ")),
+                false,
+            ),
+            sid,
+            id,
+        )));
+    };
+    Ok(action)
+}
+
+/// The run mode a start asks for (a stop ignores it), and the live gate:
+/// Live only when the strategy opted in. `Err`: the audited refusal.
+fn webhook_mode(
+    audit: &Audit<'_>,
+    strategy: &StrategyRow,
+    action: &str,
+    (payload, safe): (&Map<String, Value>, &Value),
+) -> Result<Option<String>, Box<WebhookOutcome>> {
+    let sid = strategy.id;
+    let mut mode: Option<String> = None;
+    if action == "start" {
+        let raw = payload.get("mode");
+        let m = raw
+            .and_then(Value::as_str)
+            .map(|m| m.trim().to_ascii_lowercase());
+        match m.filter(|m| RUN_MODES.contains(&m.as_str())) {
+            Some(m) => mode = Some(m),
+            None => {
+                let shown = match raw {
+                    Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
+                    Some(Value::Null) | None => None,
+                    Some(o) => Some(o.to_string()),
+                };
+                let id = audit.write(
+                    "rejected_invalid_action",
+                    Some(sid),
+                    Some(action),
+                    shown.as_deref(),
+                    Some(safe),
+                    Some("Unrecognised mode"),
+                );
+                return Err(Box::new(stamped(
+                    WebhookOutcome::new(
+                        "rejected_invalid_action",
+                        format!(
+                            "'mode' must be one of {} when starting",
+                            RUN_MODES.join(", ")
+                        ),
+                        false,
+                    ),
+                    sid,
+                    id,
+                )));
+            }
+        }
+        // 7. The live gate.
+        if mode.as_deref() == Some("live") && !strategy.live_enabled {
+            let id = audit.write(
+                "rejected_live_disabled",
+                Some(sid),
+                Some(action),
+                mode.as_deref(),
+                Some(safe),
+                Some("Live trading is not enabled for this strategy"),
+            );
+            return Err(Box::new(stamped(
+                WebhookOutcome::new(
+                    "rejected_live_disabled",
+                    "Live trading is not enabled for this strategy",
+                    false,
+                ),
+                sid,
+                id,
+            )));
+        }
+    }
+    Ok(mode)
+}
 
 impl StrategyModule {
     /// Run one inbound alert through the pipeline and act on it, or refuse
@@ -25,27 +146,92 @@ impl StrategyModule {
             ua,
         };
         // 1. Token: shape first (no lookup for a non-token), then the digest.
-        if !looks_like_token(token) {
-            return self.unknown_token_outcome(ip, ua);
-        }
-        let strategy = match self.store.get_strategy_by_webhook_token(token) {
-            // The row was found through the digest index; confirm the digest
-            // in constant time so the comparison leaks nothing about it.
-            Ok(Some(s)) if digest_matches(token, &s.webhook_token_hash) => s,
-            Ok(_) => return self.unknown_token_outcome(ip, ua),
-            Err(e) => {
-                tracing::error!("Could not resolve a webhook token: {}", e);
-                return self.unknown_token_outcome(ip, ua);
-            }
+        let strategy = match self.webhook_strategy(token, ip, ua) {
+            Ok(s) => s,
+            Err(refused) => return *refused,
         };
         let sid = strategy.id;
-        let with = |mut o: WebhookOutcome, id: Option<i64>| {
-            o.strategy_id = Some(sid);
-            o.webhook_event_id = id;
-            o
+
+        // 2 and 3. The kill switch and the address, before the body is parsed.
+        if let Some(refused) = self.gate_refusal(&audit, &strategy).await {
+            return refused;
+        }
+        // 4. Payload.
+        let payload = match parse_payload(body) {
+            Ok(p) => p,
+            Err(e) => {
+                let id = audit.write("rejected_payload", Some(sid), None, None, None, Some(&e));
+                return stamped(WebhookOutcome::new("rejected_payload", e, false), sid, id);
+            }
+        };
+        let safe = redact(&Value::Object(payload.clone()), token, 0);
+
+        // 5. Action, by kind.
+        let action = match webhook_action(&audit, &strategy, &payload, &safe) {
+            Ok(a) => a,
+            Err(refused) => return *refused,
         };
 
-        // 2. Kill switch, ahead of everything a caller controls.
+        // 5b. Signal mode branches out before the batch-only stages.
+        if crate::strategy::signals::SIGNAL_ACTIONS.contains(&action.as_str()) {
+            return self
+                .signal_webhook(&audit, &strategy, &action, (&payload, &safe))
+                .await;
+        }
+
+        // 6 and 7. Mode, required by start, ignored by stop, and the live gate.
+        let mode = match webhook_mode(&audit, &strategy, &action, (&payload, &safe)) {
+            Ok(m) => m,
+            Err(refused) => return *refused,
+        };
+
+        // 8 and 9: both windows read and the claim written under one lock.
+        let key = (sid, action.clone(), mode.clone());
+        let now = self.webhook.now();
+        if let Some(refused) = self.claim_window(&audit, &key, now, &safe) {
+            return refused;
+        }
+
+        // 10. Dispatch.
+        self.dispatch_webhook(&audit, &strategy, (&key, now), &safe)
+            .await
+    }
+
+    /// The strategy a webhook token names: a token's shape first (no
+    /// lookup for a non-token), then the digest lookup confirmed in constant
+    /// time, so the comparison leaks nothing about it. `Err`: the unknown
+    /// token's answer.
+    fn webhook_strategy(
+        &self,
+        token: &str,
+        ip: Option<&str>,
+        ua: Option<&str>,
+    ) -> Result<StrategyRow, Box<WebhookOutcome>> {
+        if !looks_like_token(token) {
+            return Err(Box::new(self.unknown_token_outcome(ip, ua)));
+        }
+        match self.store.get_strategy_by_webhook_token(token) {
+            // The row was found through the digest index; confirm the digest
+            // in constant time so the comparison leaks nothing about it.
+            Ok(Some(s)) if digest_matches(token, &s.webhook_token_hash) => Ok(s),
+            Ok(_) => Err(Box::new(self.unknown_token_outcome(ip, ua))),
+            Err(e) => {
+                tracing::error!("Could not resolve a webhook token: {}", e);
+                Err(Box::new(self.unknown_token_outcome(ip, ua)))
+            }
+        }
+    }
+
+    /// The kill switch, ahead of everything a caller controls, then the
+    /// caller's address, before the body is parsed. A refused address
+    /// counts as a failed authentication on this webhook, whatever the
+    /// source address, so rotating addresses locks it.
+    async fn gate_refusal(
+        &self,
+        audit: &Audit<'_>,
+        strategy: &StrategyRow,
+    ) -> Option<WebhookOutcome> {
+        let sid = strategy.id;
         if strategy.webhook_locked {
             let id = audit.write(
                 "rejected_locked",
@@ -55,17 +241,17 @@ impl StrategyModule {
                 None,
                 Some("The webhook kill switch is engaged"),
             );
-            return with(
+            return Some(stamped(
                 WebhookOutcome::new(
                     "rejected_locked",
                     "This strategy's webhook is locked",
                     false,
                 ),
+                sid,
                 id,
-            );
+            ));
         }
-        // 3. Address, before the body is parsed.
-        if !ip_allowed(ip, &strategy.webhook_ip_allowlist) {
+        if !ip_allowed(audit.ip, &strategy.webhook_ip_allowlist) {
             let id = audit.write(
                 "rejected_ip",
                 Some(sid),
@@ -77,153 +263,76 @@ impl StrategyModule {
             // A failed authentication on this webhook, counted per webhook
             // whatever the source address, so rotating addresses locks it.
             if self.webhook.record_webhook_failure(sid) {
-                self.lock_webhook_after_failures(&strategy).await;
+                self.lock_webhook_after_failures(strategy).await;
             }
-            return with(
+            return Some(stamped(
                 WebhookOutcome::new(
                     "rejected_ip",
                     "This address is not allowed to trigger this strategy",
                     false,
                 ),
+                sid,
                 id,
-            );
+            ));
         }
-        // 4. Payload.
-        let payload = match parse_payload(body) {
-            Ok(p) => p,
-            Err(e) => {
-                let id = audit.write("rejected_payload", Some(sid), None, None, None, Some(&e));
-                return with(WebhookOutcome::new("rejected_payload", e, false), id);
-            }
-        };
-        let safe = redact(&Value::Object(payload.clone()), token, 0);
+        None
+    }
 
-        // 5. Action, by kind.
-        let allowed = crate::strategy::signals::actions_for(&strategy.strategy_kind);
-        let raw_action = payload.get("action");
-        let action = raw_action
-            .and_then(Value::as_str)
-            .map(|a| a.trim().to_ascii_lowercase());
-        let Some(action) = action.filter(|a| allowed.contains(&a.as_str())) else {
-            let shown = match raw_action {
-                Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
-                Some(Value::Null) | None => None,
-                Some(other) => Some(other.to_string()),
-            };
+    /// A signal's action: run through the signal path, the answer audited.
+    async fn signal_webhook(
+        &self,
+        audit: &Audit<'_>,
+        strategy: &StrategyRow,
+        action: &str,
+        (payload, safe): (&Map<String, Value>, &Value),
+    ) -> WebhookOutcome {
+        let sid = strategy.id;
+        let leg_id = payload.get("leg_id");
+        let symbol = payload.get("symbol").and_then(Value::as_str);
+        let exchange = payload.get("exchange").and_then(Value::as_str);
+        let r = self
+            .handle_signal(strategy, action, leg_id, symbol, exchange)
+            .await;
+        if !r.ok {
+            let err = r
+                .error
+                .clone()
+                .unwrap_or_else(|| "The signal was refused".into());
             let id = audit.write(
                 "rejected_invalid_action",
                 Some(sid),
-                shown.as_deref(),
+                Some(action),
                 None,
-                Some(&safe),
-                Some("Unrecognised action"),
+                Some(safe),
+                Some(&err),
             );
-            return with(
-                WebhookOutcome::new(
-                    "rejected_invalid_action",
-                    format!("'action' must be one of {}", allowed.join(", ")),
-                    false,
-                ),
+            return stamped(
+                WebhookOutcome::new("rejected_invalid_action", err, false),
+                sid,
                 id,
             );
+        }
+        let id = audit.write("ok", Some(sid), Some(action), None, Some(safe), None);
+        let message = match &r.note {
+            Some(n) => format!("Signal accepted ({})", n),
+            None => "Signal accepted".into(),
         };
+        let mut o = stamped(WebhookOutcome::new("ok", message, true), sid, id);
+        o.run_id = r.run_id;
+        o
+    }
 
-        // 5b. Signal mode branches out before the batch-only stages.
-        if crate::strategy::signals::SIGNAL_ACTIONS.contains(&action.as_str()) {
-            let leg_id = payload.get("leg_id");
-            let symbol = payload.get("symbol").and_then(Value::as_str);
-            let exchange = payload.get("exchange").and_then(Value::as_str);
-            let r = self
-                .handle_signal(&strategy, &action, leg_id, symbol, exchange)
-                .await;
-            if !r.ok {
-                let err = r
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "The signal was refused".into());
-                let id = audit.write(
-                    "rejected_invalid_action",
-                    Some(sid),
-                    Some(&action),
-                    None,
-                    Some(&safe),
-                    Some(&err),
-                );
-                return with(
-                    WebhookOutcome::new("rejected_invalid_action", err, false),
-                    id,
-                );
-            }
-            let id = audit.write("ok", Some(sid), Some(&action), None, Some(&safe), None);
-            let message = match &r.note {
-                Some(n) => format!("Signal accepted ({})", n),
-                None => "Signal accepted".into(),
-            };
-            let mut o = with(WebhookOutcome::new("ok", message, true), id);
-            o.run_id = r.run_id;
-            return o;
-        }
-
-        // 6. Mode, required by start, ignored by stop.
-        let mut mode: Option<String> = None;
-        if action == "start" {
-            let raw = payload.get("mode");
-            let m = raw
-                .and_then(Value::as_str)
-                .map(|m| m.trim().to_ascii_lowercase());
-            match m.filter(|m| RUN_MODES.contains(&m.as_str())) {
-                Some(m) => mode = Some(m),
-                None => {
-                    let shown = match raw {
-                        Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
-                        Some(Value::Null) | None => None,
-                        Some(o) => Some(o.to_string()),
-                    };
-                    let id = audit.write(
-                        "rejected_invalid_action",
-                        Some(sid),
-                        Some(&action),
-                        shown.as_deref(),
-                        Some(&safe),
-                        Some("Unrecognised mode"),
-                    );
-                    return with(
-                        WebhookOutcome::new(
-                            "rejected_invalid_action",
-                            format!(
-                                "'mode' must be one of {} when starting",
-                                RUN_MODES.join(", ")
-                            ),
-                            false,
-                        ),
-                        id,
-                    );
-                }
-            }
-            // 7. The live gate.
-            if mode.as_deref() == Some("live") && !strategy.live_enabled {
-                let id = audit.write(
-                    "rejected_live_disabled",
-                    Some(sid),
-                    Some(&action),
-                    mode.as_deref(),
-                    Some(&safe),
-                    Some("Live trading is not enabled for this strategy"),
-                );
-                return with(
-                    WebhookOutcome::new(
-                        "rejected_live_disabled",
-                        "Live trading is not enabled for this strategy",
-                        false,
-                    ),
-                    id,
-                );
-            }
-        }
-
-        // 8 and 9: both windows read and the claim written under one lock.
-        let key = (sid, action.clone(), mode.clone());
-        let now = self.webhook.now();
+    /// Claims the signal's dedupe window and checks the cooling-off after
+    /// a stop, both under one lock; the refusal when either holds.
+    fn claim_window(
+        &self,
+        audit: &Audit<'_>,
+        key: &WebhookKey,
+        now: Instant,
+        safe: &Value,
+    ) -> Option<WebhookOutcome> {
+        let (sid, action, mode) = key;
+        let sid = *sid;
         let refusal = {
             let mut dedupe = self.webhook.dedupe.lock();
             dedupe.retain(|_, at| now.saturating_duration_since(*at) < DEDUPE_WINDOW);
@@ -235,7 +344,7 @@ impl StrategyModule {
             } else {
                 0
             };
-            if dedupe.contains_key(&key) {
+            if dedupe.contains_key(key) {
                 Some(("rejected_dedupe", 0))
             } else if cooling > 0 {
                 Some(("rejected_cooling_off", cooling))
@@ -249,15 +358,15 @@ impl StrategyModule {
                 let id = audit.write(
                     "rejected_dedupe",
                     Some(sid),
-                    Some(&action),
+                    Some(action.as_str()),
                     mode.as_deref(),
-                    Some(&safe),
+                    Some(safe),
                     Some(&format!(
                         "Duplicate signal inside {}s",
                         DEDUPE_WINDOW.as_secs()
                     )),
                 );
-                return with(
+                return Some(stamped(
                     WebhookOutcome::new(
                         "rejected_dedupe",
                         format!(
@@ -266,22 +375,23 @@ impl StrategyModule {
                         ),
                         true,
                     ),
+                    sid,
                     id,
-                );
+                ));
             }
             Some((_, remaining)) => {
                 let id = audit.write(
                     "rejected_cooling_off",
                     Some(sid),
-                    Some(&action),
+                    Some(action.as_str()),
                     mode.as_deref(),
-                    Some(&safe),
+                    Some(safe),
                     Some(&format!(
                         "Stopped within the last {}s",
                         COOLING_OFF.as_secs()
                     )),
                 );
-                return with(
+                return Some(stamped(
                     WebhookOutcome::new(
                         "rejected_cooling_off",
                         format!(
@@ -290,19 +400,33 @@ impl StrategyModule {
                         ),
                         false,
                     ),
+                    sid,
                     id,
-                );
+                ));
             }
             None => {}
         }
+        None
+    }
 
-        // 10. Dispatch. The accepted row first, so the run can point at it.
+    /// Dispatches an accepted start or stop. The accepted row is written
+    /// first, so the run can point at it; an engine refusal releases the
+    /// dedupe claim so the sender's retry is not swallowed.
+    async fn dispatch_webhook(
+        &self,
+        audit: &Audit<'_>,
+        strategy: &StrategyRow,
+        (key, now): (&WebhookKey, Instant),
+        safe: &Value,
+    ) -> WebhookOutcome {
+        let (sid, action, mode) = key;
+        let sid = *sid;
         let event_id = audit.write(
             "ok",
             Some(sid),
-            Some(&action),
+            Some(action.as_str()),
             mode.as_deref(),
-            Some(&safe),
+            Some(safe),
             None,
         );
         let was_live = strategy.status != "stopped";
@@ -318,21 +442,25 @@ impl StrategyModule {
                 .await;
             (r.ok, r.run_id, r.error, None, vec![])
         } else {
-            self.bridge_stop(&strategy).await
+            self.bridge_stop(strategy).await
         };
         if !ok {
             // Release the claim so the sender's retry is not swallowed.
-            self.webhook.dedupe.lock().remove(&key);
+            self.webhook.dedupe.lock().remove(key);
             let err = error.unwrap_or_else(|| "The engine could not act on the signal".into());
             let id = audit.write(
                 "rejected_engine_error",
                 Some(sid),
-                Some(&action),
+                Some(action.as_str()),
                 mode.as_deref(),
-                Some(&safe),
+                Some(safe),
                 Some(&err),
             );
-            let mut o = with(WebhookOutcome::new("rejected_engine_error", err, false), id);
+            let mut o = stamped(
+                WebhookOutcome::new("rejected_engine_error", err, false),
+                sid,
+                id,
+            );
             o.run_id = run_id;
             o.stop_pending = stop_pending;
             o.exits = exits;
@@ -341,8 +469,9 @@ impl StrategyModule {
         if action == "stop" && was_live && stop_pending != Some(true) {
             self.webhook.note_run_stopped(sid, now);
         }
-        let mut o = with(
+        let mut o = stamped(
             WebhookOutcome::new("ok", format!("Strategy {} accepted", action), true),
+            sid,
             event_id,
         );
         o.run_id = run_id;
