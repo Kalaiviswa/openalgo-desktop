@@ -171,41 +171,51 @@ pub async fn place_order(
                 &errorcode, &message,
             )))
         }
-        PlaceOutcome::Ambiguous => {
-            let rows = match raw_orders(b, auth).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::error!(
-                        "Could not read the Angel One order book to settle tag {}: {}",
-                        ordertag,
-                        e.code()
-                    );
-                    Vec::new()
-                }
-            };
-            match reconcile_by_tag(&rows, &ordertag, &body) {
-                Some(r) => {
-                    tracing::info!(
-                        "Angel One order {} found by its tag {}",
-                        r.orderid,
-                        ordertag
-                    );
-                    Ok(OrderResponse {
-                        order_id: r.orderid.clone(),
-                        message: None,
-                    })
-                }
-                None => {
-                    // Not proof of absence: the book can lag the order. The
-                    // outcome is unknown and the reconciler keeps looking
-                    // for this tag (LOG-08).
-                    tracing::error!("Angel One order with tag {} is unconfirmed", ordertag);
-                    Err(AppError::uncertain(
-                        "Angel One did not confirm this order and it was not found in the order book yet. It may have been placed: check the order book before placing it again.",
-                        Some(ordertag),
-                    ))
-                }
-            }
+        PlaceOutcome::Ambiguous => settle_by_tag(b, auth, &ordertag, &body).await,
+    }
+}
+
+/// An order whose reply was lost or ambiguous: found in the order book by
+/// its tag, or unconfirmed (LOG-08; the book can lag the order, so absence
+/// is not proof it was not placed).
+async fn settle_by_tag(
+    b: &AngelBroker,
+    auth: &AuthToken,
+    ordertag: &str,
+    body: &Value,
+) -> Result<OrderResponse> {
+    let rows = match raw_orders(b, auth).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                "Could not read the Angel One order book to settle tag {}: {}",
+                ordertag,
+                e.code()
+            );
+            Vec::new()
+        }
+    };
+    match reconcile_by_tag(&rows, ordertag, body) {
+        Some(r) => {
+            tracing::info!(
+                "Angel One order {} found by its tag {}",
+                r.orderid,
+                ordertag
+            );
+            Ok(OrderResponse {
+                order_id: r.orderid.clone(),
+                message: None,
+            })
+        }
+        None => {
+            // Not proof of absence: the book can lag the order. The
+            // outcome is unknown and the reconciler keeps looking
+            // for this tag (LOG-08).
+            tracing::error!("Angel One order with tag {} is unconfirmed", ordertag);
+            Err(AppError::uncertain(
+                "Angel One did not confirm this order and it was not found in the order book yet. It may have been placed: check the order book before placing it again.",
+                Some(ordertag.to_string()),
+            ))
         }
     }
 }
