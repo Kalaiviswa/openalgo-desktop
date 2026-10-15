@@ -406,20 +406,6 @@ impl WhatsAppService {
         )
     }
 
-    pub fn config(ctx: &AppState) -> db::WaConfig {
-        ctx.sqlite
-            .conn()
-            .and_then(|c| db::get_config(&c))
-            .unwrap_or_else(|e| {
-                tracing::error!("Could not read the WhatsApp settings: {}", e);
-                db::WaConfig::default()
-            })
-    }
-
-    pub fn is_paired(ctx: &AppState) -> bool {
-        Self::config(ctx).is_paired
-    }
-
     /// Web `is_ready`: paired and connected.
     pub fn is_ready(&self, ctx: &AppState) -> bool {
         self.is_running() && self.client.read().is_some() && Self::is_paired(ctx)

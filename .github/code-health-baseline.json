@@ -81,7 +81,7 @@
     "src-tauri/src/mcp/research.rs": 1611,
     "src-tauri/src/mcp/ta.rs": 1412,
     "src-tauri/src/messaging/telegram/bot.rs": 1473,
-    "src-tauri/src/messaging/whatsapp/mod.rs": 1205,
+    "src-tauri/src/messaging/whatsapp/mod.rs": 1192,
     "src-tauri/src/sandbox/gtt.rs": 1183,
     "src-tauri/src/sandbox/mod.rs": 1003,
     "src-tauri/src/sandbox/orders.rs": 1017,
