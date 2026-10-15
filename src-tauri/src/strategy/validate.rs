@@ -564,6 +564,139 @@ fn tab_segments(tab: &str) -> &'static [&'static str] {
     }
 }
 
+/// The run-wide risk and schedule settings: the overall stop and target,
+/// the profit lock, trail-to-entry, the scheduler, the daily loss limit
+/// and the webhook allowlist.
+fn risk_settings(raw: &Map<String, Value>, c: &mut Map<String, Value>) -> R<()> {
+    c.insert(
+        "overall_sl_mtm".into(),
+        loss_amount(get(raw, "overall_sl_mtm"), "overall_sl_mtm")?,
+    );
+    c.insert(
+        "overall_target_mtm".into(),
+        match get(raw, "overall_target_mtm") {
+            Some(v) => number(v, "overall_target_mtm", Some(0.0), None, None)?,
+            None => Value::Null,
+        },
+    );
+    c.insert("lock_profit".into(), lock_profit(get(raw, "lock_profit"))?);
+    c.insert(
+        "trail_sl_to_entry".into(),
+        json!(boolean(
+            get(raw, "trail_sl_to_entry").unwrap_or(&json!(false)),
+            "trail_sl_to_entry"
+        )?),
+    );
+    c.insert("scheduler".into(), scheduler(get(raw, "scheduler"))?);
+    c.insert(
+        "daily_loss_limit_inr".into(),
+        loss_amount(get(raw, "daily_loss_limit_inr"), "daily_loss_limit_inr")?,
+    );
+    c.insert(
+        "webhook_ip_allowlist".into(),
+        ip_allowlist(get(raw, "webhook_ip_allowlist"))?,
+    );
+    Ok(())
+}
+
+/// The entry and exit times, required for an intraday strategy, and the
+/// entry before the exit.
+fn session_times(raw: &Map<String, Value>, stype: &str) -> R<(Option<String>, Option<String>)> {
+    let entry = get(raw, "entry_time");
+    let exit = get(raw, "exit_time");
+    if stype == "intraday" {
+        if entry.is_none() {
+            return Err("entry_time is required for an intraday strategy".into());
+        }
+        if exit.is_none() {
+            return Err("exit_time is required for an intraday strategy".into());
+        }
+    }
+    let entry = entry.map(|v| hhmm(v, "entry_time")).transpose()?;
+    let exit = exit.map(|v| hhmm(v, "exit_time")).transpose()?;
+    if let (Some(a), Some(b)) = (&entry, &exit) {
+        if a >= b {
+            return Err("entry_time must be earlier than exit_time".into());
+        }
+    }
+    Ok((entry, exit))
+}
+
+/// The rules across fields: a signal leg's side must be one its
+/// direction acts on, every leg's segment must be one its universe tab
+/// offers, a signal's cash and futures legs must sit on matching
+/// exchanges, and a batch's short cash leg must be intraday.
+fn cross_field_rules(
+    kind: &str,
+    direction: &str,
+    (product, tab): (&str, &str),
+    legs: &[Value],
+) -> R<()> {
+    if kind == "signal" {
+        let accepted: &[&str] = match direction {
+            "long_only" => &["long", "both"],
+            "short_only" => &["short", "both"],
+            _ => &["long", "short", "both"],
+        };
+        for (i, leg) in legs.iter().enumerate() {
+            let side = leg["side"].as_str().unwrap_or("both");
+            if !accepted.contains(&side) {
+                let mut a = accepted.to_vec();
+                a.sort();
+                return Err(format!(
+                    "legs[{}].side is '{}', which a '{}' strategy never acts on. Use {}, or change the strategy direction.",
+                    i,
+                    side,
+                    direction,
+                    a.join(" or ")
+                ));
+            }
+        }
+    }
+    let allowed = tab_segments(tab);
+    for (i, leg) in legs.iter().enumerate() {
+        if let Some(seg) = leg["segment"].as_str() {
+            if !allowed.contains(&seg) {
+                return Err(format!(
+                    "legs[{}].segment is '{}', which the '{}' universe does not offer. That tab trades {}.",
+                    i,
+                    seg,
+                    tab,
+                    allowed.join(" and ")
+                ));
+            }
+        }
+    }
+    if kind == "signal" {
+        for (i, leg) in legs.iter().enumerate() {
+            let seg = leg["segment"].as_str().unwrap_or("");
+            let ex = leg["exchange"].as_str().unwrap_or("");
+            if seg == "cash" && is_derivative_exchange(ex) {
+                return Err(format!(
+                    "legs[{}] is a cash leg on {}, which lists derivatives. Use NSE or BSE for cash, or set the segment to 'futures'.",
+                    i, ex
+                ));
+            }
+            if seg == "futures" && !is_derivative_exchange(ex) {
+                return Err(format!(
+                    "legs[{}] is a futures leg on {}, which lists cash. Use a derivative exchange, or set the segment to 'cash'.",
+                    i, ex
+                ));
+            }
+        }
+    } else if product != "MIS" {
+        for (i, leg) in legs.iter().enumerate() {
+            if leg["segment"] == "cash" && leg["position"] == "S" {
+                return Err(format!(
+                    "legs[{}] sells cash short, but product '{}' carries the position. Cash cannot be held short overnight. Use MIS for an intraday short, or make the leg long.",
+                    i, product
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate a whole strategy configuration (create, and a merged PATCH).
 pub fn validate_strategy_config(payload: &Value, g: &SymbolGeneration) -> R<Value> {
     let raw = mapping(payload, "The request body")?;
@@ -632,118 +765,17 @@ pub fn validate_strategy_config(payload: &Value, g: &SymbolGeneration) -> R<Valu
         )?),
     );
     c.insert("legs".into(), Value::Array(legs.clone()));
-    c.insert(
-        "overall_sl_mtm".into(),
-        loss_amount(get(raw, "overall_sl_mtm"), "overall_sl_mtm")?,
-    );
-    c.insert(
-        "overall_target_mtm".into(),
-        match get(raw, "overall_target_mtm") {
-            Some(v) => number(v, "overall_target_mtm", Some(0.0), None, None)?,
-            None => Value::Null,
-        },
-    );
-    c.insert("lock_profit".into(), lock_profit(get(raw, "lock_profit"))?);
-    c.insert(
-        "trail_sl_to_entry".into(),
-        json!(boolean(
-            get(raw, "trail_sl_to_entry").unwrap_or(&json!(false)),
-            "trail_sl_to_entry"
-        )?),
-    );
-    c.insert("scheduler".into(), scheduler(get(raw, "scheduler"))?);
-    c.insert(
-        "daily_loss_limit_inr".into(),
-        loss_amount(get(raw, "daily_loss_limit_inr"), "daily_loss_limit_inr")?,
-    );
-    c.insert(
-        "webhook_ip_allowlist".into(),
-        ip_allowlist(get(raw, "webhook_ip_allowlist"))?,
-    );
+    risk_settings(raw, &mut c)?;
 
-    let entry = get(raw, "entry_time");
-    let exit = get(raw, "exit_time");
-    if stype == "intraday" {
-        if entry.is_none() {
-            return Err("entry_time is required for an intraday strategy".into());
-        }
-        if exit.is_none() {
-            return Err("exit_time is required for an intraday strategy".into());
-        }
-    }
-    let entry = entry.map(|v| hhmm(v, "entry_time")).transpose()?;
-    let exit = exit.map(|v| hhmm(v, "exit_time")).transpose()?;
-    if let (Some(a), Some(b)) = (&entry, &exit) {
-        if a >= b {
-            return Err("entry_time must be earlier than exit_time".into());
-        }
-    }
+    let (entry, exit) = session_times(raw, stype)?;
     c.insert("entry_time".into(), json!(entry));
     c.insert("exit_time".into(), json!(exit));
 
-    // Cross-field rules.
-    if kind == "signal" {
-        let direction = c["direction"].as_str().unwrap_or("both");
-        let accepted: &[&str] = match direction {
-            "long_only" => &["long", "both"],
-            "short_only" => &["short", "both"],
-            _ => &["long", "short", "both"],
-        };
-        for (i, leg) in legs.iter().enumerate() {
-            let side = leg["side"].as_str().unwrap_or("both");
-            if !accepted.contains(&side) {
-                let mut a = accepted.to_vec();
-                a.sort();
-                return Err(format!(
-                    "legs[{}].side is '{}', which a '{}' strategy never acts on. Use {}, or change the strategy direction.",
-                    i,
-                    side,
-                    direction,
-                    a.join(" or ")
-                ));
-            }
-        }
-    }
-    let allowed = tab_segments(tab);
-    for (i, leg) in legs.iter().enumerate() {
-        if let Some(seg) = leg["segment"].as_str() {
-            if !allowed.contains(&seg) {
-                return Err(format!(
-                    "legs[{}].segment is '{}', which the '{}' universe does not offer. That tab trades {}.",
-                    i,
-                    seg,
-                    tab,
-                    allowed.join(" and ")
-                ));
-            }
-        }
-    }
-    if kind == "signal" {
-        for (i, leg) in legs.iter().enumerate() {
-            let seg = leg["segment"].as_str().unwrap_or("");
-            let ex = leg["exchange"].as_str().unwrap_or("");
-            if seg == "cash" && is_derivative_exchange(ex) {
-                return Err(format!(
-                    "legs[{}] is a cash leg on {}, which lists derivatives. Use NSE or BSE for cash, or set the segment to 'futures'.",
-                    i, ex
-                ));
-            }
-            if seg == "futures" && !is_derivative_exchange(ex) {
-                return Err(format!(
-                    "legs[{}] is a futures leg on {}, which lists cash. Use a derivative exchange, or set the segment to 'cash'.",
-                    i, ex
-                ));
-            }
-        }
-    } else if product != "MIS" {
-        for (i, leg) in legs.iter().enumerate() {
-            if leg["segment"] == "cash" && leg["position"] == "S" {
-                return Err(format!(
-                    "legs[{}] sells cash short, but product '{}' carries the position. Cash cannot be held short overnight. Use MIS for an intraday short, or make the leg long.",
-                    i, product
-                ));
-            }
-        }
-    }
+    cross_field_rules(
+        kind,
+        c["direction"].as_str().unwrap_or("both"),
+        (product, tab),
+        &legs,
+    )?;
     Ok(Value::Object(c))
 }
