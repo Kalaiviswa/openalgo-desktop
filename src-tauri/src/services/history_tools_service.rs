@@ -453,6 +453,52 @@ pub async fn custom_straddle(
     }))
 }
 
+/// The LTP of each symbol in a multiquotes answer (0 when it has none).
+fn result_ltps(body: &Value) -> HashMap<String, f64> {
+    body.get("results")
+        .and_then(Value::as_array)
+        .map(|rs| {
+            rs.iter()
+                .filter_map(|x| {
+                    let s = x.get("symbol")?.as_str()?.to_string();
+                    let d = x.get("data").unwrap_or(x);
+                    Some((s, d.get("ltp").and_then(Value::as_f64).unwrap_or(0.0)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One cell of the surface: the option's implied volatility, or null when
+/// it has no price or no positive IV.
+fn iv_cell(sym: &str, exchange: &str, spot: f64, px: f64, now: DateTime<Utc>) -> Value {
+    if px <= 0.0 {
+        return Value::Null;
+    }
+    let Ok(c) = parse_option_symbol(sym) else {
+        return Value::Null;
+    };
+    let g = GreeksInput::new(sym, exchange, &c, spot, px).calculate(now);
+    g.body
+        .get("implied_volatility")
+        .and_then(Value::as_f64)
+        .filter(|v| g.is_success() && *v > 0.0)
+        .map(|v| float(py_round(v, 2)))
+        .unwrap_or(Value::Null)
+}
+
+/// Days to an expiry, to one decimal (0 when it cannot be worked out).
+fn expiry_dte(r: &Reference, e: &str, grid: &[f64], now: DateTime<Utc>) -> Value {
+    grid.first()
+        .and_then(|k| parse_option_symbol(&option_symbol(&r.base, e, *k, "CE")).ok())
+        .and_then(|c| expiry_datetime(&c.expiry, &r.options_exchange, None))
+        .map(|x| {
+            let d = ((x - now).num_milliseconds() as f64 / 86_400_000.0).max(0.0);
+            float(py_round(d, 1))
+        })
+        .unwrap_or(json!(0))
+}
+
 /// `POST /volsurface/api/surface-data`.
 pub async fn vol_surface(
     ctx: &AppState,
@@ -516,49 +562,16 @@ pub async fn vol_surface(
             .collect();
         // One batched quote call per expiry.
         let mq = market_data_service::multiquotes(ctx, &syms).await;
-        let ltps: HashMap<String, f64> = mq
-            .body
-            .get("results")
-            .and_then(Value::as_array)
-            .map(|rs| {
-                rs.iter()
-                    .filter_map(|x| {
-                        let s = x.get("symbol")?.as_str()?.to_string();
-                        let d = x.get("data").unwrap_or(x);
-                        Some((s, d.get("ltp").and_then(Value::as_f64).unwrap_or(0.0)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let ltps = result_ltps(&mq.body);
         let row: Vec<Value> = syms
             .iter()
             .map(|(sym, _)| {
                 let px = ltps.get(sym).copied().unwrap_or(0.0);
-                if px <= 0.0 {
-                    return Value::Null;
-                }
-                let Ok(c) = parse_option_symbol(sym) else {
-                    return Value::Null;
-                };
-                let g = GreeksInput::new(sym, &r.options_exchange, &c, q.ltp, px).calculate(now);
-                g.body
-                    .get("implied_volatility")
-                    .and_then(Value::as_f64)
-                    .filter(|v| g.is_success() && *v > 0.0)
-                    .map(|v| float(py_round(v, 2)))
-                    .unwrap_or(Value::Null)
+                iv_cell(sym, &r.options_exchange, q.ltp, px, now)
             })
             .collect();
         grid_rows.push(row);
-        let dte = grid
-            .first()
-            .and_then(|k| parse_option_symbol(&option_symbol(&r.base, e, *k, "CE")).ok())
-            .and_then(|c| expiry_datetime(&c.expiry, &r.options_exchange, None))
-            .map(|x| {
-                let d = ((x - now).num_milliseconds() as f64 / 86_400_000.0).max(0.0);
-                float(py_round(d, 1))
-            })
-            .unwrap_or(json!(0));
+        let dte = expiry_dte(&r, e, &grid, now);
         info.push(json!({"date": e, "dte": dte}));
     }
     data(json!({
