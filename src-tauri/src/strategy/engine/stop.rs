@@ -7,6 +7,21 @@ use crate::strategy::store::ORDER_KINDS;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 
+/// The kind a stop's exit orders are recorded as: `exit_<reason>` when it
+/// is a known kind, else `exit_close_all` (and always for a manual stop).
+fn stop_exit_kind(reason: &str) -> String {
+    if reason == "manual" {
+        "exit_close_all".to_string()
+    } else {
+        let k = format!("exit_{}", reason);
+        if ORDER_KINDS.contains(&k.as_str()) {
+            k
+        } else {
+            "exit_close_all".to_string()
+        }
+    }
+}
+
 impl StrategyModule {
     /// Request a stop, exit every owned position, and finalise only once
     /// flat. Boxed: a synchronous fill inside it can reach it again.
@@ -33,37 +48,13 @@ impl StrategyModule {
         };
 
         // Durable before every broker call.
-        if !self.store.request_run_stop(run_id, reason).unwrap_or(false) {
-            return StopOutcome {
-                ok: false,
-                stop_pending: false,
-                error: Some(
-                    "Could not save the stop request, so no exit order was placed. Try again."
-                        .into(),
-                ),
-                exits: vec![],
-                run_stopped: None,
-            };
-        }
-        let reason = self
-            .store
-            .get_run(run_id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.stop_requested_reason)
-            .unwrap_or_else(|| reason.to_string());
-        self.state.mark_stopping(run_id);
-        self.emit(
-            strategy_id,
-            user_id,
-            "run_stop_requested",
-            &format!(
-                "Stop requested ({}); exit orders are being attempted",
-                reason
-            ),
-            ev(Some(run_id), None, "info"),
-        )
-        .await;
+        let reason = match self
+            .record_stop_request(run_id, strategy_id, user_id, reason)
+            .await
+        {
+            Ok(r) => r,
+            Err(refused) => return refused,
+        };
 
         if self.reconcile_acks(run_id, true).await > 0 {
             self.emit(
@@ -94,22 +85,9 @@ impl StrategyModule {
         let still_held = snapshot.requires_management();
 
         if let Err(e) = self.gateway.authorised(mode) {
-            if !still_held {
-                return self
-                    .finish_stop(run_id, strategy_id, user_id, &reason, vec![])
-                    .await;
-            }
-            if self.claim_unactionable(run_id) {
-                self.emit(
-                    strategy_id,
-                    user_id,
-                    "run_stop_failed",
-                    "Stop remains pending because there is no broker session. Positions remain open and managed; log in to your broker and the stop is retried.",
-                    ev(Some(run_id), None, "critical"),
-                )
+            return self
+                .stop_without_session(run_id, (strategy_id, user_id), &reason, still_held, e)
                 .await;
-            }
-            return StopOutcome::pending(format!("{} The run remains managed.", e), vec![]);
         }
         self.note_actionable_again(strategy_id, user_id, run_id)
             .await;
@@ -132,21 +110,98 @@ impl StrategyModule {
             return StopOutcome::pending(STATE_UNAVAILABLE, vec![]);
         };
         let managed = snapshot.managed_leg_ids();
-        let kind = if reason == "manual" {
-            "exit_close_all".to_string()
-        } else {
-            let k = format!("exit_{}", reason);
-            if ORDER_KINDS.contains(&k.as_str()) {
-                k
-            } else {
-                "exit_close_all".to_string()
-            }
-        };
+        let kind = stop_exit_kind(&reason);
         let exits = self
             .exit_legs(run_id, &strategy, &managed, &kind, mode, user_id)
             .await;
 
-        // A synchronous sandbox fill may already have finished the run.
+        self.stop_after_exits(run_id, (strategy_id, user_id), &reason, exits)
+            .await
+    }
+
+    /// Records the stop request durably (the stored reason wins), marks the
+    /// run stopping and announces it. A request that cannot be saved
+    /// places no exit (`Err`: the stop's answer).
+    async fn record_stop_request(
+        &self,
+        run_id: i64,
+        strategy_id: i64,
+        user_id: &str,
+        reason: &str,
+    ) -> Result<String, StopOutcome> {
+        if !self.store.request_run_stop(run_id, reason).unwrap_or(false) {
+            return Err(StopOutcome {
+                ok: false,
+                stop_pending: false,
+                error: Some(
+                    "Could not save the stop request, so no exit order was placed. Try again."
+                        .into(),
+                ),
+                exits: vec![],
+                run_stopped: None,
+            });
+        }
+        let reason = self
+            .store
+            .get_run(run_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.stop_requested_reason)
+            .unwrap_or_else(|| reason.to_string());
+        self.state.mark_stopping(run_id);
+        self.emit(
+            strategy_id,
+            user_id,
+            "run_stop_requested",
+            &format!(
+                "Stop requested ({}); exit orders are being attempted",
+                reason
+            ),
+            ev(Some(run_id), None, "info"),
+        )
+        .await;
+        Ok(reason)
+    }
+
+    /// No broker session: a run with nothing held is finished; otherwise
+    /// the stop stays pending, the positions stay managed, and the trader
+    /// is told once.
+    async fn stop_without_session(
+        &self,
+        run_id: i64,
+        (strategy_id, user_id): (i64, &str),
+        reason: &str,
+        still_held: bool,
+        e: String,
+    ) -> StopOutcome {
+        if !still_held {
+            return self
+                .finish_stop(run_id, strategy_id, user_id, reason, vec![])
+                .await;
+        }
+        if self.claim_unactionable(run_id) {
+            self.emit(
+            strategy_id,
+            user_id,
+            "run_stop_failed",
+            "Stop remains pending because there is no broker session. Positions remain open and managed; log in to your broker and the stop is retried.",
+            ev(Some(run_id), None, "critical"),
+        )
+        .await;
+        }
+        StopOutcome::pending(format!("{} The run remains managed.", e), vec![])
+    }
+
+    /// What the stop's exits found: a run already finished by a fill, exits
+    /// refused while positions are held (the run stays open and managed),
+    /// exits still working (pending), or flat (finished).
+    async fn stop_after_exits(
+        &self,
+        run_id: i64,
+        (strategy_id, user_id): (i64, &str),
+        reason: &str,
+        exits: Vec<Value>,
+    ) -> StopOutcome {
         if let Ok(Some(r)) = self.store.get_run(run_id) {
             if r.stopped_at.is_some() {
                 return StopOutcome {
@@ -158,13 +213,13 @@ impl StrategyModule {
         }
         let Some(snapshot) = self.state.snapshot(run_id) else {
             self.emit(
-                strategy_id,
-                user_id,
-                "run_stop_failed",
-                "Stop remains pending because the run's live state is unavailable; nothing was assumed closed",
-                ev(Some(run_id), None, "critical"),
-            )
-            .await;
+            strategy_id,
+            user_id,
+            "run_stop_failed",
+            "Stop remains pending because the run's live state is unavailable; nothing was assumed closed",
+            ev(Some(run_id), None, "critical"),
+        )
+        .await;
             return StopOutcome::pending(STATE_UNAVAILABLE, exits);
         };
         let still_held = snapshot.requires_management();
@@ -178,24 +233,24 @@ impl StrategyModule {
             // The positions are still at the broker: finalising would release
             // the strategy, drop the state and unsubscribe the prices.
             self.emit(
-                strategy_id,
-                user_id,
-                "run_stop_failed",
-                &format!(
-                    "Stop refused for {} position(s); the run remains open, managed, and can be stopped again",
-                    refused
-                ),
-                ev(Some(run_id), None, "critical"),
-            )
-            .await;
+            strategy_id,
+            user_id,
+            "run_stop_failed",
+            &format!(
+                "Stop refused for {} position(s); the run remains open, managed, and can be stopped again",
+                refused
+            ),
+            ev(Some(run_id), None, "critical"),
+        )
+        .await;
             return StopOutcome::pending(
-                format!(
-                    "{} of {} exit order(s) were refused. The run is still open and still managed; retry the stop.",
-                    refused,
-                    exits.len()
-                ),
-                exits,
-            );
+            format!(
+                "{} of {} exit order(s) were refused. The run is still open and still managed; retry the stop.",
+                refused,
+                exits.len()
+            ),
+            exits,
+        );
         }
         if still_held {
             return StopOutcome {
@@ -205,7 +260,7 @@ impl StrategyModule {
                 ..Default::default()
             };
         }
-        self.finish_stop(run_id, strategy_id, user_id, &reason, exits)
+        self.finish_stop(run_id, strategy_id, user_id, reason, exits)
             .await
     }
 
