@@ -542,6 +542,96 @@ impl Supervisor {
         true
     }
 
+    /// Sends the full subscription set and reports the feed connected;
+    /// false when the socket is lost.
+    async fn subscribe_all<S>(&mut self, broker: &str, write: &mut S) -> bool
+    where
+        S: futures_util::Sink<Message, Error = WsError> + Unpin,
+    {
+        if !self.resubscribe(write).await {
+            return false;
+        }
+        self.status.send_replace(FeedStatus::Connected {
+            broker: broker.to_string(),
+        });
+        true
+    }
+
+    /// One message from the broker: market events published, replies sent,
+    /// and the subscriptions sent once the login is acknowledged. An `Err`
+    /// ends the session.
+    async fn on_message<S>(
+        &mut self,
+        broker: &str,
+        write: &mut S,
+        msg: Message,
+        subscribed: &mut bool,
+    ) -> std::result::Result<(), SessionEnd>
+    where
+        S: futures_util::Sink<Message, Error = WsError> + Unpin,
+    {
+        if let Message::Close(_) = msg {
+            return Err(SessionEnd::Lost);
+        }
+        for ev in self.feed.parse(&msg) {
+            match ev {
+                FeedEvent::AuthFailed(m) => return Err(SessionEnd::AuthFailed(m)),
+                FeedEvent::AuthOk => {
+                    if !*subscribed {
+                        if !self.subscribe_all(broker, write).await {
+                            return Err(SessionEnd::Lost);
+                        }
+                        *subscribed = true;
+                    }
+                }
+                FeedEvent::Heartbeat => {}
+                FeedEvent::Reply(m) => {
+                    if write.send(m).await.is_err() {
+                        return Err(SessionEnd::Lost);
+                    }
+                }
+                e @ (FeedEvent::Tick(_) | FeedEvent::Depth(_) | FeedEvent::OrderUpdate(_)) => {
+                    self.stats.events.fetch_add(1, Ordering::Relaxed);
+                    // No receiver yet is normal; nothing is retained.
+                    let _ = self.events.send(Arc::new(e));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Coalesces the commands already waiting into `deltas`, so a burst of
+    /// subscribe calls reaches the broker as batches. True when a stop was
+    /// among them.
+    fn coalesce(&mut self, deltas: &mut Vec<Delta>) -> bool {
+        while let Ok(more) = self.cmd.try_recv() {
+            match more {
+                Command::Apply(d) => deltas.extend(d),
+                Command::Stop => return true,
+            }
+        }
+        false
+    }
+
+    /// Whether the feed stalled: nothing received within the stall timeout,
+    /// or no market data while the socket stayed open.
+    fn stalled(&mut self, broker: &str, last_rx: Instant) -> bool {
+        if last_rx.elapsed() >= self.config.stall_timeout {
+            tracing::warn!(broker, "Market data feed stalled; reconnecting");
+            self.stats.stalls.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        if self.feed.data_stalled() {
+            tracing::warn!(
+                broker,
+                "Market data stopped while the socket stayed open; reconnecting"
+            );
+            self.stats.stalls.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
     async fn session<S, R>(&mut self, broker: &str, write: &mut S, read: &mut R) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = WsError> + Unpin,
@@ -552,13 +642,10 @@ impl Supervisor {
         }
         let mut subscribed = false;
         if !self.feed.awaits_auth_ack() {
-            if !self.resubscribe(write).await {
+            if !self.subscribe_all(broker, write).await {
                 return SessionEnd::Lost;
             }
             subscribed = true;
-            self.status.send_replace(FeedStatus::Connected {
-                broker: broker.to_string(),
-            });
         }
         let heartbeat = self.feed.heartbeat();
         let hb_period = heartbeat
@@ -591,53 +678,14 @@ impl Supervisor {
                         None => return SessionEnd::Lost,
                     };
                     last_rx = Instant::now();
-                    if let Message::Close(_) = msg {
-                        return SessionEnd::Lost;
-                    }
-                    for ev in self.feed.parse(&msg) {
-                        match ev {
-                            FeedEvent::AuthFailed(m) => return SessionEnd::AuthFailed(m),
-                            FeedEvent::AuthOk => {
-                                if !subscribed {
-                                    if !self.resubscribe(write).await {
-                                        return SessionEnd::Lost;
-                                    }
-                                    subscribed = true;
-                                    self.status.send_replace(FeedStatus::Connected {
-                                        broker: broker.to_string(),
-                                    });
-                                }
-                            }
-                            FeedEvent::Heartbeat => {}
-                            FeedEvent::Reply(m) => {
-                                if write.send(m).await.is_err() {
-                                    return SessionEnd::Lost;
-                                }
-                            }
-                            e @ (FeedEvent::Tick(_) | FeedEvent::Depth(_) | FeedEvent::OrderUpdate(_)) => {
-                                self.stats.events.fetch_add(1, Ordering::Relaxed);
-                                // No receiver yet is normal; nothing is retained.
-                                let _ = self.events.send(Arc::new(e));
-                            }
-                        }
+                    if let Err(end) = self.on_message(broker, write, msg, &mut subscribed).await {
+                        return end;
                     }
                 }
                 cmd = self.cmd.recv() => match cmd {
                     None | Some(Command::Stop) => return SessionEnd::Stopped,
                     Some(Command::Apply(mut deltas)) => {
-                        // Coalesce commands already waiting, so a burst of
-                        // subscribe calls reaches the broker as batches.
-                        let mut stop = false;
-                        while let Ok(more) = self.cmd.try_recv() {
-                            match more {
-                                Command::Apply(d) => deltas.extend(d),
-                                Command::Stop => {
-                                    stop = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if stop {
+                        if self.coalesce(&mut deltas) {
                             return SessionEnd::Stopped;
                         }
                         if !subscribed {
@@ -659,24 +707,14 @@ impl Supervisor {
                 _ = &mut ack_deadline, if ack_pending => {
                     ack_pending = false;
                     if !subscribed {
-                        if !self.resubscribe(write).await {
+                        if !self.subscribe_all(broker, write).await {
                             return SessionEnd::Lost;
                         }
                         subscribed = true;
-                        self.status.send_replace(FeedStatus::Connected {
-                            broker: broker.to_string(),
-                        });
                     }
                 }
                 _ = watchdog.tick() => {
-                    if last_rx.elapsed() >= self.config.stall_timeout {
-                        tracing::warn!(broker, "Market data feed stalled; reconnecting");
-                        self.stats.stalls.fetch_add(1, Ordering::Relaxed);
-                        return SessionEnd::Stalled;
-                    }
-                    if self.feed.data_stalled() {
-                        tracing::warn!(broker, "Market data stopped while the socket stayed open; reconnecting");
-                        self.stats.stalls.fetch_add(1, Ordering::Relaxed);
+                    if self.stalled(broker, last_rx) {
                         return SessionEnd::Stalled;
                     }
                 }

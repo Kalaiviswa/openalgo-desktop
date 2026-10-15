@@ -102,7 +102,6 @@
     "src-tauri/src/strategy/store.rs::migrate": 136,
     "src-tauri/src/strategy/validate.rs::validate_leg": 112,
     "src-tauri/src/strategy/validate.rs::validate_strategy_config": 182,
-    "src-tauri/src/strategy/webhook.rs::handle_webhook": 338,
-    "src-tauri/src/websocket/manager.rs::session": 141
+    "src-tauri/src/strategy/webhook.rs::handle_webhook": 338
   }
 }
