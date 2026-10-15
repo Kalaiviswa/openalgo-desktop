@@ -358,6 +358,53 @@ fn levels(side: &[proto::DepthLevel]) -> Vec<DepthLevel> {
         .collect()
 }
 
+/// Fold one decoded message into an instrument's merged state: a price
+/// (LTP or index value) and a book are each kept as they arrive. Answers
+/// whether it carried a price and a book.
+fn merge(m: &mut Merged, data: &proto::LiveData) -> (bool, bool) {
+    let mut is_price = false;
+    if let Some(p) = &data.ltp_data {
+        is_price = true;
+        m.ltp = p.ltp;
+        for (dst, v) in [
+            (&mut m.open, p.open),
+            (&mut m.high, p.high),
+            (&mut m.low, p.low),
+            (&mut m.close, p.close),
+        ] {
+            if v != 0.0 {
+                *dst = v;
+            }
+        }
+        if p.volume != 0.0 {
+            m.volume = p.volume as i64;
+        }
+        if p.ts_in_millis > 0.0 {
+            m.ltt = p.ts_in_millis as i64;
+        }
+        m.seen = true;
+    }
+    if let Some(i) = &data.index_data {
+        is_price = true;
+        m.ltp = i.value;
+        if i.ts_in_millis > 0.0 {
+            m.ltt = i.ts_in_millis as i64;
+        }
+        m.seen = true;
+    }
+    let mut is_book = false;
+    if let Some(d) = &data.depth_data {
+        is_book = true;
+        m.buy = levels(&d.buy);
+        m.sell = levels(&d.sell);
+        if d.ts_in_millis > 0.0 {
+            m.ltt = d.ts_in_millis as i64;
+        }
+        m.seen = true;
+    }
+    (is_price, is_book)
+}
+
 impl GrowwFeed {
     pub fn new(http: reqwest::Client, auth_token: &str, endpoints: FeedEndpoints) -> Self {
         Self {
@@ -398,47 +445,8 @@ impl GrowwFeed {
             tracing::debug!("Groww feed payload could not be decoded");
             return Vec::new();
         };
-        let m = &mut inst.merged;
-        let mut is_price = false;
-        if let Some(p) = &data.ltp_data {
-            is_price = true;
-            m.ltp = p.ltp;
-            for (dst, v) in [
-                (&mut m.open, p.open),
-                (&mut m.high, p.high),
-                (&mut m.low, p.low),
-                (&mut m.close, p.close),
-            ] {
-                if v != 0.0 {
-                    *dst = v;
-                }
-            }
-            if p.volume != 0.0 {
-                m.volume = p.volume as i64;
-            }
-            if p.ts_in_millis > 0.0 {
-                m.ltt = p.ts_in_millis as i64;
-            }
-            m.seen = true;
-        }
-        if let Some(i) = &data.index_data {
-            is_price = true;
-            m.ltp = i.value;
-            if i.ts_in_millis > 0.0 {
-                m.ltt = i.ts_in_millis as i64;
-            }
-            m.seen = true;
-        }
-        let mut is_book = false;
-        if let Some(d) = &data.depth_data {
-            is_book = true;
-            m.buy = levels(&d.buy);
-            m.sell = levels(&d.sell);
-            if d.ts_in_millis > 0.0 {
-                m.ltt = d.ts_in_millis as i64;
-            }
-            m.seen = true;
-        }
+        let (is_price, is_book) = merge(&mut inst.merged, &data);
+        let m = &inst.merged;
         let mode = inst.sub.mode;
         let depth_mode = mode == FeedMode::Depth && !is_index(&inst.sub.exchange);
         if !depth_mode && !is_price {
