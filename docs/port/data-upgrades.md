@@ -102,13 +102,14 @@ Each was traced against the code; the decisions:
    readable. Now every folder is created 0700 and every file 0600 from its
    first byte: the `VACUUM INTO` target is created owner-only and empty
    first, the DuckDB and key files are streamed into owner-only files, and
-   so are a restore's staging files and the folder lock. On Windows the
-   data folder's ACL is inherited: every folder and file is created with
-   the default security of its parent, and nothing sets an entry of its
-   own.
+   so are a restore's staging files and the folder lock. On Windows every
+   folder and file is created with the default security of its folder
+   (the data folder's ACL, which is the account's own under `%APPDATA%`),
+   and nothing adds an entry.
    - Tests: `backups_are_owner_only_from_the_first_byte` (Unix),
-     `backups_carry_only_the_data_folders_acl_on_windows` (Windows: every
-     access entry on `backups/`, the backup and its files is inherited).
+     `backups_grant_no_one_the_data_folder_does_not_on_windows` (Windows:
+     every account an access entry on `backups/`, the backup or its files
+     names is one the data folder's ACL names).
 4. **Bounded retention and link safety: held, fixed.** Pruning kept three.
    But a `backups` that was a link was followed: making a backup chmod-ed,
    and cleanup deleted `.partial-` folders in, the folder it pointed to.

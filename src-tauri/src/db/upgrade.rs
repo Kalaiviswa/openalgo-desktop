@@ -49,8 +49,8 @@
 //! them open yet (the app-start path holds the folder lock,
 //! [`DataFolderLock`], so no second copy of OpenAlgo has either). Every
 //! folder is created owner-only (0700) and every file owner-only (0600)
-//! from its first byte, never widened and narrowed later (Windows: the data
-//! folder's ACL is inherited). `backups/` and the folders in it are never
+//! from its first byte, never widened and narrowed later (Windows: created
+//! with the default security of the data folder, nothing added). `backups/` and the folders in it are never
 //! followed through a link: a link there is left alone, and a `backups`
 //! that is not a plain folder stops the upgrade. At most
 //! [`KEEP_BACKUPS`] leftovers are ever kept.
@@ -687,26 +687,72 @@ fn restore(dir: &Path, backup: &Path) -> io::Result<()> {
     let manifest: Manifest = serde_json::from_str(&text).map_err(io::Error::other)?;
     let held = |n: &str| manifest.files.iter().any(|f| f == n);
     for (name, kind) in STORES {
-        for side in side_files(name, *kind) {
-            remove_if_present(&dir.join(&side))?;
-        }
-        let live = dir.join(name);
-        if held(name) {
-            let staged = dir.join(format!("{}.restoring", name));
-            remove_if_present(&staged)?;
-            copy_private(&backup.join(name), &staged)?;
-            fs::rename(&staged, &live)?;
-            for side in side_files(name, *kind) {
-                if held(&side) {
-                    copy_private(&backup.join(&side), &dir.join(&side))?;
-                }
-            }
-        } else {
-            remove_if_present(&live)?;
-        }
+        restore_store(dir, backup, name, *kind, &held).map_err(|e| naming(name, e))?;
     }
     crate::security::fsperm::sync_dir(dir);
     Ok(())
+}
+
+/// Put one store back: its side files go first, then the backup's copy
+/// replaces it by a rename (or, when the backup does not hold it, the store
+/// the failed open created is removed).
+fn restore_store(
+    dir: &Path,
+    backup: &Path,
+    name: &str,
+    kind: Kind,
+    held: &dyn Fn(&str) -> bool,
+) -> io::Result<()> {
+    for side in side_files(name, kind) {
+        retry_while_in_use(|| remove_if_present(&dir.join(&side)))?;
+    }
+    let live = dir.join(name);
+    if !held(name) {
+        return retry_while_in_use(|| remove_if_present(&live));
+    }
+    let staged = dir.join(format!("{}.restoring", name));
+    remove_if_present(&staged)?;
+    copy_private(&backup.join(name), &staged)?;
+    retry_while_in_use(|| fs::rename(&staged, &live))?;
+    for side in side_files(name, kind) {
+        if held(&side) {
+            copy_private(&backup.join(&side), &dir.join(&side))?;
+        }
+    }
+    Ok(())
+}
+
+/// How long a restore waits for a store the failed open (or another
+/// program, such as a virus scanner) still holds open.
+const IN_USE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `op` again while the file it needs is in use. On Windows a file that
+/// is open cannot be replaced or removed ("used by another process"); a
+/// failed open can leave a database connection closing on a pool thread
+/// for a moment after it returned. Other errors, and every error elsewhere,
+/// are returned at once.
+fn retry_while_in_use(mut op: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + IN_USE_WAIT;
+    let mut pause = std::time::Duration::from_millis(50);
+    loop {
+        match op() {
+            Err(e) if in_use(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_secs(1));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// A file another handle holds (Windows: sharing or lock violation).
+fn in_use(e: &io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33))
+}
+
+/// The error with the store it concerns, for the log.
+fn naming(name: &str, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {}", name, e))
 }
 
 fn remove_if_present(p: &Path) -> io::Result<()> {
@@ -1267,28 +1313,45 @@ mod tests {
         assert_eq!(mode(&dir.join(LOCK_FILE)), 0o600);
     }
 
-    /// Security review, finding 3 on Windows: backup folders and files carry
-    /// only what they inherit from the data folder's ACL (no entry of their
-    /// own), so they are exactly as private as the data folder.
+    /// The accounts an access entry names on `p` (`icacls`).
+    #[cfg(windows)]
+    fn who_has_access(p: &Path) -> std::collections::BTreeSet<String> {
+        let out = std::process::Command::new("icacls")
+            .arg(p)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).replace(&*p.to_string_lossy(), "");
+        text.lines()
+            .filter_map(|l| l.split_once(":("))
+            .map(|(who, _)| who.trim().to_string())
+            .collect()
+    }
+
+    /// Security review, finding 3 on Windows: backup folders and files grant
+    /// no account that the data folder does not (they are created with the
+    /// default security of their folder, and nothing adds an entry), so they
+    /// are as private as the data folder.
     #[cfg(windows)]
     #[test]
-    fn backups_carry_only_the_data_folders_acl_on_windows() {
+    fn backups_grant_no_one_the_data_folder_does_not_on_windows() {
         let d = folder(Some("1.0.0"));
         let dir = d.path().to_path_buf();
+        let folder_has = who_has_access(&dir);
+        assert!(!folder_has.is_empty());
         let got = open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
             let (b, _) = &backups(&dir)[0];
             let mut paths = vec![dir.join(BACKUPS_DIR), b.clone()];
             paths.extend(fs::read_dir(b).unwrap().flatten().map(|e| e.path()));
             for p in paths {
-                let out = std::process::Command::new("icacls")
-                    .arg(&p)
-                    .output()
-                    .unwrap();
-                let text = String::from_utf8_lossy(&out.stdout);
-                let entries: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
-                assert!(!entries.is_empty(), "{}: {}", p.display(), text);
-                for e in entries {
-                    assert!(e.contains("(I)"), "{}: {}", p.display(), e);
+                let has = who_has_access(&p);
+                assert!(!has.is_empty(), "{}", p.display());
+                for who in has {
+                    assert!(
+                        folder_has.contains(&who),
+                        "{} grants {}, which the data folder does not",
+                        p.display(),
+                        who
+                    );
                 }
             }
             Err(AppError::Internal("migration failed".into()))

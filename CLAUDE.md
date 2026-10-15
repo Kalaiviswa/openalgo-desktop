@@ -690,6 +690,11 @@ worktree onto master. CI builds fresh and is unaffected.
   fails with "Access is denied": the flush needs a handle opened for writing.
   The first REL-02 backup passed on macOS and Linux and failed every backup on
   Windows this way.
+- Windows: a file that is open cannot be replaced or removed (os error 32).
+  An `AppState::open` that failed can leave an r2d2 pool thread opening a
+  connection for a moment after it returned, so `db::upgrade`'s restore
+  retries a replace or removal for up to ten seconds while the file is in
+  use.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
 
