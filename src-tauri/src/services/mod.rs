@@ -50,6 +50,7 @@ pub mod market_calendar_service;
 pub mod market_data_service;
 pub mod master_contract_service;
 pub mod monitor;
+pub mod notify_service;
 pub mod obligations;
 pub mod options_order_service;
 pub mod options_service;
