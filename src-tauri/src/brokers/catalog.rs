@@ -268,6 +268,21 @@ pub fn authorize_url(
     })
 }
 
+/// A Noren family broker's authorize URL, from its own configuration.
+fn noren_authorize_url(broker: &str, api_key: &str, state: &str) -> Option<String> {
+    use crate::brokers::{flattrade, shoonya, tradesmart, zebu};
+    let config = match broker {
+        "shoonya" => shoonya::config(),
+        "zebu" => zebu::config(),
+        "tradesmart" => tradesmart::config(),
+        "flattrade" => flattrade::config(),
+        _ => return None,
+    };
+    Some(crate::brokers::families::noren::authorize_url(
+        config, api_key, state,
+    ))
+}
+
 fn authorize_url_string(
     broker: &str,
     api_key: &str,
@@ -336,26 +351,7 @@ fn authorize_url_string(
         }
         // Noren family: the authorize URL takes the app key (the half
         // after `:::` of a `userid:::key` entry).
-        "shoonya" => Some(crate::brokers::families::noren::authorize_url(
-            crate::brokers::shoonya::config(),
-            api_key,
-            state,
-        )),
-        "zebu" => Some(crate::brokers::families::noren::authorize_url(
-            crate::brokers::zebu::config(),
-            api_key,
-            state,
-        )),
-        "tradesmart" => Some(crate::brokers::families::noren::authorize_url(
-            crate::brokers::tradesmart::config(),
-            api_key,
-            state,
-        )),
-        "flattrade" => Some(crate::brokers::families::noren::authorize_url(
-            crate::brokers::flattrade::config(),
-            api_key,
-            state,
-        )),
+        "shoonya" | "zebu" | "tradesmart" | "flattrade" => noren_authorize_url(broker, api_key, state),
         // IIFL Capital: appkey + both redirect casings; `state` rides on
         // the callback URL.
         "iiflcapital" => Some(crate::brokers::iiflcapital::auth::login_url(
