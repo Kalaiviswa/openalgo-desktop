@@ -129,7 +129,6 @@
     "src-tauri/src/server/routes/auth.rs::login_totp": 74,
     "src-tauri/src/server/routes/broker.rs::oauth_callback": 83,
     "src-tauri/src/server/routes/historify/mod.rs::table": 89,
-    "src-tauri/src/server/routes/historify/schedules.rs::schedule_create": 63,
     "src-tauri/src/server/routes/openscript_runner.rs::table": 88,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,

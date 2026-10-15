@@ -57,51 +57,60 @@ fn lookback(body: &JsonBody, default: Option<i64>) -> Result<Option<i64>, EarlyR
 
 /// POST /historify/api/schedules
 pub async fn schedule_create(State(ctx): Ctx, body: JsonBody) -> Response {
+    let add = match schedule_to_add(&body) {
+        Ok(a) => a,
+        Err(r) => return *r,
+    };
+    let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    match ctx.historify.scheduler.add(&id, add).await {
+        Ok(m) => json_response(
+            StatusCode::CREATED,
+            json!({"status": "success", "message": m, "schedule_id": id}),
+        ),
+        Err(m) => error(StatusCode::BAD_REQUEST, m),
+    }
+}
+
+/// The schedule a create request describes, checked field by field in the
+/// web's order, or the answer for the first field that is wrong.
+fn schedule_to_add(body: &JsonBody) -> Result<AddSchedule, EarlyReply> {
+    let bad = |m: &str| -> EarlyReply { Box::new(error(StatusCode::BAD_REQUEST, m)) };
     let name = body.str("name").unwrap_or_default();
     if name.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "Schedule name is required");
+        return Err(bad("Schedule name is required"));
     }
     let schedule_type = body.str("schedule_type").unwrap_or_default();
     if schedule_type != "interval" && schedule_type != "daily" {
-        return error(
-            StatusCode::BAD_REQUEST,
+        return Err(bad(
             "Invalid schedule type. Must be \"interval\" or \"daily\"",
-        );
+        ));
     }
     let data_interval = body.str("data_interval").unwrap_or_else(|| "D".into());
     if data_interval != "1m" && data_interval != "D" {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid data interval. Must be \"1m\" or \"D\"",
-        );
+        return Err(bad("Invalid data interval. Must be \"1m\" or \"D\""));
     }
-    let interval_value = int_field(&body, "interval_value");
+    let interval_value = int_field(body, "interval_value");
     let interval_unit = body
         .str("interval_unit")
         .unwrap_or_else(|| "minutes".into());
     let time_of_day = body.str("time_of_day").unwrap_or_else(|| "09:15".into());
     if schedule_type == "interval" {
         if !matches!(interval_value, Ok(Some(v)) if v >= 1) {
-            return error(StatusCode::BAD_REQUEST, "Invalid interval value");
+            return Err(bad("Invalid interval value"));
         }
         if interval_unit != "minutes" && interval_unit != "hours" {
-            return error(
-                StatusCode::BAD_REQUEST,
+            return Err(bad(
                 "Invalid interval unit. Must be \"minutes\" or \"hours\"",
-            );
+            ));
         }
     } else if parse_hhmm(&time_of_day).is_none() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid time format. Use HH:MM (e.g., 09:15)",
-        );
+        return Err(bad("Invalid time format. Use HH:MM (e.g., 09:15)"));
     }
-    let lookback_days = match lookback(&body, Some(1)) {
+    let lookback_days = match lookback(body, Some(1)) {
         Ok(v) => v.unwrap_or(1),
-        Err(r) => return *r,
+        Err(r) => return Err(r),
     };
-    let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    let add = AddSchedule {
+    Ok(AddSchedule {
         name,
         schedule_type,
         data_interval,
@@ -110,14 +119,7 @@ pub async fn schedule_create(State(ctx): Ctx, body: JsonBody) -> Response {
         time_of_day: Some(time_of_day),
         lookback_days,
         description: body.str("description"),
-    };
-    match ctx.historify.scheduler.add(&id, add).await {
-        Ok(m) => json_response(
-            StatusCode::CREATED,
-            json!({"status": "success", "message": m, "schedule_id": id}),
-        ),
-        Err(m) => error(StatusCode::BAD_REQUEST, m),
-    }
+    })
 }
 
 /// GET /historify/api/schedules/{id}
