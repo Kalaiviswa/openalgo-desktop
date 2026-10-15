@@ -467,6 +467,12 @@ impl AuthService {
         }
     }
 
+    /// The id of the account `username`, if there is one.
+    pub fn user_id(state: &AppState, username: &str) -> Result<Option<i64>> {
+        let conn = state.sqlite.conn()?;
+        Ok(user::find_by_username(&conn, username)?.map(|r| r.id))
+    }
+
     /// Save the two-factor choices of the account `user_id`.
     pub fn set_two_factor(state: &AppState, user_id: i64, f: user::TwoFactorFlags) -> Result<()> {
         let conn = state.sqlite.conn()?;

@@ -1,10 +1,11 @@
 //! Web `blueprints/whatsapp.py`: the `/whatsapp` page's JSON routes. All
 //! need the signed-in user; the work is in `messaging::whatsapp`.
 
-use crate::messaging::whatsapp::{db, normalize_phone, phone_to_jid, WhatsAppService};
+use crate::messaging::whatsapp::{db, normalize_phone, page, phone_to_jid, WhatsAppService};
 use crate::server::envelope::{error, json_response};
 use crate::server::middleware::User;
 use crate::server::routes::webui::{ok, JsonBody};
+use crate::services::auth_service::AuthService;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -61,10 +62,7 @@ pub async fn update_config(State(ctx): Ctx, _u: User, body: JsonBody) -> Respons
             updates.insert(k.into(), v.clone());
         }
     }
-    let good = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::update_config(&c, &updates, ctx.now()))
+    let good = page::update_config(&ctx, &updates)
         .map_err(|e| tracing::error!("Saving the WhatsApp settings failed: {}", e))
         .is_ok();
     ok(json!({
@@ -76,13 +74,7 @@ pub async fn update_config(State(ctx): Ctx, _u: User, body: JsonBody) -> Respons
 /// POST /whatsapp/pair
 pub async fn pair(State(ctx): Ctx, User(u): User, body: JsonBody) -> Response {
     let phone = normalize_phone(body.0.get("phone").unwrap_or(&Value::Null));
-    let owner_id = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| crate::db::sqlite::user::find_by_username(&c, &u.username))
-        .ok()
-        .flatten()
-        .map(|r| r.id);
+    let owner_id = AuthService::user_id(&ctx, &u.username).ok().flatten();
     let svc = &ctx.messaging.whatsapp;
     let (good, msg) = svc
         .start_pair(
@@ -157,11 +149,7 @@ pub async fn bot_status(State(ctx): Ctx, _u: User) -> Response {
 
 /// GET /whatsapp/users
 pub async fn users(State(ctx): Ctx, _u: User) -> Response {
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::all_users(&c, None, None))
-    {
+    match page::users(&ctx) {
         Ok(list) => {
             let n = list.len();
             ok(json!({"status": "success",
@@ -177,11 +165,7 @@ pub async fn users(State(ctx): Ctx, _u: User) -> Response {
 
 /// POST /whatsapp/user/{jid}/unlink
 pub async fn unlink_user(State(ctx): Ctx, _u: User, Path(jid): Path<String>) -> Response {
-    let good = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::delete_user(&c, &jid, ctx.now()))
-        .unwrap_or(false);
+    let good = page::unlink_user(&ctx, &jid).unwrap_or(false);
     json_response(
         if good {
             StatusCode::OK
@@ -238,22 +222,14 @@ pub async fn test_message(State(ctx): Ctx, User(u): User) -> Response {
     if !ctx.messaging.whatsapp.is_ready(&ctx) {
         return not_ready(&ctx);
     }
-    let conn = ctx.sqlite.conn();
-    let mine = conn
-        .as_ref()
-        .ok()
-        .and_then(|c| db::get_user_by_username(c, &u.username).ok().flatten());
+    let mine = page::user_by_username(&ctx, &u.username).ok().flatten();
     let (jid, text) = match mine {
         Some(m) => (
             m.whatsapp_jid,
             "*Test from OpenAlgo*\nYour WhatsApp integration is working.".to_string(),
         ),
         None => {
-            let all = conn
-                .as_ref()
-                .ok()
-                .and_then(|c| db::all_users(c, None, None).ok())
-                .unwrap_or_default();
+            let all = page::users(&ctx).unwrap_or_default();
             let Some(first) = all.into_iter().next() else {
                 return error(
                     StatusCode::NOT_FOUND,
@@ -269,7 +245,6 @@ pub async fn test_message(State(ctx): Ctx, User(u): User) -> Response {
             )
         }
     };
-    drop(conn);
     queue_send(&ctx, jid.clone(), text);
     ok(json!({"status": "success", "message": format!("Test queued to {}", jid)}))
 }
@@ -311,13 +286,9 @@ pub async fn stats(
         .and_then(|d| d.trim().parse::<i64>().ok())
         .map(|d| d.clamp(1, 365))
         .unwrap_or(7);
-    let data = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::command_stats(&c, days, ctx.now()))
-        .unwrap_or_else(|e| {
-            tracing::error!("Reading WhatsApp stats failed: {}", e);
-            json!({"total_commands": 0, "by_command": {}, "days": days})
-        });
+    let data = page::command_stats(&ctx, days).unwrap_or_else(|e| {
+        tracing::error!("Reading WhatsApp stats failed: {}", e);
+        json!({"total_commands": 0, "by_command": {}, "days": days})
+    });
     ok(json!({"status": "success", "data": data}))
 }

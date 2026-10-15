@@ -19,6 +19,7 @@
 pub mod commands;
 pub mod db;
 pub mod http;
+pub mod page;
 pub mod store;
 
 use crate::events::OrderMeta;
