@@ -5,7 +5,7 @@
 use super::inbox::Message;
 use super::orders::{Planned, Target};
 use super::{orders, store};
-use super::{Refusal, RunEntry, Runner, MAX_LOG_LINES};
+use super::{Refusal, RunEntry, RunInfo, Runner, MAX_LOG_LINES};
 use chrono::Duration as ChronoDuration;
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
@@ -147,62 +147,16 @@ impl Runner {
     ) -> Option<Value> {
         let entry = self.entry_for(run_id, token)?;
         let info = entry.info.clone();
-        let now_ms = || self.clock.now().timestamp_millis();
-        let reject = |id: i64, text: &str| {
-            entry.inbox.push(Message::Frame {
-                intent_id: id,
-                frame: orders::frame(id, "rejected", 0, None, None, Some(text), now_ms()),
-            });
-        };
         let _held = entry.order_lock.lock().await;
-        if entry.halted.load(Ordering::SeqCst) {
-            for i in intents {
-                reject(
-                    i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
-                    "this run is stopping, so nothing further is sent",
-                );
-            }
-            return Some(json!({"status": "success", "sent": 0, "halted": true}));
-        }
-        // An earlier order's answer not yet saved: its fill cannot be
-        // counted, so a new order would be sized and sent blind.
-        self.flush_unsaved(&entry);
-        if !entry.unsaved.lock().is_empty() {
-            for i in intents {
-                reject(
-                    i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
-                    "an earlier order of this run could not be recorded yet, so nothing new is sent",
-                );
-            }
-            return Some(json!({"status": "success", "sent": 0, "unsaved": true}));
-        }
-        // An order the destination did not confirm may be there: a new
-        // order would be sized without it, so nothing is sent until the
-        // order book settles it (LOG-08). A ledger that cannot be read is
-        // treated the same way.
-        let own = match self.read_own(&info) {
-            Ok(rows) => rows,
-            Err(_) => {
-                for i in intents {
-                    reject(
-                        i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
-                        "this run's own orders could not be read, so nothing new is sent",
-                    );
-                }
-                return Some(json!({"status": "success", "sent": 0, "unconfirmed": true}));
+        let own = match self.bar_gate(&entry) {
+            Ok(own) => own,
+            Err((text, flag)) => {
+                self.reject_intents(&entry, intents, text);
+                let mut reply = json!({"status": "success", "sent": 0});
+                reply[flag] = json!(true);
+                return Some(reply);
             }
         };
-        if own.iter().any(|o| {
-            o.orderid.is_none() && (o.status == store::UNCONFIRMED || o.status == "placed")
-        }) {
-            for i in intents {
-                reject(
-                    i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
-                    "an earlier order of this run was not confirmed, so nothing new is sent until the order book settles it",
-                );
-            }
-            return Some(json!({"status": "success", "sent": 0, "unconfirmed": true}));
-        }
         let services = self.services();
         let lot = services.lot_size(&info.symbol, &info.exchange);
         let planned: Vec<Planned> = intents.iter().map(|i| orders::plan(i, lot)).collect();
@@ -210,12 +164,11 @@ impl Runner {
             .iter()
             .find(|p| matches!(p, Planned::Unroutable { .. }))
         {
-            for i in intents {
-                reject(
-                    i.get("intentId").and_then(Value::as_i64).unwrap_or(-1),
-                    "this runner cannot send that order as one piece",
-                );
-            }
+            self.reject_intents(
+                &entry,
+                intents,
+                "this runner cannot send that order as one piece",
+            );
             let why = format!(
                 "{} asked for an order this runner cannot send as one piece ({}). Nothing was sent for this bar and the run has stopped.",
                 info.script, kind
@@ -250,7 +203,7 @@ impl Runner {
                                     placement.action, placement.quantity, info.symbol, why
                                 )],
                             );
-                            reject(placement.intent_id, why);
+                            self.reject_intent(&entry, placement.intent_id, why);
                             continue;
                         }
                     }
@@ -261,52 +214,118 @@ impl Runner {
                         Ok((_, r)) => sent += usize::from(r.ok),
                         Err(e) => {
                             tracing::error!("Could not record an OpenScript order: {}", e);
-                            reject(placement.intent_id, "the order could not be recorded");
-                        }
-                    }
-                }
-                Planned::Cancel { tag, .. } => {
-                    let rows = match self.read_own(&info) {
-                        Ok(rows) => rows,
-                        Err(why) => {
-                            self.write_log(
-                                &info,
-                                &[format!(
-                                    "The orders tagged {} were not cancelled: {}",
-                                    tag, why
-                                )],
-                            );
-                            Vec::new()
-                        }
-                    };
-                    for o in rows
-                        .into_iter()
-                        .filter(|o| o.tag == tag && !store::TERMINAL.contains(&o.status.as_str()))
-                    {
-                        if let Some(oid) = o.orderid.as_deref() {
-                            let r = services.cancel(info.mode, oid).await;
-                            self.write_log(
-                                &info,
-                                &[if r.ok {
-                                    format!("Asked for order {} to be cancelled.", oid)
-                                } else {
-                                    format!(
-                                        "Order {} could not be cancelled: {}",
-                                        oid,
-                                        r.error.unwrap_or_default()
-                                    )
-                                }],
+                            self.reject_intent(
+                                &entry,
+                                placement.intent_id,
+                                "the order could not be recorded",
                             );
                         }
                     }
                 }
+                Planned::Cancel { tag, .. } => self.cancel_tagged(&info, &tag).await,
                 Planned::Refuse { intent_id, reason } => {
                     self.write_log(&info, &[format!("An order was not sent: {}", reason)]);
-                    reject(intent_id, &reason);
+                    self.reject_intent(&entry, intent_id, &reason);
                 }
                 Planned::Unroutable { .. } => {}
             }
         }
         Some(json!({"status": "success", "sent": sent}))
+    }
+
+    /// Whether a bar's intents may be sent at all, under the run's order
+    /// lock: its own orders when they may, else the text each intent is
+    /// rejected with and the reply's flag.
+    fn bar_gate(
+        &self,
+        entry: &RunEntry,
+    ) -> Result<Vec<store::OrderRow>, (&'static str, &'static str)> {
+        if entry.halted.load(Ordering::SeqCst) {
+            return Err(("this run is stopping, so nothing further is sent", "halted"));
+        }
+        // An earlier order's answer not yet saved: its fill cannot be
+        // counted, so a new order would be sized and sent blind.
+        self.flush_unsaved(entry);
+        if !entry.unsaved.lock().is_empty() {
+            return Err((
+                "an earlier order of this run could not be recorded yet, so nothing new is sent",
+                "unsaved",
+            ));
+        }
+        // An order the destination did not confirm may be there: a new
+        // order would be sized without it, so nothing is sent until the
+        // order book settles it (LOG-08). A ledger that cannot be read is
+        // treated the same way.
+        let Ok(own) = self.read_own(&entry.info) else {
+            return Err((
+                "this run's own orders could not be read, so nothing new is sent",
+                "unconfirmed",
+            ));
+        };
+        if own.iter().any(|o| {
+            o.orderid.is_none() && (o.status == store::UNCONFIRMED || o.status == "placed")
+        }) {
+            return Err((
+                "an earlier order of this run was not confirmed, so nothing new is sent until the order book settles it",
+                "unconfirmed",
+            ));
+        }
+        Ok(own)
+    }
+
+    /// Answer one intent with a rejected frame.
+    fn reject_intent(&self, entry: &RunEntry, id: i64, text: &str) {
+        let now_ms = self.clock.now().timestamp_millis();
+        entry.inbox.push(Message::Frame {
+            intent_id: id,
+            frame: orders::frame(id, "rejected", 0, None, None, Some(text), now_ms),
+        });
+    }
+
+    /// Answer every intent of a bar with a rejected frame.
+    fn reject_intents(&self, entry: &RunEntry, intents: &[Value], text: &str) {
+        for i in intents {
+            let id = i.get("intentId").and_then(Value::as_i64).unwrap_or(-1);
+            self.reject_intent(entry, id, text);
+        }
+    }
+
+    /// Ask for every working order of this run tagged `tag` to be
+    /// cancelled, saying in the run's log what came of each.
+    async fn cancel_tagged(&self, info: &RunInfo, tag: &str) {
+        let rows = match self.read_own(info) {
+            Ok(rows) => rows,
+            Err(why) => {
+                self.write_log(
+                    info,
+                    &[format!(
+                        "The orders tagged {} were not cancelled: {}",
+                        tag, why
+                    )],
+                );
+                Vec::new()
+            }
+        };
+        let services = self.services();
+        for o in rows
+            .into_iter()
+            .filter(|o| o.tag == tag && !store::TERMINAL.contains(&o.status.as_str()))
+        {
+            if let Some(oid) = o.orderid.as_deref() {
+                let r = services.cancel(info.mode, oid).await;
+                self.write_log(
+                    info,
+                    &[if r.ok {
+                        format!("Asked for order {} to be cancelled.", oid)
+                    } else {
+                        format!(
+                            "Order {} could not be cancelled: {}",
+                            oid,
+                            r.error.unwrap_or_default()
+                        )
+                    }],
+                );
+            }
+        }
     }
 }
