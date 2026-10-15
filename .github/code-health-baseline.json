@@ -72,7 +72,6 @@
     "src-tauri/src/brokers/kotak/streaming.rs::decode_packet": 134,
     "src-tauri/src/brokers/kotak/streaming.rs::on_packet": 130,
     "src-tauri/src/brokers/motilal/data.rs::multiquote_batch": 125,
-    "src-tauri/src/brokers/nubra/streaming.rs::parse_binary": 110,
     "src-tauri/src/brokers/samco/data.rs::get_history": 104,
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,

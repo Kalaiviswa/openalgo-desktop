@@ -262,98 +262,9 @@ impl NubraFeed {
         };
         let mut out = Vec::new();
         match frame {
-            MarketFrame::Index(m) => {
-                for x in m.indexes.iter().chain(m.instruments.iter()) {
-                    let Some(key) = self.by_name.get(&feed_name(&x.indexname)).cloned() else {
-                        continue;
-                    };
-                    let Some(inst) = self.insts.get_mut(&key) else {
-                        continue;
-                    };
-                    let st = &mut inst.state;
-                    st.has_index = true;
-                    st.ltp = x.index_value as f64 / 100.0;
-                    st.high = x.high_index_value as f64 / 100.0;
-                    st.low = x.low_index_value as f64 / 100.0;
-                    st.volume = x.volume;
-                    st.prev_close = x.prev_close as f64 / 100.0;
-                    st.change_percent = f64::from(x.changepercent);
-                    if x.volume_oi != 0 {
-                        st.oi = x.volume_oi;
-                    }
-                    if st.ltp > 0.0 {
-                        out.push(FeedEvent::Tick(Self::tick(inst)));
-                    }
-                }
-            }
-            MarketFrame::Bucket(m) => {
-                for x in m.indexes.iter().chain(m.instruments.iter()) {
-                    let Some(key) = self.by_name.get(&feed_name(&x.indexname)).cloned() else {
-                        continue;
-                    };
-                    let Some(inst) = self.insts.get_mut(&key) else {
-                        continue;
-                    };
-                    let st = &mut inst.state;
-                    if x.open != 0 {
-                        st.open = x.open as f64 / 100.0;
-                    }
-                    if !st.has_index {
-                        // The candle is the only source: refresh everything.
-                        if x.close != 0 {
-                            st.ltp = x.close as f64 / 100.0;
-                        }
-                        if x.high != 0 {
-                            st.high = x.high as f64 / 100.0;
-                        }
-                        if x.low != 0 {
-                            st.low = x.low as f64 / 100.0;
-                        }
-                        st.volume = if x.cumulative_volume != 0 {
-                            x.cumulative_volume
-                        } else {
-                            x.bucket_volume
-                        };
-                        if st.ltp > 0.0 {
-                            out.push(FeedEvent::Tick(Self::tick(inst)));
-                        }
-                    }
-                }
-            }
-            MarketFrame::Orderbook(m) => {
-                for x in &m.instruments {
-                    let rid = if x.ref_id != 0 {
-                        x.ref_id
-                    } else {
-                        i64::from(x.inst_id)
-                    };
-                    let Some(key) = self.by_ref.get(&rid).cloned() else {
-                        continue;
-                    };
-                    let Some(inst) = self.insts.get_mut(&key) else {
-                        continue;
-                    };
-                    let st = &mut inst.state;
-                    if x.ltp != 0 {
-                        st.ltp = x.ltp as f64 / 100.0;
-                    }
-                    if x.ltq != 0 {
-                        st.ltq = x.ltq;
-                    }
-                    if x.volume != 0 {
-                        st.volume = x.volume;
-                    }
-                    st.bids = levels(&x.bids);
-                    st.asks = levels(&x.asks);
-                    if st.ltp <= 0.0 {
-                        continue;
-                    }
-                    out.push(FeedEvent::Tick(Self::tick(inst)));
-                    if inst.sub.mode == FeedMode::Depth {
-                        out.push(FeedEvent::Depth(Self::depth(inst)));
-                    }
-                }
-            }
+            MarketFrame::Index(m) => self.on_index(&m, &mut out),
+            MarketFrame::Bucket(m) => self.on_bucket(&m, &mut out),
+            MarketFrame::Orderbook(m) => self.on_orderbook(&m, &mut out),
             MarketFrame::Greeks(m) => {
                 for x in &m.instruments {
                     if let Some(key) = self.by_ref.get(&x.ref_id).cloned() {
@@ -365,6 +276,108 @@ impl NubraFeed {
             }
         }
         out
+    }
+
+    /// Index values: the instrument state, and a tick when it has a price.
+    fn on_index(&mut self, m: &proto::BatchWebSocketIndexMessage, out: &mut Vec<FeedEvent>) {
+        for x in m.indexes.iter().chain(m.instruments.iter()) {
+            let Some(key) = self.by_name.get(&feed_name(&x.indexname)).cloned() else {
+                continue;
+            };
+            let Some(inst) = self.insts.get_mut(&key) else {
+                continue;
+            };
+            let st = &mut inst.state;
+            st.has_index = true;
+            st.ltp = x.index_value as f64 / 100.0;
+            st.high = x.high_index_value as f64 / 100.0;
+            st.low = x.low_index_value as f64 / 100.0;
+            st.volume = x.volume;
+            st.prev_close = x.prev_close as f64 / 100.0;
+            st.change_percent = f64::from(x.changepercent);
+            if x.volume_oi != 0 {
+                st.oi = x.volume_oi;
+            }
+            if st.ltp > 0.0 {
+                out.push(FeedEvent::Tick(Self::tick(inst)));
+            }
+        }
+    }
+
+    /// Index candles: the open always; the rest only where no index value arrives.
+    fn on_bucket(&mut self, m: &proto::BatchWebSocketIndexBucketMessage, out: &mut Vec<FeedEvent>) {
+        for x in m.indexes.iter().chain(m.instruments.iter()) {
+            let Some(key) = self.by_name.get(&feed_name(&x.indexname)).cloned() else {
+                continue;
+            };
+            let Some(inst) = self.insts.get_mut(&key) else {
+                continue;
+            };
+            let st = &mut inst.state;
+            if x.open != 0 {
+                st.open = x.open as f64 / 100.0;
+            }
+            if !st.has_index {
+                // The candle is the only source: refresh everything.
+                if x.close != 0 {
+                    st.ltp = x.close as f64 / 100.0;
+                }
+                if x.high != 0 {
+                    st.high = x.high as f64 / 100.0;
+                }
+                if x.low != 0 {
+                    st.low = x.low as f64 / 100.0;
+                }
+                st.volume = if x.cumulative_volume != 0 {
+                    x.cumulative_volume
+                } else {
+                    x.bucket_volume
+                };
+                if st.ltp > 0.0 {
+                    out.push(FeedEvent::Tick(Self::tick(inst)));
+                }
+            }
+        }
+    }
+
+    /// Order books: price, quantity, volume and levels, a tick, and the depth in depth mode.
+    fn on_orderbook(
+        &mut self,
+        m: &proto::BatchWebSocketOrderbookMessage,
+        out: &mut Vec<FeedEvent>,
+    ) {
+        for x in &m.instruments {
+            let rid = if x.ref_id != 0 {
+                x.ref_id
+            } else {
+                i64::from(x.inst_id)
+            };
+            let Some(key) = self.by_ref.get(&rid).cloned() else {
+                continue;
+            };
+            let Some(inst) = self.insts.get_mut(&key) else {
+                continue;
+            };
+            let st = &mut inst.state;
+            if x.ltp != 0 {
+                st.ltp = x.ltp as f64 / 100.0;
+            }
+            if x.ltq != 0 {
+                st.ltq = x.ltq;
+            }
+            if x.volume != 0 {
+                st.volume = x.volume;
+            }
+            st.bids = levels(&x.bids);
+            st.asks = levels(&x.asks);
+            if st.ltp <= 0.0 {
+                continue;
+            }
+            out.push(FeedEvent::Tick(Self::tick(inst)));
+            if inst.sub.mode == FeedMode::Depth {
+                out.push(FeedEvent::Depth(Self::depth(inst)));
+            }
+        }
     }
 }
 
