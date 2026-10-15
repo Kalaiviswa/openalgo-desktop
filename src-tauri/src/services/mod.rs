@@ -25,6 +25,7 @@
 
 pub mod account_service;
 pub mod action_center_service;
+pub mod alert_log_service;
 pub mod analyzer_log_service;
 pub mod analyzer_service;
 pub mod apikey_service;
@@ -70,6 +71,7 @@ pub mod tools_service;
 pub mod traffic_service;
 pub mod ui_order_service;
 pub mod update;
+pub mod watchlist_service;
 
 pub use analyzer_service::{AnalyzerService, AnalyzerStatus};
 pub use core::Reply;

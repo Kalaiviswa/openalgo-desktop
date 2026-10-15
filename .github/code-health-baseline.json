@@ -36,7 +36,6 @@
     "src-tauri/src/server/routes/openscript_runner.rs": 7,
     "src-tauri/src/server/routes/strategy_portfolio.rs": 5,
     "src-tauri/src/server/routes/telegram.rs": 10,
-    "src-tauri/src/server/routes/watchlist.rs": 11,
     "src-tauri/src/server/routes/whatsapp.rs": 6
   },
   "lint_allows": {
@@ -70,7 +69,6 @@
     "src-tauri/src/server/routes/strategy_module.rs::clippy::result_large_err": 3,
     "src-tauri/src/server/routes/strategy_portfolio.rs::clippy::result_large_err": 1,
     "src-tauri/src/server/routes/telegram.rs::clippy::result_large_err": 1,
-    "src-tauri/src/server/routes/watchlist.rs::clippy::result_large_err": 1,
     "src-tauri/src/services/options_service.rs::clippy::too_many_arguments": 2,
     "src-tauri/src/strategy/engine.rs::clippy::large_enum_variant": 1,
     "src-tauri/src/strategy/recovery.rs::clippy::too_many_arguments": 1,
