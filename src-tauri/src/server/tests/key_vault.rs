@@ -912,6 +912,29 @@ async fn a_new_password_without_the_old_one_drops_only_encrypted_values() {
     close(ctx).await;
 }
 
+/// KEY-01: quitting wipes the keys as a logout does: the shutdown path
+/// locks them, so nothing decrypts with what a quitting app held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quitting_wipes_the_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = open_with(dir.path(), Arc::new(CountingKeyStore::default()));
+    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    let (s, v, _) = sign_in(&ctx, PASSWORD).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert!(ctx.security.is_unlocked());
+    // What quitting runs (`close` without its checks of what is left).
+    ctx.shutdown().await;
+    assert!(
+        !ctx.security.is_unlocked(),
+        "quitting left the keys in memory"
+    );
+    assert!(matches!(
+        ctx.security.api_key_lookup("k"),
+        Err(crate::error::AppError::Locked)
+    ));
+    ctx.ui.set(None);
+}
+
 // ----------------------------------------------------------------- caches
 
 /// KEY-01: a logout clears every cache the web's `invalidate_user_cache`

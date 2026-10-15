@@ -296,6 +296,7 @@ mode memo (written under the reader's lock), the monitor's ban list.
 | No system text in answers or the error log; no key prints | `server::tests::key_vault::the_error_log_never_carries_what_the_keychain_said`, `error::tests::key_and_os_errors_never_reach_an_answer`, `security::keystore::tests::a_keychain_read_never_prints_the_key`, `security::window::tests::a_proof_matches_itself_only_and_never_prints` |
 | `vault.json` move | `server::tests::key_vault::a_password_mode_vault_file_moves_into_the_database_once` |
 | Locked before sign-in and after logout | `server::tests::key_vault::locked_before_sign_in_and_after_logout_every_surface_refuses` |
+| Quitting wipes the keys | `server::tests::key_vault::quitting_wipes_the_keys` |
 | Password change: one transaction, fault test | `server::tests::key_vault::a_password_change_writes_hash_and_vault_together` |
 | Forgotten password | `server::tests::key_vault::a_new_password_without_the_old_one_drops_only_encrypted_values` |
 | Caches | `services::apikey_service::tests::*`, `cache::tests::*`, master and facts race tests |
