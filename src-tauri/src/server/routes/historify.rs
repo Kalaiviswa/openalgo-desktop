@@ -856,10 +856,7 @@ pub async fn metadata_enrich(State(ctx): Ctx, body: JsonBody) -> Response {
 
 fn store_error(e: crate::error::AppError) -> Response {
     tracing::error!("Reading Historify schedules failed: {}", e);
-    error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        crate::db::duckdb::STORE_UNAVAILABLE,
-    )
+    error(StatusCode::INTERNAL_SERVER_ERROR, svc::STORE_UNAVAILABLE)
 }
 
 /// GET /historify/api/schedules

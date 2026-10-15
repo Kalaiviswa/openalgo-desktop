@@ -6,6 +6,7 @@
 use crate::config::{validate_bind_host, ServerConfigUpdate};
 use crate::server::envelope::error;
 use crate::server::routes::webui::{failed, ok, JsonBody};
+use crate::services::settings_service;
 use crate::state::AppState;
 use axum::{extract::State, http::StatusCode, response::Response};
 use serde_json::{json, Value};
@@ -109,14 +110,10 @@ pub fn port_problem(host: &str, port: u16, own: &[u16]) -> Option<String> {
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn parse_port(body: &JsonBody, k: &str, label: &str) -> Result<u16, Response> {
+fn parse_port(body: &JsonBody, k: &str, label: &str) -> Result<u16, String> {
     match body.int(k) {
         Ok(Some(p)) if (1024..=65535).contains(&p) => Ok(p as u16),
-        _ => Err(error(
-            StatusCode::BAD_REQUEST,
-            format!("Enter {} between 1024 and 65535.", label),
-        )),
+        _ => Err(format!("Enter {} between 1024 and 65535.", label)),
     }
 }
 
@@ -183,24 +180,17 @@ pub fn save_effect(
     }
 }
 
-/// POST /settings/api/server (json: http_host, http_port, ws_host, ws_port,
-/// lan_enabled). The market data feed moves at once; the app's listener
-/// after a restart. The answer lists which is which (`applied`, `pending`).
-pub async fn save_server(State(ctx): Ctx, body: JsonBody) -> Response {
-    let cfg = ctx.server_config();
-    let http_port = match parse_port(&body, "http_port", "an app port") {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
-    let ws_port = match parse_port(&body, "ws_port", "a market data port") {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+/// The server settings a save asks for, checked against each other and
+/// against the ports in use; `Err` is the trader's message.
+fn server_update(
+    ctx: &AppState,
+    cfg: &crate::config::ServerConfig,
+    body: &JsonBody,
+) -> Result<ServerConfigUpdate, String> {
+    let http_port = parse_port(body, "http_port", "an app port")?;
+    let ws_port = parse_port(body, "ws_port", "a market data port")?;
     if http_port == ws_port {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "The app port and the market data port must be different.",
-        );
+        return Err("The app port and the market data port must be different.".into());
     }
     let lan = body.bool("lan_enabled");
     let http_host = body
@@ -211,22 +201,16 @@ pub async fn save_server(State(ctx): Ctx, body: JsonBody) -> Response {
         .unwrap_or_else(|| http_host.clone());
     for h in [&http_host, &ws_host] {
         if validate_bind_host(h).is_err() {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "Enter an IP address such as 127.0.0.1 for this computer only, or 0.0.0.0 for every network.",
-            );
+            return Err("Enter an IP address such as 127.0.0.1 for this computer only, or 0.0.0.0 for every network.".into());
         }
     }
     if http_host != ws_host {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "The market data address must be the same as the app address.",
-        );
+        return Err("The market data address must be the same as the app address.".into());
     }
     if !lan && !is_loopback_host(&http_host) {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Turn on access from other devices to listen on an address other than 127.0.0.1.",
+        return Err(
+            "Turn on access from other devices to listen on an address other than 127.0.0.1."
+                .into(),
         );
     }
     let bind_host = if lan && is_loopback_host(&http_host) {
@@ -237,20 +221,27 @@ pub async fn save_server(State(ctx): Ctx, body: JsonBody) -> Response {
     let own = [ctx.listening_port(), cfg.http_port, cfg.ws_port];
     for p in [http_port, ws_port] {
         if let Some(msg) = port_problem(&bind_host, p, &own) {
-            return error(StatusCode::BAD_REQUEST, msg);
+            return Err(msg);
         }
     }
-    let update = ServerConfigUpdate {
+    Ok(ServerConfigUpdate {
         http_port: Some(http_port),
         ws_port: Some(ws_port),
         bind_host: Some(bind_host),
         ..Default::default()
+    })
+}
+
+/// POST /settings/api/server (json: http_host, http_port, ws_host, ws_port,
+/// lan_enabled). The market data feed moves at once; the app's listener
+/// after a restart. The answer lists which is which (`applied`, `pending`).
+pub async fn save_server(State(ctx): Ctx, body: JsonBody) -> Response {
+    let cfg = ctx.server_config();
+    let update = match server_update(&ctx, &cfg, &body) {
+        Ok(u) => u,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
-    let res = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| crate::config::save(&c, &update));
-    match res {
+    match settings_service::save_server(&ctx, &update) {
         Ok(()) => {
             let _ = ctx.reload_config();
             let after = ctx.server_config();

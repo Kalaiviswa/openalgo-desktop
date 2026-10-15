@@ -136,6 +136,16 @@ pub fn should_download_at(
     }
 }
 
+/// The broker's master contract status in the web's shape
+/// (`/api/master-contract/status`).
+pub fn status(ctx: &AppState, broker: &str) -> Result<Value> {
+    let row = {
+        let conn = ctx.sqlite.conn()?;
+        mcs::get(&conn, broker, ctx.now())?
+    };
+    Ok(mcs::status_json(row.as_ref(), broker))
+}
+
 /// The smart-download decision for `broker` now.
 pub fn should_download(ctx: &AppState, broker: &str) -> Result<(bool, String)> {
     let conn = ctx.sqlite.conn()?;

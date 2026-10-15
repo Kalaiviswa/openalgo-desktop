@@ -1,9 +1,9 @@
 //! Web `blueprints/leverage.py`: one leverage value applied to crypto
 //! futures orders (Delta Exchange). 0 means the broker's default.
 
-use crate::db::sqlite::webui;
 use crate::server::envelope::error;
 use crate::server::routes::webui::{failed, ok, JsonBody};
+use crate::services::settings_service;
 use crate::state::AppState;
 use axum::{extract::State, http::StatusCode, response::Response};
 use serde_json::{json, Value};
@@ -13,7 +13,7 @@ type Ctx = State<Arc<AppState>>;
 
 /// GET /leverage/api/current
 pub async fn current(State(ctx): Ctx) -> Response {
-    match ctx.sqlite.conn().and_then(|c| webui::leverage(&c)) {
+    match settings_service::leverage(&ctx) {
         Ok(v) => ok(json!({"status": "success", "leverage": v})),
         Err(e) => failed(
             "Reading leverage",
@@ -46,7 +46,7 @@ pub async fn update(State(ctx): Ctx, body: JsonBody) -> Response {
         return bad("Invalid leverage value");
     }
     let lev = v as i64;
-    match ctx.sqlite.conn().and_then(|c| webui::set_leverage(&c, lev)) {
+    match settings_service::set_leverage(&ctx, lev) {
         Ok(()) => {
             let label = if lev > 0 {
                 format!("{}x", lev)
