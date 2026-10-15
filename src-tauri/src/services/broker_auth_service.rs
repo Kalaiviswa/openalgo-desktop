@@ -40,6 +40,11 @@ use crate::state::{AppState, BrokerSession};
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod daily_boundary;
+mod pending_revoke;
+
+pub use pending_revoke::PendingRevoke;
+
 pub const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 /// In the data folder while an ended broker session's stored row is still
 /// to be revoked, so a restart before the retry does not resume it
@@ -48,56 +53,6 @@ pub const REVOKE_MARKER: &str = "broker-revoke.pending";
 const RESUME_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct BrokerAuthService;
-
-/// What a broker revoke whose database write failed still has to write
-/// (SEC-05b), kept in memory and in the marker file (`REVOKE_MARKER`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingRevoke {
-    /// A logout, a broker switch or any other explicit revoke: every stored
-    /// session. An empty or unreadable marker means this (fail closed; it
-    /// is also what a marker written before scopes existed holds).
-    All,
-    /// The daily boundary (SES-02): the stored sessions authenticated
-    /// before it, except continuous (crypto) ones (SES-01). A session
-    /// signed in after the boundary is never touched by its retry.
-    Before(chrono::DateTime<chrono::Utc>),
-}
-
-impl PendingRevoke {
-    /// Two revokes both still to be written: the wider one.
-    fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Before(a), Self::Before(b)) => Self::Before(a.max(b)),
-            _ => Self::All,
-        }
-    }
-
-    fn write(self, conn: &rusqlite::Connection) -> Result<()> {
-        match self {
-            Self::All => auth::revoke_all(conn).map(|_| ()),
-            Self::Before(boundary) => auth::revoke_before(conn, boundary, |broker| {
-                catalog::session_policy(broker) == catalog::SessionPolicy::Continuous
-            })
-            .map(|_| ()),
-        }
-    }
-
-    /// The marker's contents: empty for `All`, the boundary (RFC 3339) for
-    /// `Before`.
-    fn encode(self) -> String {
-        match self {
-            Self::All => String::new(),
-            Self::Before(boundary) => boundary.to_rfc3339(),
-        }
-    }
-
-    /// Read a marker; anything but a boundary means every session.
-    fn decode(text: &str) -> Self {
-        chrono::DateTime::parse_from_rfc3339(text.trim())
-            .map(|b| Self::Before(b.with_timezone(&chrono::Utc)))
-            .unwrap_or(Self::All)
-    }
-}
 
 /// Where a broker callback came from.
 #[derive(Debug, Clone, Copy)]
@@ -724,6 +679,20 @@ impl BrokerAuthService {
                 return Ok(None);
             }
         }
+        let Some(stored) = Self::resumable_stored_session(state)? else {
+            return Ok(None);
+        };
+        if !Self::broker_accepts(state, &stored).await? {
+            return Ok(None);
+        }
+        Self::install_resumed(state, stored).await
+    }
+
+    /// The latest stored session, if it may still be resumed. One from
+    /// before the daily boundary is revoked instead; a continuous (crypto)
+    /// session has no daily boundary (SES-01), and the broker checks its
+    /// token either way.
+    fn resumable_stored_session(state: &AppState) -> Result<Option<auth::StoredBrokerSession>> {
         let stored = {
             let conn = state.sqlite.conn()?;
             match auth::latest_active(&conn, &state.security) {
@@ -735,8 +704,6 @@ impl BrokerAuthService {
         let Some(stored) = stored else {
             return Ok(None);
         };
-        // A continuous (crypto) session has no daily boundary (SES-01); the
-        // broker still checks the token below either way.
         let cfg = state.server_config();
         if catalog::session_policy(&stored.broker_id) == catalog::SessionPolicy::DailyBoundary
             && !crate::session::boundary::is_fresh(
@@ -750,11 +717,16 @@ impl BrokerAuthService {
             auth::revoke(&conn, &stored.broker_id)?;
             return Ok(None);
         }
+        Ok(Some(stored))
+    }
+
+    /// Whether the broker still accepts the stored token. Like the web, a
+    /// cheap funds call proves it; per-login state the token does not carry
+    /// (Kotak's UCC) comes back from the stored broker credentials first.
+    async fn broker_accepts(state: &AppState, stored: &auth::StoredBrokerSession) -> Result<bool> {
         let Some(broker) = state.brokers.get(&stored.broker_id) else {
-            return Ok(None);
+            return Ok(false);
         };
-        // Per-login state the token does not carry (Kotak's UCC) comes back
-        // from the stored broker credentials.
         let stored_creds = {
             let conn = state.sqlite.conn()?;
             credentials::load(&conn, &state.security, &stored.broker_id)?
@@ -762,7 +734,6 @@ impl BrokerAuthService {
         if let Some(c) = &stored_creds {
             broker.restore_session(&Self::stored_input(c));
         }
-        // Like the web: a cheap funds call proves the token still works.
         match tokio::time::timeout(
             RESUME_CHECK_TIMEOUT,
             broker.get_funds(&crate::brokers::types::AuthToken::new(
@@ -771,16 +742,25 @@ impl BrokerAuthService {
         )
         .await
         {
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => Ok(true),
             Ok(Err(e)) => {
                 tracing::info!("Stored broker session not accepted by broker: {}", e.code());
-                return Ok(None);
+                Ok(false)
             }
             Err(_) => {
                 tracing::info!("Broker did not answer the session check in time");
-                return Ok(None);
+                Ok(false)
             }
         }
+    }
+
+    /// Install the resumed session. A sign-in or a sign-out may have
+    /// finished during the broker's check: under the session lock, the
+    /// stored session comes back only if nothing changed meanwhile.
+    async fn install_resumed(
+        state: &AppState,
+        stored: auth::StoredBrokerSession,
+    ) -> Result<Option<BrokerSession>> {
         let session = BrokerSession {
             broker_id: stored.broker_id,
             auth_token: stored.auth_token,
@@ -789,8 +769,6 @@ impl BrokerAuthService {
             user_name: stored.user_name,
             authenticated_at: stored.authenticated_at,
         };
-        // A sign-in or a sign-out may have finished during the check: the
-        // stored session comes back only if nothing changed meanwhile.
         let _held = Self::session_lock(state).await;
         if let Some(s) = state.get_broker_session() {
             return Ok(Some(s));
@@ -860,62 +838,6 @@ impl BrokerAuthService {
         // update backups (REL-02 security review).
         crate::db::upgrade::purge_backups(&state.data_dir, "Broker session ended");
         written
-    }
-
-    /// The daily boundary (SES-02): end only what was authenticated before
-    /// `boundary`, so a sign-in made after it (before the next 30-second
-    /// poll, or right after a wake from sleep) keeps its session, its
-    /// streaming and its stored row. Continuous (crypto) sessions are not
-    /// ended (SES-01). Runs under the session lock, so no sign-in or resume
-    /// completes meanwhile; the in-memory session is taken only if it is
-    /// from before the boundary, and streaming is torn down only while the
-    /// runtime still runs a session from before it (the freshness check in
-    /// `get_broker_session` may already have dropped the memory copy).
-    ///
-    /// The stored rows from before the boundary are revoked by time. When
-    /// that write fails, the revoke is left pending like a failed sign-out
-    /// (SEC-05b: in memory and on disk across a restart; no resume until it
-    /// is written), recorded as the boundary's (`PendingRevoke::Before`):
-    /// its retry revokes only what this write would have, never a session
-    /// signed in after the boundary or a crypto one. Returns whether a live
-    /// session ended.
-    pub async fn expire_before(
-        state: &AppState,
-        boundary: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        let daily =
-            |broker: &str| catalog::session_policy(broker) == catalog::SessionPolicy::DailyBoundary;
-        let _held = Self::session_lock(state).await;
-        let taken = {
-            let mut live = state.broker_session.write();
-            if live
-                .as_ref()
-                .is_some_and(|s| s.authenticated_at < boundary && daily(&s.broker_id))
-            {
-                live.take()
-            } else {
-                None
-            }
-        };
-        let torn_down = state.runtime.teardown_started_before(state, boundary).await;
-        let ended = taken.is_some() || torn_down;
-        if ended {
-            state.api_keys.clear();
-            state.clear_symbol_cache();
-            state.bus.publish(Event::BrokerSessionEnded {
-                reason: SessionEndReason::DailyExpiry,
-            });
-        }
-        let written = state
-            .sqlite
-            .conn()
-            .and_then(|conn| auth::revoke_before(&conn, boundary, |b| !daily(b)));
-        if let Err(e) = written {
-            let mut pending = state.revoke_pending.lock();
-            Self::mark_pending_locked(state, &mut pending, PendingRevoke::Before(boundary));
-            return Err(e);
-        }
-        Ok(ended)
     }
 
     /// Whether an ended session's stored row is still to be revoked, in
@@ -1010,39 +932,6 @@ impl BrokerAuthService {
             .ok()
             .and_then(|c| auth::has_revoked(&c).ok())
             .unwrap_or(false)
-    }
-}
-
-#[cfg(test)]
-mod pending_revoke_tests {
-    use super::PendingRevoke;
-    use chrono::TimeZone;
-
-    /// The marker's scope: empty (as written before scopes existed) or
-    /// unreadable means every session; a boundary reads back as written;
-    /// two pending revokes merge to the wider.
-    #[test]
-    fn a_marker_reads_back_its_scope_and_merges_to_the_wider() {
-        let b1 = chrono::Utc
-            .with_ymd_and_hms(2026, 10, 4, 21, 30, 0)
-            .unwrap();
-        let b2 = chrono::Utc
-            .with_ymd_and_hms(2026, 10, 5, 21, 30, 0)
-            .unwrap();
-        let (all, before1, before2) = (
-            PendingRevoke::All,
-            PendingRevoke::Before(b1),
-            PendingRevoke::Before(b2),
-        );
-        for unreadable in ["", "\n", "2026-10-0", "garbage"] {
-            assert_eq!(PendingRevoke::decode(unreadable), all, "{:?}", unreadable);
-        }
-        assert_eq!(all.encode(), "");
-        assert_eq!(PendingRevoke::decode(&before1.encode()), before1);
-        assert_eq!(before1.merge(before2), before2);
-        assert_eq!(before2.merge(before1), before2);
-        assert_eq!(before1.merge(all), all);
-        assert_eq!(all.merge(before1), all);
     }
 }
 
