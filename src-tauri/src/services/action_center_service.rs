@@ -73,6 +73,147 @@ fn int_of(v: Option<&Value>) -> i64 {
     }
 }
 
+/// The display fields of one order by its API type (web
+/// `parse_pending_order`).
+fn display_fields(api_type: &str, data: &Value) -> Value {
+    let g = |k: &str, d: &str| get_or(data, k, json!(d));
+    match api_type {
+        "optionsmultiorder" => multi_leg_fields(data),
+        "optionsorder" => json!({
+            "symbol": format!("{} {} {}", py_str(&g("underlying", "")), py_str(&g("offset", "")),
+                py_str(&g("option_type", ""))),
+            "exchange": g("exchange", ""),
+            "action": g("action", ""),
+            "quantity": g("quantity", ""),
+            "price": g("price", "0"),
+            "trigger_price": g("trigger_price", "0"),
+            "price_type": g("pricetype", "MARKET"),
+            "product_type": g("product", ""),
+        }),
+        "placegttorder" => gtt_fields(data),
+        "basketorder" => basket_fields(data),
+        "splitorder" => json!({
+            "symbol": g("symbol", ""),
+            "exchange": g("exchange", ""),
+            "action": g("action", ""),
+            "quantity": format!("{} (split: {})", py_str(&g("quantity", "")), py_str(&g("splitsize", ""))),
+            "price": g("price", "0"),
+            "trigger_price": g("trigger_price", "0"),
+            "price_type": data.get("pricetype").cloned().unwrap_or_else(|| g("price_type", "MARKET")),
+            "product_type": data.get("product").cloned().unwrap_or_else(|| g("product_type", "")),
+        }),
+        "smartorder" => json!({
+            "symbol": g("symbol", ""),
+            "exchange": g("exchange", ""),
+            "action": g("action", ""),
+            "quantity": g("quantity", ""),
+            "price": g("price", "0"),
+            "trigger_price": g("trigger_price", "0"),
+            "price_type": data.get("pricetype").cloned().unwrap_or_else(|| g("price_type", "MARKET")),
+            "product_type": data.get("product").cloned().unwrap_or_else(|| g("product_type", "")),
+        }),
+        _ => json!({
+            "symbol": g("symbol", ""),
+            "exchange": g("exchange", ""),
+            "action": g("action", ""),
+            "quantity": g("quantity", ""),
+            "price": g("price", "0"),
+            "trigger_price": g("trigger_price", "0"),
+            "price_type": data.get("price_type").cloned().unwrap_or_else(|| g("pricetype", "MARKET")),
+            "product_type": data.get("product_type").cloned().unwrap_or_else(|| g("product", "")),
+        }),
+    }
+}
+
+/// An options multi-order: the legs summed, one value where they agree.
+fn multi_leg_fields(data: &Value) -> Value {
+    let g = |k: &str, d: &str| get_or(data, k, json!(d));
+    let legs = data
+        .get("legs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let set = |k: &str, d: &str| {
+        let mut v: Vec<String> = legs
+            .iter()
+            .map(|l| py_str(&get_or(l, k, json!(d))).to_uppercase())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let one_or = |v: Vec<String>, many: &str| {
+        if v.len() == 1 {
+            v[0].clone()
+        } else {
+            many.to_string()
+        }
+    };
+    json!({
+        "symbol": format!("{} ({} legs)", py_str(&g("underlying", "")), legs.len()),
+        "exchange": g("exchange", ""),
+        "action": one_or(set("action", ""), "MULTI"),
+        "quantity": legs.iter().map(|l| int_of(l.get("quantity"))).sum::<i64>(),
+        "price": "Multiple",
+        "trigger_price": "Multiple",
+        "price_type": one_or(set("pricetype", "MARKET"), "Multiple"),
+        "product_type": one_or(set("product", "MIS"), "Multiple"),
+    })
+}
+
+/// A GTT order: an OCO trigger shows both prices.
+fn gtt_fields(data: &Value) -> Value {
+    let g = |k: &str, d: &str| get_or(data, k, json!(d));
+    let trigger = if py_str(&g("trigger_type", "")).to_uppercase() == "OCO" {
+        json!(format!(
+            "{} / {}",
+            py_str(&get_or(data, "triggerprice_sl", json!(0))),
+            py_str(&get_or(data, "triggerprice_tg", json!(0)))
+        ))
+    } else {
+        get_or(data, "trigger_price", json!(0))
+    };
+    json!({
+        "symbol": g("symbol", ""),
+        "exchange": g("exchange", ""),
+        "action": g("action", ""),
+        "quantity": g("quantity", ""),
+        "price": g("price", "0"),
+        "trigger_price": trigger,
+        "price_type": g("pricetype", "LIMIT"),
+        "product_type": g("product", ""),
+    })
+}
+
+/// A basket: the order count and summed quantity, one exchange and action when it has one order.
+fn basket_fields(data: &Value) -> Value {
+    let orders = data
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let first = |k: &str| {
+        if orders.len() > 1 {
+            json!("Multiple")
+        } else {
+            orders
+                .first()
+                .map(|o| get_or(o, k, json!("")))
+                .unwrap_or(json!(""))
+        }
+    };
+    json!({
+        "symbol": format!("Basket ({} orders)", orders.len()),
+        "exchange": first("exchange"),
+        "action": first("action"),
+        "quantity": orders.iter().map(|o| int_of(o.get("quantity"))).sum::<i64>().to_string(),
+        "price": "Multiple",
+        "trigger_price": "0",
+        "price_type": "Multiple",
+        "product_type": "Multiple",
+    })
+}
+
 /// Web `parse_pending_order`: one row for display.
 pub fn parse_pending_order(row: &PendingOrderRow, now: DateTime<Utc>) -> Value {
     let data: Value = match serde_json::from_str::<Value>(&row.order_data) {
@@ -113,131 +254,7 @@ pub fn parse_pending_order(row: &PendingOrderRow, now: DateTime<Utc>) -> Value {
         "strategy": get_or(&data, "strategy", json!("N/A")),
         "raw_order_data": Value::Object(raw),
     });
-    let g = |k: &str, d: &str| get_or(&data, k, json!(d));
-    let extra = match row.api_type.as_str() {
-        "optionsmultiorder" => {
-            let legs = data
-                .get("legs")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let set = |k: &str, d: &str| {
-                let mut v: Vec<String> = legs
-                    .iter()
-                    .map(|l| py_str(&get_or(l, k, json!(d))).to_uppercase())
-                    .collect();
-                v.sort();
-                v.dedup();
-                v
-            };
-            let one_or = |v: Vec<String>, many: &str| {
-                if v.len() == 1 {
-                    v[0].clone()
-                } else {
-                    many.to_string()
-                }
-            };
-            json!({
-                "symbol": format!("{} ({} legs)", py_str(&g("underlying", "")), legs.len()),
-                "exchange": g("exchange", ""),
-                "action": one_or(set("action", ""), "MULTI"),
-                "quantity": legs.iter().map(|l| int_of(l.get("quantity"))).sum::<i64>(),
-                "price": "Multiple",
-                "trigger_price": "Multiple",
-                "price_type": one_or(set("pricetype", "MARKET"), "Multiple"),
-                "product_type": one_or(set("product", "MIS"), "Multiple"),
-            })
-        }
-        "optionsorder" => json!({
-            "symbol": format!("{} {} {}", py_str(&g("underlying", "")), py_str(&g("offset", "")),
-                py_str(&g("option_type", ""))),
-            "exchange": g("exchange", ""),
-            "action": g("action", ""),
-            "quantity": g("quantity", ""),
-            "price": g("price", "0"),
-            "trigger_price": g("trigger_price", "0"),
-            "price_type": g("pricetype", "MARKET"),
-            "product_type": g("product", ""),
-        }),
-        "placegttorder" => {
-            let trigger = if py_str(&g("trigger_type", "")).to_uppercase() == "OCO" {
-                json!(format!(
-                    "{} / {}",
-                    py_str(&get_or(&data, "triggerprice_sl", json!(0))),
-                    py_str(&get_or(&data, "triggerprice_tg", json!(0)))
-                ))
-            } else {
-                get_or(&data, "trigger_price", json!(0))
-            };
-            json!({
-                "symbol": g("symbol", ""),
-                "exchange": g("exchange", ""),
-                "action": g("action", ""),
-                "quantity": g("quantity", ""),
-                "price": g("price", "0"),
-                "trigger_price": trigger,
-                "price_type": g("pricetype", "LIMIT"),
-                "product_type": g("product", ""),
-            })
-        }
-        "basketorder" => {
-            let orders = data
-                .get("orders")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let first = |k: &str| {
-                if orders.len() > 1 {
-                    json!("Multiple")
-                } else {
-                    orders
-                        .first()
-                        .map(|o| get_or(o, k, json!("")))
-                        .unwrap_or(json!(""))
-                }
-            };
-            json!({
-                "symbol": format!("Basket ({} orders)", orders.len()),
-                "exchange": first("exchange"),
-                "action": first("action"),
-                "quantity": orders.iter().map(|o| int_of(o.get("quantity"))).sum::<i64>().to_string(),
-                "price": "Multiple",
-                "trigger_price": "0",
-                "price_type": "Multiple",
-                "product_type": "Multiple",
-            })
-        }
-        "splitorder" => json!({
-            "symbol": g("symbol", ""),
-            "exchange": g("exchange", ""),
-            "action": g("action", ""),
-            "quantity": format!("{} (split: {})", py_str(&g("quantity", "")), py_str(&g("splitsize", ""))),
-            "price": g("price", "0"),
-            "trigger_price": g("trigger_price", "0"),
-            "price_type": data.get("pricetype").cloned().unwrap_or_else(|| g("price_type", "MARKET")),
-            "product_type": data.get("product").cloned().unwrap_or_else(|| g("product_type", "")),
-        }),
-        "smartorder" => json!({
-            "symbol": g("symbol", ""),
-            "exchange": g("exchange", ""),
-            "action": g("action", ""),
-            "quantity": g("quantity", ""),
-            "price": g("price", "0"),
-            "trigger_price": g("trigger_price", "0"),
-            "price_type": data.get("pricetype").cloned().unwrap_or_else(|| g("price_type", "MARKET")),
-            "product_type": data.get("product").cloned().unwrap_or_else(|| g("product_type", "")),
-        }),
-        _ => json!({
-            "symbol": g("symbol", ""),
-            "exchange": g("exchange", ""),
-            "action": g("action", ""),
-            "quantity": g("quantity", ""),
-            "price": g("price", "0"),
-            "trigger_price": g("trigger_price", "0"),
-            "price_type": data.get("price_type").cloned().unwrap_or_else(|| g("pricetype", "MARKET")),
-            "product_type": data.get("product_type").cloned().unwrap_or_else(|| g("product", "")),
-        }),
-    };
+    let extra = display_fields(&row.api_type, &data);
     if let (Some(o), Value::Object(e)) = (out.as_object_mut(), extra) {
         o.extend(e);
     }
