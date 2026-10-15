@@ -317,6 +317,67 @@ fn rebuild(c: &Connection, table: &str, create_new: &str, insert: &str) -> Resul
     Ok(())
 }
 
+/// The desktop v1 tables converted to the web shape, in order: the table,
+/// a column only its old shape has, the new table and the copy.
+const DESKTOP_V1_TABLES: [(&str, &str, &str, &str); 4] = [
+    (
+        "watchlist",
+        "list_name",
+        "CREATE TABLE {T} (
+                id INTEGER PRIMARY KEY, symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
+                display_name VARCHAR, added_at TIMESTAMP DEFAULT current_timestamp,
+                UNIQUE (symbol, exchange))",
+        "INSERT INTO {T} (id, symbol, exchange, display_name, added_at)
+             SELECT min(id), upper(symbol), upper(exchange),
+                    first(name ORDER BY id), min(created_at)
+             FROM watchlist GROUP BY upper(symbol), upper(exchange)",
+    ),
+    (
+        "job_items",
+        "timeframe",
+        "CREATE TABLE {T} (
+                id INTEGER PRIMARY KEY, job_id VARCHAR NOT NULL, symbol VARCHAR NOT NULL,
+                exchange VARCHAR NOT NULL, status VARCHAR NOT NULL,
+                records_downloaded INTEGER DEFAULT 0, error_message VARCHAR,
+                started_at TIMESTAMP, completed_at TIMESTAMP)",
+        "INSERT INTO {T} (id, job_id, symbol, exchange, status, error_message)
+             SELECT id, CAST(job_id AS VARCHAR), upper(symbol), upper(exchange),
+                    CASE WHEN status IN ('completed', 'done') THEN 'success'
+                         WHEN status = 'failed' THEN 'error' ELSE status END,
+                    error
+             FROM job_items",
+    ),
+    (
+        "download_jobs",
+        "total_items",
+        "CREATE TABLE {T} (
+                id VARCHAR PRIMARY KEY, job_type VARCHAR NOT NULL, status VARCHAR NOT NULL,
+                total_symbols INTEGER DEFAULT 0, completed_symbols INTEGER DEFAULT 0,
+                failed_symbols INTEGER DEFAULT 0, interval VARCHAR, start_date VARCHAR,
+                end_date VARCHAR, config VARCHAR,
+                created_at TIMESTAMP DEFAULT current_timestamp, started_at TIMESTAMP,
+                completed_at TIMESTAMP, error_message VARCHAR)",
+        "INSERT INTO {T} (id, job_type, status, total_symbols, completed_symbols,
+                              failed_symbols, created_at, completed_at)
+             SELECT CAST(id AS VARCHAR), 'custom',
+                    CASE WHEN status IN ('running', 'pending') THEN 'failed' ELSE status END,
+                    total_items, completed_items, 0, created_at, completed_at
+             FROM download_jobs",
+    ),
+    (
+        "symbol_metadata",
+        "sector",
+        "CREATE TABLE {T} (
+                symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL, name VARCHAR,
+                expiry VARCHAR, strike DOUBLE, lotsize INTEGER, instrumenttype VARCHAR,
+                tick_size DOUBLE, last_updated TIMESTAMP DEFAULT current_timestamp,
+                PRIMARY KEY (symbol, exchange))",
+        "INSERT INTO {T} (symbol, exchange, name, last_updated)
+             SELECT upper(symbol), upper(exchange), name, updated_at FROM symbol_metadata
+             ON CONFLICT DO NOTHING",
+    ),
+];
+
 fn convert_desktop_v1(c: &Connection) -> Result<()> {
     // Old indexes depend on the tables being replaced.
     c.execute_batch(
@@ -346,72 +407,10 @@ fn convert_desktop_v1(c: &Connection) -> Result<()> {
         )?;
     }
 
-    if table_exists(c, "watchlist")? && has_column(c, "watchlist", "list_name")? {
-        rebuild(
-            c,
-            "watchlist",
-            "CREATE TABLE {T} (
-                id INTEGER PRIMARY KEY, symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
-                display_name VARCHAR, added_at TIMESTAMP DEFAULT current_timestamp,
-                UNIQUE (symbol, exchange))",
-            "INSERT INTO {T} (id, symbol, exchange, display_name, added_at)
-             SELECT min(id), upper(symbol), upper(exchange),
-                    first(name ORDER BY id), min(created_at)
-             FROM watchlist GROUP BY upper(symbol), upper(exchange)",
-        )?;
-    }
-
-    if table_exists(c, "job_items")? && has_column(c, "job_items", "timeframe")? {
-        rebuild(
-            c,
-            "job_items",
-            "CREATE TABLE {T} (
-                id INTEGER PRIMARY KEY, job_id VARCHAR NOT NULL, symbol VARCHAR NOT NULL,
-                exchange VARCHAR NOT NULL, status VARCHAR NOT NULL,
-                records_downloaded INTEGER DEFAULT 0, error_message VARCHAR,
-                started_at TIMESTAMP, completed_at TIMESTAMP)",
-            "INSERT INTO {T} (id, job_id, symbol, exchange, status, error_message)
-             SELECT id, CAST(job_id AS VARCHAR), upper(symbol), upper(exchange),
-                    CASE WHEN status IN ('completed', 'done') THEN 'success'
-                         WHEN status = 'failed' THEN 'error' ELSE status END,
-                    error
-             FROM job_items",
-        )?;
-    }
-
-    if table_exists(c, "download_jobs")? && has_column(c, "download_jobs", "total_items")? {
-        rebuild(
-            c,
-            "download_jobs",
-            "CREATE TABLE {T} (
-                id VARCHAR PRIMARY KEY, job_type VARCHAR NOT NULL, status VARCHAR NOT NULL,
-                total_symbols INTEGER DEFAULT 0, completed_symbols INTEGER DEFAULT 0,
-                failed_symbols INTEGER DEFAULT 0, interval VARCHAR, start_date VARCHAR,
-                end_date VARCHAR, config VARCHAR,
-                created_at TIMESTAMP DEFAULT current_timestamp, started_at TIMESTAMP,
-                completed_at TIMESTAMP, error_message VARCHAR)",
-            "INSERT INTO {T} (id, job_type, status, total_symbols, completed_symbols,
-                              failed_symbols, created_at, completed_at)
-             SELECT CAST(id AS VARCHAR), 'custom',
-                    CASE WHEN status IN ('running', 'pending') THEN 'failed' ELSE status END,
-                    total_items, completed_items, 0, created_at, completed_at
-             FROM download_jobs",
-        )?;
-    }
-
-    if table_exists(c, "symbol_metadata")? && has_column(c, "symbol_metadata", "sector")? {
-        rebuild(
-            c,
-            "symbol_metadata",
-            "CREATE TABLE {T} (
-                symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL, name VARCHAR,
-                expiry VARCHAR, strike DOUBLE, lotsize INTEGER, instrumenttype VARCHAR,
-                tick_size DOUBLE, last_updated TIMESTAMP DEFAULT current_timestamp,
-                PRIMARY KEY (symbol, exchange))",
-            "INSERT INTO {T} (symbol, exchange, name, last_updated)
-             SELECT upper(symbol), upper(exchange), name, updated_at FROM symbol_metadata
-             ON CONFLICT DO NOTHING",
-        )?;
+    for (table, old_column, create_new, insert) in DESKTOP_V1_TABLES {
+        if table_exists(c, table)? && has_column(c, table, old_column)? {
+            rebuild(c, table, create_new, insert)?;
+        }
     }
 
     if table_exists(c, "data_catalog")? && has_column(c, "data_catalog", "timeframe")? {
