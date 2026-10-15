@@ -32,9 +32,7 @@
     "src/pages/strategy/Wizard.tsx": "web",
     "src/types/strategy_module.ts": "web"
   },
-  "handler_db_access": {
-    "src-tauri/src/server/routes/openscript_runner.rs": 7
-  },
+  "handler_db_access": {},
   "lint_allows": {
     "src-tauri/src/brokers/aliceblue/master_contract.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/brokers/angel/auth.rs::non_snake_case": 1,
@@ -176,7 +174,6 @@
     "src-tauri/src/server/routes/historify.rs::table": 89,
     "src-tauri/src/server/routes/historify.rs::upload": 138,
     "src-tauri/src/server/routes/mod.rs::table": 738,
-    "src-tauri/src/server/routes/openscript_runner.rs::set_settings": 78,
     "src-tauri/src/server/routes/openscript_runner.rs::table": 88,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,

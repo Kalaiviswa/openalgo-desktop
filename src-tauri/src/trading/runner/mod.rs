@@ -46,6 +46,7 @@
 //! never reported running with nothing behind it.
 
 pub mod books;
+mod deployments;
 pub mod host;
 pub mod inbox;
 pub mod orders;
