@@ -1,11 +1,31 @@
-//! What the `/whatsapp` page reads and changes in openalgo.db (web
-//! `blueprints/whatsapp.py` with `database/whatsapp_db.py`): the settings,
-//! the linked users and the command statistics.
+//! The WhatsApp settings, linked users and command statistics in
+//! openalgo.db (web `blueprints/whatsapp.py` with
+//! `database/whatsapp_db.py`): what the `/whatsapp` page reads and changes,
+//! and the settings the bot reads.
 
 use super::db::{self, WaUser};
+use super::WhatsAppService;
 use crate::error::Result;
 use crate::state::AppState;
 use serde_json::{Map, Value};
+
+impl WhatsAppService {
+    /// The settings; the defaults when they cannot be read (logged).
+    pub fn config(ctx: &AppState) -> db::WaConfig {
+        ctx.sqlite
+            .conn()
+            .and_then(|c| db::get_config(&c))
+            .unwrap_or_else(|e| {
+                tracing::error!("Could not read the WhatsApp settings: {}", e);
+                db::WaConfig::default()
+            })
+    }
+
+    /// Whether a WhatsApp account is paired.
+    pub fn is_paired(ctx: &AppState) -> bool {
+        Self::config(ctx).is_paired
+    }
+}
 
 /// Change the settings named in `updates` (the page's field names).
 pub fn update_config(ctx: &AppState, updates: &Map<String, Value>) -> Result<()> {
