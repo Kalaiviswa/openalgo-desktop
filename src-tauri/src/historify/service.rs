@@ -14,7 +14,7 @@ use crate::services::core::Reply;
 use crate::services::market_data_service::candle_json;
 use crate::services::search_ui_service::FNO_EXCHANGES;
 use crate::services::symbol_service::freeze_qty_for_option;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -550,44 +550,10 @@ impl Historify {
             .get("interval")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let mut compression = body
-            .get("compression")
-            .and_then(Value::as_str)
-            .unwrap_or("zstd")
-            .to_string();
-        if !["zstd", "snappy", "gzip", "none"].contains(&compression.as_str()) {
-            compression = "zstd".into();
-        }
-        let intervals: Option<Vec<String>> = match body.get("intervals") {
-            None | Some(Value::Null) => None,
-            Some(Value::Array(a)) => {
-                if a.is_empty() {
-                    return Reply::error(400, "At least one interval must be specified");
-                }
-                let mut seen = Vec::new();
-                for v in a {
-                    let s = match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    if !seen.contains(&s) {
-                        seen.push(s);
-                    }
-                }
-                let invalid: Vec<String> = seen
-                    .iter()
-                    .filter(|i| interval::parse(i).is_none())
-                    .map(|i| format!("'{}'", i))
-                    .collect();
-                if !invalid.is_empty() {
-                    return Reply::error(
-                        400,
-                        format!("Invalid intervals: [{}]", invalid.join(", ")),
-                    );
-                }
-                Some(seen)
-            }
-            Some(_) => return Reply::error(400, "intervals must be an array"),
+        let compression = export_compression(body);
+        let intervals = match requested_intervals(body) {
+            Ok(v) => v,
+            Err(r) => return r,
         };
         let start = match date_bound(body.get("start_date").and_then(Value::as_str)) {
             Ok(d) => d.map(day_start),
@@ -598,24 +564,8 @@ impl Historify {
             Err(r) => return r,
         };
 
-        let stamp = ist_naive(self.now()).format("%Y%m%d_%H%M%S").to_string();
-        let export_id = &uuid::Uuid::new_v4().simple().to_string()[..10];
-        let base = if symbols.len() == 1 {
-            format!(
-                "historify_{}_{}_{}",
-                export::sanitize_filename(&symbols[0].0),
-                stamp,
-                export_id
-            )
-        } else {
-            format!("historify_export_{}_{}", stamp, export_id)
-        };
-        let has_computed = intervals
-            .as_ref()
-            .is_some_and(|v| v.iter().any(|i| interval::is_custom(i)));
-        if intervals.as_ref().is_some_and(|v| v.len() > 1)
-            || (has_computed && (format == "csv" || format == "txt"))
-        {
+        let base = export_base_name(&symbols, self.now());
+        if needs_zip(intervals.as_deref(), &format) {
             format = "zip".into();
         }
         let (ext, mime) = match format.as_str() {
@@ -923,4 +873,79 @@ pub fn fno_options(rows: &[SymToken], q: &ChainQuery) -> Reply {
         "status": "success", "count": all.len(), "ce_count": nc, "pe_count": np, "data": all,
         "underlying": q.underlying.to_uppercase(), "exchange": q.exchange, "expiry": q.expiry,
     }))
+}
+
+/// An export file's name without its extension: the symbol when there is
+/// one, the time in IST and a random id.
+fn export_base_name(symbols: &[(String, String)], now: DateTime<Utc>) -> String {
+    let stamp = ist_naive(now).format("%Y%m%d_%H%M%S").to_string();
+    let export_id = &uuid::Uuid::new_v4().simple().to_string()[..10];
+    if symbols.len() == 1 {
+        format!(
+            "historify_{}_{}_{}",
+            export::sanitize_filename(&symbols[0].0),
+            stamp,
+            export_id
+        )
+    } else {
+        format!("historify_export_{}_{}", stamp, export_id)
+    }
+}
+
+/// The Parquet compression a bulk export asks for; zstd for anything else.
+fn export_compression(body: &serde_json::Map<String, Value>) -> String {
+    let compression = body
+        .get("compression")
+        .and_then(Value::as_str)
+        .unwrap_or("zstd")
+        .to_string();
+    if ["zstd", "snappy", "gzip", "none"].contains(&compression.as_str()) {
+        compression
+    } else {
+        "zstd".into()
+    }
+}
+
+/// The `intervals` a bulk export names: none, or a non-empty list of
+/// distinct known intervals in the order given.
+fn requested_intervals(
+    body: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<String>>, Reply> {
+    let a = match body.get("intervals") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(a)) => a,
+        Some(_) => return Err(Reply::error(400, "intervals must be an array")),
+    };
+    if a.is_empty() {
+        return Err(Reply::error(400, "At least one interval must be specified"));
+    }
+    let mut seen = Vec::new();
+    for v in a {
+        let s = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if !seen.contains(&s) {
+            seen.push(s);
+        }
+    }
+    let invalid: Vec<String> = seen
+        .iter()
+        .filter(|i| interval::parse(i).is_none())
+        .map(|i| format!("'{}'", i))
+        .collect();
+    if !invalid.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!("Invalid intervals: [{}]", invalid.join(", ")),
+        ));
+    }
+    Ok(Some(seen))
+}
+
+/// A bulk export of several intervals, or of a computed interval as CSV or
+/// text, is written as a zip.
+fn needs_zip(intervals: Option<&[String]>, format: &str) -> bool {
+    let has_computed = intervals.is_some_and(|v| v.iter().any(|i| interval::is_custom(i)));
+    intervals.is_some_and(|v| v.len() > 1) || (has_computed && (format == "csv" || format == "txt"))
 }

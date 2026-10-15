@@ -96,7 +96,6 @@
     "src-tauri/src/historify/import.rs::read_file": 194,
     "src-tauri/src/historify/jobs/processor.rs::run": 214,
     "src-tauri/src/historify/scheduler.rs::execute_claimed": 123,
-    "src-tauri/src/historify/service.rs::export_bulk": 144,
     "src-tauri/src/mcp/http.rs::call_tool": 112,
     "src-tauri/src/mcp/research/tools.rs::screen": 108,
     "src-tauri/src/mcp/research/tools.rs::snapshot": 147,
