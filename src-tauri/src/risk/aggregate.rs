@@ -60,6 +60,109 @@ pub fn aggregate_pnl(positions: &[PositionPnL]) -> PnLSummary {
     }
 }
 
+/// The profit lock after this mark: armed once the total reaches the
+/// activation level, its floor the max of the configured floor, the floor
+/// already held and, for a trailing lock, the peak less the give-back (a
+/// ratchet). Returns (armed, floor, armed on this mark, floor raised on
+/// this mark).
+fn lock_state(risk: &AggregateRisk, total: f64, peak: f64) -> (bool, Option<f64>, bool, bool) {
+    let mut lock_armed = risk.lock_armed;
+    let mut lock_floor = risk.lock_floor;
+    let mut armed_now = false;
+    let mut floor_raised = false;
+
+    if let Some(at) = risk.lock_profit_at {
+        if !lock_armed && total >= at {
+            lock_armed = true;
+            armed_now = true;
+        }
+        if lock_armed {
+            let mut new_floor = risk.lock_profit_floor.unwrap_or(0.0);
+            if let Some(f) = lock_floor {
+                if f > new_floor {
+                    new_floor = f;
+                }
+            }
+            if let Some(step) = risk.lock_trail_step.filter(|s| *s > 0.0) {
+                let candidate = peak - step;
+                if candidate > new_floor {
+                    new_floor = candidate;
+                }
+            }
+            floor_raised = !armed_now && lock_floor.map(|f| new_floor > f).unwrap_or(false);
+            lock_floor = Some(new_floor);
+        }
+    }
+    (lock_armed, lock_floor, armed_now, floor_raised)
+}
+
+/// The first limit this mark breaches, in order: the profit lock, the
+/// combined stop (unless bypassed), the combined target.
+fn breach(
+    risk: &AggregateRisk,
+    total: f64,
+    lock_armed: bool,
+    lock_floor: Option<f64>,
+    armed_now: bool,
+) -> Option<(BreachReason, String)> {
+    // Gated on the configuration still being present: a persisted
+    // `lock_armed` from a removed configuration must not keep closing.
+    if let (Some(at), true, Some(floor)) = (risk.lock_profit_at, lock_armed, lock_floor) {
+        if total <= floor {
+            if armed_now && floor > at {
+                return Some((
+                    BreachReason::LockProfit,
+                    format!(
+                        "lock profit floor {} is above its activation threshold {}, so it \
+                         triggered on the tick it became active; the floor must be below the threshold",
+                        format_price(floor),
+                        format_price(at)
+                    ),
+                ));
+            }
+            return Some((
+                BreachReason::LockProfit,
+                format!(
+                    "lock profit triggered: mark to market {} fell to or below the locked floor {}",
+                    format_price(total),
+                    format_price(floor)
+                ),
+            ));
+        }
+    }
+
+    if !risk.stop_bypassed {
+        if let Some(sl) = risk.combined_stoploss {
+            let limit = sl.abs();
+            if total <= -limit {
+                return Some((
+                    BreachReason::CombinedStop,
+                    format!(
+                        "combined stop loss hit: mark to market {} fell to or below the limit {}",
+                        format_price(total),
+                        format_price(-limit)
+                    ),
+                ));
+            }
+        }
+    }
+
+    if let Some(target) = risk.combined_target {
+        if total >= target {
+            return Some((
+                BreachReason::CombinedTarget,
+                format!(
+                    "combined target hit: mark to market {} reached the target {}",
+                    format_price(total),
+                    format_price(target)
+                ),
+            ));
+        }
+    }
+
+    None
+}
+
 /// Judge the whole set against its combined limits.
 pub fn evaluate_aggregate(
     risk: &AggregateRisk,
@@ -78,35 +181,7 @@ pub fn evaluate_aggregate(
         risk.trough_pnl
     };
 
-    let mut lock_armed = risk.lock_armed;
-    let mut lock_floor = risk.lock_floor;
-    let mut armed_now = false;
-    let mut floor_raised = false;
-
-    if let Some(at) = risk.lock_profit_at {
-        if !lock_armed && total >= at {
-            lock_armed = true;
-            armed_now = true;
-        }
-        if lock_armed {
-            // The max of the configured floor, the floor already held, and
-            // (for a trailing lock) the peak less the give-back: a ratchet.
-            let mut new_floor = risk.lock_profit_floor.unwrap_or(0.0);
-            if let Some(f) = lock_floor {
-                if f > new_floor {
-                    new_floor = f;
-                }
-            }
-            if let Some(step) = risk.lock_trail_step.filter(|s| *s > 0.0) {
-                let candidate = peak - step;
-                if candidate > new_floor {
-                    new_floor = candidate;
-                }
-            }
-            floor_raised = !armed_now && lock_floor.map(|f| new_floor > f).unwrap_or(false);
-            lock_floor = Some(new_floor);
-        }
-    }
+    let (lock_armed, lock_floor, armed_now, floor_raised) = lock_state(risk, total, peak);
 
     let decide = |reason: Option<BreachReason>, detail: String| AggregateDecision {
         total_pnl: total,
@@ -123,59 +198,8 @@ pub fn evaluate_aggregate(
         detail,
     };
 
-    // Gated on the configuration still being present: a persisted
-    // `lock_armed` from a removed configuration must not keep closing.
-    if let (Some(at), true, Some(floor)) = (risk.lock_profit_at, lock_armed, lock_floor) {
-        if total <= floor {
-            if armed_now && floor > at {
-                return decide(
-                    Some(BreachReason::LockProfit),
-                    format!(
-                        "lock profit floor {} is above its activation threshold {}, so it \
-                         triggered on the tick it became active; the floor must be below the threshold",
-                        format_price(floor),
-                        format_price(at)
-                    ),
-                );
-            }
-            return decide(
-                Some(BreachReason::LockProfit),
-                format!(
-                    "lock profit triggered: mark to market {} fell to or below the locked floor {}",
-                    format_price(total),
-                    format_price(floor)
-                ),
-            );
-        }
-    }
-
-    if !risk.stop_bypassed {
-        if let Some(sl) = risk.combined_stoploss {
-            let limit = sl.abs();
-            if total <= -limit {
-                return decide(
-                    Some(BreachReason::CombinedStop),
-                    format!(
-                        "combined stop loss hit: mark to market {} fell to or below the limit {}",
-                        format_price(total),
-                        format_price(-limit)
-                    ),
-                );
-            }
-        }
-    }
-
-    if let Some(target) = risk.combined_target {
-        if total >= target {
-            return decide(
-                Some(BreachReason::CombinedTarget),
-                format!(
-                    "combined target hit: mark to market {} reached the target {}",
-                    format_price(total),
-                    format_price(target)
-                ),
-            );
-        }
+    if let Some((reason, detail)) = breach(risk, total, lock_armed, lock_floor, armed_now) {
+        return decide(Some(reason), detail);
     }
 
     let mut detail = String::new();
