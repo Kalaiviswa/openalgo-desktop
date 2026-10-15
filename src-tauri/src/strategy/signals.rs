@@ -134,6 +134,19 @@ fn hhmm(text: Option<&str>) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(text?, "%H:%M").ok()
 }
 
+/// The claimed leg a signal exit is placed for: what it holds, the claim
+/// token, and whether it is a superseded position's exit.
+struct SignalExit<'a> {
+    lid: i64,
+    position: &'a str,
+    symbol: &'a str,
+    exchange: &'a str,
+    quantity: i64,
+    position_ref: Option<String>,
+    claim_token: &'a str,
+    superseded: bool,
+}
+
 impl StrategyModule {
     /// Why this signal is outside the strategy's trading window, if it is.
     /// Exits stay allowed before the entry window: a carried position must
@@ -651,14 +664,16 @@ impl StrategyModule {
                         .signal_place_exit(
                             strategy,
                             run_id,
-                            lid,
-                            &c.position,
-                            &c.symbol,
-                            &c.exchange,
-                            c.quantity,
-                            c.position_ref.clone(),
-                            &c.claim_token,
-                            true,
+                            SignalExit {
+                                lid,
+                                position: &c.position,
+                                symbol: &c.symbol,
+                                exchange: &c.exchange,
+                                quantity: c.quantity,
+                                position_ref: c.position_ref.clone(),
+                                claim_token: &c.claim_token,
+                                superseded: true,
+                            },
                         )
                         .await;
                     return match placed {
@@ -707,14 +722,16 @@ impl StrategyModule {
                 .signal_place_exit(
                     strategy,
                     run_id,
-                    lid,
-                    &c.leg.position,
-                    &c.leg.symbol,
-                    &c.leg.exchange,
-                    c.leg.qty,
-                    c.leg.position_ref.clone(),
-                    &c.claim_token,
-                    false,
+                    SignalExit {
+                        lid,
+                        position: &c.leg.position,
+                        symbol: &c.leg.symbol,
+                        exchange: &c.leg.exchange,
+                        quantity: c.leg.qty,
+                        position_ref: c.leg.position_ref.clone(),
+                        claim_token: &c.claim_token,
+                        superseded: false,
+                    },
                 )
                 .await
             {
@@ -737,20 +754,22 @@ impl StrategyModule {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn signal_place_exit(
         &self,
         strategy: &StrategyRow,
         run_id: i64,
-        lid: i64,
-        position: &str,
-        symbol: &str,
-        exchange: &str,
-        quantity: i64,
-        position_ref: Option<String>,
-        claim_token: &str,
-        superseded: bool,
+        exit: SignalExit<'_>,
     ) -> Result<(), (String, Option<ClaimId>)> {
+        let SignalExit {
+            lid,
+            position,
+            symbol,
+            exchange,
+            quantity,
+            position_ref,
+            claim_token,
+            superseded,
+        } = exit;
         let mut claim = ClaimId::Token(claim_token.to_string());
         let mode = self.run_mode(run_id);
         if let Err(e) = self.gateway.authorised(mode) {

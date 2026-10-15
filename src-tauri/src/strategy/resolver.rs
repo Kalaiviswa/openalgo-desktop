@@ -334,7 +334,6 @@ fn quote_target(
 
 /// Resolve one batch leg. `shared_ltp` carries the underlying's price from
 /// the first leg so every leg of one spread settles around the same ATM.
-#[allow(clippy::too_many_arguments)]
 pub async fn resolve_leg(
     g: &SymbolGeneration,
     gateway: &dyn OrderGateway,

@@ -355,7 +355,6 @@ struct Recovered {
     priced: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rebuild_position(
     leg_id: i64,
     position_ref: Option<String>,
