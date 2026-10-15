@@ -3,7 +3,7 @@
 //! opened, a migration that fails puts that start's backup back so the
 //! older version opens the folder as before, no leftover backup survives
 //! an action that deletes what it would hold (forgetting a broker, a broker
-//! sign-out, a password reset, account reset), and a folder written by a
+//! sign-out, a fresh start, account reset), and a folder written by a
 //! newer version is refused before anything is opened. The decisions are unit-tested in `db::upgrade`.
 
 use openalgo_desktop_lib::brokers::BrokerRegistry;
@@ -145,14 +145,14 @@ fn plant_leftover(dir: &Path) -> PathBuf {
 /// `backups/`. A successful start deletes every backup; a leftover it
 /// could not delete goes with the first action that removes something a
 /// copy would still hold: forgetting a broker, a broker sign-out (logout),
-/// a forgotten-password reset and account reset.
+/// a fresh start after a forgotten password (KEY-01) and account reset.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_backup_survives_a_deleting_action() {
     let mut survived = Vec::new();
     for action in [
         "forget broker",
         "broker sign-out",
-        "password reset",
+        "fresh start",
         "account reset",
     ] {
         let keys = Arc::new(MemoryKeyStore::new());
@@ -169,9 +169,7 @@ async fn no_backup_survives_a_deleting_action() {
             "broker sign-out" => BrokerAuthService::revoke(&ctx, SessionEndReason::Logout)
                 .await
                 .unwrap(),
-            "password reset" => {
-                AuthService::reset_password(&ctx, "trader@example.com", "Another@456").unwrap()
-            }
+            "fresh start" => AuthService::start_fresh(&ctx, "Another@456", "Another@456").unwrap(),
             "account reset" => AuthService::reset_account_everywhere(&ctx).await.unwrap(),
             other => unreachable!("{}", other),
         }

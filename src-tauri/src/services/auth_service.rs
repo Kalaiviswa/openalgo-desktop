@@ -366,6 +366,9 @@ impl AuthService {
                 api_keys::upsert_for_user(conn, with, &row.username, &key)?;
                 Ok(())
             })?;
+        // No copy of the old keys and what they protected may outlive them
+        // in the data folder's update backups (REL-02 security review).
+        crate::db::upgrade::purge_backups(&state.data_dir, "Fresh start");
         // The stored broker sessions are gone, so nothing is left to revoke.
         crate::services::broker_auth_service::BrokerAuthService::clear_pending_revoke(state);
         state.sessions.clear();

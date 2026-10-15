@@ -63,9 +63,10 @@ Each was traced against the code; the decisions:
      the review's list therefore also empties `backups/`
      (`upgrade::purge_backups`): forgetting a broker
      (`BrokerConfigService::forget`), every broker sign-out, logout's
-     included (`BrokerAuthService::revoke_held`), a password change or
-     forgotten-password reset (`AuthService::set_password`) and account
-     reset (`AuthService::reset_account`). This is not the primary
+     included (`BrokerAuthService::revoke_held`), a password change
+     (`AuthService::set_password`), a fresh start after a forgotten
+     password (`AuthService::start_fresh`, KEY-01) and account reset
+     (`AuthService::reset_account`). This is not the primary
      guarantee (a new deleting action that forgets the call still has no
      backup to leak into after a normal start); it only closes the
      leftover case.

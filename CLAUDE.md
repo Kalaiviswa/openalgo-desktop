@@ -750,7 +750,7 @@ Every flaky test found so far was a race, not a slow machine:
   succeeds or after it was put back. A leftover a start could not delete
   goes with the next action that deletes something a copy would hold
   (`db::upgrade::purge_backups`: forgetting a broker, any broker sign-out,
-  a password change or reset, account reset); a new action of that kind
+  a password change, a fresh start, account reset); a new action of that kind
   calls it too. Never add a manual restore of an older backup or keep
   backups "just in case": an older copy brings back forgotten broker keys,
   a revoked session, an old API key or a leaked password. `restore` stays
