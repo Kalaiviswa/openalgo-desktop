@@ -56,6 +56,9 @@ impl BrokerAuthService {
             .sqlite
             .conn()
             .and_then(|conn| auth::revoke_before(&conn, boundary, |b| !daily(b)));
+        // No copy of a session the boundary ended may outlive it in the data
+        // folder's update backups (REL-02), as after any other revoke.
+        crate::db::upgrade::purge_backups(&state.data_dir, "Daily session boundary");
         if let Err(e) = written {
             let mut pending = state.revoke_pending.lock();
             Self::mark_pending_locked(state, &mut pending, PendingRevoke::Before(boundary));

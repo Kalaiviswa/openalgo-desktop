@@ -145,13 +145,15 @@ fn plant_leftover(dir: &Path) -> PathBuf {
 /// `backups/`. A successful start deletes every backup; a leftover it
 /// could not delete goes with the first action that removes something a
 /// copy would still hold: forgetting a broker, a broker sign-out (logout),
-/// a fresh start after a forgotten password (KEY-01) and account reset.
+/// the daily boundary ending a broker session (SES-02), a fresh start after
+/// a forgotten password (KEY-01) and account reset.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_backup_survives_a_deleting_action() {
     let mut survived = Vec::new();
     for action in [
         "forget broker",
         "broker sign-out",
+        "daily boundary",
         "fresh start",
         "account reset",
     ] {
@@ -169,6 +171,12 @@ async fn no_backup_survives_a_deleting_action() {
             "broker sign-out" => BrokerAuthService::revoke(&ctx, SessionEndReason::Logout)
                 .await
                 .unwrap(),
+            "daily boundary" => {
+                let boundary = ctx.now() + chrono::Duration::seconds(1);
+                BrokerAuthService::expire_before(&ctx, boundary)
+                    .await
+                    .unwrap();
+            }
             "fresh start" => AuthService::start_fresh(&ctx, "Another@456", "Another@456").unwrap(),
             "account reset" => AuthService::reset_account_everywhere(&ctx).await.unwrap(),
             other => unreachable!("{}", other),
