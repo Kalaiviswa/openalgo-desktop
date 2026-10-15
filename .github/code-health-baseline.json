@@ -48,7 +48,6 @@
     "src-tauri/src/strategy/store.rs": 1784
   },
   "rust_functions": {
-    "src-tauri/src/sandbox/positions.rs::close_position_outcome": 103,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
     "src-tauri/src/strategy/book.rs::apply_fill_locked": 126,

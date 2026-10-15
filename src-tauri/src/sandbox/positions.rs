@@ -729,29 +729,20 @@ pub(crate) async fn close_position(
         .reply)
 }
 
-/// [`close_position`], reporting whether the position is flat, still
-/// waiting on a close order, or the close was refused.
-///
-/// A MARKET close rests when there is no usable price. Asking again while it
-/// rests returns that close instead of placing another: a second exit for the
-/// same quantity would, once prices return, close the position and then open
-/// the opposite one. Only the quantity no resting close covers is ordered.
-pub(crate) async fn close_position_outcome(
+/// The open position and the side that closes it, with the MARKET closes
+/// already resting for it; `None` when it is flat or absent.
+async fn read_open_position(
     core: &Arc<Core>,
     symbol: &str,
     exchange: &str,
     product: &str,
-) -> SbResult<CloseResult> {
-    let guard = core
-        .locks
-        .lock(PositionKey::new(core.user(), exchange, symbol, product))
-        .await;
+) -> SbResult<Option<(PositionRow, Action, Vec<OrderRow>)>> {
     let (s, e, p) = (
         symbol.to_string(),
         exchange.to_string(),
         product.to_string(),
     );
-    let read = blocking(core, move |c| {
+    blocking(core, move |c| {
         Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
             let Some(pos) = get(conn, c.user(), &s, &e, &p)?.filter(|row| row.quantity != 0) else {
                 return Ok(None);
@@ -765,53 +756,51 @@ pub(crate) async fn close_position_outcome(
             Ok(Some((pos, action, exits)))
         })?)
     })
-    .await?;
-    let Some((pos, action, exits)) = read else {
-        return Err(SandboxError::not_found(format!(
-            "No open position found for {symbol}"
-        )));
-    };
-    let covered: i64 = exits.iter().map(|o| o.quantity).sum();
-    let remaining = pos.quantity.abs() - covered;
-    if remaining <= 0 {
-        let orderid = exits.last().map(|o| o.orderid.clone()).unwrap_or_default();
-        tracing::info!(
-            "Close of {} {} {} is already pending as order {}",
-            symbol,
-            exchange,
-            product,
-            orderid
-        );
-        return Ok(CloseResult {
-            reply: OrderMessage::new(
-                orderid,
-                format!(
-                    "Position close order for {symbol} is already placed and fills when a price is available"
-                ),
+    .await
+}
+
+/// Resting closes already cover the whole position: the latest one is
+/// the answer and nothing more is placed.
+fn close_already_pending(
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+    exits: &[OrderRow],
+) -> CloseResult {
+    let orderid = exits.last().map(|o| o.orderid.clone()).unwrap_or_default();
+    tracing::info!(
+        "Close of {} {} {} is already pending as order {}",
+        symbol,
+        exchange,
+        product,
+        orderid
+    );
+    CloseResult {
+        reply: OrderMessage::new(
+            orderid,
+            format!(
+                "Position close order for {symbol} is already placed and fills when a price is available"
             ),
-            outcome: CloseOutcome::Pending,
-            placed: false,
-        });
+        ),
+        outcome: CloseOutcome::Pending,
+        placed: false,
     }
-    let req = super::orders::OrderRequest {
-        symbol: symbol.to_string(),
-        exchange: exchange.to_string(),
-        action: action.as_str().to_string(),
-        quantity: remaining,
-        price: None,
-        trigger_price: None,
-        price_type: "MARKET".to_string(),
-        product: product.to_string(),
-        strategy: "AUTO_SQUARE_OFF".to_string(),
-    };
-    let placed = super::placement::place_locked(core, &guard, req, None, None).await?;
-    let (s, e, p, id) = (
+}
+
+/// What the close order did: filled (the position is flat), pending
+/// (it, or an earlier close, still waits for a price) or failed.
+async fn close_outcome(
+    core: &Arc<Core>,
+    (symbol, exchange, product): (&str, &str, &str),
+    id: String,
+    covered: i64,
+) -> SbResult<CloseOutcome> {
+    let (s, e, p) = (
         symbol.to_string(),
         exchange.to_string(),
         product.to_string(),
-        placed.orderid.clone(),
     );
-    let outcome = blocking(core, move |c| {
+    blocking(core, move |c| {
         Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
             let flat = get(conn, c.user(), &s, &e, &p)?
                 .map(|row| row.quantity == 0)
@@ -829,6 +818,55 @@ pub(crate) async fn close_position_outcome(
             })
         })?)
     })
+    .await
+}
+
+/// [`close_position`], reporting whether the position is flat, still
+/// waiting on a close order, or the close was refused.
+///
+/// A MARKET close rests when there is no usable price. Asking again while it
+/// rests returns that close instead of placing another: a second exit for the
+/// same quantity would, once prices return, close the position and then open
+/// the opposite one. Only the quantity no resting close covers is ordered.
+pub(crate) async fn close_position_outcome(
+    core: &Arc<Core>,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> SbResult<CloseResult> {
+    let guard = core
+        .locks
+        .lock(PositionKey::new(core.user(), exchange, symbol, product))
+        .await;
+    let read = read_open_position(core, symbol, exchange, product).await?;
+    let Some((pos, action, exits)) = read else {
+        return Err(SandboxError::not_found(format!(
+            "No open position found for {symbol}"
+        )));
+    };
+    let covered: i64 = exits.iter().map(|o| o.quantity).sum();
+    let remaining = pos.quantity.abs() - covered;
+    if remaining <= 0 {
+        return Ok(close_already_pending(symbol, exchange, product, &exits));
+    }
+    let req = super::orders::OrderRequest {
+        symbol: symbol.to_string(),
+        exchange: exchange.to_string(),
+        action: action.as_str().to_string(),
+        quantity: remaining,
+        price: None,
+        trigger_price: None,
+        price_type: "MARKET".to_string(),
+        product: product.to_string(),
+        strategy: "AUTO_SQUARE_OFF".to_string(),
+    };
+    let placed = super::placement::place_locked(core, &guard, req, None, None).await?;
+    let outcome = close_outcome(
+        core,
+        (symbol, exchange, product),
+        placed.orderid.clone(),
+        covered,
+    )
     .await?;
     Ok(CloseResult {
         reply: OrderMessage::new(
