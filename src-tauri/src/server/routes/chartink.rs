@@ -4,8 +4,11 @@
 
 use super::{Access, RouteSpec};
 use crate::chartink::{service as svc, webhook};
-use crate::server::envelope::json_response;
-use crate::server::middleware::{ClientIp, User};
+use crate::server::envelope::{json_response, EarlyReply};
+use crate::server::middleware::{
+    count_failure, failures_exhausted, limiter_key, ClientIp, Source, User,
+};
+use crate::server::ratelimit::Bucket;
 use crate::server::routes::webui::int_id;
 use crate::services::core::Reply;
 use crate::state::AppState;
@@ -185,8 +188,37 @@ pub async fn webhook_route(
     Path(webhook_id): Path<String>,
     req: Request,
 ) -> Response {
-    use crate::server::middleware::{count_failure, failures_exhausted, limiter_key, Source};
-    use crate::server::ratelimit::Bucket;
+    let known = match admit_webhook_call(&ctx, ip, source, deferred, &webhook_id) {
+        Ok(known) => known,
+        Err(r) => return *r,
+    };
+    if known && !ctx.security.is_unlocked() {
+        return crate::server::envelope::webhook_while_locked("error");
+    }
+    let bytes = match read_payload(req).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let (status, body, failed_auth) = svc::webhook_alert(&ctx, &webhook_id, &bytes).await;
+    if failed_auth && known {
+        // The id went away between the check and the alert: a failure.
+        count_failure(&ctx, ip, Bucket::WebhookFail);
+    }
+    json_response(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+        body,
+    )
+}
+
+/// The webhook's admission, before any body read: whether the id is
+/// known, or the rate-limited answer.
+fn admit_webhook_call(
+    ctx: &AppState,
+    ip: std::net::IpAddr,
+    source: Source,
+    deferred: bool,
+    webhook_id: &str,
+) -> Result<bool, EarlyReply> {
     let limited = || {
         json_response(
             StatusCode::TOO_MANY_REQUESTS,
@@ -203,7 +235,7 @@ pub async fn webhook_route(
     let mut deferred = deferred;
     if !tunnel {
         match webhook::admit_address(&ctx.chartink.guard, &ctx.limiter, ip) {
-            None => return limited(),
+            None => return Err(Box::new(limited())),
             Some(d) => deferred |= d,
         }
     }
@@ -212,24 +244,27 @@ pub async fn webhook_route(
     // caller's failure budget; once that is spent, the caller's unknown ids
     // are refused at once (no body read, no probe recorded), while valid
     // ids still pass.
-    let known = svc::webhook_known(&ctx, &webhook_id);
+    let known = svc::webhook_known(ctx, webhook_id);
     if known {
-        let tunnel_key = tunnel.then(|| limiter_key(ip, "chartink-webhook", &webhook_id));
-        if !webhook::admit_webhook(&ctx.chartink.guard, &ctx.limiter, tunnel_key, &webhook_id) {
-            return limited();
+        let tunnel_key = tunnel.then(|| limiter_key(ip, "chartink-webhook", webhook_id));
+        if !webhook::admit_webhook(&ctx.chartink.guard, &ctx.limiter, tunnel_key, webhook_id) {
+            return Err(Box::new(limited()));
         }
     } else {
-        if deferred || failures_exhausted(&ctx, ip, Bucket::WebhookFail) {
+        if deferred || failures_exhausted(ctx, ip, Bucket::WebhookFail) {
             ctx.chartink
                 .guard
                 .note_throttled("too many failed webhook attempts from one caller");
-            return limited();
+            return Err(Box::new(limited()));
         }
-        count_failure(&ctx, ip, Bucket::WebhookFail);
+        count_failure(ctx, ip, Bucket::WebhookFail);
     }
-    if known && !ctx.security.is_unlocked() {
-        return crate::server::envelope::webhook_while_locked("error");
-    }
+    Ok(known)
+}
+
+/// The alert body, at most `MAX_PAYLOAD_BYTES` (a larger declared or sent
+/// body is refused).
+async fn read_payload(req: Request) -> Result<Bytes, Response> {
     let declared = req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -245,19 +280,10 @@ pub async fn webhook_route(
         )
     };
     if declared.is_some_and(|d| d > webhook::MAX_PAYLOAD_BYTES) {
-        return too_large();
+        return Err(too_large());
     }
     let body: Body = req.into_body();
-    let Ok(bytes) = to_bytes(body, webhook::MAX_PAYLOAD_BYTES).await else {
-        return too_large();
-    };
-    let (status, body, failed_auth) = svc::webhook_alert(&ctx, &webhook_id, &bytes).await;
-    if failed_auth && known {
-        // The id went away between the check and the alert: a failure.
-        count_failure(&ctx, ip, Bucket::WebhookFail);
-    }
-    json_response(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
-        body,
-    )
+    to_bytes(body, webhook::MAX_PAYLOAD_BYTES)
+        .await
+        .map_err(|_| too_large())
 }
