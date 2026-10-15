@@ -20,6 +20,7 @@ pub mod data;
 pub mod funds;
 pub mod mapping;
 pub mod master_contract;
+mod order_feed;
 pub mod orders;
 pub mod streaming;
 #[cfg(test)]
@@ -449,7 +450,7 @@ impl AliceBlueBroker {
     /// through `Broker::create_order_feed`.
     pub fn order_socket(&self, auth: &AuthToken) -> Result<Box<dyn BrokerFeed>> {
         let ucc = auth::ucc(auth).ok_or_else(missing_ucc)?;
-        Ok(Box::new(streaming::AliceBlueOrderFeed::new(
+        Ok(Box::new(order_feed::AliceBlueOrderFeed::new(
             self.http.clone(),
             self.ep.clone(),
             auth.raw(),

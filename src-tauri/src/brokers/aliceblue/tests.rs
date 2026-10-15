@@ -6,6 +6,7 @@
 use super::data::{self, candles_from, history_exchange, history_window, resample};
 use super::mapping::{self, *};
 use super::master_contract::{self, index_symbol, parse_all, parse_exchange_csv, FILES};
+use super::order_feed::{order_heartbeat_frame, order_subscribe_frame, OrderSession};
 use super::orders::{means_empty, Book};
 use super::streaming::{self, *};
 use super::{auth, funds, WindowLimiter};

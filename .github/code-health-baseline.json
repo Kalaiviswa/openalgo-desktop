@@ -51,7 +51,6 @@
     "src-tauri/src/strategy/store.rs::clippy::too_many_arguments": 1
   },
   "rust_files": {
-    "src-tauri/src/brokers/aliceblue/streaming.rs": 1025,
     "src-tauri/src/brokers/fyers/streaming.rs": 1408,
     "src-tauri/src/feed/server.rs": 1425,
     "src-tauri/src/historify/db.rs": 1361,
