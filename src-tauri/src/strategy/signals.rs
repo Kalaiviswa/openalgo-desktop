@@ -21,7 +21,7 @@
 //! to `configured` after an exit so it can be signalled again the same day.
 
 use super::dispatch::{
-    build_order, entry_action, exit_action, DispatchResult, RunMode, EXIT_PRICETYPE,
+    build_order, entry_action, exit_action, DispatchResult, OrderPayload, RunMode, EXIT_PRICETYPE,
 };
 use super::resolver::{contract_exists, is_derivative_exchange, resolve_quantity};
 use super::state::{ClaimId, EntryDecision, LegSpec};
@@ -505,44 +505,9 @@ impl StrategyModule {
             &strategy.name,
             &strategy.pricetype,
         );
-        let row_id = match self.store.record_order(
-            run_id,
-            spec.leg_id,
-            "entry",
-            &NewOrder {
-                symbol: spec.symbol.clone(),
-                exchange: spec.exchange.clone(),
-                action: action.into(),
-                qty: spec.quantity,
-                product: Some(order.product.clone()),
-                pricetype: order.pricetype.clone(),
-                status: "pending".into(),
-                position_ref: spec.position_ref.clone(),
-                broker_order_id: None,
-            },
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("Signal entry row not written: {}", e);
-                self.emit(
-                    strategy.id,
-                    &strategy.user_id,
-                    "leg_entry_rejected",
-                    &format!(
-                        "Signal entry for leg {} not placed: its order row could not be written",
-                        spec.leg_id
-                    ),
-                    EventFields {
-                        run_id: Some(run_id),
-                        leg_id: Some(spec.leg_id),
-                        severity: Some("critical"),
-                        payload: None,
-                    },
-                )
-                .await;
-                return Err("Could not record the order before placing it".into());
-            }
-        };
+        let row_id = self
+            .record_signal_entry(strategy, run_id, spec, (&order, action))
+            .await?;
         if self
             .state
             .add_leg(
@@ -591,6 +556,75 @@ impl StrategyModule {
             &claim.claim_token,
             result.ok,
         );
+        self.emit_signal_entry_placed(strategy, run_id, spec, action, &result)
+            .await;
+        if result.ok {
+            self.replay_for(result.broker_order_id.as_deref()).await;
+            Ok(())
+        } else {
+            self.reconcile_pending_stop(run_id).await;
+            Err(result.error.unwrap_or_else(|| "Order rejected".into()))
+        }
+    }
+
+    /// Records a signal entry's order before it is sent; an entry whose row
+    /// cannot be written is not placed.
+    async fn record_signal_entry(
+        &self,
+        strategy: &StrategyRow,
+        run_id: i64,
+        spec: &LegSpec,
+        (order, action): (&OrderPayload, &str),
+    ) -> Result<i64, String> {
+        match self.store.record_order(
+            run_id,
+            spec.leg_id,
+            "entry",
+            &NewOrder {
+                symbol: spec.symbol.clone(),
+                exchange: spec.exchange.clone(),
+                action: action.into(),
+                qty: spec.quantity,
+                product: Some(order.product.clone()),
+                pricetype: order.pricetype.clone(),
+                status: "pending".into(),
+                position_ref: spec.position_ref.clone(),
+                broker_order_id: None,
+            },
+        ) {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                tracing::error!("Signal entry row not written: {}", e);
+                self.emit(
+                    strategy.id,
+                    &strategy.user_id,
+                    "leg_entry_rejected",
+                    &format!(
+                        "Signal entry for leg {} not placed: its order row could not be written",
+                        spec.leg_id
+                    ),
+                    EventFields {
+                        run_id: Some(run_id),
+                        leg_id: Some(spec.leg_id),
+                        severity: Some("critical"),
+                        payload: None,
+                    },
+                )
+                .await;
+                Err("Could not record the order before placing it".into())
+            }
+        }
+    }
+
+    /// The `leg_entry_placed` event: the entry, and how the broker answered.
+    async fn emit_signal_entry_placed(
+        &self,
+        strategy: &StrategyRow,
+        run_id: i64,
+        spec: &LegSpec,
+        action: &str,
+        result: &DispatchResult,
+    ) {
         self.emit(
             strategy.id,
             &strategy.user_id,
@@ -614,13 +648,6 @@ impl StrategyModule {
             },
         )
         .await;
-        if result.ok {
-            self.replay_for(result.broker_order_id.as_deref()).await;
-            Ok(())
-        } else {
-            self.reconcile_pending_stop(run_id).await;
-            Err(result.error.unwrap_or_else(|| "Order rejected".into()))
-        }
     }
 
     fn run_mode(&self, run_id: i64) -> RunMode {
