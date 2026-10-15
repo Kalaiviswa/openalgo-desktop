@@ -881,6 +881,11 @@ async fn telegram_hundred_start_stop_cycles_leave_no_tasks_or_descriptors() {
     crate::isolated!(telegram_hundred_start_stop_cycles_leave_no_tasks_or_descriptors);
     let _serial = SERIAL.lock().await;
     let h = H::new(false);
+    // The order reconciler's passes ask every owner whether it holds an
+    // order, some through the database pool; a read that overlaps the bot's
+    // own opens another pooled connection (three descriptors) mid-count.
+    // That is the pool, not the bot: count without it.
+    h.ctx.reconciler.stop();
     let (_fake, base, _j) = spawn_fake().await;
     h.start_telegram(&base).await;
     h.ctx.messaging.telegram.stop(&h.ctx).await;
@@ -1361,6 +1366,8 @@ async fn whatsapp_bot_start_stop_cycles_are_clean() {
     );
     assert_eq!(h.ctx.messaging.whatsapp.tasks_alive().await, (false, false));
 
+    // As for Telegram: count without the order reconciler's pooled reads.
+    h.ctx.reconciler.stop();
     let fds_before = open_fds();
     let tasks_before = h.ctx.task_count();
     for _ in 0..100 {
