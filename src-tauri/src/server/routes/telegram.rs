@@ -2,6 +2,7 @@
 //! need the signed-in user; the bot work is in `messaging::telegram`.
 
 use crate::messaging::telegram::db::{self, ConfigUpdate, UserFilter};
+use crate::messaging::telegram::page;
 use crate::server::envelope::error;
 use crate::server::middleware::User;
 use crate::server::routes::webui::{ok, JsonBody};
@@ -18,21 +19,19 @@ type Ctx = State<Arc<AppState>>;
 
 const FAILED: &str = "Could not read the Telegram settings. Try again.";
 
-#[allow(clippy::result_large_err)]
-fn config(ctx: &AppState) -> Result<db::BotConfig, Response> {
-    ctx.sqlite
-        .conn()
-        .and_then(|c| db::get_bot_config(&c, &ctx.security))
-        .map_err(|e| {
-            tracing::error!("Reading the Telegram settings failed: {}", e);
-            error(StatusCode::INTERNAL_SERVER_ERROR, FAILED)
-        })
+/// The bot settings; a failed read is logged.
+fn config(ctx: &AppState) -> Option<db::BotConfig> {
+    page::bot_config(ctx)
+        .map_err(|e| tracing::error!("Reading the Telegram settings failed: {}", e))
+        .ok()
+}
+
+fn config_unreadable() -> Response {
+    error(StatusCode::INTERNAL_SERVER_ERROR, FAILED)
 }
 
 fn users(ctx: &AppState, f: &UserFilter) -> Vec<Value> {
-    ctx.sqlite
-        .conn()
-        .and_then(|c| db::all_users(&c, f))
+    page::users(ctx, f)
         .map(|u| u.iter().map(db::TgUser::list_json).collect())
         .unwrap_or_else(|e| {
             tracing::error!("Reading Telegram users failed: {}", e);
@@ -42,11 +41,7 @@ fn users(ctx: &AppState, f: &UserFilter) -> Vec<Value> {
 
 /// `_format_stats_for_react(get_command_stats(days))`.
 fn stats(ctx: &AppState, days: i64) -> (Vec<Value>, i64, i64) {
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::command_stats(&c, days, ctx.now()))
-    {
+    match page::command_stats(ctx, days) {
         Ok(s) => (
             s.commands_by_type
                 .iter()
@@ -100,11 +95,7 @@ pub async fn configuration(State(ctx): Ctx, _u: User, body: JsonBody) -> Respons
             }
         }
     }
-    let res = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::update_bot_config(&c, &ctx.security, u, ctx.now()));
-    match res {
+    match page::update_config(&ctx, u) {
         Ok(()) => ok(json!({"status": "success", "message": "Configuration updated"})),
         Err(e) => {
             tracing::error!("Saving the Telegram settings failed: {}", e);
@@ -118,9 +109,8 @@ pub async fn configuration(State(ctx): Ctx, _u: User, body: JsonBody) -> Respons
 
 /// POST /telegram/bot/start
 pub async fn bot_start(State(ctx): Ctx, _u: User) -> Response {
-    let cfg = match config(&ctx) {
-        Ok(c) => c,
-        Err(r) => return r,
+    let Some(cfg) = config(&ctx) else {
+        return config_unreadable();
     };
     let Some(token) = cfg.token else {
         return error(StatusCode::BAD_REQUEST, "Bot token not configured");
@@ -160,8 +150,8 @@ fn bot_status_json(ctx: &AppState, cfg: &db::BotConfig) -> Value {
 /// GET /telegram/bot/status
 pub async fn bot_status(State(ctx): Ctx, _u: User) -> Response {
     match config(&ctx) {
-        Ok(c) => ok(json!({"status": "success", "data": bot_status_json(&ctx, &c)})),
-        Err(r) => r,
+        Some(c) => ok(json!({"status": "success", "data": bot_status_json(&ctx, &c)})),
+        None => config_unreadable(),
     }
 }
 
@@ -177,18 +167,14 @@ pub async fn broadcast(State(ctx): Ctx, _u: User, body: JsonBody) -> Response {
         return error(StatusCode::BAD_REQUEST, "Message is required");
     }
     match config(&ctx) {
-        Ok(c) if !c.broadcast_enabled => {
+        Some(c) if !c.broadcast_enabled => {
             return error(StatusCode::FORBIDDEN, "Broadcast is disabled")
         }
-        Ok(_) => {}
-        Err(r) => return r,
+        Some(_) => {}
+        None => return config_unreadable(),
     }
     let (mut sent, mut failed) = (0, 0);
-    let list = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::all_users(&c, &filter_from(&body)))
-        .unwrap_or_default();
+    let list = page::users(&ctx, &filter_from(&body)).unwrap_or_default();
     for u in list.iter().filter(|u| u.notifications_enabled) {
         if ctx
             .messaging
@@ -214,11 +200,7 @@ pub async fn unlink_user(State(ctx): Ctx, _u: User, Path(id): Path<String>) -> R
     let Ok(id) = id.parse::<i64>() else {
         return error(StatusCode::NOT_FOUND, "User not found");
     };
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::delete_user(&c, id, ctx.now()))
-    {
+    match page::unlink_user(&ctx, id) {
         Ok(true) => ok(json!({"status": "success", "message": "User unlinked"})),
         Ok(false) => error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to unlink user"),
         Err(e) => {
@@ -230,11 +212,7 @@ pub async fn unlink_user(State(ctx): Ctx, _u: User, Path(id): Path<String>) -> R
 
 /// POST /telegram/test-message
 pub async fn test_message(State(ctx): Ctx, User(u): User) -> Response {
-    let all = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::all_users(&c, &UserFilter::default()))
-        .unwrap_or_default();
+    let all = page::users(&ctx, &UserFilter::default()).unwrap_or_default();
     let mine = all.iter().find(|x| x.openalgo_username == u.username);
     let (target, message) = match (mine, all.first()) {
         (Some(m), _) => (
@@ -278,7 +256,7 @@ pub async fn send_message(State(ctx): Ctx, User(u): User, body: JsonBody) -> Res
     let Some(id) = id.and_then(crate::messaging::format::py_int) else {
         return error(StatusCode::BAD_REQUEST, "Invalid telegram_id");
     };
-    match ctx.sqlite.conn().and_then(|c| db::get_user(&c, id)) {
+    match page::user(&ctx, id) {
         Ok(Some(_)) => {}
         _ => return error(StatusCode::NOT_FOUND, "User not found"),
     }
@@ -298,15 +276,11 @@ pub async fn send_message(State(ctx): Ctx, User(u): User, body: JsonBody) -> Res
 
 /// GET /telegram/api/index
 pub async fn api_index(State(ctx): Ctx, User(u): User) -> Response {
-    let cfg = match config(&ctx) {
-        Ok(c) => c,
-        Err(r) => return r,
+    let Some(cfg) = config(&ctx) else {
+        return config_unreadable();
     };
     let (stats7, total, active) = stats(&ctx, 7);
-    let me = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::get_user_by_username(&c, &u.username))
+    let me = page::user_by_username(&ctx, &u.username)
         .ok()
         .flatten()
         .map(|x| x.full_json())
@@ -330,14 +304,14 @@ pub async fn api_index(State(ctx): Ctx, User(u): User) -> Response {
 /// GET /telegram/api/config (also the JSON side of GET /telegram/config).
 pub async fn api_config(State(ctx): Ctx, _u: User) -> Response {
     match config(&ctx) {
-        Ok(cfg) => ok(json!({"status": "success", "data": {
+        Some(cfg) => ok(json!({"status": "success", "data": {
             "has_token": cfg.token.is_some(),
             "bot_username": cfg.bot_username,
             "broadcast_enabled": cfg.broadcast_enabled,
             "rate_limit_per_minute": cfg.rate_limit_per_minute,
             "is_active": cfg.is_active,
         }})),
-        Err(r) => r,
+        None => config_unreadable(),
     }
 }
 
@@ -355,11 +329,7 @@ pub async fn api_users(State(ctx): Ctx, _u: User) -> Response {
 pub async fn api_analytics(State(ctx): Ctx, _u: User) -> Response {
     let (s7, _, _) = stats(&ctx, 7);
     let (s30, _, _) = stats(&ctx, 30);
-    let list = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| db::all_users(&c, &UserFilter::default()))
-        .unwrap_or_default();
+    let list = page::users(&ctx, &UserFilter::default()).unwrap_or_default();
     let active = list.iter().filter(|u| u.notifications_enabled).count();
     ok(json!({"status": "success", "data": {
         "stats_7d": s7,
