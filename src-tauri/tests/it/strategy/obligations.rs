@@ -300,6 +300,47 @@ async fn switch_row2_an_order_with_an_unknown_outcome_refuses_the_switch_until_r
     switched(&a, switch_to_angel(&a).await);
 }
 
+/// Row 2: an order from the scalping page whose answer was lost refuses
+/// the switch until it is settled; a Sandbox one never counts (LOG-08).
+#[tokio::test]
+async fn switch_row2_a_scalping_page_order_with_an_unknown_outcome_refuses_the_switch() {
+    use openalgo_desktop_lib::scalping::unconfirmed::{record, NewPending};
+    let a = app();
+    a.ctx.reconciler.stop();
+    let order = |mode| NewPending {
+        mode,
+        kind: "entry",
+        symbol: ATM_CE,
+        exchange: "NFO",
+        product: "NRML",
+        action: "BUY",
+        quantity: 65,
+        client_tag: None,
+    };
+    record(&a.ctx.sqlite, &order("analyze"), a.ctx.now()).unwrap();
+    assert!(open_live_obligations(&a.ctx, "zerodha").unwrap().is_empty());
+    let id = record(&a.ctx.sqlite, &order("live"), a.ctx.now()).unwrap();
+    refused(
+        &a,
+        switch_to_angel(&a).await,
+        &[
+            "Zerodha still has 1 order whose outcome is not known yet.",
+            "check the order book until every order is settled",
+        ],
+    );
+    // Settled (here: found in the book and bound to its order).
+    a.ctx
+        .sqlite
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE scalping_unconfirmed SET status = 'placed', orderid = 'OID1' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    switched(&a, switch_to_angel(&a).await);
+}
+
 /// Row 3: an exit partly filled refuses the switch until it ends.
 #[tokio::test]
 async fn switch_row3_an_exit_still_filling_refuses_the_switch_until_it_ends() {
