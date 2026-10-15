@@ -173,7 +173,6 @@
     "src-tauri/src/services/system_info.rs::render_report": 153,
     "src-tauri/src/services/system_info.rs::system_payload": 122,
     "src-tauri/src/services/ui_order_service.rs::close_position": 108,
-    "src-tauri/src/state.rs::open": 200,
     "src-tauri/src/strategy/book.rs::apply_fill_locked": 126,
     "src-tauri/src/strategy/engine.rs::apply_fill_inner": 241,
     "src-tauri/src/strategy/engine.rs::exit_legs": 261,
