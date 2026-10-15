@@ -3,21 +3,24 @@
 
 use crate::brokers::catalog::{self, AuthType, SignIn};
 use crate::config::url_with_scheme;
-use crate::db::sqlite::credentials::{self, CredentialUpdate};
-use crate::events::SessionEndReason;
+use crate::db::sqlite::credentials::CredentialUpdate;
+use crate::error::AppError;
 use crate::security::Secret;
 use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::middleware::{login_limited, redirect, ClientIp, Sess, User};
 use crate::services::broker_auth_service::{BrokerAuthService, CallbackOrigin, FormLogin};
 use crate::services::broker_config_service::BrokerConfigService;
+use crate::services::broker_settings_service::{
+    self, SettingsError, SettingsOutcome, SettingsSave,
+};
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -341,39 +344,19 @@ pub async fn oauth_manual(State(ctx): Ctx, User(user): User, form: FormData) -> 
 pub async fn get_credentials(State(ctx): Ctx) -> Response {
     let cfg = ctx.server_config();
     let broker = cfg.active_broker.clone().unwrap_or_default();
-    let masked = if broker.is_empty() {
-        Ok(credentials::MaskedCredentials::default())
-    } else {
-        ctx.sqlite.conn().and_then(|c| {
-            credentials::load(&c, &ctx.security, &broker)
-                .map(|o| o.map(|s| s.masked()).unwrap_or_default())
-        })
-    };
-    let masked = match masked {
-        Ok(m) => m,
+    let (masked, client_id) = match broker_settings_service::masked(&ctx, &broker) {
+        Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    let client_id = if broker.is_empty() {
-        None
+    let redirect_url = if broker.is_empty() {
+        String::new()
     } else {
-        ctx.sqlite
-            .conn()
-            .ok()
-            .and_then(|c| credentials::load(&c, &ctx.security, &broker).ok().flatten())
-            .and_then(|s| s.client_id)
+        BrokerConfigService::redirect_url(&ctx, &broker)
+            .unwrap_or_else(|_| cfg.redirect_url_for(&broker))
     };
     let mut data = serde_json::to_value(masked).unwrap_or_default();
-    let ws_host = cfg.bind_host.clone();
     if let Some(o) = data.as_object_mut() {
-        o.insert(
-            "redirect_url".into(),
-            json!(if broker.is_empty() {
-                String::new()
-            } else {
-                BrokerConfigService::redirect_url(&ctx, &broker)
-                    .unwrap_or_else(|_| cfg.redirect_url_for(&broker))
-            }),
-        );
+        o.insert("redirect_url".into(), json!(redirect_url));
         o.insert("current_broker".into(), json!(broker));
         o.insert("valid_brokers".into(), json!(catalog::ALL_BROKERS));
         // Desktop: brokers whose sign-in needs a separate client id, and the
@@ -383,250 +366,66 @@ pub async fn get_credentials(State(ctx): Ctx) -> Response {
             json!(catalog::CLIENT_ID_BROKERS),
         );
         o.insert("client_id".into(), json!(client_id));
-        o.insert("ngrok_allow".into(), json!(cfg.ngrok_allow));
-        // Desktop: whether each address is the automatic one (nothing saved),
-        // so the Profile page can offer to go back to it.
-        o.insert(
-            "host_server_is_default".into(),
-            json!(cfg.host_server.is_none()),
-        );
-        o.insert(
-            "websocket_url_is_default".into(),
-            json!(cfg.websocket_url.is_none()),
-        );
-        o.insert(
-            "host_server".into(),
-            json!(cfg
-                .host_server
-                .clone()
-                .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.http_port))),
-        );
-        o.insert(
-            "websocket_url".into(),
-            json!(cfg
-                .websocket_url
-                .clone()
-                .unwrap_or_else(|| format!("ws://127.0.0.1:{}", cfg.ws_port))),
-        );
-        o.insert(
-            "server_status".into(),
-            json!({
-                "flask": {"host": cfg.bind_host, "port": cfg.http_port.to_string()},
-                "websocket": {"host": ws_host, "port": cfg.ws_port.to_string()},
-                "zmq": {"host": "127.0.0.1", "port": "5555"},
-            }),
-        );
+        o.extend(server_settings(&cfg));
     }
     json_response(StatusCode::OK, json!({"status": "success", "data": data}))
+}
+
+/// The server addresses `GET /api/broker/credentials` reports with the keys.
+fn server_settings(cfg: &crate::config::ServerConfig) -> serde_json::Map<String, Value> {
+    let mut o = serde_json::Map::new();
+    o.insert("ngrok_allow".into(), json!(cfg.ngrok_allow));
+    // Desktop: whether each address is the automatic one (nothing saved), so
+    // the Profile page can offer to go back to it.
+    o.insert(
+        "host_server_is_default".into(),
+        json!(cfg.host_server.is_none()),
+    );
+    o.insert(
+        "websocket_url_is_default".into(),
+        json!(cfg.websocket_url.is_none()),
+    );
+    o.insert(
+        "host_server".into(),
+        json!(cfg
+            .host_server
+            .clone()
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.http_port))),
+    );
+    o.insert(
+        "websocket_url".into(),
+        json!(cfg
+            .websocket_url
+            .clone()
+            .unwrap_or_else(|| format!("ws://127.0.0.1:{}", cfg.ws_port))),
+    );
+    o.insert(
+        "server_status".into(),
+        json!({
+            "flask": {"host": cfg.bind_host, "port": cfg.http_port.to_string()},
+            "websocket": {"host": cfg.bind_host, "port": cfg.ws_port.to_string()},
+            "zmq": {"host": "127.0.0.1", "port": "5555"},
+        }),
+    );
+    o
 }
 
 /// POST /api/broker/credentials (form or json, web field names). Empty
 /// values keep what is stored. Applies immediately; no restart needed.
 pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
-    let redirect_url = form.non_empty("redirect_url");
-    // The broker this save names, if it names one (the web derives it from
-    // the redirect URL). A save that names none (the tunnel settings, say)
-    // never writes the active broker: a snapshot taken here could be stale
-    // by the time it is written (FLOW-03).
-    let mut broker: Option<String> = None;
-    if let Some(r) = &redirect_url {
-        let b = r
-            .strip_suffix("/callback")
-            .and_then(|p| p.rsplit('/').next())
-            .map(|s| s.to_lowercase());
-        // Parsed like the other addresses: the broker reads this one.
-        let ok_format = url_with_scheme(r, &["http", "https"], true) && b.is_some();
-        if !ok_format {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "Invalid redirect URL format. Must end with /<broker>/callback",
-            );
-        }
-        let b = b.unwrap_or_default();
-        if !valid_broker(&b) {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Invalid broker '{}'. Valid brokers: {}",
-                    b,
-                    catalog::ALL_BROKERS.join(", ")
-                ),
-            );
-        }
-        broker = Some(b);
-    }
-    if let Some(b) = form.non_empty("broker") {
-        if !valid_broker(&b) {
-            return error(StatusCode::BAD_REQUEST, "Choose a broker from the list.");
-        }
-        broker = Some(b);
-    }
-    let key = form.non_empty("broker_api_key");
-    // Desktop: an address sent empty means "use the automatic address" (it is
-    // stored empty, which reads back as unset), so a saved tunnel address can
-    // be cleared; the web keeps the old value. A value must be a full URL
-    // with the right scheme and a host (CFG-01, CFG-02).
-    let host_server = form.get("host_server").map(|v| v.trim().to_string());
-    let websocket_url = form.get("websocket_url").map(|v| v.trim().to_string());
-    for (value, schemes, any_path, message) in [
-        (
-            &host_server,
-            ["http", "https"],
-            false,
-            "Invalid HOST_SERVER format. Must start with http:// or https://",
-        ),
-        (
-            &websocket_url,
-            ["ws", "wss"],
-            true,
-            "Invalid WEBSOCKET_URL format. Must start with ws:// or wss://",
-        ),
-    ] {
-        if let Some(v) = value.as_deref().filter(|v| !v.is_empty()) {
-            if !url_with_scheme(v, &schemes, any_path) {
-                return error(StatusCode::BAD_REQUEST, message);
-            }
-        }
-    }
-    let update = CredentialUpdate {
-        api_key: key.map(Secret::new),
-        api_secret: form.non_empty("broker_api_secret").map(Secret::new),
-        api_key_market: form.non_empty("broker_api_key_market").map(Secret::new),
-        api_secret_market: form.non_empty("broker_api_secret_market").map(Secret::new),
-        client_id: form.non_empty("client_id"),
-    };
-    let mut updated: Vec<&str> = Vec::new();
-    for (f, name) in [
-        (update.api_key.is_some(), "BROKER_API_KEY"),
-        (update.api_secret.is_some(), "BROKER_API_SECRET"),
-        (update.api_key_market.is_some(), "BROKER_API_KEY_MARKET"),
-        (
-            update.api_secret_market.is_some(),
-            "BROKER_API_SECRET_MARKET",
-        ),
-        // Desktop: the client id some brokers' sign-in is bound to.
-        (update.client_id.is_some(), "CLIENT_ID"),
-        (redirect_url.is_some(), "REDIRECT_URL"),
-        (form.get("ngrok_allow").is_some(), "NGROK_ALLOW"),
-        (host_server.is_some(), "HOST_SERVER"),
-        (websocket_url.is_some(), "WEBSOCKET_URL"),
-    ] {
-        if f {
-            updated.push(name);
-        }
-    }
-    if updated.is_empty() && form.non_empty("broker").is_none() {
-        return error(StatusCode::BAD_REQUEST, "No credentials provided to update");
-    }
-    let has_secret_fields = update.api_key.is_some()
-        || update.api_secret.is_some()
-        || update.api_key_market.is_some()
-        || update.api_secret_market.is_some()
-        || update.client_id.is_some();
-    // One lifecycle lock for the save and the sign-out it causes, and the
-    // settings read again inside the transaction: two saves, or a save and
-    // a sign-in, never interleave, and "switched" is decided against what
-    // is stored now, not a snapshot (FLOW-03).
-    let held = BrokerAuthService::session_lock(&ctx).await;
-    // A save that would end the live session (a switch, or new keys for the
-    // logged-in broker) is refused while Live automation or unsettled
-    // orders depend on it, before anything is stored.
-    if let Some(live) = ctx.get_broker_session() {
-        let stored_active = match ctx
-            .sqlite
-            .conn()
-            .and_then(|c| crate::config::ServerConfig::load(&c))
-        {
-            Ok(c) => c.active_broker,
-            Err(e) => return e.into_response(),
-        };
-        let target = broker.clone().or(stored_active);
-        let ends_live = broker.as_deref().is_some_and(|b| b != live.broker_id)
-            || (has_secret_fields && target.as_deref() == Some(live.broker_id.as_str()));
-        if ends_live {
-            if let Some(why) = crate::services::broker_switch::refusal(&ctx, &live.broker_id) {
-                return error(StatusCode::CONFLICT, why);
-            }
-        }
-    }
-    let res = ctx.sqlite.conn().and_then(
-        |mut c| -> crate::error::Result<(Option<String>, Option<String>)> {
-            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let previous = crate::config::ServerConfig::load(&tx)?.active_broker;
-            // Keys go to the broker the save names, else the active one.
-            let target = broker.clone().or_else(|| previous.clone());
-            if has_secret_fields {
-                let b = target.clone().ok_or_else(|| {
-                    crate::error::AppError::Validation(
-                        "Choose your broker before saving its API key.".into(),
-                    )
-                })?;
-                if let Some(k) = &update.api_key {
-                    BrokerConfigService::check_api_key_format(&b, k.expose())
-                        .map_err(|m| crate::error::AppError::Validation(m.into()))?;
-                }
-                // Saving the settings again is how a trader switches accounts:
-                // the next sign-in is no longer bound to the last one's.
-                BrokerConfigService::save_keys(&tx, &ctx.security, &b, update)?;
-            }
-            crate::config::save(
-                &tx,
-                &crate::config::ServerConfigUpdate {
-                    // Only when the save names a broker.
-                    active_broker: broker.clone(),
-                    redirect_url: redirect_url.clone(),
-                    host_server: host_server.clone(),
-                    websocket_url: websocket_url.clone(),
-                    ngrok_allow: form
-                        .get("ngrok_allow")
-                        .map(|v| v.eq_ignore_ascii_case("true")),
-                    ..Default::default()
-                },
-            )?;
-            tx.commit()?;
-            Ok((previous, target))
-        },
-    );
-    let (previous, target) = match res {
+    let (save, updated) = match settings_form(&form) {
         Ok(v) => v,
-        Err(e) => {
-            return match e {
-                crate::error::AppError::Validation(m) => error(StatusCode::BAD_REQUEST, m),
-                crate::error::AppError::Locked => crate::error::AppError::Locked.into_response(),
-                other => crate::server::routes::webui::failed(
-                    "Saving broker settings",
-                    other,
-                    "Your broker settings were not saved, and nothing was changed. Try again.",
-                ),
-            }
-        }
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
-    let _ = ctx.reload_config();
-    let switched = broker.is_some() && broker != previous;
-    // One broker at a time: a save that makes another broker the active one
-    // ends the live session of the old one. New keys for the logged-in
-    // broker end its session too (FLOW-04: a session belongs to the keys it
-    // signed in with).
-    let signed_out = match ctx.get_broker_session() {
-        Some(s)
-            if (broker.is_some() && broker.as_deref() != Some(s.broker_id.as_str()))
-                || (has_secret_fields && target.as_deref() == Some(s.broker_id.as_str())) =>
-        {
-            // The session ends in memory whatever the database does; a
-            // failed write of its stored row is retried by the session poll.
-            if let Err(e) =
-                BrokerAuthService::revoke_held(&ctx, SessionEndReason::Logout, &held).await
-            {
-                tracing::error!(
-                    "Broker session ended by the settings save; its stored row is still to be revoked: {}",
-                    e
-                );
-            }
-            Some(s.broker_id)
-        }
-        _ => None,
+    let (switched, signed_out) = match broker_settings_service::save(&ctx, save).await {
+        Ok(SettingsOutcome::Saved {
+            switched,
+            signed_out_of,
+        }) => (switched, signed_out_of),
+        Ok(SettingsOutcome::Refused(why)) => return error(StatusCode::CONFLICT, why),
+        Err(SettingsError::Read(e)) => return e.into_response(),
+        Err(SettingsError::Save(e)) => return settings_not_saved(e),
     };
-    drop(held);
     tracing::info!("Broker settings updated: {}", updated.join(", "));
     json_response(
         StatusCode::OK,
@@ -643,15 +442,135 @@ pub async fn update_credentials(State(ctx): Ctx, form: FormData) -> Response {
     )
 }
 
+/// The settings form, checked, and the web's names of the fields it
+/// changes (for the reply). `Err` is the trader's message.
+fn settings_form(form: &FormData) -> Result<(SettingsSave, Vec<&'static str>), String> {
+    let redirect_url = form.non_empty("redirect_url");
+    // The broker this save names, if it names one (the web derives it from
+    // the redirect URL).
+    let mut broker = match &redirect_url {
+        Some(r) => Some(broker_of_redirect_url(r)?),
+        None => None,
+    };
+    if let Some(b) = form.non_empty("broker") {
+        if !valid_broker(&b) {
+            return Err("Choose a broker from the list.".into());
+        }
+        broker = Some(b);
+    }
+    // Desktop: an address sent empty means "use the automatic address" (it is
+    // stored empty, which reads back as unset), so a saved tunnel address can
+    // be cleared; the web keeps the old value.
+    let host_server = form.get("host_server").map(|v| v.trim().to_string());
+    let websocket_url = form.get("websocket_url").map(|v| v.trim().to_string());
+    check_addresses(host_server.as_deref(), websocket_url.as_deref())?;
+    let save = SettingsSave {
+        broker,
+        update: CredentialUpdate {
+            api_key: form.non_empty("broker_api_key").map(Secret::new),
+            api_secret: form.non_empty("broker_api_secret").map(Secret::new),
+            api_key_market: form.non_empty("broker_api_key_market").map(Secret::new),
+            api_secret_market: form.non_empty("broker_api_secret_market").map(Secret::new),
+            client_id: form.non_empty("client_id"),
+        },
+        redirect_url,
+        host_server,
+        websocket_url,
+        ngrok_allow: form
+            .get("ngrok_allow")
+            .map(|v| v.eq_ignore_ascii_case("true")),
+    };
+    let updated = updated_fields(&save);
+    if updated.is_empty() && form.non_empty("broker").is_none() {
+        return Err("No credentials provided to update".into());
+    }
+    Ok((save, updated))
+}
+
+/// The broker a redirect URL names (`.../<broker>/callback`), parsed like
+/// the other addresses, since the broker reads this one.
+fn broker_of_redirect_url(url: &str) -> Result<String, String> {
+    let b = url
+        .strip_suffix("/callback")
+        .and_then(|p| p.rsplit('/').next())
+        .map(|s| s.to_lowercase());
+    let Some(b) = b.filter(|_| url_with_scheme(url, &["http", "https"], true)) else {
+        return Err("Invalid redirect URL format. Must end with /<broker>/callback".into());
+    };
+    if !valid_broker(&b) {
+        return Err(format!(
+            "Invalid broker '{}'. Valid brokers: {}",
+            b,
+            catalog::ALL_BROKERS.join(", ")
+        ));
+    }
+    Ok(b)
+}
+
+/// A server address must be a full URL with the right scheme and a host
+/// (CFG-01, CFG-02); empty means the automatic one.
+fn check_addresses(host_server: Option<&str>, websocket_url: Option<&str>) -> Result<(), String> {
+    for (value, schemes, any_path, message) in [
+        (
+            host_server,
+            ["http", "https"],
+            false,
+            "Invalid HOST_SERVER format. Must start with http:// or https://",
+        ),
+        (
+            websocket_url,
+            ["ws", "wss"],
+            true,
+            "Invalid WEBSOCKET_URL format. Must start with ws:// or wss://",
+        ),
+    ] {
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            if !url_with_scheme(v, &schemes, any_path) {
+                return Err(message.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The web's names of the fields a save changes.
+fn updated_fields(save: &SettingsSave) -> Vec<&'static str> {
+    let u = &save.update;
+    [
+        (u.api_key.is_some(), "BROKER_API_KEY"),
+        (u.api_secret.is_some(), "BROKER_API_SECRET"),
+        (u.api_key_market.is_some(), "BROKER_API_KEY_MARKET"),
+        (u.api_secret_market.is_some(), "BROKER_API_SECRET_MARKET"),
+        // Desktop: the client id some brokers' sign-in is bound to.
+        (u.client_id.is_some(), "CLIENT_ID"),
+        (save.redirect_url.is_some(), "REDIRECT_URL"),
+        (save.ngrok_allow.is_some(), "NGROK_ALLOW"),
+        (save.host_server.is_some(), "HOST_SERVER"),
+        (save.websocket_url.is_some(), "WEBSOCKET_URL"),
+    ]
+    .into_iter()
+    .filter_map(|(changed, name)| changed.then_some(name))
+    .collect()
+}
+
+/// The reply when the save itself failed: nothing was changed.
+fn settings_not_saved(e: AppError) -> Response {
+    match e {
+        AppError::Validation(m) => error(StatusCode::BAD_REQUEST, m),
+        AppError::Locked => AppError::Locked.into_response(),
+        other => crate::server::routes::webui::failed(
+            "Saving broker settings",
+            other,
+            "Your broker settings were not saved, and nothing was changed. Try again.",
+        ),
+    }
+}
+
 /// GET /api/broker/configured: every broker with saved keys and which one is
 /// active (desktop; the broker page lists them so a trader can switch).
 pub async fn configured(State(ctx): Ctx) -> Response {
     let active = ctx.server_config().active_broker.clone();
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| credentials::list_configured(&c))
-    {
+    match broker_settings_service::configured(&ctx) {
         Ok(list) => {
             let brokers: Vec<_> = list
                 .iter()
