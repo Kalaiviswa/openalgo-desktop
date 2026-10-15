@@ -25,7 +25,9 @@
 //! idempotent by meaning, and a 60 second window would suppress a genuine
 //! long, short, long sequence.
 
-use super::store::{hash_webhook_token, StrategyRow, RUN_MODES, WEBHOOK_TOKEN_PREFIX};
+use super::store::{
+    hash_webhook_token, StrategyRow, WebhookEvent, RUN_MODES, WEBHOOK_TOKEN_PREFIX,
+};
 use super::StrategyModule;
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
@@ -506,16 +508,16 @@ impl Audit<'_> {
         payload: Option<&Value>,
         error: Option<&str>,
     ) -> Option<i64> {
-        match self.module.store.record_webhook_event(
+        match self.module.store.record_webhook_event(&WebhookEvent {
             result,
             strategy_id,
             action,
             mode,
             payload,
-            self.ip,
-            self.ua,
+            ip: self.ip,
+            user_agent: self.ua,
             error,
-        ) {
+        }) {
             Ok(id) => Some(id),
             Err(e) => {
                 tracing::error!("Could not audit a webhook ({}): {}", result, e);

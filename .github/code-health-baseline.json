@@ -37,8 +37,7 @@
     "src-tauri/src/strategy/engine/exits.rs::clippy::large_enum_variant": 1,
     "src-tauri/src/strategy/recovery.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/strategy/resolver.rs::clippy::too_many_arguments": 1,
-    "src-tauri/src/strategy/signals.rs::clippy::too_many_arguments": 1,
-    "src-tauri/src/strategy/store/webhook_audit.rs::clippy::too_many_arguments": 1
+    "src-tauri/src/strategy/signals.rs::clippy::too_many_arguments": 1
   },
   "rust_files": {},
   "rust_functions": {

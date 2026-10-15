@@ -5,21 +5,33 @@ use crate::error::Result;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
+/// One webhook call as the audit records it.
+#[derive(Debug, Clone, Copy)]
+pub struct WebhookEvent<'a> {
+    pub result: &'a str,
+    pub strategy_id: Option<i64>,
+    pub action: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub payload: Option<&'a Value>,
+    pub ip: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub error: Option<&'a str>,
+}
+
 impl Store {
     /// Audit one inbound webhook, whatever the outcome. Ownerless rows (an
     /// unknown token) are capped at the newest `MAX_UNATTRIBUTED_WEBHOOK_EVENTS`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_webhook_event(
-        &self,
-        result: &str,
-        strategy_id: Option<i64>,
-        action: Option<&str>,
-        mode: Option<&str>,
-        payload: Option<&Value>,
-        ip: Option<&str>,
-        user_agent: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<i64> {
+    pub fn record_webhook_event(&self, event: &WebhookEvent<'_>) -> Result<i64> {
+        let WebhookEvent {
+            result,
+            strategy_id,
+            action,
+            mode,
+            payload,
+            ip,
+            user_agent,
+            error,
+        } = *event;
         let conn = self.conn()?;
         let ua = user_agent
             .map(|u| u.chars().take(255).collect::<String>())

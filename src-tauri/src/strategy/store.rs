@@ -37,11 +37,13 @@ mod orders;
 mod runs;
 mod strategies;
 mod webhook_audit;
+
 pub use by_mode::ModedOrder;
 pub use management::{
     migrate_revision, ClaimOutcome, StartClaim, ALREADY_RUNNING, CHANGED_WHILE_EDITING,
     CHANGED_WHILE_STARTING, LIVE_NOT_ENABLED, WEBHOOK_LOCKED,
 };
+pub use webhook_audit::WebhookEvent;
 
 pub const WEBHOOK_TOKEN_PREFIX: &str = "oaws_";
 
