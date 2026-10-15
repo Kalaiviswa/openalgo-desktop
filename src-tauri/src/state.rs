@@ -170,12 +170,20 @@ impl OpenOptions {
     }
 }
 
-impl AppState {
-    /// Open everything under `data_dir`. Must run inside a Tokio runtime
-    /// (subscribers are spawned here).
-    pub fn open(data_dir: &Path, opts: OpenOptions) -> Result<Arc<Self>> {
+/// What [`AppState::open`] opens first, in this order: the data folder's
+/// keys and databases, migrated, and the server settings.
+struct Stores {
+    security: Arc<SecurityManager>,
+    sqlite: Arc<SqliteDb>,
+    logs: Arc<LogsDb>,
+    duckdb: Arc<DuckDb>,
+    config: ServerConfig,
+}
+
+impl Stores {
+    fn open(data_dir: &Path, opts: &OpenOptions) -> Result<Self> {
         crate::security::fsperm::ensure_private_dir(data_dir)?;
-        let security = Arc::new(SecurityManager::open(data_dir, opts.keystore)?);
+        let security = Arc::new(SecurityManager::open(data_dir, opts.keystore.clone())?);
         let sqlite = Arc::new(SqliteDb::new(&data_dir.join("openalgo.db"))?);
         let logs = Arc::new(LogsDb::new(&data_dir.join("logs.db"))?);
         {
@@ -193,11 +201,101 @@ impl AppState {
             let conn = sqlite.conn()?;
             ServerConfig::load(&conn)?
         };
+        Ok(Self {
+            security,
+            sqlite,
+            logs,
+            duckdb,
+            config,
+        })
+    }
+}
+
+/// Everything [`AppState::assemble`] builds the context from.
+struct Parts<'a> {
+    data_dir: &'a Path,
+    opts: OpenOptions,
+    stores: Stores,
+    ui: Arc<SocketEmitter>,
+    bus: Arc<EventBus>,
+    http: reqwest::Client,
+    sandbox_db: Arc<crate::sandbox::SandboxDb>,
+    symbols: SymbolResolver,
+    websocket: Arc<WebSocketManager>,
+    runtime: crate::services::broker_runtime::BrokerRuntime,
+    bridge: Arc<crate::feed::bridge::BrokerBridge>,
+}
+
+impl Parts<'_> {
+    fn historify(&self, me: &std::sync::Weak<AppState>) -> Arc<crate::historify::Historify> {
+        Arc::new(crate::historify::Historify::new(
+            (*self.stores.duckdb).clone(),
+            Arc::new(crate::historify::source::BrokerSource::new(me.clone())),
+            self.bus.clone(),
+            self.opts.clock.clone(),
+            &self.data_dir.join("historify_work"),
+            crate::historify::jobs::EngineConfig::default(),
+        ))
+    }
+
+    fn strategy(&self, me: &std::sync::Weak<AppState>) -> Arc<crate::strategy::StrategyModule> {
+        crate::strategy::StrategyModule::new(crate::strategy::Deps {
+            db: self.stores.sqlite.clone(),
+            gateway: Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
+            rooms: Arc::new(crate::strategy::broadcast::SocketRooms::new(
+                self.ui.clone(),
+            )),
+            clock: self.opts.clock.clone(),
+            symbols: self.symbols.clone(),
+            session_hour: self.stores.config.session_expiry_hour,
+            session_minute: self.stores.config.session_expiry_minute,
+            prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
+                me.clone(),
+                self.websocket.clone(),
+            ))),
+        })
+    }
+
+    fn scalping(&self, me: &std::sync::Weak<AppState>) -> Arc<crate::scalping::Scalping> {
+        crate::scalping::Scalping::new(crate::scalping::MonitorDeps {
+            store: crate::scalping::Store::new(self.stores.sqlite.clone()),
+            gateway: Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
+            prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
+                me.clone(),
+                self.websocket.clone(),
+            ))),
+            ui: self.ui.clone(),
+            clock: self.opts.clock.clone(),
+            symbols: self.symbols.clone(),
+        })
+    }
+
+    fn sandbox(&self, me: &std::sync::Weak<AppState>) -> crate::sandbox::Sandbox {
+        crate::sandbox::Sandbox::with_db(
+            self.sandbox_db.clone(),
+            crate::sandbox::SandboxDeps {
+                symbols: Arc::new(crate::services::sandbox_feed::MasterSymbols(
+                    self.symbols.clone(),
+                )),
+                quotes: Arc::new(crate::services::sandbox_feed::LiveQuotes::new(me.clone())),
+                clock: self.opts.clock.clone(),
+                bus: Some(self.bus.clone()),
+            },
+            crate::sandbox::SandboxOptions::default(),
+        )
+    }
+}
+
+impl AppState {
+    /// Open everything under `data_dir`. Must run inside a Tokio runtime
+    /// (subscribers are spawned here).
+    pub fn open(data_dir: &Path, opts: OpenOptions) -> Result<Arc<Self>> {
+        let stores = Stores::open(data_dir, &opts)?;
         let ui = Arc::new(SocketEmitter::default());
         let bus = Arc::new(EventBus::new());
         crate::events::subscribers::register_all(
             &bus,
-            logs.clone(),
+            stores.logs.clone(),
             ui.clone() as Arc<dyn UiEmitter>,
         );
         let http = reqwest::Client::builder()
@@ -210,98 +308,81 @@ impl AppState {
         )?);
         crate::security::fsperm::restrict_db_files(&data_dir.join("sandbox.db"))?;
         let symbols = opts.brokers.symbols();
-        let sandbox_bus = bus.clone();
-        let sandbox_clock = opts.clock.clone();
-        let historify_bus = bus.clone();
-        let historify_clock = opts.clock.clone();
-        let historify_db = (*duckdb).clone();
         let websocket = Arc::new(WebSocketManager::new());
-        let strategy_db = sqlite.clone();
-        let trading_db = sqlite.clone();
-        let trading_clock = opts.clock.clone();
-        let strategy_ui = ui.clone();
-        let strategy_symbols = symbols.clone();
-        let strategy_clock = opts.clock.clone();
-        let strategy_feed = websocket.clone();
-        let strategy_session = (config.session_expiry_hour, config.session_expiry_minute);
-        let scalping_db = sqlite.clone();
-        let scalping_ui = ui.clone();
-        let scalping_symbols = symbols.clone();
-        let scalping_clock = opts.clock.clone();
-        let scalping_feed = websocket.clone();
-        let chartink_db = sqlite.clone();
-        let chartink_clock = opts.clock.clone();
-        let reconciler_clock = opts.clock.clone();
-        let reconciler_bus = bus.clone();
         let runtime = crate::services::broker_runtime::BrokerRuntime::new();
         let bridge = crate::feed::bridge::BrokerBridge::with_depth_manager(
             websocket.clone(),
             runtime.depth_ws.clone(),
             symbols.clone(),
         );
-        let ctx = Arc::new_cyclic(|me: &std::sync::Weak<Self>| Self {
-            historify: Arc::new(crate::historify::Historify::new(
-                historify_db,
-                Arc::new(crate::historify::source::BrokerSource::new(me.clone())),
-                historify_bus,
-                historify_clock,
-                &data_dir.join("historify_work"),
-                crate::historify::jobs::EngineConfig::default(),
+        let parts = Parts {
+            data_dir,
+            opts,
+            stores,
+            ui,
+            bus,
+            http,
+            sandbox_db,
+            symbols,
+            websocket,
+            runtime,
+            bridge,
+        };
+        let ctx = Arc::new_cyclic(|me: &std::sync::Weak<Self>| Self::assemble(me, parts));
+        ctx.start_services();
+        Ok(ctx)
+    }
+
+    /// The context from its opened parts. `me` is the context's own weak
+    /// reference, which the modules that call back into it hold.
+    fn assemble(me: &std::sync::Weak<Self>, p: Parts<'_>) -> Self {
+        let historify = p.historify(me);
+        let strategy = p.strategy(me);
+        let trading = crate::trading::Trading::new(
+            p.data_dir,
+            p.stores.sqlite.clone(),
+            p.opts.clock.clone(),
+            Arc::new(crate::trading::runner::services::AppServices::new(
+                me.clone(),
             )),
-            strategy: crate::strategy::StrategyModule::new(crate::strategy::Deps {
-                db: strategy_db,
-                gateway: Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
-                rooms: Arc::new(crate::strategy::broadcast::SocketRooms::new(strategy_ui)),
-                clock: strategy_clock,
-                symbols: strategy_symbols,
-                session_hour: strategy_session.0,
-                session_minute: strategy_session.1,
-                prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
-                    me.clone(),
-                    strategy_feed,
-                ))),
-            }),
-            trading: crate::trading::Trading::new(
-                data_dir,
-                trading_db,
-                trading_clock,
-                Arc::new(crate::trading::runner::services::AppServices::new(
-                    me.clone(),
-                )),
-            ),
-            scalping: crate::scalping::Scalping::new(crate::scalping::MonitorDeps {
-                store: crate::scalping::Store::new(scalping_db),
-                gateway: Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
-                prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
-                    me.clone(),
-                    scalping_feed,
-                ))),
-                ui: scalping_ui,
-                clock: scalping_clock,
-                symbols: scalping_symbols,
-            }),
-            reconciler: crate::services::order_reconciler::OrderReconciler::new(
-                Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
-                reconciler_clock,
-                Some(reconciler_bus),
-            ),
-            chartink: crate::chartink::Chartink::new(me.clone(), chartink_db, chartink_clock),
-            sandbox: crate::sandbox::Sandbox::with_db(
-                sandbox_db,
-                crate::sandbox::SandboxDeps {
-                    symbols: Arc::new(crate::services::sandbox_feed::MasterSymbols(
-                        symbols.clone(),
-                    )),
-                    quotes: Arc::new(crate::services::sandbox_feed::LiveQuotes::new(me.clone())),
-                    clock: sandbox_clock,
-                    bus: Some(sandbox_bus),
-                },
-                crate::sandbox::SandboxOptions::default(),
-            ),
-            sqlite,
-            logs,
-            duckdb,
-            security,
+        );
+        let scalping = p.scalping(me);
+        let reconciler = crate::services::order_reconciler::OrderReconciler::new(
+            Arc::new(crate::strategy::dispatch::AppGateway::new(me.clone())),
+            p.opts.clock.clone(),
+            Some(p.bus.clone()),
+        );
+        let chartink = crate::chartink::Chartink::new(
+            me.clone(),
+            p.stores.sqlite.clone(),
+            p.opts.clock.clone(),
+        );
+        let sandbox = p.sandbox(me);
+        let Parts {
+            data_dir,
+            opts,
+            stores,
+            ui,
+            bus,
+            http,
+            symbols,
+            websocket,
+            runtime,
+            bridge,
+            ..
+        } = p;
+        Self {
+            historify,
+            strategy,
+            trading,
+            scalping,
+            reconciler,
+            chartink,
+            sandbox,
+            sqlite: stores.sqlite,
+            logs: stores.logs,
+            duckdb: stores.duckdb,
+            security: stores.security,
             symbols,
             brokers: opts.brokers,
             websocket,
@@ -311,7 +392,7 @@ impl AppState {
             bus,
             ui,
             clock: opts.clock,
-            config: RwLock::new(config),
+            config: RwLock::new(stores.config),
             port_pin: RwLock::new(None),
             sessions: WebSessionStore::new(),
             limiter: RateLimiter::new(),
@@ -330,11 +411,18 @@ impl AppState {
             messaging: crate::messaging::Messaging::new(),
             mcp: crate::mcp::McpRuntime::new(),
             updates: crate::services::update::UpdateService::new(env!("CARGO_PKG_VERSION")),
-        });
-        crate::messaging::register(&ctx);
+        }
+    }
+
+    /// Register the subscribers and the reconciler's order owners, start
+    /// the background services, and resume the sandbox engine when
+    /// analyzer mode was on.
+    fn start_services(self: &Arc<Self>) {
+        let ctx = self;
+        crate::messaging::register(ctx);
         ctx.historify.start();
-        crate::strategy::register(&ctx);
-        crate::trading::register(&ctx);
+        crate::strategy::register(ctx);
+        crate::trading::register(ctx);
         crate::scalping::register(&ctx.bus, &ctx.scalping);
         // One reconciler over every owner of orders (LOG-08, ARCH-01). A gap
         // in order facts pauses new strategy entries until it is repaired.
@@ -352,10 +440,10 @@ impl AppState {
             )));
         ctx.reconciler
             .register(Arc::new(crate::scalping::unconfirmed::ScalpingOrders::new(
-                Arc::downgrade(&ctx),
+                Arc::downgrade(ctx),
             )));
         ctx.strategy.set_entry_gate(ctx.reconciler.clone());
-        let alerts = Arc::downgrade(&ctx);
+        let alerts = Arc::downgrade(ctx);
         ctx.reconciler.set_alert_sink(Arc::new(move |a| {
             if let Some(ctx) = alerts.upgrade() {
                 crate::services::health_service::order_facts_alert(&ctx, a);
@@ -363,7 +451,7 @@ impl AppState {
         }));
         // A scalping stop that cannot be judged safely is left in place and
         // the trader told on the Health page.
-        let alerts = Arc::downgrade(&ctx);
+        let alerts = Arc::downgrade(ctx);
         ctx.scalping
             .monitor
             .set_alert_sink(Arc::new(move |message: String| {
@@ -376,12 +464,11 @@ impl AppState {
         ctx.reconciler.watch_feed(ctx.websocket.watch_status());
         crate::services::order_reconciler::register(&ctx.bus, &ctx.reconciler);
         ctx.reconciler.start();
-        crate::services::broker_config_service::BrokerConfigService::apply_rate_plans(&ctx);
+        crate::services::broker_config_service::BrokerConfigService::apply_rate_plans(ctx);
         // Analyzer mode survives restarts: resume the sandbox engine.
         if ctx.sqlite.get_analyze_mode().unwrap_or(false) {
-            crate::services::analyzer_service::AnalyzerService::spawn_engine_transition(&ctx, true);
+            crate::services::analyzer_service::AnalyzerService::spawn_engine_transition(ctx, true);
         }
-        Ok(ctx)
     }
 
     /// Open the data folder as version `version` of the app (REL-02):
