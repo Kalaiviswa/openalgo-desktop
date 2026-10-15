@@ -25,40 +25,33 @@ use super::models::{
 };
 use serde_json::Value;
 
-/// Judge one position against one last price.
-pub fn evaluate_position(risk: &PositionRisk, last_price: Option<f64>) -> PositionDecision {
-    let Some(ltp) = last_price.filter(|p| is_price(Some(*p))) else {
-        return PositionDecision {
-            identifier: risk.identifier.clone(),
-            evaluated: false,
-            stop_price: risk.effective_stop(),
-            target_price: as_price(risk.target_price),
-            highest_price: risk.highest_price,
-            lowest_price: risk.lowest_price,
-            pnl: 0.0,
-            breached: false,
-            reason: None,
-            detail: "tick ignored: last price is missing, zero, negative or not finite".into(),
-            stop_moved: false,
-            trail_armed: false,
-        };
-    };
-
-    let long_side = risk.is_long();
-    let entry = is_price(Some(risk.entry_price)).then_some(risk.entry_price);
-
-    // Seed a missing extreme from entry, or from this tick when even entry is
-    // unusable, so the extreme is never seeded at zero.
-    let seed = entry.unwrap_or(ltp);
-    let mut highest = risk.highest_price;
-    let mut lowest = risk.lowest_price;
-    if long_side {
-        highest = Some(py_max(highest.unwrap_or(seed), ltp));
-    } else {
-        lowest = Some(py_min(lowest.unwrap_or(seed), ltp));
+/// The decision for a tick without a usable price: nothing evaluated, the
+/// stored levels unchanged.
+fn ignored(risk: &PositionRisk) -> PositionDecision {
+    PositionDecision {
+        identifier: risk.identifier.clone(),
+        evaluated: false,
+        stop_price: risk.effective_stop(),
+        target_price: as_price(risk.target_price),
+        highest_price: risk.highest_price,
+        lowest_price: risk.lowest_price,
+        pnl: 0.0,
+        breached: false,
+        reason: None,
+        detail: "tick ignored: last price is missing, zero, negative or not finite".into(),
+        stop_moved: false,
+        trail_armed: false,
     }
+}
 
-    // Favourable excursion: how far the best price seen has run our way.
+/// Favourable excursion: how far the best price seen has run our way (zero
+/// without a usable entry).
+fn favourable_excursion(
+    entry: Option<f64>,
+    long_side: bool,
+    highest: Option<f64>,
+    lowest: Option<f64>,
+) -> f64 {
     let mut favourable = 0.0;
     if let Some(entry) = entry {
         let best = if long_side { highest } else { lowest };
@@ -73,18 +66,27 @@ pub fn evaluate_position(risk: &PositionRisk, last_price: Option<f64>) -> Positi
             );
         }
     }
+    favourable
+}
 
-    let mut stop = risk.effective_stop();
-    let original_stop = stop;
+/// The stop after this tick's trail, and whether the trail is armed. The
+/// trail arms on a strictly positive excursion that reaches the trigger (a
+/// trigger of zero means "as soon as it is in profit"), and its candidate,
+/// clamped to the peak, replaces the stop only when tighter (a ratchet).
+fn trailed_stop(
+    risk: &PositionRisk,
+    stop: Option<f64>,
+    favourable: f64,
+    (highest, lowest): (Option<f64>, Option<f64>),
+    has_entry: bool,
+) -> (Option<f64>, bool) {
+    let long_side = risk.is_long();
+    let mut stop = stop;
     let mut trail_armed = false;
 
     let trigger = py_max(0.0, risk.trail_trigger);
-    let can_trail = risk.trailing_enabled
-        && risk.trail_step > 0.0
-        && risk.trail_step.is_finite()
-        && entry.is_some();
-    // A trigger of zero means "as soon as it is in profit", so a strictly
-    // positive excursion is always required.
+    let can_trail =
+        risk.trailing_enabled && risk.trail_step > 0.0 && risk.trail_step.is_finite() && has_entry;
     if can_trail && favourable > 0.0 && favourable >= trigger {
         trail_armed = true;
         if let Some(candidate) = trail_candidate(risk, favourable, highest, lowest, trigger) {
@@ -105,30 +107,78 @@ pub fn evaluate_position(risk: &PositionRisk, last_price: Option<f64>) -> Positi
             }
         }
     }
+    (stop, trail_armed)
+}
+
+/// Whether the last price has reached `level`: at or below it when
+/// `below`, else at or above it. No level is never reached.
+fn reached(ltp: f64, level: Option<f64>, below: bool) -> bool {
+    match level {
+        Some(l) => {
+            if below {
+                ltp <= l
+            } else {
+                ltp >= l
+            }
+        }
+        None => false,
+    }
+}
+
+/// The open P&L at the last price (zero without a usable entry or with no
+/// quantity).
+fn position_pnl(entry: Option<f64>, ltp: f64, long_side: bool, quantity: f64) -> f64 {
+    let mut pnl = 0.0;
+    if let Some(entry) = entry {
+        if quantity != 0.0 {
+            pnl = if long_side {
+                (ltp - entry) * quantity
+            } else {
+                (entry - ltp) * quantity
+            };
+        }
+    }
+    pnl
+}
+
+/// Judge one position against one last price.
+pub fn evaluate_position(risk: &PositionRisk, last_price: Option<f64>) -> PositionDecision {
+    let Some(ltp) = last_price.filter(|p| is_price(Some(*p))) else {
+        return ignored(risk);
+    };
+
+    let long_side = risk.is_long();
+    let entry = is_price(Some(risk.entry_price)).then_some(risk.entry_price);
+
+    // Seed a missing extreme from entry, or from this tick when even entry is
+    // unusable, so the extreme is never seeded at zero.
+    let seed = entry.unwrap_or(ltp);
+    let mut highest = risk.highest_price;
+    let mut lowest = risk.lowest_price;
+    if long_side {
+        highest = Some(py_max(highest.unwrap_or(seed), ltp));
+    } else {
+        lowest = Some(py_min(lowest.unwrap_or(seed), ltp));
+    }
+
+    let favourable = favourable_excursion(entry, long_side, highest, lowest);
+
+    let original_stop = risk.effective_stop();
+    let (stop, trail_armed) = trailed_stop(
+        risk,
+        original_stop,
+        favourable,
+        (highest, lowest),
+        entry.is_some(),
+    );
 
     let stop_moved = stop != original_stop;
     let target = as_price(risk.target_price);
 
-    let stop_hit = match stop {
-        Some(s) => {
-            if long_side {
-                ltp <= s
-            } else {
-                ltp >= s
-            }
-        }
-        None => false,
-    };
-    let target_hit = match target {
-        Some(t) => {
-            if long_side {
-                ltp >= t
-            } else {
-                ltp <= t
-            }
-        }
-        None => false,
-    };
+    // A long stop is hit at or below it and its target at or above; a short
+    // the other way round.
+    let stop_hit = reached(ltp, stop, long_side);
+    let target_hit = reached(ltp, target, !long_side);
 
     let side_word = if long_side { "long" } else { "short" };
     let mut reason = None;
@@ -165,16 +215,7 @@ pub fn evaluate_position(risk: &PositionRisk, last_price: Option<f64>) -> Positi
         }
     }
 
-    let mut pnl = 0.0;
-    if let Some(entry) = entry {
-        if risk.quantity != 0.0 {
-            pnl = if long_side {
-                (ltp - entry) * risk.quantity
-            } else {
-                (entry - ltp) * risk.quantity
-            };
-        }
-    }
+    let pnl = position_pnl(entry, ltp, long_side, risk.quantity);
 
     PositionDecision {
         identifier: risk.identifier.clone(),
