@@ -699,21 +699,37 @@ pub mod build {
         f
     }
 
-    /// An L1 packet with every quote field (prices in rupees x divisor).
-    #[allow(clippy::too_many_arguments)]
-    pub fn l1_full(
-        seg: u8,
-        token: i32,
-        ltp: i32,
-        open: i32,
-        high: i32,
-        low: i32,
-        close: i32,
-        vol: u32,
-        bid: i32,
-        ask: i32,
-        oi: Option<u32>,
-    ) -> Vec<u8> {
+    /// Every quote field of an L1 packet (prices in rupees x divisor).
+    #[derive(Debug, Clone, Copy)]
+    pub struct L1Quote {
+        pub seg: u8,
+        pub token: i32,
+        pub ltp: i32,
+        pub open: i32,
+        pub high: i32,
+        pub low: i32,
+        pub close: i32,
+        pub vol: u32,
+        pub bid: i32,
+        pub ask: i32,
+        pub oi: Option<u32>,
+    }
+
+    /// An L1 packet with every quote field.
+    pub fn l1_full(q: L1Quote) -> Vec<u8> {
+        let L1Quote {
+            seg,
+            token,
+            ltp,
+            open,
+            high,
+            low,
+            close,
+            vol,
+            bid,
+            ask,
+            oi,
+        } = q;
         let mut f = vec![
             (29, V::I32(ltp)),
             (30, V::I32(open)),

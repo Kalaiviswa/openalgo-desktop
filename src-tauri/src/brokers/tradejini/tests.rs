@@ -605,9 +605,19 @@ fn header_and_packet_offsets() {
 fn l1_full_packet_divides_after_segment() {
     // exchSeg and token come last; prices still use the NSE divisor.
     let f = build::frame(
-        &[build::l1_full(
-            1, 2885, 142460, 141000, 143000, 140500, 141800, 123456, 142455, 142465, None,
-        )],
+        &[build::l1_full(build::L1Quote {
+            seg: 1,
+            token: 2885,
+            ltp: 142460,
+            open: 141000,
+            high: 143000,
+            low: 140500,
+            close: 141800,
+            vol: 123456,
+            bid: 142455,
+            ask: 142465,
+            oi: None,
+        })],
         false,
     );
     let Packet::L1(q) = &decode_message(&f)[0] else {
@@ -631,19 +641,19 @@ fn l1_full_packet_divides_after_segment() {
 fn cds_divisor_and_zlib() {
     // CDS prices are scaled by 1e7: 83.1234 -> 831234000.
     let f = build::frame(
-        &[build::l1_full(
-            5,
-            1234,
-            831_234_000,
-            830_000_000,
-            832_000_000,
-            829_000_000,
-            830_500_000,
-            10,
-            831_200_000,
-            831_300_000,
-            Some(500),
-        )],
+        &[build::l1_full(build::L1Quote {
+            seg: 5,
+            token: 1234,
+            ltp: 831_234_000,
+            open: 830_000_000,
+            high: 832_000_000,
+            low: 829_000_000,
+            close: 830_500_000,
+            vol: 10,
+            bid: 831_200_000,
+            ask: 831_300_000,
+            oi: Some(500),
+        })],
         true,
     );
     assert_eq!(f[5], 100);
@@ -835,12 +845,34 @@ fn feed_ticks_depth_and_auth() {
     let frame = build::frame(
         &[
             build::auth(1),
-            build::l1_full(
-                1, 2885, 142460, 141000, 143000, 140500, 141800, 99, 142455, 142465, None,
-            ),
+            build::l1_full(build::L1Quote {
+                seg: 1,
+                token: 2885,
+                ltp: 142460,
+                open: 141000,
+                high: 143000,
+                low: 140500,
+                close: 141800,
+                vol: 99,
+                bid: 142455,
+                ask: 142465,
+                oi: None,
+            }),
             build::l5(1, 2885, &[(142455, 10, 1)], &[(142465, 20, 2)]),
             // Not subscribed: ignored.
-            build::l1_full(1, 1, 100, 100, 100, 100, 100, 1, 100, 100, None),
+            build::l1_full(build::L1Quote {
+                seg: 1,
+                token: 1,
+                ltp: 100,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                vol: 1,
+                bid: 100,
+                ask: 100,
+                oi: None,
+            }),
         ],
         true,
     );

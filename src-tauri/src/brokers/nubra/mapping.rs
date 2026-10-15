@@ -121,18 +121,32 @@ pub fn ref_id(token: &str) -> Option<i64> {
     t.parse().ok()
 }
 
+/// One order as Nubra's place and margin requests take it.
+pub struct OrderItem<'a> {
+    /// Nubra's instrument id.
+    pub ref_id: i64,
+    pub quantity: i64,
+    pub action: Action,
+    pub product: Product,
+    pub price_type: PriceType,
+    pub price: f64,
+    pub trigger: f64,
+    /// The strategy tag (`sanitize_strat_tag`).
+    pub tag: &'a str,
+}
+
 /// One place-order item (web `transform_data`).
-#[allow(clippy::too_many_arguments)]
-pub fn order_item(
-    ref_id: i64,
-    quantity: i64,
-    action: Action,
-    product: Product,
-    pt: PriceType,
-    price: f64,
-    trigger: f64,
-    tag: &str,
-) -> Value {
+pub fn order_item(o: &OrderItem<'_>) -> Value {
+    let OrderItem {
+        ref_id,
+        quantity,
+        action,
+        product,
+        price_type: pt,
+        price,
+        trigger,
+        tag,
+    } = *o;
     let mut m = Map::new();
     m.insert("refId".into(), json!(ref_id));
     m.insert("qty".into(), json!(quantity));
@@ -154,16 +168,16 @@ pub fn order_item(
 
 /// Place item for a resolved order.
 pub fn place_item(o: &ResolvedOrder, ref_id: i64) -> Value {
-    order_item(
+    order_item(&OrderItem {
         ref_id,
-        o.quantity,
-        o.action,
-        o.product,
-        o.pricetype,
-        o.price,
-        o.trigger_price,
-        &sanitize_strat_tag(None),
-    )
+        quantity: o.quantity,
+        action: o.action,
+        product: o.product,
+        price_type: o.pricetype,
+        price: o.price,
+        trigger: o.trigger_price,
+        tag: &sanitize_strat_tag(None),
+    })
 }
 
 /// One modify item (web `transform_modify_order_data`).

@@ -128,18 +128,18 @@ pub fn parse_csv(text: &str) -> Result<Vec<SymToken>> {
         }
         let f = split_csv_line(line);
         let get = |i: usize| f.get(i).map(|s| s.trim()).unwrap_or("");
-        if let Some(row) = parse_row(
-            get(c_token),
-            get(c_ts),
-            get(c_company),
-            get(c_expiry),
-            get(c_strike),
-            get(c_tick),
-            get(c_lot),
-            get(c_opt),
-            get(c_seg),
-            get(c_ex),
-        ) {
+        if let Some(row) = parse_row(RawRow {
+            token: get(c_token),
+            trading_symbol: get(c_ts),
+            company: get(c_company),
+            expiry: get(c_expiry),
+            strike: get(c_strike),
+            tick: get(c_tick),
+            lot: get(c_lot),
+            option_type: get(c_opt),
+            segment: get(c_seg),
+            exchange: get(c_ex),
+        }) {
             if seen.insert((row.symbol.clone(), row.exchange.clone())) {
                 out.push(row);
             }
@@ -154,19 +154,34 @@ fn parse_expiry(s: &str) -> Option<NaiveDate> {
         .filter(|d| d.year() > 1900)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn parse_row(
-    token: &str,
-    ts: &str,
-    company: &str,
-    expiry_raw: &str,
-    strike_raw: &str,
-    tick_raw: &str,
-    lot_raw: &str,
-    opt_raw: &str,
-    seg: &str,
-    ex_raw: &str,
-) -> Option<SymToken> {
+/// One `CompactScrip.csv` row, as the file has it.
+#[derive(Clone, Copy)]
+struct RawRow<'a> {
+    token: &'a str,
+    trading_symbol: &'a str,
+    company: &'a str,
+    expiry: &'a str,
+    strike: &'a str,
+    tick: &'a str,
+    lot: &'a str,
+    option_type: &'a str,
+    segment: &'a str,
+    exchange: &'a str,
+}
+
+fn parse_row(raw: RawRow<'_>) -> Option<SymToken> {
+    let RawRow {
+        token,
+        trading_symbol: ts,
+        company,
+        expiry: expiry_raw,
+        strike: strike_raw,
+        tick: tick_raw,
+        lot: lot_raw,
+        option_type: opt_raw,
+        segment: seg,
+        exchange: ex_raw,
+    } = raw;
     let brex = ex_raw.to_ascii_uppercase();
     let opt = opt_raw.to_ascii_uppercase();
     let exchange = match (brex.as_str(), seg) {

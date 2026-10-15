@@ -154,31 +154,32 @@ fn f64_of(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|x| x.is_finite())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn row(
-    symbol: String,
-    brsymbol: &str,
-    name: &str,
-    exchange: &str,
-    token: &str,
-    expiry: String,
-    strike: f64,
+/// The columns every row made from one CSV line shares.
+struct Line<'a> {
+    brsymbol: &'a str,
+    name: &'a str,
+    exchange: &'a str,
+    token: &'a str,
     lot: i32,
-    itype: &str,
     tick: f64,
-) -> SymbolData {
-    SymbolData {
-        symbol,
-        brsymbol: brsymbol.to_string(),
-        name: name.to_string(),
-        exchange: exchange.to_string(),
-        brexchange: exchange.to_string(),
-        token: clean_token(token),
-        expiry,
-        strike,
-        lot_size: lot,
-        instrument_type: itype.to_string(),
-        tick_size: tick,
+}
+
+impl Line<'_> {
+    /// The master row for this line as the OpenAlgo `symbol`.
+    fn row(&self, symbol: String, expiry: String, strike: f64, itype: &str) -> SymbolData {
+        SymbolData {
+            symbol,
+            brsymbol: self.brsymbol.to_string(),
+            name: self.name.to_string(),
+            exchange: self.exchange.to_string(),
+            brexchange: self.exchange.to_string(),
+            token: clean_token(self.token),
+            expiry,
+            strike,
+            lot_size: self.lot,
+            instrument_type: itype.to_string(),
+            tick_size: self.tick,
+        }
     }
 }
 
@@ -199,12 +200,15 @@ pub fn parse_exchange_csv(file: &str, csv: &str) -> Vec<SymbolData> {
             continue;
         }
         let f = split_csv_line(line);
-        let exch = get(&f, c.exch);
         let trading = get(&f, c.trading);
-        let name = get(&f, c.inst_name);
-        let token = get(&f, c.token);
-        let lot = lot_of(get(&f, c.lot));
-        let tick = f64_of(get(&f, c.tick)).unwrap_or(0.0);
+        let line = Line {
+            brsymbol: trading,
+            name: get(&f, c.inst_name),
+            exchange: get(&f, c.exch),
+            token: get(&f, c.token),
+            lot: lot_of(get(&f, c.lot)),
+            tick: f64_of(get(&f, c.tick)).unwrap_or(0.0),
+        };
         match file {
             "NSE" | "BSE" => {
                 if file == "NSE" && !matches!(get(&f, c.group), "EQ" | "BE") {
@@ -217,18 +221,7 @@ pub fn parse_exchange_csv(file: &str, csv: &str) -> Vec<SymbolData> {
                 if symbol.is_empty() {
                     continue;
                 }
-                out.push(row(
-                    symbol.to_string(),
-                    trading,
-                    name,
-                    exch,
-                    token,
-                    String::new(),
-                    1.0,
-                    lot,
-                    "EQ",
-                    tick,
-                ));
+                out.push(line.row(symbol.to_string(), String::new(), 1.0, "EQ"));
             }
             _ => {
                 if file == "MCX" && get(&f, c.segment) == "mcx_idx" {
@@ -283,17 +276,11 @@ pub fn parse_exchange_csv(file: &str, csv: &str) -> Vec<SymbolData> {
                     "CE" => "CE",
                     _ => "PE",
                 };
-                out.push(row(
+                out.push(line.row(
                     symbol,
-                    trading,
-                    name,
-                    exch,
-                    token,
                     expiry.map(format_expiry).unwrap_or_default(),
                     strike.unwrap_or(0.0),
-                    lot,
                     itype_oa,
-                    tick,
                 ));
             }
         }

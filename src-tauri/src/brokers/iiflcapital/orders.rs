@@ -126,16 +126,16 @@ pub async fn place_order(
         trigger_price: o.trigger_price,
         tick_size: o.instrument.tick_size,
     };
-    let payload = mapping::order_payload(
-        o.token(),
-        o.exchange.as_str(),
-        &fields,
-        o.quantity,
-        o.product,
-        o.validity,
-        o.disclosed_quantity,
-        None,
-    )?;
+    let payload = mapping::order_payload(&mapping::OrderRequest {
+        token: o.token(),
+        exchange: o.exchange.as_str(),
+        fields,
+        quantity: o.quantity,
+        product: o.product,
+        validity: o.validity,
+        disclosed_quantity: o.disclosed_quantity,
+        tag: None,
+    })?;
     let order_id = send_order(b, auth, payload).await?;
     Ok(OrderResponse {
         order_id,
