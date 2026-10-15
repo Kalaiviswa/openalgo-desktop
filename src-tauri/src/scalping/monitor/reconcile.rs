@@ -4,8 +4,8 @@
 //! and clearing a leg once its exits ended and the position is flat.
 
 use super::{
-    flatness, fold_child, leg_position, run_mode, ChildState, ExitAttempt, Flatness, Gen,
-    RiskMonitor, BOOK_LAG_GRACE_MS,
+    flatness, fold_child, leg_position, run_mode, ChildState, ExitAttempt, ExitChild, Flatness,
+    Gen, RiskMonitor, BOOK_LAG_GRACE_MS,
 };
 use crate::scalping::store::{SlState, MODE_LIVE};
 use crate::services::order_reconciler::{
@@ -100,19 +100,7 @@ impl RiskMonitor {
                         // order past the session, a book that dropped it):
                         // never left working silently (review P1-5).
                         live.insert(akey.clone());
-                        let u = Unconfirmed {
-                            symbol: &sl.symbol,
-                            exchange: &sl.exchange,
-                            action: &child.action,
-                            quantity: child.qty,
-                            product: Some(&sl.product),
-                            client_tag: child.client_tag.as_deref(),
-                            placed_at: Some(child.placed_at),
-                            net_before: child.net_before,
-                            pricetype: Some("MARKET"),
-                            price: None,
-                            trigger_price: None,
-                        };
+                        let u = exit_unconfirmed(&sl, child);
                         match self.absence.judge(&akey, &akey, mode, book, &u).await {
                             Absence::NotPlaced => {
                                 self.absence.forget(&akey);
@@ -142,20 +130,7 @@ impl RiskMonitor {
                     _ => {
                         let akey = format!("{}#{}#{}", key, a.id, i);
                         live.insert(akey.clone());
-                        let u = Unconfirmed {
-                            symbol: &sl.symbol,
-                            exchange: &sl.exchange,
-                            action: &child.action,
-                            quantity: child.qty,
-                            product: Some(&sl.product),
-                            client_tag: child.client_tag.as_deref(),
-                            placed_at: Some(child.placed_at),
-                            net_before: child.net_before,
-                            // Exits are MARKET orders.
-                            pricetype: Some("MARKET"),
-                            price: None,
-                            trigger_price: None,
-                        };
+                        let u = exit_unconfirmed(&sl, child);
                         let bound = |id: &str| claimed.contains(id) || book.owned(id);
                         match book.find(&u, &bound) {
                             Found::Order(b) => {
@@ -334,6 +309,24 @@ impl RiskMonitor {
                 );
             }
         }
+    }
+}
+
+/// An exit order as the reconciler looks it up: exits are MARKET orders on
+/// the leg's symbol, exchange and product.
+fn exit_unconfirmed<'a>(sl: &'a SlState, child: &'a ExitChild) -> Unconfirmed<'a> {
+    Unconfirmed {
+        symbol: &sl.symbol,
+        exchange: &sl.exchange,
+        action: &child.action,
+        quantity: child.qty,
+        product: Some(&sl.product),
+        client_tag: child.client_tag.as_deref(),
+        placed_at: Some(child.placed_at),
+        net_before: child.net_before,
+        pricetype: Some("MARKET"),
+        price: None,
+        trigger_price: None,
     }
 }
 

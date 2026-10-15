@@ -123,7 +123,7 @@
     "src-tauri/src/sandbox/squareoff.rs::sweep": 133,
     "src-tauri/src/scalping/monitor/exits.rs::execute_exit": 265,
     "src-tauri/src/scalping/monitor/mod.rs::sync": 113,
-    "src-tauri/src/scalping/monitor/reconcile.rs::reconcile_book": 192,
+    "src-tauri/src/scalping/monitor/reconcile.rs::reconcile_book": 174,
     "src-tauri/src/server/api_v1/notify.rs::whatsapp_notify": 141,
     "src-tauri/src/server/routes/auth.rs::login": 103,
     "src-tauri/src/server/routes/auth.rs::login_totp": 74,
