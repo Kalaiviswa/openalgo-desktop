@@ -10,6 +10,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod credentials;
 pub mod data_migrations;
+mod durability;
 pub mod key_vault;
 pub mod logs;
 pub mod market_calendar;
@@ -27,6 +28,7 @@ pub mod watchlist;
 pub mod webui;
 
 use crate::error::Result;
+pub use durability::Durability;
 use models::Settings;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -35,13 +37,17 @@ use std::time::Duration;
 
 pub type DbConn = PooledConnection<SqliteConnectionManager>;
 
-/// Build a pool with the pragmas every connection needs.
-pub fn open_pool(path: &Path, max_size: u32) -> Result<Pool<SqliteConnectionManager>> {
-    let manager = SqliteConnectionManager::file(path).with_init(|c| {
-        c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; \
-             PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )
+/// Build a pool with the pragmas every connection needs, at the store's
+/// [`Durability`], applied to each connection the pool opens.
+pub fn open_pool(
+    path: &Path,
+    max_size: u32,
+    durability: Durability,
+) -> Result<Pool<SqliteConnectionManager>> {
+    let manager = SqliteConnectionManager::file(path).with_init(move |c| {
+        c.execute_batch("PRAGMA journal_mode=WAL;")?;
+        c.execute_batch(durability.pragma())?;
+        c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
     });
     let pool = Pool::builder()
         .max_size(max_size)
@@ -66,7 +72,7 @@ impl SqliteDb {
     /// Open (creating if needed) the main database and run schema migrations.
     pub fn new(path: &Path) -> Result<Self> {
         let db = Self {
-            pool: open_pool(path, 8)?,
+            pool: open_pool(path, 8, Durability::MAIN)?,
             analyze_mode: parking_lot::Mutex::new(None),
         };
         db.run_migrations()?;
