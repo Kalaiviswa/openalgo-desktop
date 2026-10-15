@@ -179,6 +179,20 @@ pub fn register(bus: &crate::events::EventBus, module: &Arc<StrategyModule>) {
     );
 }
 
+/// A broker status as the order row stores it: complete, cancelled,
+/// rejected, or open for anything still working.
+fn canonical_status(status: &str) -> &'static str {
+    if FILLED.contains(&status) {
+        "complete"
+    } else if CANCELLED.contains(&status) {
+        "cancelled"
+    } else if DEAD.contains(&status) {
+        "rejected"
+    } else {
+        "open"
+    }
+}
+
 impl StrategyModule {
     /// Match one update to a strategy order and apply it.
     pub async fn apply_update(&self, order_id: &str, update: OrderUpdate) {
@@ -266,15 +280,7 @@ impl StrategyModule {
 
     async fn apply_frame(&self, order_id: &str, row: &OrderRow, u: &OrderUpdate) {
         let status = normalise(&u.order_status);
-        let canonical = if FILLED.contains(&status.as_str()) {
-            "complete"
-        } else if CANCELLED.contains(&status.as_str()) {
-            "cancelled"
-        } else if DEAD.contains(&status.as_str()) {
-            "rejected"
-        } else {
-            "open"
-        };
+        let canonical = canonical_status(&status);
         let incoming_qty = (u.filled_quantity > 0).then_some(u.filled_quantity);
         let incoming_price = usable_price(Some(u.average_price));
         let rejection = (!u.rejection_reason.is_empty()).then_some(u.rejection_reason.as_str());
@@ -299,7 +305,7 @@ impl StrategyModule {
             }
         };
 
-        let mut exit_owner = if is_entry {
+        let exit_owner = if is_entry {
             None
         } else {
             self.exit_owner_for_row(row.run_id, row.leg_id, row.id, row.position_ref.as_deref())
@@ -316,101 +322,128 @@ impl StrategyModule {
                 .map(|r| r.stopped_at.is_some())
                 .unwrap_or(false);
         if should_apply {
-            let price = if is_entry {
-                usable_price(fold.average_fill_price)
-            } else {
-                incremental_fill_price(&fold)
-            };
-            let opts = FillOpts {
-                filled_qty: Some(fold.fill_delta),
-                order_row_id: Some(row.id),
-                position_ref: row.position_ref.clone(),
-                cumulative_filled_qty: (is_entry
-                    && (!fold.terminal() || fold.previous_filled_qty > 0))
-                    .then_some(fold.cumulative_filled_qty),
-                order_terminal: fold.terminal(),
-                allow_prior_order_correction: fold.was_terminal(),
-            };
-            if late_entry {
-                self.manage_late_entry_correction(row.run_id).await;
-            } else {
-                self.apply_fill(row.run_id, row.leg_id, price, is_entry, opts)
-                    .await;
-            }
-            if fold.fill_delta > 0 && price.is_none() {
-                self.report_unpriced_fill(row, order_id, fold.cumulative_filled_qty)
-                    .await;
-            }
+            self.apply_frame_fill(row, order_id, &fold, (is_entry, late_entry))
+                .await;
         }
 
         let dead_transition =
             (canonical == "cancelled" || canonical == "rejected") && !fold.was_terminal();
         if dead_transition {
             tracing::warn!("Strategy order {} ended as {}", order_id, canonical);
-            if is_entry && fold.cumulative_filled_qty <= 0 {
-                // Zero fill: the entry will never become a position.
-                self.state.with_run(row.run_id, |run| {
-                    if let Some(leg) = run.leg_mut(row.leg_id) {
-                        let owns =
-                            row.position_ref.is_none() || leg.position_ref == row.position_ref;
-                        if owns && leg.entry_status != "complete" {
-                            leg.entry_status = canonical.into();
-                            leg.status = "rejected".into();
-                        }
-                    }
-                });
-                self.reconcile_pending_stop(row.run_id).await;
-            } else if !is_entry {
-                if !should_apply {
-                    exit_owner = self
-                        .state
-                        .release_order_exit(
-                            row.run_id,
-                            row.leg_id,
-                            row.id,
-                            row.position_ref.as_deref(),
-                        )
-                        .map(str::to_string);
-                }
-                let held = self.exit_owner_still_held(
-                    row.run_id,
-                    row.leg_id,
-                    exit_owner.as_deref(),
-                    row.position_ref.as_deref(),
-                );
-                if exit_owner.as_deref() == Some("superseded") && held {
-                    self.report_flip_outgoing_exit_rejected(
-                        row.run_id,
-                        row.leg_id,
-                        canonical,
-                        row.broker_order_id.as_deref(),
-                    )
-                    .await;
-                }
-                if held {
-                    self.report_pending_stop_exit_failed(row, canonical).await;
-                }
-                if fold.cumulative_filled_qty <= 0
-                    && exit_owner.is_none()
-                    && self.state.snapshot(row.run_id).is_none()
-                {
-                    self.report_stranded_exit(row, canonical).await;
-                }
-            }
+            self.on_order_ended(row, canonical, &fold, is_entry, (should_apply, exit_owner))
+                .await;
         }
 
         if fold.fill_delta > 0 || fold.terminal() {
-            if let (Ok(Some(durable)), Ok(Some(run))) =
-                (self.store.get_order(row.id), self.store.get_run(row.run_id))
-            {
-                self.broadcast
-                    .push_order_update(run.strategy_id, durable.to_dict())
-                    .await;
-            }
-            self.broadcast
-                .push_delta(self.state.snapshot(row.run_id), true)
+            self.broadcast_order(row).await;
+        }
+    }
+
+    /// Applies a frame's fill to the position it belongs to (a late entry
+    /// on a stopped run is corrected instead), and reports a fill the
+    /// broker gave no price for.
+    async fn apply_frame_fill(
+        &self,
+        row: &OrderRow,
+        order_id: &str,
+        fold: &OrderFactFold,
+        (is_entry, late_entry): (bool, bool),
+    ) {
+        let price = if is_entry {
+            usable_price(fold.average_fill_price)
+        } else {
+            incremental_fill_price(fold)
+        };
+        let opts = FillOpts {
+            filled_qty: Some(fold.fill_delta),
+            order_row_id: Some(row.id),
+            position_ref: row.position_ref.clone(),
+            cumulative_filled_qty: (is_entry && (!fold.terminal() || fold.previous_filled_qty > 0))
+                .then_some(fold.cumulative_filled_qty),
+            order_terminal: fold.terminal(),
+            allow_prior_order_correction: fold.was_terminal(),
+        };
+        if late_entry {
+            self.manage_late_entry_correction(row.run_id).await;
+        } else {
+            self.apply_fill(row.run_id, row.leg_id, price, is_entry, opts)
                 .await;
         }
+        if fold.fill_delta > 0 && price.is_none() {
+            self.report_unpriced_fill(row, order_id, fold.cumulative_filled_qty)
+                .await;
+        }
+    }
+
+    /// An order that just ended cancelled or rejected: an unfilled entry
+    /// will never become a position; an exit's claim goes back, and a
+    /// held, stopping or stranded exit is reported.
+    async fn on_order_ended(
+        &self,
+        row: &OrderRow,
+        canonical: &str,
+        fold: &OrderFactFold,
+        is_entry: bool,
+        (should_apply, mut exit_owner): (bool, Option<String>),
+    ) {
+        if is_entry && fold.cumulative_filled_qty <= 0 {
+            // Zero fill: the entry will never become a position.
+            self.state.with_run(row.run_id, |run| {
+                if let Some(leg) = run.leg_mut(row.leg_id) {
+                    let owns = row.position_ref.is_none() || leg.position_ref == row.position_ref;
+                    if owns && leg.entry_status != "complete" {
+                        leg.entry_status = canonical.into();
+                        leg.status = "rejected".into();
+                    }
+                }
+            });
+            self.reconcile_pending_stop(row.run_id).await;
+        } else if !is_entry {
+            if !should_apply {
+                exit_owner = self
+                    .state
+                    .release_order_exit(row.run_id, row.leg_id, row.id, row.position_ref.as_deref())
+                    .map(str::to_string);
+            }
+            let held = self.exit_owner_still_held(
+                row.run_id,
+                row.leg_id,
+                exit_owner.as_deref(),
+                row.position_ref.as_deref(),
+            );
+            if exit_owner.as_deref() == Some("superseded") && held {
+                self.report_flip_outgoing_exit_rejected(
+                    row.run_id,
+                    row.leg_id,
+                    canonical,
+                    row.broker_order_id.as_deref(),
+                )
+                .await;
+            }
+            if held {
+                self.report_pending_stop_exit_failed(row, canonical).await;
+            }
+            if fold.cumulative_filled_qty <= 0
+                && exit_owner.is_none()
+                && self.state.snapshot(row.run_id).is_none()
+            {
+                self.report_stranded_exit(row, canonical).await;
+            }
+        }
+    }
+
+    /// The order's durable row and the run's state, pushed to the page.
+    async fn broadcast_order(&self, row: &OrderRow) {
+        if let (Ok(Some(durable)), Ok(Some(run))) =
+            (self.store.get_order(row.id), self.store.get_run(row.run_id))
+        {
+            self.broadcast
+                .push_order_update(run.strategy_id, durable.to_dict())
+                .await;
+        }
+        self.broadcast
+            .push_delta(self.state.snapshot(row.run_id), true)
+            .await;
     }
 
     fn exit_owner_for_row(
