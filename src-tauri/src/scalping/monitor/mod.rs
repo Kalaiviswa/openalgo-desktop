@@ -550,6 +550,56 @@ impl RiskMonitor {
 
     // ------------------------------------------------------------ sync
 
+    /// A leg's exit attempt restored from its row. A day order from an
+    /// earlier session is ended (review P1-5); an attempt that cannot be
+    /// read back marks the leg broken (fail closed). True when the leg has
+    /// newly become unreadable.
+    fn restore_attempt(&self, inner: &mut Inner, key: &str, sl: &SlState) -> bool {
+        match sl.exit_attempt.as_deref().filter(|t| !t.trim().is_empty()) {
+            None => {
+                inner.broken.remove(key);
+                false
+            }
+            Some(t) => match serde_json::from_str::<ExitAttempt>(t) {
+                Ok(mut a) => {
+                    inner.broken.remove(key);
+                    // A day order from an earlier session cannot still be
+                    // working (review P1-5).
+                    let since = session_start(self.clock.now());
+                    let mut ended = false;
+                    for c in a.children.iter_mut().filter(|c| !c.terminal()) {
+                        if c.placed_at < since {
+                            c.state = ChildState::Dead;
+                            ended = true;
+                        }
+                    }
+                    if ended {
+                        tracing::warn!(
+                            "Scalping exit orders for {} from an earlier session were ended",
+                            sl.symbol
+                        );
+                        if !a.working() && a.settled_at.is_none() {
+                            a.settled_at = Some(self.clock.now());
+                        }
+                        self.persist_attempt(sl.id, &a);
+                    }
+                    inner.attempts.insert(key.to_string(), a);
+                    false
+                }
+                Err(e) => {
+                    // Exit orders were sent and cannot be read back: never
+                    // assume none (fail closed).
+                    tracing::error!(
+                        "Stored scalping exit orders for {} could not be read: {}",
+                        sl.symbol,
+                        e
+                    );
+                    inner.broken.insert(key.to_string())
+                }
+            },
+        }
+    }
+
     /// Reconcile the managed legs and the price subscriptions with the
     /// stored stops (every mode: a live leg stays protected while analyzer
     /// mode is on, and the other way round).
@@ -573,50 +623,9 @@ impl RiskMonitor {
                 let key = slkey(&sl.mode, &sl.symbol, &sl.exchange, &sl.product);
                 // An attempt survives a restart on its row; the one in memory
                 // is newer while the monitor runs.
-                if !inner.attempts.contains_key(&key) {
-                    match sl.exit_attempt.as_deref().filter(|t| !t.trim().is_empty()) {
-                        None => {
-                            inner.broken.remove(&key);
-                        }
-                        Some(t) => match serde_json::from_str::<ExitAttempt>(t) {
-                            Ok(mut a) => {
-                                inner.broken.remove(&key);
-                                // A day order from an earlier session cannot
-                                // still be working (review P1-5).
-                                let since = session_start(self.clock.now());
-                                let mut ended = false;
-                                for c in a.children.iter_mut().filter(|c| !c.terminal()) {
-                                    if c.placed_at < since {
-                                        c.state = ChildState::Dead;
-                                        ended = true;
-                                    }
-                                }
-                                if ended {
-                                    tracing::warn!(
-                                        "Scalping exit orders for {} from an earlier session were ended",
-                                        sl.symbol
-                                    );
-                                    if !a.working() && a.settled_at.is_none() {
-                                        a.settled_at = Some(self.clock.now());
-                                    }
-                                    self.persist_attempt(sl.id, &a);
-                                }
-                                inner.attempts.insert(key.clone(), a);
-                            }
-                            Err(e) => {
-                                // Exit orders were sent and cannot be read
-                                // back: never assume none (fail closed).
-                                tracing::error!(
-                                    "Stored scalping exit orders for {} could not be read: {}",
-                                    sl.symbol,
-                                    e
-                                );
-                                if inner.broken.insert(key.clone()) {
-                                    unreadable.push((key.clone(), sl.symbol.clone()));
-                                }
-                            }
-                        },
-                    }
+                if !inner.attempts.contains_key(&key) && self.restore_attempt(&mut inner, &key, &sl)
+                {
+                    unreadable.push((key.clone(), sl.symbol.clone()));
                 }
                 states.insert(
                     key,
