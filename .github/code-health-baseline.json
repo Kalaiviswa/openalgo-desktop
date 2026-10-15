@@ -242,7 +242,7 @@
     "src-tauri/src/historify/jobs.rs::run": 214,
     "src-tauri/src/historify/scheduler.rs::execute_claimed": 123,
     "src-tauri/src/historify/service.rs::export_bulk": 144,
-    "src-tauri/src/lib.rs::run": 148,
+    "src-tauri/src/lib.rs::run": 141,
     "src-tauri/src/mcp/http.rs::call_tool": 112,
     "src-tauri/src/mcp/research.rs::screen": 108,
     "src-tauri/src/mcp/research.rs::snapshot": 147,
