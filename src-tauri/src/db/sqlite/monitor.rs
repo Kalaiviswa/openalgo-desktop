@@ -767,7 +767,6 @@ pub const AUTO_BAN_DEFAULT_HOURS: i64 = 24;
 /// own. It always expires, is never
 /// made permanent by repetition, never shortens a ban already in force (a
 /// ban entered by hand included), and at most `cap` are in force at once.
-#[allow(clippy::too_many_arguments)]
 pub fn auto_ban(
     conn: &Connection,
     ip: &str,
