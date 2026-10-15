@@ -50,7 +50,6 @@
   },
   "rust_functions": {
     "src-tauri/src/sandbox/gtt.rs::place": 103,
-    "src-tauri/src/sandbox/gtt/trigger.rs::fire": 181,
     "src-tauri/src/sandbox/mod.rs::mypnl": 111,
     "src-tauri/src/sandbox/positions.rs::apply_fill": 139,
     "src-tauri/src/sandbox/positions.rs::close_position_outcome": 103,

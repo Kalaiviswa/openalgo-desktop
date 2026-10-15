@@ -2,7 +2,7 @@
 //! handling): one caller claims a leg (OCO exclusivity), fires its order,
 //! and the active legs are checked against each price.
 
-use super::{active_legs, get_gtt, get_leg, leg_is_triggered_by, legs_of};
+use super::{active_legs, get_gtt, get_leg, leg_is_triggered_by, legs_of, GttRow, LegRow};
 use crate::sandbox::clock::{gtt_ts, ts};
 use crate::sandbox::config::SandboxConfig;
 use crate::sandbox::core::{blocking, Core};
@@ -56,43 +56,15 @@ pub(crate) async fn claim(core: &Arc<Core>, leg_id: i64) -> SbResult<bool> {
     .await
 }
 
-/// Place the order for a leg this caller claimed. Returns `true` when the
-/// order was placed.
-pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbResult<bool> {
-    let loaded = blocking(core, move |c| {
-        Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
-            let Some(leg) = get_leg(conn, leg_id)? else {
-                return Ok(None);
-            };
-            let gtt = get_gtt(conn, &leg.gtt_id)?;
-            Ok(gtt.map(|g| (leg, g)))
-        })?)
-    })
-    .await?;
-    let Some((leg, gtt)) = loaded else {
-        return Ok(false);
-    };
-    if leg.leg_status != "triggering" {
-        return Ok(false);
-    }
-    // Never wait on the tick path: if another order on this position is in
-    // flight, hand the claim back and fire on the next price.
-    let Some(guard) = core.locks.try_lock(PositionKey::new(
-        &gtt.user_id,
-        &gtt.exchange,
-        &gtt.symbol,
-        &leg.product,
-    )) else {
-        blocking(core, move |c| {
-            Ok(c.db.with_tx(|tx| revert_claim(tx, leg_id))?)
-        })
-        .await?;
-        return Ok(false);
-    };
-
-    // Take the parent and release its reservation in one transaction.
-    let gtt_id = gtt.gtt_id.clone();
-    let released = blocking(core, move |c| {
+/// Take the parent and release its reservation in one transaction: the
+/// margin released, or `None` (the claim handed back) when the parent is
+/// no longer active or its margin could not be released.
+async fn release_reservation(
+    core: &Arc<Core>,
+    gtt_id: String,
+    leg_id: i64,
+) -> SbResult<Option<Decimal>> {
+    blocking(core, move |c| {
         let r: SbResult<Option<Decimal>> = c.db.with_tx(|tx| {
             let now = c.now();
             let n = tx.execute(
@@ -136,12 +108,12 @@ pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbRes
             }
         }
     })
-    .await?;
-    let Some(released) = released else {
-        return Ok(false);
-    };
+    .await
+}
 
-    let req = OrderRequest {
+/// The order a fired leg places (strategy "GTT" when the GTT has none).
+fn leg_order(gtt: &GttRow, leg: &LegRow) -> OrderRequest {
+    OrderRequest {
         symbol: gtt.symbol.clone(),
         exchange: gtt.exchange.clone(),
         action: leg.action.clone(),
@@ -155,87 +127,152 @@ pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbRes
             .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "GTT".to_string()),
+    }
+}
+
+/// A fired leg's order was placed: the leg is marked triggered with it, the
+/// other leg of a two-leg GTT is cancelled, and the triggered event goes
+/// out once that commits.
+async fn record_fired(
+    core: &Arc<Core>,
+    gtt: &GttRow,
+    leg_id: i64,
+    orderid: String,
+    price: Decimal,
+) -> SbResult<bool> {
+    let gtt_id = gtt.gtt_id.clone();
+    let two_leg = gtt.trigger_type == "two-leg";
+    let g2 = gtt.clone();
+    blocking(core, move |c| {
+        let mut outbox = Outbox::new();
+        c.db.with_tx(|tx| -> SbResult<()> {
+            let now = gtt_ts(c.now());
+            tx.execute(
+                "UPDATE sandbox_gtt_legs SET leg_status = 'triggered', triggered_order_id = ?1,
+                           claimed_at = NULL, updated_at = ?2 WHERE id = ?3",
+                params![orderid, now, leg_id],
+            )?;
+            if two_leg {
+                tx.execute(
+                    "UPDATE sandbox_gtt_legs SET leg_status = 'cancelled', claimed_at = NULL, updated_at = ?1
+                             WHERE gtt_id = ?2 AND id != ?3 AND leg_status IN ('pending','triggering')",
+                    params![now, gtt_id, leg_id],
+                )?;
+            }
+            let prices: Vec<f64> = legs_of(tx, &gtt_id)?
+                .iter()
+                .map(|l| money(l.trigger_price))
+                .collect();
+            outbox.push(gtt_triggered(
+                &g2.gtt_id,
+                &g2.symbol,
+                &g2.exchange,
+                g2.strategy.as_deref().unwrap_or(""),
+                &prices,
+                &orderid,
+            ));
+            Ok(())
+        })?;
+        c.publish(outbox);
+        tracing::info!("Sandbox GTT {} fired at {}; order {}", gtt_id, price, orderid);
+        Ok(true)
+    })
+    .await
+}
+
+/// A fired leg's order was refused: the margin goes back and the GTT is
+/// active again (rejected when its margin cannot come back), and the
+/// claim is handed back.
+async fn restore_after_refusal(
+    core: &Arc<Core>,
+    gtt_id: String,
+    leg_id: i64,
+    released: Decimal,
+) -> SbResult<bool> {
+    blocking(core, move |c| {
+        c.db.with_tx(|tx| -> SbResult<()> {
+            let cfg = SandboxConfig::load(tx)?;
+            let now = c.now();
+            let mut restored = true;
+            if released > Decimal::ZERO {
+                let r = funds::apply(tx, c.user(), cfg.starting_capital, &ts(now), |f| {
+                    funds::margin_delta(f, released)
+                })?;
+                restored = r.is_ok();
+            }
+            if restored {
+                tx.execute(
+                    "UPDATE sandbox_gtt SET gtt_status = 'active', margin_blocked = ?1, updated_at = ?2
+                             WHERE gtt_id = ?3 AND gtt_status = 'triggered'",
+                    params![dec_to_db(released), gtt_ts(now), gtt_id],
+                )?;
+            } else {
+                tracing::warn!(
+                    "GTT {} could not get its margin back after a refused order; marking it rejected",
+                    gtt_id
+                );
+                tx.execute(
+                    "UPDATE sandbox_gtt SET gtt_status = 'rejected', margin_blocked = '0', updated_at = ?1
+                             WHERE gtt_id = ?2",
+                    params![gtt_ts(now), gtt_id],
+                )?;
+            }
+            revert_claim(tx, leg_id)?;
+            Ok(())
+        })?;
+        Ok(false)
+    })
+    .await
+}
+
+/// Place the order for a leg this caller claimed. Returns `true` when the
+/// order was placed.
+pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbResult<bool> {
+    let loaded = blocking(core, move |c| {
+        Ok(c.db.with_conn(|conn| -> rusqlite::Result<_> {
+            let Some(leg) = get_leg(conn, leg_id)? else {
+                return Ok(None);
+            };
+            let gtt = get_gtt(conn, &leg.gtt_id)?;
+            Ok(gtt.map(|g| (leg, g)))
+        })?)
+    })
+    .await?;
+    let Some((leg, gtt)) = loaded else {
+        return Ok(false);
     };
+    if leg.leg_status != "triggering" {
+        return Ok(false);
+    }
+    // Never wait on the tick path: if another order on this position is in
+    // flight, hand the claim back and fire on the next price.
+    let Some(guard) = core.locks.try_lock(PositionKey::new(
+        &gtt.user_id,
+        &gtt.exchange,
+        &gtt.symbol,
+        &leg.product,
+    )) else {
+        blocking(core, move |c| {
+            Ok(c.db.with_tx(|tx| revert_claim(tx, leg_id))?)
+        })
+        .await?;
+        return Ok(false);
+    };
+
+    let released = release_reservation(core, gtt.gtt_id.clone(), leg_id).await?;
+    let Some(released) = released else {
+        return Ok(false);
+    };
+
+    let req = leg_order(&gtt, &leg);
     let placed = placement::place_locked(core, &guard, req, None, Some(leg.id)).await;
     drop(guard);
     let gtt_id = gtt.gtt_id.clone();
     match placed {
-        Ok(p) => {
-            let orderid = p.orderid.clone();
-            let two_leg = gtt.trigger_type == "two-leg";
-            let g2 = gtt.clone();
-            blocking(core, move |c| {
-                let mut outbox = Outbox::new();
-                c.db.with_tx(|tx| -> SbResult<()> {
-                    let now = gtt_ts(c.now());
-                    tx.execute(
-                        "UPDATE sandbox_gtt_legs SET leg_status = 'triggered', triggered_order_id = ?1,
-                           claimed_at = NULL, updated_at = ?2 WHERE id = ?3",
-                        params![orderid, now, leg_id],
-                    )?;
-                    if two_leg {
-                        tx.execute(
-                            "UPDATE sandbox_gtt_legs SET leg_status = 'cancelled', claimed_at = NULL, updated_at = ?1
-                             WHERE gtt_id = ?2 AND id != ?3 AND leg_status IN ('pending','triggering')",
-                            params![now, gtt_id, leg_id],
-                        )?;
-                    }
-                    let prices: Vec<f64> = legs_of(tx, &gtt_id)?
-                        .iter()
-                        .map(|l| money(l.trigger_price))
-                        .collect();
-                    outbox.push(gtt_triggered(
-                        &g2.gtt_id,
-                        &g2.symbol,
-                        &g2.exchange,
-                        g2.strategy.as_deref().unwrap_or(""),
-                        &prices,
-                        &orderid,
-                    ));
-                    Ok(())
-                })?;
-                c.publish(outbox);
-                tracing::info!("Sandbox GTT {} fired at {}; order {}", gtt_id, price, orderid);
-                Ok(true)
-            })
-            .await
-        }
+        Ok(p) => record_fired(core, &gtt, leg_id, p.orderid.clone(), price).await,
         Err(e) => {
             tracing::warn!("Sandbox GTT {} leg order refused: {}", gtt_id, e.message);
-            blocking(core, move |c| {
-                c.db.with_tx(|tx| -> SbResult<()> {
-                    let cfg = SandboxConfig::load(tx)?;
-                    let now = c.now();
-                    let mut restored = true;
-                    if released > Decimal::ZERO {
-                        let r = funds::apply(tx, c.user(), cfg.starting_capital, &ts(now), |f| {
-                            funds::margin_delta(f, released)
-                        })?;
-                        restored = r.is_ok();
-                    }
-                    if restored {
-                        tx.execute(
-                            "UPDATE sandbox_gtt SET gtt_status = 'active', margin_blocked = ?1, updated_at = ?2
-                             WHERE gtt_id = ?3 AND gtt_status = 'triggered'",
-                            params![dec_to_db(released), gtt_ts(now), gtt_id],
-                        )?;
-                    } else {
-                        tracing::warn!(
-                            "GTT {} could not get its margin back after a refused order; marking it rejected",
-                            gtt_id
-                        );
-                        tx.execute(
-                            "UPDATE sandbox_gtt SET gtt_status = 'rejected', margin_blocked = '0', updated_at = ?1
-                             WHERE gtt_id = ?2",
-                            params![gtt_ts(now), gtt_id],
-                        )?;
-                    }
-                    revert_claim(tx, leg_id)?;
-                    Ok(())
-                })?;
-                Ok(false)
-            })
-            .await
+            restore_after_refusal(core, gtt_id, leg_id, released).await
         }
     }
 }
