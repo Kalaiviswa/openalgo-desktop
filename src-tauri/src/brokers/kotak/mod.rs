@@ -18,6 +18,7 @@
 
 pub mod auth;
 mod data;
+mod feed_config;
 mod funds;
 pub mod mapping;
 pub mod master_contract;
@@ -469,7 +470,7 @@ impl Broker for KotakBroker {
     /// resumed session), so streaming works without a fresh login.
     fn create_feed(&self, auth: &AuthToken) -> Result<Box<dyn BrokerFeed>> {
         let s = KotakSession::parse(auth)?;
-        let url = streaming::cached_feed_url(self, &s.data_center);
+        let url = feed_config::cached_feed_url(self, &s.data_center);
         let feed = streaming::KotakFeed::new(&url, &s.sid, self.ucc_hint(), self.symbols.clone());
         let feed = if self.has_feed_url(&s.data_center) {
             feed

@@ -1,8 +1,7 @@
-//! Kotak Neo market feed (SFeed `native_batch`), order-update feed and feed
-//! host lookup (web `streaming/sfeed_protocol.py`, `sfeed_websocket.py`,
-//! `kotak_adapter.py`, `kotak_feed_config.py`, `kotak_order_adapter.py`).
-//! The legacy HSM protocol is not read: a data centre that selects it
-//! streams from SFeed ([`feed_url_from_config`]), as on the web.
+//! Kotak Neo market feed (SFeed `native_batch`) and order-update feed (web
+//! `streaming/sfeed_protocol.py`, `sfeed_websocket.py`, `kotak_adapter.py`,
+//! `kotak_order_adapter.py`). Which host a data centre streams from is
+//! `feed_config`.
 //!
 //! SFeed control plane is JSON text:
 //! * after connect: `{"user": <UCC>, "auth": <trading sid>, "format":
@@ -39,7 +38,8 @@
 //!   `i64 quantity, i32 price, i32 orders` (a touch line always 1 + 1).
 
 use super::data::{index_candidates, kotak_segment};
-use super::{KotakBroker, KotakSession};
+use super::feed_config::{lookup_feed_url, FeedLookup};
+use super::KotakSession;
 use crate::brokers::common::streaming::{
     now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
     NormalizedTick, OrderUpdate, PrepareError, WsRequest,
@@ -52,7 +52,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-pub const DEFAULT_SFEED_URL: &str = "wss://sfeed.kotaksecurities.com/apifeed";
 pub const HEADER_SIZE: usize = 9;
 pub const DEFAULT_DIVIDER: f64 = 100.0;
 pub const MSG_AUTH_RESPONSE: [u64; 2] = [1117, 1119];
@@ -348,124 +347,6 @@ pub fn parse_dividers(v: &Value) -> HashMap<i8, f64> {
         }
     }
     out
-}
-
-// ---------------------------------------------------------------------------
-// Feed host lookup
-// ---------------------------------------------------------------------------
-
-/// `https://` -> `wss://`, a bare host gets `wss://` (web
-/// `_to_websocket_scheme`).
-pub fn to_wss(url: &str) -> String {
-    let u = url.trim();
-    if let Some(r) = u.strip_prefix("https://") {
-        format!("wss://{}", r)
-    } else if let Some(r) = u.strip_prefix("http://") {
-        format!("ws://{}", r)
-    } else if u.starts_with("wss://") || u.starts_with("ws://") {
-        u.to_string()
-    } else {
-        format!("wss://{}", u)
-    }
-}
-
-/// The market-data URL a config answer gives a data centre, and the
-/// source (`sh` SFeed, `ks` cdtstream, `hs` legacy HSM). The legacy HSM
-/// source falls back to the default SFeed host and says so, as on the web
-/// (`kotak_feed_config.py`): OpenAlgo reads only the SFeed protocol, and
-/// nothing has selected HSM since September 2026.
-pub fn feed_url_from_config(configs: &Value, data_center: &str) -> (Option<String>, String) {
-    let get = |k: String| {
-        configs
-            .get(&k)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
-    };
-    let Some(source) = get(format!("{}_broadcast_source", data_center)) else {
-        return (None, DEFAULT_SFEED_URL.to_string());
-    };
-    if source == "hs" {
-        tracing::warn!(
-            "Kotak data centre {} selects the legacy HSM feed, which OpenAlgo cannot read. Streaming from SFeed instead; if quotes do not arrive, this is why.",
-            data_center
-        );
-    }
-    let url = match get(format!("{}_{}_broadcast_endpoint", data_center, source)) {
-        Some(u) if source != "hs" => to_wss(&u),
-        _ => DEFAULT_SFEED_URL.to_string(),
-    };
-    (Some(source), url)
-}
-
-/// Look up and remember the feed URL for `data_center` (web
-/// `fetch_feed_config`, 5 s budget). Any failure leaves the default.
-pub async fn resolve_feed_url(b: &KotakBroker, data_center: &str) -> String {
-    let url = lookup_feed_url(&b.http, &b.feed_config_url, data_center).await;
-    *b.feed_url.lock() = Some((data_center.to_string(), url.clone()));
-    url
-}
-
-/// The feed URL the config service names for `data_center`, else the
-/// default.
-async fn lookup_feed_url(http: &reqwest::Client, config_url: &str, data_center: &str) -> String {
-    if data_center.is_empty() {
-        DEFAULT_SFEED_URL.to_string()
-    } else {
-        let resp = http
-            .get(config_url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => match r.json::<Value>().await {
-                Ok(v) => {
-                    let configs = v
-                        .get("data")
-                        .and_then(|d| d.get("configs"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    let (source, url) = feed_url_from_config(&configs, data_center);
-                    tracing::info!(
-                        "Kotak data centre {} streams from source {}",
-                        data_center,
-                        source.as_deref().unwrap_or("default")
-                    );
-                    url
-                }
-                Err(_) => DEFAULT_SFEED_URL.to_string(),
-            },
-            Ok(r) => {
-                tracing::warn!(status = r.status().as_u16(), "Kotak feed config refused");
-                DEFAULT_SFEED_URL.to_string()
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Kotak feed config lookup failed: {}",
-                    crate::brokers::common::redact::url_safe_error(&e)
-                );
-                DEFAULT_SFEED_URL.to_string()
-            }
-        }
-    }
-}
-
-/// Resolve the data-centre feed host before connecting (a session resumed
-/// in this run has not been through the login that looks it up).
-struct FeedLookup {
-    http: reqwest::Client,
-    config_url: String,
-    data_center: String,
-    /// The broker's cache, filled once resolved.
-    cache: std::sync::Arc<parking_lot::Mutex<Option<(String, String)>>>,
-}
-
-/// The remembered feed URL for `data_center`, else the default.
-pub fn cached_feed_url(b: &KotakBroker, data_center: &str) -> String {
-    match b.feed_url.lock().as_ref() {
-        Some((dc, url)) if dc == data_center => url.clone(),
-        _ => DEFAULT_SFEED_URL.to_string(),
-    }
 }
 
 // ---------------------------------------------------------------------------
