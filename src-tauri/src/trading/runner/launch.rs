@@ -99,7 +99,6 @@ impl Runner {
         host: &Arc<dyn RunnerHost>,
         where_: &str,
     ) -> Result<RunInfo, Refusal> {
-        let services = self.services();
         let run_id = saved.deployment.clone();
         // The settings were read before the claim: a removal may have landed.
         let still = self
@@ -116,32 +115,7 @@ impl Runner {
                 ),
             ));
         }
-        // The side is decided here, once, and kept for the life of the run.
-        // A mode that cannot be read refuses the start (LOG-09): taken as
-        // off, a deployment meant for the sandbox would start live.
-        let mode = match services.analyzer_on() {
-            Ok(true) => RunMode::Sandbox,
-            Ok(false) => RunMode::Live,
-            Err(why) => {
-                tracing::error!("{} was not started: {}", run_id, why);
-                return Err(Refusal::new(
-                    409,
-                    format!(
-                        "{} was not started, because OpenAlgo could not read whether analyzer mode is on. Restart OpenAlgo, then start it again.",
-                        saved.script
-                    ),
-                ));
-            }
-        };
-        if let Err(why) = services.authorised(mode) {
-            return Err(Refusal::new(
-                409,
-                format!(
-                    "{} trades live and cannot start until your broker is connected. {}",
-                    saved.script, why
-                ),
-            ));
-        }
+        let mode = self.side_for(saved)?;
         let started = self.clock.now();
         let log_file = self.logs_dir.join(format!(
             "{}_{}_IST.log",
@@ -169,21 +143,7 @@ impl Runner {
             unsaved_orders: 0,
             unresolved_orders: 0,
         };
-        let entry = Arc::new(RunEntry {
-            info: info.clone(),
-            token: random_token(),
-            inbox: Inbox::new(),
-            halted: AtomicBool::new(false),
-            close_pending: AtomicBool::new(false),
-            unsaved: Mutex::new(Vec::new()),
-            unresolved: AtomicUsize::new(0),
-            last_seen: Mutex::new(Instant::now()),
-            anchor: Mutex::new(None),
-            last_bar: Mutex::new(None),
-            pump: Mutex::new(None),
-            cancel: self.cancel.child_token(),
-            order_lock: tokio::sync::Mutex::new(()),
-        });
+        let entry = self.new_entry(&info);
         self.write_log(
             &info,
             &[format!(
@@ -225,5 +185,55 @@ impl Runner {
         self.spawn_pump(&entry);
         tracing::info!("Started the OpenScript run {}", run_id);
         Ok(info)
+    }
+
+    /// The side a run starts on, decided here once and kept for the life of
+    /// the run. A mode that cannot be read refuses the start (LOG-09):
+    /// taken as off, a deployment meant for the sandbox would start live.
+    fn side_for(&self, saved: &store::Deployment) -> Result<RunMode, Refusal> {
+        let services = self.services();
+        let mode = match services.analyzer_on() {
+            Ok(true) => RunMode::Sandbox,
+            Ok(false) => RunMode::Live,
+            Err(why) => {
+                tracing::error!("{} was not started: {}", saved.deployment, why);
+                return Err(Refusal::new(
+                    409,
+                    format!(
+                        "{} was not started, because OpenAlgo could not read whether analyzer mode is on. Restart OpenAlgo, then start it again.",
+                        saved.script
+                    ),
+                ));
+            }
+        };
+        if let Err(why) = services.authorised(mode) {
+            return Err(Refusal::new(
+                409,
+                format!(
+                    "{} trades live and cannot start until your broker is connected. {}",
+                    saved.script, why
+                ),
+            ));
+        }
+        Ok(mode)
+    }
+
+    /// A new run's registry entry, with its page secret and an empty inbox.
+    fn new_entry(&self, info: &RunInfo) -> Arc<RunEntry> {
+        Arc::new(RunEntry {
+            info: info.clone(),
+            token: random_token(),
+            inbox: Inbox::new(),
+            halted: AtomicBool::new(false),
+            close_pending: AtomicBool::new(false),
+            unsaved: Mutex::new(Vec::new()),
+            unresolved: AtomicUsize::new(0),
+            last_seen: Mutex::new(Instant::now()),
+            anchor: Mutex::new(None),
+            last_bar: Mutex::new(None),
+            pump: Mutex::new(None),
+            cancel: self.cancel.child_token(),
+            order_lock: tokio::sync::Mutex::new(()),
+        })
     }
 }
