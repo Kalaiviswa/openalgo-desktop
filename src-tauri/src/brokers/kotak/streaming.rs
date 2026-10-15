@@ -661,72 +661,80 @@ impl KotakFeed {
         Some(t)
     }
 
+    /// A scrip packet: its fields folded into the instrument's state (a
+    /// zero keeps the last value), a tick, and the depth in depth mode.
+    fn on_scrip(&mut self, pkt: Sfeed, now: i64, out: &mut Vec<FeedEvent>) {
+        let Sfeed::Scrip {
+            exchange,
+            token,
+            level,
+            ltp,
+            open,
+            high,
+            low,
+            close,
+            average_price,
+            last_trade_time,
+            last_trade_qty,
+            total_buy,
+            total_sell,
+            volume,
+            oi,
+            buy,
+            sell,
+        } = pkt
+        else {
+            return;
+        };
+        let Some(key) = self.lookup(&exchange, &token, "") else {
+            return;
+        };
+        let st = self.state.entry(key.clone()).or_default();
+        st.ltp = keep(st.ltp, ltp);
+        st.open = keep(st.open, open);
+        st.high = keep(st.high, high);
+        st.low = keep(st.low, low);
+        st.close = keep(st.close, close);
+        st.average_price = keep(st.average_price, average_price);
+        st.volume = keep_i(st.volume, volume);
+        st.last_quantity = keep_i(st.last_quantity, last_trade_qty);
+        st.total_buy = keep_i(st.total_buy, total_buy);
+        st.total_sell = keep_i(st.total_sell, total_sell);
+        st.oi = keep_i(st.oi, oi);
+        st.ltt = keep_i(st.ltt, last_trade_time);
+        let depth = matches!(level, 8 | 16);
+        if depth || level == 4 {
+            st.buy = merge_levels(&st.buy, &buy);
+            st.sell = merge_levels(&st.sell, &sell);
+        }
+        let st = st.clone();
+        let mode = self.subs.get(&key).map(|s| s.mode);
+        if mode == Some(FeedMode::Ltp) && st.ltp <= 0.0 {
+            return;
+        }
+        if let Some(t) = self.tick_for(&key, &st, now) {
+            out.push(FeedEvent::Tick(t));
+        }
+        if depth && mode == Some(FeedMode::Depth) {
+            if let Some(sub) = self.subs.get(&key) {
+                out.push(FeedEvent::Depth(NormalizedDepth {
+                    symbol: sub.symbol.clone(),
+                    exchange: sub.exchange.clone(),
+                    ltp: st.ltp,
+                    buy: st.buy.clone(),
+                    sell: st.sell.clone(),
+                    total_buy_quantity: st.total_buy,
+                    total_sell_quantity: st.total_sell,
+                    timestamp_ms: now,
+                }));
+            }
+        }
+    }
+
     fn on_packet(&mut self, pkt: Sfeed, out: &mut Vec<FeedEvent>) {
         let now = now_ms();
         match pkt {
-            Sfeed::Scrip {
-                exchange,
-                token,
-                level,
-                ltp,
-                open,
-                high,
-                low,
-                close,
-                average_price,
-                last_trade_time,
-                last_trade_qty,
-                total_buy,
-                total_sell,
-                volume,
-                oi,
-                buy,
-                sell,
-            } => {
-                let Some(key) = self.lookup(&exchange, &token, "") else {
-                    return;
-                };
-                let st = self.state.entry(key.clone()).or_default();
-                st.ltp = keep(st.ltp, ltp);
-                st.open = keep(st.open, open);
-                st.high = keep(st.high, high);
-                st.low = keep(st.low, low);
-                st.close = keep(st.close, close);
-                st.average_price = keep(st.average_price, average_price);
-                st.volume = keep_i(st.volume, volume);
-                st.last_quantity = keep_i(st.last_quantity, last_trade_qty);
-                st.total_buy = keep_i(st.total_buy, total_buy);
-                st.total_sell = keep_i(st.total_sell, total_sell);
-                st.oi = keep_i(st.oi, oi);
-                st.ltt = keep_i(st.ltt, last_trade_time);
-                let depth = matches!(level, 8 | 16);
-                if depth || level == 4 {
-                    st.buy = merge_levels(&st.buy, &buy);
-                    st.sell = merge_levels(&st.sell, &sell);
-                }
-                let st = st.clone();
-                let mode = self.subs.get(&key).map(|s| s.mode);
-                if mode == Some(FeedMode::Ltp) && st.ltp <= 0.0 {
-                    return;
-                }
-                if let Some(t) = self.tick_for(&key, &st, now) {
-                    out.push(FeedEvent::Tick(t));
-                }
-                if depth && mode == Some(FeedMode::Depth) {
-                    if let Some(sub) = self.subs.get(&key) {
-                        out.push(FeedEvent::Depth(NormalizedDepth {
-                            symbol: sub.symbol.clone(),
-                            exchange: sub.exchange.clone(),
-                            ltp: st.ltp,
-                            buy: st.buy.clone(),
-                            sell: st.sell.clone(),
-                            total_buy_quantity: st.total_buy,
-                            total_sell_quantity: st.total_sell,
-                            timestamp_ms: now,
-                        }));
-                    }
-                }
-            }
+            pkt @ Sfeed::Scrip { .. } => self.on_scrip(pkt, now, out),
             Sfeed::Lite {
                 exchange,
                 token,
