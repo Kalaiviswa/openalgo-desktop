@@ -130,10 +130,10 @@ fn incomplete(file: &str) -> AppError {
         "Pocketful master file {} is missing or has no instruments",
         file
     );
-    AppError::Broker(format!(
-        "Pocketful's instrument list came without its {} segment. Your existing symbols were kept; try downloading the master contract again later.",
-        file.trim_end_matches("CompactScrip.csv")
-    ))
+    crate::brokers::common::master_contract::part_missing(
+        "Pocketful",
+        file.trim_end_matches("CompactScrip.csv"),
+    )
 }
 
 /// `rows` of one segment file, refused when it yielded none.

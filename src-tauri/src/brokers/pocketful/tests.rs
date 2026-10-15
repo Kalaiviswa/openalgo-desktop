@@ -160,7 +160,11 @@ fn master_archive_is_all_or_nothing() {
         let mut fs = files();
         fs.remove(i);
         let msg = parse_archive(&fs).unwrap_err().client_message();
-        assert!(msg.contains(&format!("its {} segment", seg)), "{}", msg);
+        assert!(
+            msg.contains(&format!("Pocketful {} instrument list", seg)),
+            "{}",
+            msg
+        );
         assert!(msg.contains("existing symbols were kept"), "{}", msg);
     }
     let mut empty = files();
@@ -168,7 +172,7 @@ fn master_archive_is_all_or_nothing() {
     assert!(parse_archive(&empty)
         .unwrap_err()
         .client_message()
-        .contains("its MCX segment"));
+        .contains("Pocketful MCX instrument list"));
     // The header alone: no instruments in the segment.
     let mut bare = files();
     let header = fixture!("NFOCompactScrip.csv").lines().next().unwrap();
@@ -176,7 +180,7 @@ fn master_archive_is_all_or_nothing() {
     assert!(parse_archive(&bare)
         .unwrap_err()
         .client_message()
-        .contains("its NFO segment"));
+        .contains("Pocketful NFO instrument list"));
 }
 
 #[test]

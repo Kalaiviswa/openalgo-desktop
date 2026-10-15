@@ -15,7 +15,7 @@
 use super::{refused, NubraBroker, DEVICE_ID};
 use crate::brokers::common::http::DOWNLOAD_TIMEOUT;
 use crate::brokers::common::master_contract::{
-    format_expiry, future_symbol, option_symbol, rename, split_csv_line, CsvHeader,
+    format_expiry, future_symbol, option_symbol, part_missing, rename, split_csv_line, CsvHeader,
 };
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -229,13 +229,6 @@ pub fn parse_indexes(csv: &str) -> Vec<SymbolData> {
         .collect()
 }
 
-fn incomplete(exchange: &str) -> AppError {
-    AppError::Broker(format!(
-        "Nubra did not send its {} instruments. Your existing symbols were kept; try downloading the master contract again shortly.",
-        exchange
-    ))
-}
-
 /// Today's date in IST (the refdata snapshot date).
 fn today_ist() -> NaiveDate {
     (chrono::Utc::now() + chrono::Duration::seconds(19_800)).date_naive()
@@ -271,7 +264,7 @@ pub async fn download(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<SymbolDat
                 ex,
                 refused(&v, status)
             );
-            return Err(incomplete(ex));
+            return Err(part_missing("Nubra", ex));
         }
         // All or nothing (MC-02, a hardening over the web, which keeps the
         // exchanges it got): an exchange with no instruments fails the
@@ -281,7 +274,7 @@ pub async fn download(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<SymbolDat
             Some(a) if !a.is_empty() => rows.extend(a.iter().cloned()),
             _ => {
                 tracing::warn!("Nubra instrument list for {} had no instruments", ex);
-                return Err(incomplete(ex));
+                return Err(part_missing("Nubra", ex));
             }
         }
     }

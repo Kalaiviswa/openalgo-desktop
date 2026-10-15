@@ -11,6 +11,16 @@ const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 
+/// The refusal of a master contract download that is missing part of the
+/// broker's instruments (MC-02): the download fails as a whole, so the
+/// stored master is kept and the next download tries again.
+pub fn part_missing(broker: &str, part: &str) -> crate::error::AppError {
+    crate::error::AppError::Broker(format!(
+        "The {} {} instrument list could not be downloaded. Your existing symbols were kept; try the download again later.",
+        broker, part
+    ))
+}
+
 /// `2024-03-28` -> `28-MAR-24`.
 pub fn format_expiry(date: NaiveDate) -> String {
     use chrono::Datelike;

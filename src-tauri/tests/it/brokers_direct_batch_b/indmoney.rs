@@ -578,6 +578,6 @@ async fn master_contract_downloads_three_sources() {
         .await
         .unwrap_err()
         .client_message();
-    assert!(msg.contains("INDmoney's fno instrument list"), "{}", msg);
+    assert!(msg.contains("INDmoney fno instrument list"), "{}", msg);
     assert!(msg.contains("existing symbols were kept"), "{}", msg);
 }

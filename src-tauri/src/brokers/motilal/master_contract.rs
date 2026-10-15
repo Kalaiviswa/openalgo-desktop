@@ -15,7 +15,7 @@
 use super::MotilalBroker;
 use crate::brokers::common::http::DOWNLOAD_TIMEOUT;
 use crate::brokers::common::master_contract::{
-    format_expiry, format_strike, split_csv_line, CsvHeader,
+    format_expiry, format_strike, part_missing, split_csv_line, CsvHeader,
 };
 use crate::brokers::common::redact;
 use crate::brokers::common::symbols::SymToken;
@@ -457,12 +457,12 @@ pub async fn download(b: &MotilalBroker) -> Result<Vec<SymToken>> {
             Ok(text) => parse_scrip_csv(&text, ex),
             Err(e) => {
                 tracing::warn!("Motilal Oswal {} master download failed: {}", ex, e);
-                return Err(incomplete(ex));
+                return Err(part_missing("Motilal Oswal", ex));
             }
         };
         if rows.is_empty() {
             tracing::warn!("Motilal Oswal {} master had no instruments", ex);
-            return Err(incomplete(ex));
+            return Err(part_missing("Motilal Oswal", ex));
         }
         all.extend(rows);
     }
@@ -471,21 +471,14 @@ pub async fn download(b: &MotilalBroker) -> Result<Vec<SymToken>> {
             Ok(text) => parse_index_csv(&text, ex),
             Err(e) => {
                 tracing::warn!("Motilal Oswal {} index master download failed: {}", ex, e);
-                return Err(incomplete(&format!("{} index", ex)));
+                return Err(part_missing("Motilal Oswal", &format!("{} index", ex)));
             }
         };
         if rows.is_empty() {
             tracing::warn!("Motilal Oswal {} index master had no instruments", ex);
-            return Err(incomplete(&format!("{} index", ex)));
+            return Err(part_missing("Motilal Oswal", &format!("{} index", ex)));
         }
         all.extend(rows);
     }
     Ok(dedupe(all))
-}
-
-fn incomplete(file: &str) -> AppError {
-    AppError::Broker(format!(
-        "The Motilal Oswal {} instrument list could not be downloaded. Your existing symbols were kept; try the download again later.",
-        file
-    ))
 }

@@ -1221,7 +1221,7 @@ async fn master_contract_download() {
         .await
         .unwrap_err()
         .client_message();
-    assert!(msg.contains("did not send its BSE instruments"), "{}", msg);
+    assert!(msg.contains("Nubra BSE instrument list"), "{}", msg);
     assert!(msg.contains("existing symbols were kept"), "{}", msg);
 }
 

@@ -989,7 +989,7 @@ async fn master_contract_is_all_or_nothing() {
         .await
         .unwrap_err()
         .client_message();
-    assert!(msg.contains("Kotak's NSE_FO instrument list"), "{}", msg);
+    assert!(msg.contains("Kotak NSE_FO instrument list"), "{}", msg);
     assert!(msg.contains("existing symbols were kept"), "{}", msg);
     let msg = run(None, Some(("BSE_FO", 200, "not,a,master\n1,2,3\n")))
         .await

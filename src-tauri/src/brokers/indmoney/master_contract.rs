@@ -18,10 +18,10 @@
 use super::{token, Bucket, IndmoneyBroker};
 use crate::brokers::common::http::DOWNLOAD_TIMEOUT;
 use crate::brokers::common::master_contract::{
-    format_expiry, format_strike, parse_broker_expiry, split_csv_line, CsvHeader,
+    format_expiry, format_strike, parse_broker_expiry, part_missing, split_csv_line, CsvHeader,
 };
 use crate::brokers::types::*;
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use chrono::NaiveDate;
 
 pub const SOURCES: &[&str] = &["equity", "fno", "index"];
@@ -259,7 +259,7 @@ pub async fn download(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Symbol
                         "network error"
                     }
                 );
-                return Err(incomplete(src));
+                return Err(part_missing("INDmoney", src));
             }
         };
         let status = resp.status().as_u16();
@@ -268,22 +268,15 @@ pub async fn download(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Symbol
         }
         if status != 200 {
             tracing::error!(status, "INDmoney {} instruments download refused", src);
-            return Err(incomplete(src));
+            return Err(part_missing("INDmoney", src));
         }
         let text = resp.text().await?;
         let parsed = parse_csv(src, &text);
         tracing::info!("INDmoney {} instruments: {} rows", src, parsed.len());
         if parsed.is_empty() {
-            return Err(incomplete(src));
+            return Err(part_missing("INDmoney", src));
         }
         rows.extend(parsed);
     }
     Ok(rows)
-}
-
-fn incomplete(source: &str) -> AppError {
-    AppError::Broker(format!(
-        "INDmoney's {} instrument list could not be downloaded. Your existing symbols were kept; check your connection and try again.",
-        source
-    ))
 }
