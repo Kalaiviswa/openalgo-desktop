@@ -283,17 +283,15 @@ impl StrategyModule {
         } else {
             RunMode::Sandbox
         };
-        if !self
-            .store
-            .claim_strategy_for_run(strategy.id)
-            .unwrap_or(false)
-        {
+        // The claim re-checks the revision this mode was decided from and
+        // the webhook lock (SM-01).
+        if let Err(refusal) = self.claim_start(&current, mode, "webhook") {
             if let Ok(Some(r)) = self.store.get_strategy_unscoped(strategy.id) {
                 if let Some(id) = r.current_run_id {
                     return Ok(id);
                 }
             }
-            return Err("This strategy is already running".into());
+            return Err(refusal);
         }
         let broker = {
             let b = self.gateway.broker_name(mode);

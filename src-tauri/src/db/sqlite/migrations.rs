@@ -69,6 +69,10 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         "085_scalping_unconfirmed",
         crate::scalping::unconfirmed::migrate,
     ),
+    (
+        "086_strategy_revision",
+        crate::strategy::store::migrate_revision,
+    ),
 ];
 
 /// Run all database migrations

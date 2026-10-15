@@ -783,6 +783,16 @@ Every flaky test found so far was a race, not a slow machine:
   private to `open_data`. Backup files and folders are created owner-only
   (never widened then narrowed; Windows inherits the data folder's ACL),
   and nothing in `backups/` is followed through a link.
+- Every strategy configuration write (edit, Live opt-in, webhook lock,
+  token) advances `sm_strategy.revision` and checks the status it refuses
+  on in its own UPDATE or `BEGIN IMMEDIATE` transaction
+  (`strategy/store/management.rs`). A start's claim and an edit compare
+  against the revision they validated (SM-01, SM-02); a new configuration
+  write must advance it too.
+- A strategy read that fails is an error answer, never an empty list or
+  "not found" (SM-04). The web's store turns it into an empty success; the
+  desktop's `/api/v1/strategy` runs, orders and events answer the web's
+  500 "An unexpected error occurred" instead.
 
 ### Sandbox deviations from the web
 

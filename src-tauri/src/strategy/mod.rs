@@ -27,6 +27,7 @@
 //! | `dispatch` | order building and the run's pipe (live or sandbox) |
 //! | `engine` | start, stop, close leg, fills, ticks, finalise |
 //! | `signals` | signal-mode protocol |
+//! | `start_claim` | the stopped-to-running claim and its refusals (SM-01) |
 //! | `order_events` | `order.update` folded into order rows and fills |
 //! | `broadcast` | the six `strategy_*` Socket.IO frames |
 //! | `webhook` | the public `/strategy/webhook/<token>` pipeline |
@@ -52,6 +53,7 @@ pub mod risk_adapter;
 pub mod scheduler;
 pub mod session;
 pub mod signals;
+mod start_claim;
 pub mod state;
 pub mod store;
 pub mod tick_feed;

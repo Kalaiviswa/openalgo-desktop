@@ -16,7 +16,10 @@ use crate::error::AppError;
 use crate::server::envelope::json_response;
 use crate::server::middleware::{ClientIp, User};
 use crate::state::AppState;
-use crate::strategy::store::{EVENT_KINDS, EVENT_SEVERITIES, RUN_MODES, STRATEGY_STATUSES};
+use crate::strategy::store::{
+    ALREADY_RUNNING, CHANGED_WHILE_EDITING, CHANGED_WHILE_STARTING, EVENT_KINDS, EVENT_SEVERITIES,
+    RUN_MODES, STRATEGY_STATUSES,
+};
 use crate::strategy::validate::{config_fields, validate_strategy_config};
 use axum::{
     body::Bytes,
@@ -35,6 +38,7 @@ pub const NOT_FOUND: &str = "Strategy not found";
 pub const CLOSE_ALL_REQUESTED_MESSAGE: &str = "Operator requested closure of all held legs";
 const EVENTS_DEFAULT_LIMIT: i64 = 500;
 const EVENTS_MAX_LIMIT: i64 = 1000;
+const READ_FAILED: &str = "The strategy records could not be read just now, so nothing is shown rather than an incomplete picture. Try again; if it keeps happening, restart the app.";
 
 fn ok(payload: Value, code: StatusCode) -> Response {
     let mut body = Map::new();
@@ -67,7 +71,9 @@ fn store_error(e: AppError) -> Response {
     match e {
         AppError::NotFound(_) => err(NOT_FOUND, StatusCode::NOT_FOUND),
         AppError::Validation(m)
-            if m.starts_with("Stop the strategy") || m.contains("already exists") =>
+            if m.starts_with("Stop the strategy")
+                || m.contains("already exists")
+                || m == CHANGED_WHILE_EDITING =>
         {
             err(m, StatusCode::CONFLICT)
         }
@@ -95,10 +101,27 @@ fn resolve(
     match ctx.strategy.store.get_strategy(id, user) {
         Ok(Some(r)) => Ok(r),
         Ok(None) => Err(err(NOT_FOUND, StatusCode::NOT_FOUND)),
-        Err(e) => {
-            tracing::error!("Could not read strategy {}: {}", id, e);
-            Err(err(NOT_FOUND, StatusCode::NOT_FOUND))
-        }
+        // Not "not found" (SM-04): a stop or a kill switch must not be told
+        // that a strategy it cannot read does not exist.
+        Err(e) => Err(read_failed(format_args!("strategy {}", id), e)),
+    }
+}
+
+/// A local read that failed (SM-04): logged, and answered as an error, never
+/// as a successful empty list that reads as "never ran" or "no positions".
+fn read_failed(what: std::fmt::Arguments<'_>, e: AppError) -> Response {
+    tracing::error!("Could not read {}: {}", what, e);
+    err(READ_FAILED, StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// `{"data": rows}` from a store read, or [`read_failed`].
+fn data_or_failed<T: serde::Serialize>(
+    what: std::fmt::Arguments<'_>,
+    read: crate::error::Result<T>,
+) -> Response {
+    match read {
+        Ok(rows) => ok200(json!({ "data": rows })),
+        Err(e) => read_failed(what, e),
     }
 }
 
@@ -164,19 +187,12 @@ pub async fn list(State(ctx): Ctx, User(u): User, Query(q): Q) -> Response {
         .get("q")
         .map(|s| s.trim().chars().take(100).collect())
         .unwrap_or_default();
-    let rows = ctx
-        .strategy
-        .store
-        .list_strategies(
-            &u.username,
-            status.map(String::as_str),
-            (!query.is_empty()).then_some(query.as_str()),
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!("Could not list strategies: {}", e);
-            vec![]
-        });
-    ok200(json!({"data": rows}))
+    let rows = ctx.strategy.store.list_strategies(
+        &u.username,
+        status.map(String::as_str),
+        (!query.is_empty()).then_some(query.as_str()),
+    );
+    data_or_failed(format_args!("the strategy list"), rows)
 }
 
 /// POST /strategy/api/strategies
@@ -294,11 +310,7 @@ pub async fn update(
             changes.insert(k.clone(), v.clone());
         }
     }
-    let updated = match ctx
-        .strategy
-        .store
-        .update_strategy(row.id, &u.username, &changes)
-    {
+    let updated = match ctx.strategy.store.update_strategy(&row, &changes) {
         Ok(r) => r,
         Err(e) => return store_error(e),
     };
@@ -539,7 +551,7 @@ pub async fn start(
         let e = r
             .error
             .unwrap_or_else(|| "Could not start the strategy".into());
-        let code = if e.contains("already running") {
+        let code = if e == ALREADY_RUNNING || e == CHANGED_WHILE_STARTING {
             StatusCode::CONFLICT
         } else {
             StatusCode::BAD_REQUEST
@@ -631,7 +643,8 @@ pub async fn runs(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Re
         Ok(r) => r,
         Err(r) => return r,
     };
-    ok200(json!({"data": ctx.strategy.store.list_runs(row.id, 100).unwrap_or_default()}))
+    let runs = ctx.strategy.store.list_runs(row.id, 100);
+    data_or_failed(format_args!("the runs of strategy {}", row.id), runs)
 }
 
 /// GET .../orders?run_id=
@@ -649,15 +662,12 @@ pub async fn orders(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let rows: Vec<Value> = ctx
+    let rows = ctx
         .strategy
         .store
         .list_orders_for_strategy(row.id, run_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|o| o.to_dict())
-        .collect();
-    ok200(json!({"data": rows}))
+        .map(|rows| rows.iter().map(|o| o.to_dict()).collect::<Vec<Value>>());
+    data_or_failed(format_args!("the orders of strategy {}", row.id), rows)
 }
 
 /// GET .../events?run_id=&kind=&severity=&limit=
@@ -702,9 +712,14 @@ pub async fn events(
         .filter(|v| *v != 0)
         .unwrap_or(EVENTS_DEFAULT_LIMIT)
         .clamp(1, EVENTS_MAX_LIMIT);
-    ok200(json!({"data": ctx.strategy.store.list_events(
-        row.id, run_id, kind.map(String::as_str), severity.map(String::as_str), limit
-    ).unwrap_or_default()}))
+    let rows = ctx.strategy.store.list_events(
+        row.id,
+        run_id,
+        kind.map(String::as_str),
+        severity.map(String::as_str),
+        limit,
+    );
+    data_or_failed(format_args!("the events of strategy {}", row.id), rows)
 }
 
 /// GET .../webhook_events
@@ -713,7 +728,11 @@ pub async fn webhook_events(State(ctx): Ctx, User(u): User, Path(sid): Path<Stri
         Ok(r) => r,
         Err(r) => return r,
     };
-    ok200(json!({"data": ctx.strategy.store.list_webhook_events(row.id, 200).unwrap_or_default()}))
+    let rows = ctx.strategy.store.list_webhook_events(row.id, 200);
+    data_or_failed(
+        format_args!("the webhook events of strategy {}", row.id),
+        rows,
+    )
 }
 
 async fn book(
@@ -735,6 +754,10 @@ async fn book(
         0 => ctx.strategy.strategy_orderbook(row.id, run_id).await,
         1 => ctx.strategy.strategy_tradebook(row.id, run_id).await,
         _ => ctx.strategy.strategy_positions(row.id, run_id).await,
+    };
+    let payload = match payload {
+        Ok(p) => p,
+        Err(e) => return read_failed(format_args!("the books of strategy {}", row.id), e),
     };
     let code = if payload["status"] == "success" {
         StatusCode::OK
@@ -789,26 +812,11 @@ pub async fn checkpoints(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let run_id = match requested {
-        Some(id) => match ctx.strategy.store.get_run(id) {
-            Ok(Some(run)) if run.strategy_id == row.id => id,
-            _ => return err("Run not found", StatusCode::NOT_FOUND),
-        },
-        None => match row.current_run_id.or_else(|| {
-            ctx.strategy
-                .store
-                .list_runs(row.id, 1)
-                .ok()
-                .and_then(|r| r.first().and_then(|x| x["id"].as_i64()))
-        }) {
-            Some(id) => id,
-            None => return ok200(json!({"data": [], "run_id": null})),
-        },
-    };
-    ok200(json!({
-        "data": ctx.strategy.store.list_checkpoints(run_id, 1000, Some(row.id)).unwrap_or_default(),
-        "run_id": run_id,
-    }))
+    match ctx.strategy.checkpoint_page(&row, requested) {
+        Ok(Some(page)) => ok200(page),
+        Ok(None) => err("Run not found", StatusCode::NOT_FOUND),
+        Err(e) => read_failed(format_args!("the checkpoints of strategy {}", row.id), e),
+    }
 }
 
 // ------------------------------------------------------------------ public webhook

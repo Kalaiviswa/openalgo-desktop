@@ -28,8 +28,9 @@
 use super::dispatch::{build_order, entry_action, exit_action, RunMode, EXIT_PRICETYPE};
 use super::resolver::{resolve_leg, Failure};
 use super::risk_adapter;
+use super::start_claim::START_READ_FAILED;
 use super::state::{new_leg_state, new_position_ref, ClaimId, LegSpec, RunState};
-use super::store::{EventFields, NewOrder, StrategyRow, ORDER_KINDS};
+use super::store::{EventFields, NewOrder, StrategyRow, LIVE_NOT_ENABLED, ORDER_KINDS};
 use super::StrategyModule;
 use crate::risk::BreachReason;
 use futures_util::future::BoxFuture;
@@ -225,7 +226,7 @@ impl StrategyModule {
             Ok(None) => return StartResult::fail("Strategy not found"),
             Err(e) => {
                 tracing::error!("Could not read strategy {}: {}", strategy_id, e);
-                return StartResult::fail("Strategy not found");
+                return StartResult::fail(START_READ_FAILED);
             }
         };
         let Some(run_mode) = RunMode::parse(mode) else {
@@ -239,9 +240,7 @@ impl StrategyModule {
         // Live is opt-in per strategy, checked here as the last point before
         // real orders as well as at every caller.
         if run_mode == RunMode::Live && !strategy.live_enabled {
-            return StartResult::fail(
-                "This strategy is not enabled for live trading. Enable it first.",
-            );
+            return StartResult::fail(LIVE_NOT_ENABLED);
         }
         if let Err(e) = self.gateway.authorised(run_mode) {
             return StartResult::fail(e);
@@ -264,14 +263,10 @@ impl StrategyModule {
             };
         }
 
-        // One conditional UPDATE, not a read then a write.
-        match self.store.claim_strategy_for_run(strategy_id) {
-            Ok(true) => {}
-            Ok(false) => return StartResult::fail("This strategy is already running"),
-            Err(e) => {
-                tracing::error!("Could not claim strategy {}: {}", strategy_id, e);
-                return StartResult::fail("This strategy is already running");
-            }
+        // One conditional UPDATE that re-checks what was decided above
+        // against the row as it is now (SM-01).
+        if let Err(refusal) = self.claim_start(&strategy, run_mode, trigger_source) {
+            return StartResult::fail(refusal);
         }
 
         let expiries: serde_json::Map<String, Value> = resolved

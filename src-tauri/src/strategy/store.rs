@@ -14,7 +14,8 @@
 //!
 //! Every guard that the engine depends on is one conditional statement, not a
 //! read followed by a write: `claim_strategy_for_run`, the terminal run CAS,
-//! the order-fact fold and the acknowledgement bind.
+//! the order-fact fold and the acknowledgement bind. The management writes
+//! (`management.rs`) hold to the same rule and advance `revision` (SM-01).
 
 use crate::db::sqlite::SqliteDb;
 use crate::error::{AppError, Result};
@@ -25,6 +26,10 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 mod management;
+pub use management::{
+    migrate_revision, ClaimOutcome, StartClaim, ALREADY_RUNNING, CHANGED_WHILE_EDITING,
+    CHANGED_WHILE_STARTING, LIVE_NOT_ENABLED, WEBHOOK_LOCKED,
+};
 
 pub const WEBHOOK_TOKEN_PREFIX: &str = "oaws_";
 
@@ -428,6 +433,9 @@ pub struct StrategyRow {
     pub current_run_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+    /// Advanced by every configuration write (SM-01). Not part of the
+    /// web's strategy shape.
+    pub revision: i64,
 }
 
 const STRATEGY_COLS: &str =
@@ -435,7 +443,7 @@ const STRATEGY_COLS: &str =
     underlying_exchange, strategy_type, entry_time, exit_time, product, pricetype, legs, \
     overall_sl_mtm, overall_target_mtm, lock_profit, trail_sl_to_entry, scheduler, live_enabled, \
     webhook_token_hash, webhook_ip_allowlist, webhook_locked, daily_loss_limit_inr, status, \
-    current_run_id, created_at, updated_at";
+    current_run_id, created_at, updated_at, revision";
 
 fn strategy_from(r: &Row<'_>) -> rusqlite::Result<StrategyRow> {
     Ok(StrategyRow {
@@ -474,6 +482,7 @@ fn strategy_from(r: &Row<'_>) -> rusqlite::Result<StrategyRow> {
         current_run_id: r.get(25)?,
         created_at: r.get(26)?,
         updated_at: r.get(27)?,
+        revision: r.get(28)?,
     })
 }
 

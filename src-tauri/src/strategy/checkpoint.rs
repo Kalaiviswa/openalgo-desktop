@@ -7,7 +7,10 @@
 //! every 120 passes, which bounds a table written all day in a process that
 //! never restarts. Nothing starts at construction; one owned task.
 
+use super::store::StrategyRow;
 use super::StrategyModule;
+use crate::error::Result;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +47,41 @@ pub fn write_once(module: &StrategyModule, prune: Option<bool>) -> usize {
         }
     }
     written
+}
+
+impl StrategyModule {
+    /// The checkpoint page the Detail page reads, `{"data", "run_id"}`: of
+    /// the `requested` run, else the current run, else the latest one.
+    /// `Ok(None)` when the requested run is not this strategy's. A failed
+    /// read is an error, never an empty page that reads as "never ran"
+    /// (SM-04).
+    pub fn checkpoint_page(
+        &self,
+        strategy: &StrategyRow,
+        requested: Option<i64>,
+    ) -> Result<Option<Value>> {
+        let run_id = match requested {
+            Some(id) => match self.store.get_run(id)? {
+                Some(run) if run.strategy_id == strategy.id => Some(id),
+                _ => return Ok(None),
+            },
+            None => match strategy.current_run_id {
+                Some(id) => Some(id),
+                None => self
+                    .store
+                    .list_runs(strategy.id, 1)?
+                    .first()
+                    .and_then(|r| r["id"].as_i64()),
+            },
+        };
+        let Some(run_id) = run_id else {
+            return Ok(Some(json!({"data": [], "run_id": null})));
+        };
+        let rows = self
+            .store
+            .list_checkpoints(run_id, 1000, Some(strategy.id))?;
+        Ok(Some(json!({"data": rows, "run_id": run_id})))
+    }
 }
 
 /// Start the owned writer; it ends on module shutdown.
