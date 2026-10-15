@@ -157,32 +157,42 @@ fn lenient_body(bytes: &Bytes) -> Map<String, Value> {
     }
 }
 
-/// Validate, authenticate the key, and (when asked) load the strategy.
-#[allow(clippy::result_large_err)]
+/// Validate, authenticate the key, and (when asked) load the strategy. The
+/// error reply is boxed: a reply is large.
 fn resolve(
     ctx: &AppState,
     ip: IpAddr,
     bytes: &Bytes,
     schema: &Schema,
     needs_strategy: bool,
-) -> Result<(Value, String, Option<crate::strategy::store::StrategyRow>), Response> {
+) -> Result<(Value, String, Option<crate::strategy::store::StrategyRow>), Box<Response>> {
     let body = lenient_body(bytes);
     let data = match schema.load(&body) {
         Ok(d) => Value::Object(d),
         Err(e) => {
-            return Err(json_response(
+            return Err(Box::new(json_response(
                 StatusCode::BAD_REQUEST,
                 json!({"status": "error", "message": e.to_json()}),
-            ))
+            )))
         }
     };
     let key = data["apikey"].as_str().unwrap_or_default();
     if !authorize(ctx, key, ip, Auth::KeyOnly) {
-        return Err(failure(INVALID_API_KEY, StatusCode::FORBIDDEN, Value::Null));
+        return Err(Box::new(failure(
+            INVALID_API_KEY,
+            StatusCode::FORBIDDEN,
+            Value::Null,
+        )));
     }
     let user = match ctx.strategy.store.api_key_owner() {
         Ok(Some(u)) => u,
-        _ => return Err(failure(INVALID_API_KEY, StatusCode::FORBIDDEN, Value::Null)),
+        _ => {
+            return Err(Box::new(failure(
+                INVALID_API_KEY,
+                StatusCode::FORBIDDEN,
+                Value::Null,
+            )))
+        }
     };
     if !needs_strategy {
         return Ok((data, user, None));
@@ -190,14 +200,18 @@ fn resolve(
     let sid = data["strategy_id"].as_i64().unwrap_or(0);
     match ctx.strategy.store.get_strategy(sid, &user) {
         Ok(Some(row)) => Ok((data, user, Some(row))),
-        Ok(None) => Err(failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null)),
+        Ok(None) => Err(Box::new(failure(
+            NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            Value::Null,
+        ))),
         Err(e) => {
             tracing::error!("Could not read strategy {}: {}", sid, e);
-            Err(failure(
+            Err(Box::new(failure(
                 UNEXPECTED,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Value::Null,
-            ))
+            )))
         }
     }
 }
@@ -240,7 +254,7 @@ async fn stop_current(
 pub async fn list(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, user, _) = match resolve(&ctx, ip, &body, &list_schema(), false) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let q = data["q"].as_str().map(str::trim).filter(|s| !s.is_empty());
     match ctx
@@ -260,7 +274,7 @@ pub async fn list(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
 pub async fn status(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (_, _, row) = match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
@@ -277,7 +291,7 @@ pub async fn status(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
 pub async fn start(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, user, row) = match resolve(&ctx, ip, &body, &start_schema(), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
@@ -313,7 +327,7 @@ pub async fn stop(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
     match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
         Ok((_, user, Some(row))) => stop_current(&ctx, &row, &user, false).await,
         Ok(_) => failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -322,7 +336,7 @@ pub async fn close_all(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
     match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
         Ok((_, user, Some(row))) => stop_current(&ctx, &row, &user, true).await,
         Ok(_) => failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -330,7 +344,7 @@ pub async fn close_all(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
 pub async fn close_leg(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, user, row) = match resolve(&ctx, ip, &body, &close_leg_schema(), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
@@ -359,7 +373,7 @@ pub async fn close_leg(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
 pub async fn runs(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, _, row) = match resolve(&ctx, ip, &body, &runs_schema(), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
@@ -372,7 +386,7 @@ pub async fn runs(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
 pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, _, row) = match resolve(&ctx, ip, &body, &orders_schema(), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
@@ -394,7 +408,7 @@ pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
 pub async fn events(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
     let (data, _, row) = match resolve(&ctx, ip, &body, &events_schema(), true) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);

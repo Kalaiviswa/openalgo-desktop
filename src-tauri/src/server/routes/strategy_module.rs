@@ -89,21 +89,21 @@ fn store_error(e: AppError) -> Response {
 }
 
 /// `(row)` for an owner-scoped route, or the 404 that hides another user's id.
-#[allow(clippy::result_large_err)]
+/// The helpers' error replies are boxed: a reply is large.
 fn resolve(
     ctx: &AppState,
     user: &str,
     sid: &str,
-) -> Result<crate::strategy::store::StrategyRow, Response> {
+) -> Result<crate::strategy::store::StrategyRow, Box<Response>> {
     let Ok(id) = sid.parse::<i64>() else {
-        return Err(err(NOT_FOUND, StatusCode::NOT_FOUND));
+        return Err(Box::new(err(NOT_FOUND, StatusCode::NOT_FOUND)));
     };
     match ctx.strategy.store.get_strategy(id, user) {
         Ok(Some(r)) => Ok(r),
-        Ok(None) => Err(err(NOT_FOUND, StatusCode::NOT_FOUND)),
+        Ok(None) => Err(Box::new(err(NOT_FOUND, StatusCode::NOT_FOUND))),
         // Not "not found" (SM-04): a stop or a kill switch must not be told
         // that a strategy it cannot read does not exist.
-        Err(e) => Err(read_failed(format_args!("strategy {}", id), e)),
+        Err(e) => Err(Box::new(read_failed(format_args!("strategy {}", id), e))),
     }
 }
 
@@ -125,27 +125,28 @@ fn data_or_failed<T: serde::Serialize>(
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn json_body(bytes: &Bytes) -> Result<Map<String, Value>, Response> {
+fn json_body(bytes: &Bytes) -> Result<Map<String, Value>, Box<Response>> {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(m)) => Ok(m),
-        Ok(_) => Err(err(
+        Ok(_) => Err(Box::new(err(
             "The request body must be a JSON object",
             StatusCode::BAD_REQUEST,
-        )),
-        Err(_) => Err(err("A JSON body is required", StatusCode::BAD_REQUEST)),
+        ))),
+        Err(_) => Err(Box::new(err(
+            "A JSON body is required",
+            StatusCode::BAD_REQUEST,
+        ))),
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn int_arg(q: &HashMap<String, String>, name: &str) -> Result<Option<i64>, Response> {
+fn int_arg(q: &HashMap<String, String>, name: &str) -> Result<Option<i64>, Box<Response>> {
     match q.get(name).map(String::as_str) {
         None | Some("") => Ok(None),
         Some(v) => v.parse::<i64>().map(Some).map_err(|_| {
-            err(
+            Box::new(err(
                 format!("{} must be a whole number", name),
                 StatusCode::BAD_REQUEST,
-            )
+            ))
         }),
     }
 }
@@ -199,7 +200,7 @@ pub async fn list(State(ctx): Ctx, User(u): User, Query(q): Q) -> Response {
 pub async fn create(State(ctx): Ctx, User(u): User, body: Bytes) -> Response {
     let payload = match json_body(&body) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let config = match validate_strategy_config(&Value::Object(payload), &ctx.symbols.snapshot()) {
         Ok(c) => c,
@@ -233,7 +234,7 @@ pub async fn create(State(ctx): Ctx, User(u): User, body: Bytes) -> Response {
 pub async fn detail(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let detail = ctx.strategy.strategy_detail(&row);
     data_or_failed(
@@ -251,11 +252,11 @@ pub async fn update(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let mut payload = match json_body(&body) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if payload.is_empty() {
         return err("Nothing to update", StatusCode::BAD_REQUEST);
@@ -348,7 +349,7 @@ pub async fn update(
 pub async fn delete(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if row.status == "running" {
         return err("Stop the strategy before deleting it", StatusCode::CONFLICT);
@@ -366,7 +367,7 @@ pub async fn delete(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> 
 pub async fn rotate_webhook(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let token = match ctx.strategy.store.rotate_webhook_token(row.id, &u.username) {
         Ok(t) => t,
@@ -396,11 +397,11 @@ pub async fn set_live(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let payload = match json_body(&body) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(enabled) = payload.get("enabled") else {
         return err("enabled is required", StatusCode::BAD_REQUEST);
@@ -449,7 +450,7 @@ pub async fn set_live(
 pub async fn kill_switch(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if let Err(e) = ctx
         .strategy
@@ -509,7 +510,7 @@ pub async fn kill_switch(State(ctx): Ctx, User(u): User, Path(sid): Path<String>
 pub async fn unlock_webhook(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if let Err(e) = ctx
         .strategy
@@ -533,11 +534,11 @@ pub async fn start(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let payload = match json_body(&body) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     if !RUN_MODES.contains(&mode) {
@@ -569,7 +570,7 @@ pub async fn start(
 async fn stop_for(ctx: &AppState, user: &str, sid: &str, event: bool) -> Response {
     let row = match resolve(ctx, user, sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(run_id) = row.current_run_id else {
         return err("This strategy is not running", StatusCode::CONFLICT);
@@ -617,7 +618,7 @@ pub async fn close_leg(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let Some(run_id) = row.current_run_id else {
         return err("This strategy is not running", StatusCode::CONFLICT);
@@ -646,7 +647,7 @@ pub async fn close_leg(
 pub async fn runs(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let runs = ctx.strategy.store.list_runs(row.id, 100);
     data_or_failed(format_args!("the runs of strategy {}", row.id), runs)
@@ -661,11 +662,11 @@ pub async fn orders(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let run_id = match int_arg(&q, "run_id") {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let rows = ctx
         .strategy
@@ -684,11 +685,11 @@ pub async fn events(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let run_id = match int_arg(&q, "run_id") {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let kind = q.get("kind").filter(|s| !s.is_empty());
     if let Some(k) = kind {
@@ -710,7 +711,7 @@ pub async fn events(
     }
     let requested = match int_arg(&q, "limit") {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     // Clamped: SQLite reads a negative LIMIT as no limit.
     let limit = requested
@@ -731,7 +732,7 @@ pub async fn events(
 pub async fn webhook_events(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let rows = ctx.strategy.store.list_webhook_events(row.id, 200);
     data_or_failed(
@@ -749,11 +750,11 @@ async fn book(
 ) -> Response {
     let row = match resolve(ctx, user, sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let run_id = match int_arg(q, "run_id") {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let payload = match which {
         0 => ctx.strategy.strategy_orderbook(row.id, run_id).await,
@@ -811,11 +812,11 @@ pub async fn checkpoints(
 ) -> Response {
     let row = match resolve(&ctx, &u.username, &sid) {
         Ok(r) => r,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let requested = match int_arg(&q, "run_id") {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match ctx.strategy.checkpoint_page(&row, requested) {
         Ok(Some(page)) => ok200(page),
