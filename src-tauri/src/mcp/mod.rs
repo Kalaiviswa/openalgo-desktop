@@ -83,7 +83,7 @@ impl Risk {
 }
 
 /// One tool: the web's registration metadata and signature.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ToolDef {
     pub name: &'static str,
     pub title: &'static str,

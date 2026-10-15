@@ -59,7 +59,6 @@
     "src-tauri/src/feed/server.rs": 1425,
     "src-tauri/src/historify/db.rs": 1361,
     "src-tauri/src/historify/jobs.rs": 1194,
-    "src-tauri/src/mcp/catalog.rs": 2278,
     "src-tauri/src/mcp/research.rs": 1611,
     "src-tauri/src/mcp/ta.rs": 1412,
     "src-tauri/src/messaging/telegram/bot.rs": 1473,
