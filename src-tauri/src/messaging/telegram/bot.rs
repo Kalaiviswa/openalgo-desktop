@@ -308,100 +308,115 @@ impl Bot {
         from: &From,
     ) {
         match cmd {
-            "start" => {
-                let text = if Self::user(ctx, from.id).is_some() {
-                    format!(
-                        "Welcome back, {}! \n\nYour account is linked. Use /menu to see available options.",
-                        from.first_name
-                    )
-                } else {
-                    format!(
-                        "Welcome to OpenAlgo Bot, {}! \n\nTo get started, link your OpenAlgo account:\n`/link <api_key> <host_url>`\n\nExample:\n`/link your_api_key_here http://127.0.0.1:5000`\n\nUse /help to see all available commands.",
-                        from.first_name
-                    )
-                };
-                self.send(chat, &text, true, None).await;
-                Self::log(ctx, from.id, "start", chat);
-            }
+            "start" => self.cmd_start(ctx, chat, from).await,
             "help" => {
                 self.send(chat, HELP_TEXT, true, None).await;
                 Self::log(ctx, from.id, "help", chat);
             }
             "link" => self.cmd_link(ctx, args, chat, from).await,
-            "unlink" => {
-                let ok = ctx
-                    .sqlite
-                    .conn()
-                    .and_then(|c| db::delete_user(&c, from.id, ctx.now()))
-                    .unwrap_or(false);
-                let text = if ok {
-                    "Account unlinked successfully.\nYour data has been removed."
-                } else {
-                    "No linked account found."
-                };
-                self.send(chat, text, true, None).await;
-                Self::log(ctx, from.id, "unlink", chat);
-            }
+            "unlink" => self.cmd_unlink(ctx, chat, from).await,
             "status" => self.cmd_status(ctx, chat, from).await,
             "orderbook" | "tradebook" | "positions" | "holdings" | "funds" | "pnl" => {
                 self.cmd_book(ctx, cmd, chat, from).await
             }
             "quote" => self.cmd_quote(ctx, args, chat, from).await,
             "chart" => self.cmd_chart(ctx, args, chat, from).await,
-            "menu" => {
-                if Self::user(ctx, from.id).is_none() {
-                    self.send(chat, LINK_FIRST, false, None).await;
-                    return;
-                }
-                self.send(
-                    chat,
-                    "*OpenAlgo Trading Menu*\nSelect an option below:",
-                    true,
-                    Some(menu_keyboard()),
-                )
-                .await;
-                Self::log(ctx, from.id, "menu", chat);
-            }
-            "closeall" => {
-                if Self::user(ctx, from.id).is_none() {
-                    self.send(chat, LINK_FIRST, false, None).await;
-                    return;
-                }
-                let kb = json!({"inline_keyboard": [
-                    [{"text": "Yes, close all", "callback_data": "confirm_closeall"}],
-                    [{"text": "Cancel", "callback_data": "cancel_action"}],
-                ]});
-                let text = format!(
-                    "*Close All Positions*\n{RULE}\n\nThis will close ALL open positions across all strategies.\n\nAre you sure?"
-                );
-                self.send(chat, &text, true, Some(kb)).await;
-                Self::log(ctx, from.id, "closeall", chat);
-            }
-            "mode" => {
-                if Self::user(ctx, from.id).is_none() {
-                    self.send(chat, LINK_FIRST, false, None).await;
-                    return;
-                }
-                let analyze = ctx.sqlite.get_analyze_mode().unwrap_or(false);
-                let (current, label, data) = if analyze {
-                    ("Analyze Mode", "Switch to Live", "mode_live")
-                } else {
-                    ("Live Mode", "Switch to Analyze", "mode_analyze")
-                };
-                let text = format!(
-                    "*Trading Mode*\n{RULE}\n\nCurrent: {current}\n\n• *Live Mode* — Orders execute with real broker\n• *Analyze Mode* — Sandbox mode (no real orders)\n"
-                );
-                self.send(
-                    chat,
-                    &text,
-                    true,
-                    Some(json!({"inline_keyboard": [[{"text": label, "callback_data": data}]]})),
-                )
-                .await;
-                Self::log(ctx, from.id, "mode", chat);
-            }
+            "menu" => self.cmd_menu(ctx, chat, from).await,
+            "closeall" => self.cmd_closeall(ctx, chat, from).await,
+            "mode" => self.cmd_mode(ctx, chat, from).await,
             _ => {}
         }
+    }
+
+    /// `/start`: a welcome, saying how to link when the user is not linked.
+    async fn cmd_start(&self, ctx: &Arc<AppState>, chat: i64, from: &From) {
+        let text = if Self::user(ctx, from.id).is_some() {
+            format!(
+                "Welcome back, {}! \n\nYour account is linked. Use /menu to see available options.",
+                from.first_name
+            )
+        } else {
+            format!(
+                "Welcome to OpenAlgo Bot, {}! \n\nTo get started, link your OpenAlgo account:\n`/link <api_key> <host_url>`\n\nExample:\n`/link your_api_key_here http://127.0.0.1:5000`\n\nUse /help to see all available commands.",
+                from.first_name
+            )
+        };
+        self.send(chat, &text, true, None).await;
+        Self::log(ctx, from.id, "start", chat);
+    }
+
+    /// `/unlink`: remove the linked account.
+    async fn cmd_unlink(&self, ctx: &Arc<AppState>, chat: i64, from: &From) {
+        let ok = ctx
+            .sqlite
+            .conn()
+            .and_then(|c| db::delete_user(&c, from.id, ctx.now()))
+            .unwrap_or(false);
+        let text = if ok {
+            "Account unlinked successfully.\nYour data has been removed."
+        } else {
+            "No linked account found."
+        };
+        self.send(chat, text, true, None).await;
+        Self::log(ctx, from.id, "unlink", chat);
+    }
+
+    /// `/menu`: the buttons of the trading menu.
+    async fn cmd_menu(&self, ctx: &Arc<AppState>, chat: i64, from: &From) {
+        if Self::user(ctx, from.id).is_none() {
+            self.send(chat, LINK_FIRST, false, None).await;
+            return;
+        }
+        self.send(
+            chat,
+            "*OpenAlgo Trading Menu*\nSelect an option below:",
+            true,
+            Some(menu_keyboard()),
+        )
+        .await;
+        Self::log(ctx, from.id, "menu", chat);
+    }
+
+    /// `/closeall`: ask to confirm closing every open position.
+    async fn cmd_closeall(&self, ctx: &Arc<AppState>, chat: i64, from: &From) {
+        if Self::user(ctx, from.id).is_none() {
+            self.send(chat, LINK_FIRST, false, None).await;
+            return;
+        }
+        let kb = json!({"inline_keyboard": [
+            [{"text": "Yes, close all", "callback_data": "confirm_closeall"}],
+            [{"text": "Cancel", "callback_data": "cancel_action"}],
+        ]});
+        let text = format!(
+            "*Close All Positions*\n{RULE}\n\nThis will close ALL open positions across all strategies.\n\nAre you sure?"
+        );
+        self.send(chat, &text, true, Some(kb)).await;
+        Self::log(ctx, from.id, "closeall", chat);
+    }
+
+    /// `/mode`: the trading mode, with a button to switch it.
+    async fn cmd_mode(&self, ctx: &Arc<AppState>, chat: i64, from: &From) {
+        if Self::user(ctx, from.id).is_none() {
+            self.send(chat, LINK_FIRST, false, None).await;
+            return;
+        }
+        let analyze = ctx.sqlite.get_analyze_mode().unwrap_or(false);
+        let (current, label, data) = if analyze {
+            ("Analyze Mode", "Switch to Live", "mode_live")
+        } else {
+            ("Live Mode", "Switch to Analyze", "mode_analyze")
+        };
+        let text = format!(
+            "*Trading Mode*\n{RULE}\n\nCurrent: {current}\n\n• *Live Mode* — Orders execute with real broker\n• *Analyze Mode* — Sandbox mode (no real orders)\n"
+        );
+        self.send(
+            chat,
+            &text,
+            true,
+            Some(json!({"inline_keyboard": [[{"text": label, "callback_data": data}]]})),
+        )
+        .await;
+        Self::log(ctx, from.id, "mode", chat);
     }
 
     async fn cmd_link(&self, ctx: &Arc<AppState>, args: &[String], chat: i64, from: &From) {
