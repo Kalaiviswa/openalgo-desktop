@@ -53,6 +53,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+
+mod shape;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -478,50 +480,6 @@ pub fn book_time(row: &Value) -> Option<DateTime<Utc>> {
     None
 }
 
-/// `SL-M`, `SL_M`, `slm` -> `SLM`.
-fn price_kind(t: &str) -> String {
-    t.trim()
-        .chars()
-        .filter(|c| !matches!(c, '-' | '_' | ' '))
-        .collect::<String>()
-        .to_ascii_uppercase()
-}
-
-/// Whether a book row has the order's shape: the price type it was sent
-/// with (a MARKET order may show as LIMIT, an SL-M as SL, after market
-/// price protection), and its limit and trigger prices where they apply.
-/// A side that does not say is not compared.
-fn same_shape(u: &Unconfirmed<'_>, r: &BookOrder) -> bool {
-    let Some(sent) = u.pricetype.map(price_kind).filter(|k| !k.is_empty()) else {
-        return true;
-    };
-    let shown = price_kind(&r.pricetype);
-    if shown.is_empty() {
-        return true;
-    }
-    let compatible =
-        sent == shown || (sent == "MARKET" && shown == "LIMIT") || (sent == "SLM" && shown == "SL");
-    if !compatible {
-        return false;
-    }
-    let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * a.abs().max(b.abs()).max(1.0);
-    if sent == shown && (sent == "LIMIT" || sent == "SL") {
-        if let Some(p) = u.price.filter(|p| *p > 0.0) {
-            if r.price > 0.0 && !close(r.price, p) {
-                return false;
-            }
-        }
-    }
-    if sent == "SL" || sent == "SLM" {
-        if let Some(t) = u.trigger_price.filter(|t| *t > 0.0) {
-            if r.trigger_price > 0.0 && !close(r.trigger_price, t) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// Find an unconfirmed placement in one book read (P1-4).
 ///
 /// * When the broker reports the client tag of every order
@@ -549,7 +507,7 @@ pub fn find_placed<'a>(
                 (Some(p), rp) if !p.trim().is_empty() && !rp.is_empty() => same(p, rp),
                 _ => true,
             }
-            && same_shape(u, r)
+            && shape::same_shape(u, r)
     };
     let tag = u.client_tag.map(str::trim).filter(|t| !t.is_empty());
     let count = |hits: Vec<&'a BookOrder>| match hits.len() {
