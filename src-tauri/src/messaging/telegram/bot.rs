@@ -20,7 +20,7 @@ use crate::messaging::format::{
 use crate::messaging::openalgo::{is_success, OpenAlgoClient};
 use crate::messaging::ReplyClass;
 use crate::state::AppState;
-use chrono::{Duration, FixedOffset, TimeZone};
+use chrono::{Duration, FixedOffset, Offset, TimeZone, Utc};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -584,8 +584,7 @@ pub const HELP_TEXT: &str = "
 
 /// Turn history rows into candles in IST (the SDK's DataFrame index).
 pub fn candles_from_history(resp: &Value) -> Vec<Candle> {
-    let ist = FixedOffset::east_opt(5 * 3600 + 1800)
-        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("utc"));
+    let ist = FixedOffset::east_opt(5 * 3600 + 1800).unwrap_or_else(|| Utc.fix());
     list_in(resp, Some("data"))
         .iter()
         .filter_map(|r| {

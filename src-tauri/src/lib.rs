@@ -4,6 +4,22 @@
 //! broker callbacks, `/api/v1`, Socket.IO), the services, the event bus and
 //! the databases. The Tauri window is a browser pointed at that server.
 
+// Code health (CLAUDE.md): no unwrap, expect, todo or print macros in
+// production code. Tests may use them. CI runs clippy with -D warnings, so
+// these warnings fail the build.
+#![cfg_attr(
+    not(test),
+    warn(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::dbg_macro,
+        clippy::print_stdout,
+        clippy::print_stderr,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 pub mod analytics;
 pub mod brokers;
 pub mod chartink;

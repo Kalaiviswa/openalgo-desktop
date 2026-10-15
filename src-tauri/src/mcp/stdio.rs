@@ -337,6 +337,10 @@ pub fn token_from(value: Option<String>) -> Result<String, &'static str> {
 
 /// Entry point of `openalgo-desktop mcp ...` (called from `main` before
 /// Tauri starts). Returns the process exit code.
+#[allow(
+    clippy::print_stderr,
+    reason = "messages for the person who ran the command; stdout carries the MCP protocol"
+)]
 pub fn main(args: &[String]) -> i32 {
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
