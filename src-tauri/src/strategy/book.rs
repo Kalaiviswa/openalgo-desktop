@@ -89,6 +89,61 @@ pub struct StrategyBook {
     lock: Mutex<()>,
 }
 
+/// An order's strategy tag: its row id, user, strategy, symbol, exchange,
+/// product, and the quantity and notional already booked.
+type Tag = (i64, String, String, String, String, String, f64, f64);
+
+fn order_tag(conn: &Connection, orderid: &str) -> rusqlite::Result<Option<Tag>> {
+    conn.query_row(
+        "SELECT id, user_id, strategy, symbol, exchange, product, applied_quantity, \
+         applied_notional FROM strategy_order_tags WHERE orderid = ?1",
+        [orderid],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        },
+    )
+    .optional()
+}
+
+/// A fill netted into a leg's (quantity, average, realized, today's
+/// realized): adding averages in, reducing realizes against the average,
+/// and a reversal starts the new side at the fill price.
+fn net_fill(
+    (mut qty, mut avg, mut realized, mut today_realized): (f64, f64, f64, f64),
+    signed: f64,
+    price: f64,
+) -> (f64, f64, f64, f64) {
+    if qty == 0.0 || (qty > 0.0) == (signed > 0.0) {
+        let total = qty.abs() + signed.abs();
+        avg = (avg * qty.abs() + price * signed.abs()) / total;
+        qty += signed;
+    } else {
+        let closing = signed.abs().min(qty.abs());
+        let direction = if qty > 0.0 { 1.0 } else { -1.0 };
+        let r = closing * (price - avg) * direction;
+        realized += r;
+        today_realized += r;
+        let remaining = signed.abs() - closing;
+        qty += signed;
+        if qty.abs() < 1e-9 {
+            qty = 0.0;
+            avg = 0.0;
+        } else if remaining > 0.0 {
+            avg = price;
+        }
+    }
+    (qty, avg, realized, today_realized)
+}
+
 impl StrategyBook {
     pub fn new(
         db: Arc<SqliteDb>,
@@ -213,26 +268,7 @@ impl StrategyBook {
         average_price: f64,
         action: &str,
     ) -> Result<Option<Value>> {
-        type Tag = (i64, String, String, String, String, String, f64, f64);
-        let tag: Option<Tag> = conn
-            .query_row(
-                "SELECT id, user_id, strategy, symbol, exchange, product, applied_quantity, \
-                 applied_notional FROM strategy_order_tags WHERE orderid = ?1",
-                [orderid],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let tag = order_tag(conn, orderid)?;
         let Some((tag_id, user, strategy, symbol, exchange, product, applied_q, applied_n)) = tag
         else {
             if !orderid.is_empty() {
@@ -279,25 +315,8 @@ impl StrategyBook {
         if trade_date.as_deref() != Some(today.as_str()) {
             today_realized = 0.0;
         }
-        if qty == 0.0 || (qty > 0.0) == (signed > 0.0) {
-            let total = qty.abs() + signed.abs();
-            avg = (avg * qty.abs() + price * signed.abs()) / total;
-            qty += signed;
-        } else {
-            let closing = signed.abs().min(qty.abs());
-            let direction = if qty > 0.0 { 1.0 } else { -1.0 };
-            let r = closing * (price - avg) * direction;
-            realized += r;
-            today_realized += r;
-            let remaining = signed.abs() - closing;
-            qty += signed;
-            if qty.abs() < 1e-9 {
-                qty = 0.0;
-                avg = 0.0;
-            } else if remaining > 0.0 {
-                avg = price;
-            }
-        }
+        (qty, avg, realized, today_realized) =
+            net_fill((qty, avg, realized, today_realized), signed, price);
         conn.execute(
             "INSERT INTO strategy_positions (user_id, strategy, symbol, exchange, product, \
              quantity, average_price, realized_pnl, today_realized_pnl, trade_date, updated_at) \
