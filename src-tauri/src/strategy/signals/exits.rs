@@ -9,6 +9,58 @@ use crate::strategy::store::{EventFields, NewOrder, StrategyRow};
 use serde_json::Value;
 
 impl StrategyModule {
+    /// An exit for a side the leg does not hold: real only when a flip
+    /// whose closing order was refused left that outgoing side held, else
+    /// noted as no matching position.
+    async fn exit_outgoing_side(
+        &self,
+        strategy: &StrategyRow,
+        run_id: i64,
+        lid: i64,
+        side: &str,
+    ) -> SignalResult {
+        if let Some(c) = self
+            .state
+            .claim_superseded_exit(run_id, lid, position_of(side))
+        {
+            let placed = self
+                .signal_place_exit(
+                    strategy,
+                    run_id,
+                    SignalExit {
+                        lid,
+                        position: &c.position,
+                        symbol: &c.symbol,
+                        exchange: &c.exchange,
+                        quantity: c.quantity,
+                        position_ref: c.position_ref.clone(),
+                        claim_token: &c.claim_token,
+                        superseded: true,
+                    },
+                )
+                .await;
+            return match placed {
+                Ok(()) => SignalResult {
+                    ok: true,
+                    leg_id: Some(lid),
+                    run_id: Some(run_id),
+                    ..Default::default()
+                },
+                Err((e, claim)) => {
+                    // `None`: unconfirmed, the claim stays (LOG-08).
+                    if let Some(claim) = claim {
+                        if self.state.release_superseded_exit(run_id, lid, &claim) {
+                            self.report_flip_outgoing_exit_rejected(run_id, lid, "refused", None)
+                                .await;
+                        }
+                    }
+                    SignalResult::refuse(e, Some(lid), Some(run_id))
+                }
+            };
+        }
+        SignalResult::note("no_matching_position", Some(lid), Some(run_id))
+    }
+
     /// Close a leg held on `side`, or say it was not held.
     pub(super) fn signal_exit<'a>(
         &'a self,
@@ -33,50 +85,7 @@ impl StrategyModule {
                 })
                 .flatten();
             if held != Some(side) {
-                // A flip whose closing order was refused leaves the outgoing
-                // side held: an exit for it is real.
-                if let Some(c) = self
-                    .state
-                    .claim_superseded_exit(run_id, lid, position_of(side))
-                {
-                    let placed = self
-                        .signal_place_exit(
-                            strategy,
-                            run_id,
-                            SignalExit {
-                                lid,
-                                position: &c.position,
-                                symbol: &c.symbol,
-                                exchange: &c.exchange,
-                                quantity: c.quantity,
-                                position_ref: c.position_ref.clone(),
-                                claim_token: &c.claim_token,
-                                superseded: true,
-                            },
-                        )
-                        .await;
-                    return match placed {
-                        Ok(()) => SignalResult {
-                            ok: true,
-                            leg_id: Some(lid),
-                            run_id: Some(run_id),
-                            ..Default::default()
-                        },
-                        Err((e, claim)) => {
-                            // `None`: unconfirmed, the claim stays (LOG-08).
-                            if let Some(claim) = claim {
-                                if self.state.release_superseded_exit(run_id, lid, &claim) {
-                                    self.report_flip_outgoing_exit_rejected(
-                                        run_id, lid, "refused", None,
-                                    )
-                                    .await;
-                                }
-                            }
-                            SignalResult::refuse(e, Some(lid), Some(run_id))
-                        }
-                    };
-                }
-                return SignalResult::note("no_matching_position", Some(lid), Some(run_id));
+                return self.exit_outgoing_side(strategy, run_id, lid, side).await;
             }
             // Claim before dispatching: a repeated exit alert must not send a
             // second closing order.
