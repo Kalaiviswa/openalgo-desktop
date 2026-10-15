@@ -392,47 +392,10 @@ async fn dispatch(ctx: &AppState, api_type: &str, data: &Value) -> Option<Reply>
 
 /// Web `execute_approved_order`: claim, dispatch once, record the result.
 pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
-    let row = match ctx.sqlite.conn().and_then(|c| store::get(&c, id)) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Execution::fail(404, "Pending order not found"),
-        Err(e) => {
-            tracing::error!("Could not read pending order {}: {}", id, e);
-            return Execution::fail(500, "The order could not be read. Try again.");
-        }
+    let row = match claim_approved(ctx, id) {
+        Ok(row) => row,
+        Err(ex) => return ex,
     };
-    if row.status != "approved" {
-        return Execution::fail(
-            400,
-            &format!("Order cannot be executed (status: {})", row.status),
-        );
-    }
-    // Claim before anything can reach the broker.
-    match ctx.sqlite.conn().and_then(|c| store::claim(&c, id)) {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                "Pending order {} is already being executed; not sending it again",
-                id
-            );
-            return Execution::fail(ALREADY_SUBMITTING_STATUS, ALREADY_SUBMITTING_MESSAGE);
-        }
-        Err(e) => {
-            tracing::error!("Could not claim pending order {}: {}", id, e);
-            let back = ctx
-                .sqlite
-                .conn()
-                .and_then(|c| store::return_to_pending(&c, id, None))
-                .unwrap_or(false);
-            if back {
-                let mut ex = Execution::fail(500, CLAIM_FAILED_MESSAGE);
-                if let Some(m) = ex.body.as_object_mut() {
-                    m.insert(RETURNED_TO_PENDING.into(), json!(true));
-                }
-                return ex;
-            }
-            return Execution::fail(500, CLAIM_FAILED_STUCK_MESSAGE);
-        }
-    }
     let data: Value = match serde_json::from_str(&row.order_data) {
         Ok(v @ Value::Object(_)) => v,
         _ => {
@@ -457,7 +420,7 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
     // be at the broker: the claim's `submitting` mark stays, so the order is
     // shown unconfirmed and never sent again (LOG-08 P1-5).
     let uncertain = reply.placement.as_ref().is_some_and(|p| p.is_uncertain());
-    let mut ex = Execution {
+    let ex = Execution {
         success: reply.is_success(),
         body: reply.body,
         status: reply.status,
@@ -475,102 +438,16 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
         return ex;
     }
     if row.api_type == "placegttorder" {
-        let trigger = match ex.body.get("trigger_id") {
-            Some(Value::String(t)) if !t.is_empty() => t.clone(),
-            Some(Value::Number(n)) => n.to_string(),
-            _ => {
-                mark(ctx, id, None, "rejected");
-                if let Some(m) = ex.body.as_object_mut() {
-                    m.insert("status".into(), json!("error"));
-                    m.insert(
-                        "message".into(),
-                        json!("GTT placement succeeded without a trigger ID"),
-                    );
-                }
-                ex.success = false;
-                ex.status = 502;
-                return ex;
-            }
-        };
-        mark(ctx, id, Some(&trigger), "open");
-        if let Some(m) = ex.body.as_object_mut() {
-            m.insert("broker_order_id".into(), json!(trigger));
-        }
-        return ex;
+        return record_gtt(ctx, id, ex);
     }
     if let Some(results) = ex.body.get("results").and_then(Value::as_array).cloned() {
-        let mut leaves = Vec::new();
-        flatten(&results, &mut leaves);
-        let ok = |r: &Value| {
-            r.get("status").and_then(Value::as_str) == Some("success")
-                && r.get("orderid").is_some_and(|o| !o.is_null() && o != "")
-        };
-        let ids: Vec<String> = leaves
-            .iter()
-            .filter(|r| ok(r))
-            .map(|r| match &r["orderid"] {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .collect();
-        if uncertain {
-            tracing::error!(
-                "Approved order {} has legs with no definite answer; it stays unconfirmed and is not sent again",
-                id
-            );
-            let summary = summarize_ids(&ids);
-            mark(
-                ctx,
-                id,
-                (!ids.is_empty()).then_some(summary.as_str()),
-                SUBMITTING,
-            );
-            return ex;
-        }
-        if ids.is_empty() {
-            mark(ctx, id, None, "rejected");
-            if let Some(m) = ex.body.as_object_mut() {
-                m.insert("status".into(), json!("error"));
-                m.insert(
-                    "message".into(),
-                    json!("No child orders were submitted successfully"),
-                );
-            }
-            ex.success = false;
-            ex.status = 502;
-            return ex;
-        }
-        let partial = leaves.iter().any(|r| !ok(r));
-        let summary = summarize_ids(&ids);
-        mark(
-            ctx,
-            id,
-            Some(&summary),
-            if partial { "partial" } else { "open" },
-        );
-        if let Some(m) = ex.body.as_object_mut() {
-            m.insert("broker_order_id".into(), json!(summary));
-            m.insert("broker_order_ids".into(), json!(ids));
-        }
-        return ex;
+        return record_legs(ctx, id, ex, &results, uncertain);
     }
     if let Some(orderid) = ex.body.get("orderid").map(|o| match o {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }) {
-        let status = super::account_service::order_status(ctx, &json!({"orderid": orderid})).await;
-        let actual = if status.is_success() {
-            status
-                .body
-                .get("data")
-                .and_then(|d| d.get("status"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        } else {
-            None
-        };
-        mark(ctx, id, Some(&orderid), actual.as_deref().unwrap_or("open"));
-        return ex;
+        return record_order(ctx, id, ex, orderid).await;
     }
     // A success with no order id: a smart order whose position already
     // matched sends nothing, but the claim still needs a final status.
@@ -580,6 +457,167 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
         "open"
     };
     mark(ctx, id, None, last);
+    ex
+}
+
+/// Read an approved order and claim it, before anything can reach the
+/// broker. `Err` is the answer when it is not sent.
+fn claim_approved(ctx: &AppState, id: i64) -> Result<PendingOrderRow, Execution> {
+    let row = match ctx.sqlite.conn().and_then(|c| store::get(&c, id)) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(Execution::fail(404, "Pending order not found")),
+        Err(e) => {
+            tracing::error!("Could not read pending order {}: {}", id, e);
+            return Err(Execution::fail(
+                500,
+                "The order could not be read. Try again.",
+            ));
+        }
+    };
+    if row.status != "approved" {
+        return Err(Execution::fail(
+            400,
+            &format!("Order cannot be executed (status: {})", row.status),
+        ));
+    }
+    match ctx.sqlite.conn().and_then(|c| store::claim(&c, id)) {
+        Ok(true) => Ok(row),
+        Ok(false) => {
+            tracing::warn!(
+                "Pending order {} is already being executed; not sending it again",
+                id
+            );
+            Err(Execution::fail(
+                ALREADY_SUBMITTING_STATUS,
+                ALREADY_SUBMITTING_MESSAGE,
+            ))
+        }
+        Err(e) => {
+            tracing::error!("Could not claim pending order {}: {}", id, e);
+            let back = ctx
+                .sqlite
+                .conn()
+                .and_then(|c| store::return_to_pending(&c, id, None))
+                .unwrap_or(false);
+            if back {
+                let mut ex = Execution::fail(500, CLAIM_FAILED_MESSAGE);
+                if let Some(m) = ex.body.as_object_mut() {
+                    m.insert(RETURNED_TO_PENDING.into(), json!(true));
+                }
+                return Err(ex);
+            }
+            Err(Execution::fail(500, CLAIM_FAILED_STUCK_MESSAGE))
+        }
+    }
+}
+
+/// A placed GTT: open under its trigger id, or rejected without one.
+fn record_gtt(ctx: &AppState, id: i64, mut ex: Execution) -> Execution {
+    let trigger = match ex.body.get("trigger_id") {
+        Some(Value::String(t)) if !t.is_empty() => t.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => {
+            mark(ctx, id, None, "rejected");
+            if let Some(m) = ex.body.as_object_mut() {
+                m.insert("status".into(), json!("error"));
+                m.insert(
+                    "message".into(),
+                    json!("GTT placement succeeded without a trigger ID"),
+                );
+            }
+            ex.success = false;
+            ex.status = 502;
+            return ex;
+        }
+    };
+    mark(ctx, id, Some(&trigger), "open");
+    if let Some(m) = ex.body.as_object_mut() {
+        m.insert("broker_order_id".into(), json!(trigger));
+    }
+    ex
+}
+
+/// A basket, split or multi-leg order: open (or partial) under the ids of
+/// the legs that were placed, rejected when none was, and left submitting
+/// when a leg has no definite answer.
+fn record_legs(
+    ctx: &AppState,
+    id: i64,
+    mut ex: Execution,
+    results: &[Value],
+    uncertain: bool,
+) -> Execution {
+    let mut leaves = Vec::new();
+    flatten(results, &mut leaves);
+    let ok = |r: &Value| {
+        r.get("status").and_then(Value::as_str) == Some("success")
+            && r.get("orderid").is_some_and(|o| !o.is_null() && o != "")
+    };
+    let ids: Vec<String> = leaves
+        .iter()
+        .filter(|r| ok(r))
+        .map(|r| match &r["orderid"] {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    if uncertain {
+        tracing::error!(
+            "Approved order {} has legs with no definite answer; it stays unconfirmed and is not sent again",
+            id
+        );
+        let summary = summarize_ids(&ids);
+        mark(
+            ctx,
+            id,
+            (!ids.is_empty()).then_some(summary.as_str()),
+            SUBMITTING,
+        );
+        return ex;
+    }
+    if ids.is_empty() {
+        mark(ctx, id, None, "rejected");
+        if let Some(m) = ex.body.as_object_mut() {
+            m.insert("status".into(), json!("error"));
+            m.insert(
+                "message".into(),
+                json!("No child orders were submitted successfully"),
+            );
+        }
+        ex.success = false;
+        ex.status = 502;
+        return ex;
+    }
+    let partial = leaves.iter().any(|r| !ok(r));
+    let summary = summarize_ids(&ids);
+    mark(
+        ctx,
+        id,
+        Some(&summary),
+        if partial { "partial" } else { "open" },
+    );
+    if let Some(m) = ex.body.as_object_mut() {
+        m.insert("broker_order_id".into(), json!(summary));
+        m.insert("broker_order_ids".into(), json!(ids));
+    }
+    ex
+}
+
+/// One placed order: recorded with the status the broker reports for it
+/// now, or open.
+async fn record_order(ctx: &AppState, id: i64, ex: Execution, orderid: String) -> Execution {
+    let status = super::account_service::order_status(ctx, &json!({"orderid": orderid})).await;
+    let actual = if status.is_success() {
+        status
+            .body
+            .get("data")
+            .and_then(|d| d.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    mark(ctx, id, Some(&orderid), actual.as_deref().unwrap_or("open"));
     ex
 }
 
