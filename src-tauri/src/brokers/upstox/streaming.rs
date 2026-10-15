@@ -19,7 +19,9 @@
 //!   every 30 s and the pongs reach its watchdog as heartbeats.
 
 use super::mapping::{oa_symbol, order_update_status};
-use super::proto::{feed::FeedUnion, full_feed::FullFeedUnion, FeedResponse, Ltpc, MarketOhlc};
+use super::proto::{
+    feed::FeedUnion, full_feed::FullFeedUnion, FeedResponse, Ltpc, MarketFullFeed, MarketOhlc,
+};
 use crate::brokers::common::streaming::{
     now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
     NormalizedTick, OrderUpdate, PrepareError, WsRequest,
@@ -373,6 +375,36 @@ pub(crate) fn normalise_for_test(
     normalise(&sub, feed, cached)
 }
 
+/// The five best bids (highest first) and asks (lowest first) of a market
+/// full feed, padded with empty levels.
+fn depth_levels(market: Option<&MarketFullFeed>) -> (Vec<DepthLevel>, Vec<DepthLevel>) {
+    let mut buy: Vec<DepthLevel> = Vec::new();
+    let mut sell: Vec<DepthLevel> = Vec::new();
+    if let Some(level) = market.and_then(|m| m.market_level.as_ref()) {
+        for q in &level.bid_ask_quote {
+            if q.bid_p > 0.0 {
+                buy.push(DepthLevel {
+                    price: q.bid_p,
+                    quantity: q.bid_q,
+                    orders: 0,
+                });
+            }
+            if q.ask_p > 0.0 {
+                sell.push(DepthLevel {
+                    price: q.ask_p,
+                    quantity: q.ask_q,
+                    orders: 0,
+                });
+            }
+        }
+    }
+    buy.sort_by(|a, b| b.price.total_cmp(&a.price));
+    sell.sort_by(|a, b| a.price.total_cmp(&b.price));
+    buy.resize(5, DepthLevel::default());
+    sell.resize(5, DepthLevel::default());
+    (buy, sell)
+}
+
 fn normalise(sub: &SubInfo, feed: Option<&FeedUnion>, cached: Option<&Ltpc>) -> Vec<FeedEvent> {
     let mut t = base_tick(sub);
     match sub.mode {
@@ -442,30 +474,7 @@ fn normalise(sub: &SubInfo, feed: Option<&FeedUnion>, cached: Option<&Ltpc>) -> 
             t.derive_change();
             let mut out = Vec::with_capacity(2);
             if sub.mode == FeedMode::Depth {
-                let mut buy: Vec<DepthLevel> = Vec::new();
-                let mut sell: Vec<DepthLevel> = Vec::new();
-                if let Some(level) = market.and_then(|m| m.market_level.as_ref()) {
-                    for q in &level.bid_ask_quote {
-                        if q.bid_p > 0.0 {
-                            buy.push(DepthLevel {
-                                price: q.bid_p,
-                                quantity: q.bid_q,
-                                orders: 0,
-                            });
-                        }
-                        if q.ask_p > 0.0 {
-                            sell.push(DepthLevel {
-                                price: q.ask_p,
-                                quantity: q.ask_q,
-                                orders: 0,
-                            });
-                        }
-                    }
-                }
-                buy.sort_by(|a, b| b.price.total_cmp(&a.price));
-                sell.sort_by(|a, b| a.price.total_cmp(&b.price));
-                buy.resize(5, DepthLevel::default());
-                sell.resize(5, DepthLevel::default());
+                let (buy, sell) = depth_levels(market);
                 let depth = NormalizedDepth {
                     symbol: t.symbol.clone(),
                     exchange: t.exchange.clone(),
