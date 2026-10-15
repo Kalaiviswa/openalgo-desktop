@@ -683,6 +683,67 @@ pub async fn close_leg(
 
 // ------------------------------------------------------------------ public webhook
 
+/// The webhook's 429, as the web words it.
+fn webhook_rate_limited() -> Response {
+    json_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({
+            "status": "error",
+            "result": "rate_limited",
+            "message": "Rate limit exceeded. Please slow down your requests.",
+            "retry_after": 60,
+        }),
+    )
+}
+
+/// The 413 for a payload over the cap, declared or received.
+fn webhook_too_large(headers: &HeaderMap, body: &Bytes) -> Option<Response> {
+    use crate::strategy::webhook::MAX_PAYLOAD_BYTES;
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|d| d > MAX_PAYLOAD_BYTES) || body.len() > MAX_PAYLOAD_BYTES {
+        return Some(json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"status": "error", "message": format!("Payload larger than {} bytes", MAX_PAYLOAD_BYTES)}),
+        ));
+    }
+    None
+}
+
+/// The token first: a digest lookup. A valid token is limited only by its
+/// own windows. An unknown one counts against the caller's failure budget;
+/// once that is spent, the caller's unknown tokens are refused at once,
+/// with no lookup audit row, while valid tokens still pass. Answers whether
+/// the token is known, or `None` when the call is rate limited.
+fn admit_webhook_token(
+    ctx: &AppState,
+    ip: std::net::IpAddr,
+    (tunnel, deferred): (bool, bool),
+    token: &str,
+) -> Option<bool> {
+    use crate::server::middleware::{count_failure, failures_exhausted, limiter_key};
+    use crate::server::ratelimit::Bucket;
+    use crate::strategy::webhook::admit_token;
+    let known = ctx.strategy.token_known(token);
+    if known {
+        let tunnel_key = tunnel.then(|| limiter_key(ip, "strategy-webhook", token));
+        if !admit_token(&ctx.strategy.webhook, &ctx.limiter, tunnel_key, token) {
+            return None;
+        }
+    } else {
+        if deferred || failures_exhausted(ctx, ip, Bucket::WebhookFail) {
+            ctx.strategy
+                .webhook
+                .note_throttled("too many failed webhook authentications from one caller");
+            return None;
+        }
+        count_failure(ctx, ip, Bucket::WebhookFail);
+    }
+    Some(known)
+}
+
 /// POST /strategy/webhook/{token}. Public: the URL token is the credential.
 /// Rate limits and the declared size cap come before any lookup, and an
 /// unknown token answers 404 from here.
@@ -695,20 +756,9 @@ pub async fn webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    use crate::server::middleware::{count_failure, failures_exhausted, limiter_key, Source};
+    use crate::server::middleware::{count_failure, Source};
     use crate::server::ratelimit::Bucket;
-    use crate::strategy::webhook::{admit_address, admit_token, MAX_PAYLOAD_BYTES};
-    let limited = || {
-        json_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            json!({
-                "status": "error",
-                "result": "rate_limited",
-                "message": "Rate limit exceeded. Please slow down your requests.",
-                "retry_after": 60,
-            }),
-        )
-    };
+    use crate::strategy::webhook::admit_address;
     // This computer and devices on the network: the web's per-address
     // limit, before any lookup. Tunnel callers share one identity, so they
     // are limited per token once it checked out (S-03).
@@ -716,39 +766,16 @@ pub async fn webhook(
     let mut deferred = deferred;
     if !tunnel {
         match admit_address(&ctx.strategy.webhook, &ctx.limiter, ip) {
-            None => return limited(),
+            None => return webhook_rate_limited(),
             Some(d) => deferred |= d,
         }
     }
-    let declared = headers
-        .get(axum::http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|d| d > MAX_PAYLOAD_BYTES) || body.len() > MAX_PAYLOAD_BYTES {
-        return json_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            json!({"status": "error", "message": format!("Payload larger than {} bytes", MAX_PAYLOAD_BYTES)}),
-        );
+    if let Some(r) = webhook_too_large(&headers, &body) {
+        return r;
     }
-    // The token first: a digest lookup. A valid token is limited only by
-    // its own windows. An unknown one counts against the caller's failure
-    // budget; once that is spent, the caller's unknown tokens are refused at
-    // once, with no lookup audit row, while valid tokens still pass.
-    let known = ctx.strategy.token_known(&token);
-    if known {
-        let tunnel_key = tunnel.then(|| limiter_key(ip, "strategy-webhook", &token));
-        if !admit_token(&ctx.strategy.webhook, &ctx.limiter, tunnel_key, &token) {
-            return limited();
-        }
-    } else {
-        if deferred || failures_exhausted(&ctx, ip, Bucket::WebhookFail) {
-            ctx.strategy
-                .webhook
-                .note_throttled("too many failed webhook authentications from one caller");
-            return limited();
-        }
-        count_failure(&ctx, ip, Bucket::WebhookFail);
-    }
+    let Some(known) = admit_webhook_token(&ctx, ip, (tunnel, deferred), &token) else {
+        return webhook_rate_limited();
+    };
     if known && !ctx.security.is_unlocked() {
         return crate::server::envelope::webhook_while_locked("message");
     }
