@@ -55,8 +55,7 @@
     "src-tauri/src/sandbox/orders.rs": 1017,
     "src-tauri/src/sandbox/positions.rs": 1017,
     "src-tauri/src/strategy/engine.rs": 2181,
-    "src-tauri/src/strategy/store.rs": 1784,
-    "src-tauri/src/trading/runner/mod.rs": 2071
+    "src-tauri/src/strategy/store.rs": 1784
   },
   "rust_functions": {
     "src-tauri/src/analytics/straddle.rs::simulate": 144,
@@ -171,10 +170,10 @@
     "src-tauri/src/strategy/validate.rs::validate_leg": 112,
     "src-tauri/src/strategy/validate.rs::validate_strategy_config": 182,
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338,
-    "src-tauri/src/trading/runner/mod.rs::close_claimed": 123,
-    "src-tauri/src/trading/runner/mod.rs::launch": 133,
-    "src-tauri/src/trading/runner/mod.rs::page_intents": 122,
-    "src-tauri/src/trading/runner/mod.rs::settle": 108,
+    "src-tauri/src/trading/runner/ending.rs::close_claimed": 123,
+    "src-tauri/src/trading/runner/ending.rs::settle": 108,
+    "src-tauri/src/trading/runner/launch.rs::launch": 133,
+    "src-tauri/src/trading/runner/page.rs::page_intents": 122,
     "src-tauri/src/trading/runner/store.rs::write": 112,
     "src-tauri/src/websocket/manager.rs::session": 141
   }
