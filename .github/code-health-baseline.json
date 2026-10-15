@@ -66,7 +66,6 @@
     "src-tauri/src/brokers/iiflcapital/data.rs::get_multiquotes": 105,
     "src-tauri/src/brokers/iiflcapital/mqtt_relay.rs::serve": 164,
     "src-tauri/src/brokers/motilal/data.rs::multiquote_batch": 125,
-    "src-tauri/src/brokers/samco/data.rs::get_history": 104,
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/feed/server/mod.rs::serve_conn": 248,

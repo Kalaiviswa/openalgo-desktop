@@ -4,7 +4,7 @@ use super::mapping::{self, text};
 use super::{is_success, url_quote, SamcoBroker, MULTIQUOTE_BATCH};
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
-use chrono::Duration as Days;
+use chrono::{Duration as Days, NaiveDate};
 use reqwest::Method;
 use serde_json::{Map, Value};
 
@@ -322,6 +322,74 @@ fn candles<'a>(v: &'a Value, keys: &[&str]) -> &'a [Value] {
         .unwrap_or(&[])
 }
 
+/// The daily candle request for a symbol or an index, and the keys its
+/// candles come under.
+fn daily_path(
+    index: bool,
+    br: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    exch: &str,
+) -> (String, &'static [&'static str]) {
+    if index {
+        (
+            format!(
+                "/history/indexCandleData?indexName={}&fromDate={}&toDate={}",
+                url_quote(br),
+                start.format("%Y-%m-%d"),
+                end.format("%Y-%m-%d")
+            ),
+            &["indexCandleData", "historicalCandleData"],
+        )
+    } else {
+        (
+            format!(
+                "/history/candleData?symbolName={}&fromDate={}&toDate={}{}",
+                url_quote(br),
+                start.format("%Y-%m-%d"),
+                end.format("%Y-%m-%d"),
+                exch
+            ),
+            &["historicalCandleData"],
+        )
+    }
+}
+
+/// The intraday candle request for a symbol or an index, and the keys its
+/// candles come under. `(from, to)` are already quoted.
+fn intraday_path(
+    index: bool,
+    br: &str,
+    (from, to): (&str, &str),
+    interval: &str,
+    exch: &str,
+) -> (String, &'static [&'static str]) {
+    if index {
+        (
+            format!(
+                "/intraday/indexCandleData?indexName={}&fromDate={}&toDate={}{}",
+                url_quote(br),
+                from,
+                to,
+                interval
+            ),
+            &["indexIntraDayCandleData", "intradayCandleData"],
+        )
+    } else {
+        (
+            format!(
+                "/intraday/candleData?symbolName={}&fromDate={}&toDate={}{}{}",
+                url_quote(br),
+                from,
+                to,
+                interval,
+                exch
+            ),
+            &["intradayCandleData"],
+        )
+    }
+}
+
 pub async fn get_history(
     b: &SamcoBroker,
     auth: &AuthToken,
@@ -359,28 +427,7 @@ pub async fn get_history(
             // web: daily through yesterday when the range ends today.
             end = today - Days::days(1);
         }
-        let (path, keys): (String, &[&str]) = if index {
-            (
-                format!(
-                    "/history/indexCandleData?indexName={}&fromDate={}&toDate={}",
-                    url_quote(&br),
-                    req.start.format("%Y-%m-%d"),
-                    end.format("%Y-%m-%d")
-                ),
-                &["indexCandleData", "historicalCandleData"],
-            )
-        } else {
-            (
-                format!(
-                    "/history/candleData?symbolName={}&fromDate={}&toDate={}{}",
-                    url_quote(&br),
-                    req.start.format("%Y-%m-%d"),
-                    end.format("%Y-%m-%d"),
-                    exch
-                ),
-                &["historicalCandleData"],
-            )
-        };
+        let (path, keys) = daily_path(index, &br, req.start, end, &exch);
         let v = b.data_call(Method::GET, &path, auth, None).await?;
         if !is_success(&v) {
             tracing::warn!("Samco daily history was refused");
@@ -395,30 +442,7 @@ pub async fn get_history(
     } else {
         format!("&interval={}", resolution)
     };
-    let (path, keys): (String, &[&str]) = if index {
-        (
-            format!(
-                "/intraday/indexCandleData?indexName={}&fromDate={}&toDate={}{}",
-                url_quote(&br),
-                from,
-                to,
-                interval
-            ),
-            &["indexIntraDayCandleData", "intradayCandleData"],
-        )
-    } else {
-        (
-            format!(
-                "/intraday/candleData?symbolName={}&fromDate={}&toDate={}{}{}",
-                url_quote(&br),
-                from,
-                to,
-                interval,
-                exch
-            ),
-            &["intradayCandleData"],
-        )
-    };
+    let (path, keys) = intraday_path(index, &br, (&from, &to), &interval, &exch);
     let v = b.data_call(Method::GET, &path, auth, None).await?;
     if !is_success(&v) {
         tracing::warn!("Samco intraday history was refused");
