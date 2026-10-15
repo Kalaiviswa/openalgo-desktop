@@ -59,6 +59,7 @@ pub mod order_reconciler;
 pub mod order_router;
 pub mod order_service;
 pub mod pnl_tracker_service;
+pub mod record_loss;
 pub mod sandbox_export_service;
 pub mod sandbox_feed;
 pub mod schema;
