@@ -100,6 +100,76 @@ fn bad_file() -> AppError {
     )
 }
 
+/// The OpenAlgo symbol of a future or option row, by exchange; `None`
+/// keeps the broker's symbol.
+fn derivative_symbol(
+    exchange: &str,
+    it: &str,
+    brsymbol: &str,
+    name: &str,
+    exp: &str,
+    strike: f64,
+) -> Option<String> {
+    let fut = || format!("{}{}FUT", name, exp);
+    let opt = |kind: &str| format!("{}{}{}{}", name, exp, strike_text(strike), kind);
+    let suffix = if brsymbol.ends_with("CE") {
+        Some("CE")
+    } else if brsymbol.ends_with("PE") {
+        Some("PE")
+    } else {
+        None
+    };
+    let (futs, opts): (&[&str], &[&str]) = match exchange {
+        "NFO" => (
+            &["FUTIDX", "FUTSTK", "FUT"],
+            &["OPTIDX", "OPTSTK", "CE", "PE"],
+        ),
+        "MCX" => (&["FUTCOM", "FUT"], &["OPTFUT", "CE", "PE"]),
+        "CDS" => (
+            &["FUTCUR", "FUTIRC", "FUT"],
+            &["OPTCUR", "OPTIRC", "CE", "PE"],
+        ),
+        // BSE derivatives: a future by its symbol or type, else an option
+        // by its suffix.
+        "BFO" => {
+            if brsymbol.ends_with("FUT") || it.to_ascii_uppercase().contains("FUT") {
+                return Some(fut());
+            }
+            return suffix.map(opt);
+        }
+        _ => return None,
+    };
+    if futs.contains(&it) {
+        Some(fut())
+    } else if opts.contains(&it) {
+        suffix.map(opt)
+    } else {
+        None
+    }
+}
+
+/// The OpenAlgo instrument type: an option type from the symbol's
+/// suffix, and every future type as FUT.
+fn oa_instrument(instrument: String, symbol: &str) -> String {
+    if matches!(
+        instrument.as_str(),
+        "OPTIDX" | "OPTSTK" | "OPTFUT" | "OPTCUR" | "OPTIRC"
+    ) {
+        if symbol.ends_with("CE") {
+            return "CE".into();
+        } else if symbol.ends_with("PE") {
+            return "PE".into();
+        }
+    }
+    if matches!(
+        instrument.as_str(),
+        "FUTIDX" | "FUTSTK" | "FUTCOM" | "FUTCUR" | "FUTIRC"
+    ) {
+        return "FUT".into();
+    }
+    instrument
+}
+
 /// web `process_samco_data` for one data row.
 pub fn row_to_symbol(f: &[String], c: &CsvColumns) -> Option<SymbolData> {
     let c = &c.0;
@@ -122,7 +192,7 @@ pub fn row_to_symbol(f: &[String], c: &CsvColumns) -> Option<SymbolData> {
         return None;
     }
     let name = get(c.name);
-    let mut instrument = get(c.instrument);
+    let instrument = get(c.instrument);
     let lot = numf(c.lot).map(|v| v as i32).unwrap_or(1);
     let tick = numf(c.tick).unwrap_or(0.05);
     let strike = numf(c.strike).unwrap_or(0.0);
@@ -149,53 +219,8 @@ pub fn row_to_symbol(f: &[String], c: &CsvColumns) -> Option<SymbolData> {
         }
     }
     let exp = expiry.replace('-', "");
-    let fut = || format!("{}{}FUT", name, exp);
-    let opt = |kind: &str| format!("{}{}{}{}", name, exp, strike_text(strike), kind);
-    let suffix = if brsymbol.ends_with("CE") {
-        Some("CE")
-    } else if brsymbol.ends_with("PE") {
-        Some("PE")
-    } else {
-        None
-    };
-    let it = instrument.as_str();
-    match exchange.as_str() {
-        "NFO" => {
-            if matches!(it, "FUTIDX" | "FUTSTK" | "FUT") {
-                symbol = fut();
-            } else if matches!(it, "OPTIDX" | "OPTSTK" | "CE" | "PE") {
-                if let Some(k) = suffix {
-                    symbol = opt(k);
-                }
-            }
-        }
-        "MCX" => {
-            if matches!(it, "FUTCOM" | "FUT") {
-                symbol = fut();
-            } else if matches!(it, "OPTFUT" | "CE" | "PE") {
-                if let Some(k) = suffix {
-                    symbol = opt(k);
-                }
-            }
-        }
-        "CDS" => {
-            if matches!(it, "FUTCUR" | "FUTIRC" | "FUT") {
-                symbol = fut();
-            } else if matches!(it, "OPTCUR" | "OPTIRC" | "CE" | "PE") {
-                if let Some(k) = suffix {
-                    symbol = opt(k);
-                }
-            }
-        }
-        "BFO" => {
-            if let Some(k) = suffix {
-                symbol = opt(k);
-            }
-            if brsymbol.ends_with("FUT") || it.to_ascii_uppercase().contains("FUT") {
-                symbol = fut();
-            }
-        }
-        _ => {}
+    if let Some(d) = derivative_symbol(&exchange, &instrument, &brsymbol, &name, &exp, strike) {
+        symbol = d;
     }
 
     symbol = match symbol.as_str() {
@@ -208,23 +233,7 @@ pub fn row_to_symbol(f: &[String], c: &CsvColumns) -> Option<SymbolData> {
         _ => symbol,
     };
 
-    if matches!(
-        instrument.as_str(),
-        "OPTIDX" | "OPTSTK" | "OPTFUT" | "OPTCUR" | "OPTIRC"
-    ) {
-        if symbol.ends_with("CE") {
-            instrument = "CE".into();
-        } else if symbol.ends_with("PE") {
-            instrument = "PE".into();
-        }
-    }
-    if matches!(
-        instrument.as_str(),
-        "FUTIDX" | "FUTSTK" | "FUTCOM" | "FUTCUR" | "FUTIRC"
-    ) {
-        instrument = "FUT".into();
-    }
-
+    let instrument = oa_instrument(instrument, &symbol);
     Some(SymbolData {
         symbol,
         brsymbol,
