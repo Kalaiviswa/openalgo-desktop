@@ -4,7 +4,7 @@
 use super::{
     ev, leg_id_of, rejection_summary, StartResult, StrategyModule, ORDER_UNCONFIRMED, UNCONFIRMED,
 };
-use crate::strategy::dispatch::{build_order, entry_action, RunMode};
+use crate::strategy::dispatch::{build_order, entry_action, DispatchResult, OrderPayload, RunMode};
 use crate::strategy::resolver::{resolve_leg, Failure};
 use crate::strategy::start_claim::START_READ_FAILED;
 use crate::strategy::state::{new_leg_state, new_position_ref, LegSpec, RunState};
@@ -309,50 +309,13 @@ impl StrategyModule {
                 &strategy.pricetype,
             );
             // Durable BEFORE the broker is called.
-            let row = self.store.record_order(
-                run_id,
-                leg.leg_id,
-                "entry",
-                &NewOrder {
-                    symbol: leg.symbol.clone(),
-                    exchange: leg.exchange.clone(),
-                    action: action.into(),
-                    qty: leg.quantity,
-                    product: Some(order.product.clone()),
-                    pricetype: strategy.pricetype.clone(),
-                    status: "pending".into(),
-                    position_ref: leg.position_ref.clone(),
-                    broker_order_id: None,
-                },
-            );
-            let row_id = match row {
+            let row_id = match self
+                .record_entry_row(run_id, strategy, leg, (&order, action), user_id)
+                .await
+            {
                 Ok(id) => id,
-                Err(e) => {
-                    tracing::error!(
-                        "Entry row for run {} leg {} not written: {}",
-                        run_id,
-                        leg.leg_id,
-                        e
-                    );
-                    // An entry that cannot be recorded is not placed.
-                    self.state
-                        .reject_entry_intent(run_id, leg.leg_id, leg.position_ref.as_deref());
-                    self.emit(
-                        strategy.id,
-                        user_id,
-                        "leg_entry_rejected",
-                        &format!(
-                            "Entry for leg {} not placed: its order row could not be written",
-                            leg.leg_id
-                        ),
-                        ev(Some(run_id), Some(leg.leg_id), "critical"),
-                    )
-                    .await;
-                    outcomes.push(json!({
-                        "leg_id": leg.leg_id, "ok": false, "symbol": leg.symbol,
-                        "broker_order_id": null,
-                        "error": "Could not record the order before placing it",
-                    }));
+                Err(outcome) => {
+                    outcomes.push(outcome);
                     continue;
                 }
             };
@@ -362,21 +325,7 @@ impl StrategyModule {
                 .record_acknowledgement(row_id, &result, strategy.id, user_id, run_id, leg.leg_id)
                 .await;
 
-            self.state.with_run(run_id, |run| {
-                if let Some(l) = run.leg_mut(leg.leg_id) {
-                    if l.position_ref == leg.position_ref && l.entry_status == "pending" {
-                        l.entry_order_id = Some(row_id);
-                        // An uncertain entry stays pending on its row: it may
-                        // become a position, so it stays managed until the
-                        // order reconciler settles it (LOG-08).
-                        if !result.uncertain {
-                            let s = if result.ok { "open" } else { "rejected" };
-                            l.entry_status = s.into();
-                            l.status = s.into();
-                        }
-                    }
-                }
-            });
+            self.note_entry_answer(run_id, leg, row_id, &result);
 
             if result.ok {
                 // After the leg's bookkeeping: a sandbox fill published inside
@@ -385,30 +334,8 @@ impl StrategyModule {
             }
 
             if !result.uncertain {
-                self.emit(
-                    strategy.id,
-                    user_id,
-                    if result.ok {
-                        "leg_entry_placed"
-                    } else {
-                        "leg_entry_rejected"
-                    },
-                    &if result.ok {
-                        format!("Entry {} {} {} placed", action, leg.quantity, leg.symbol)
-                    } else {
-                        format!(
-                            "Entry rejected on leg {}: {}",
-                            leg.leg_id,
-                            result.error.clone().unwrap_or_default()
-                        )
-                    },
-                    ev(
-                        Some(run_id),
-                        Some(leg.leg_id),
-                        if result.ok { "info" } else { "warn" },
-                    ),
-                )
-                .await;
+                self.emit_entry_answer((strategy, user_id), run_id, leg, action, &result)
+                    .await;
             }
 
             outcomes.push(json!({
@@ -424,6 +351,123 @@ impl StrategyModule {
         outcomes
     }
 
+    /// Records a leg's entry before the broker is called. An entry that
+    /// cannot be recorded is not placed: its intent is rejected, the trader
+    /// is told, and its outcome is the refusal (`Err`).
+    async fn record_entry_row(
+        &self,
+        run_id: i64,
+        strategy: &StrategyRow,
+        leg: &LegSpec,
+        (order, action): (&OrderPayload, &str),
+        user_id: &str,
+    ) -> Result<i64, Value> {
+        let row = self.store.record_order(
+            run_id,
+            leg.leg_id,
+            "entry",
+            &NewOrder {
+                symbol: leg.symbol.clone(),
+                exchange: leg.exchange.clone(),
+                action: action.into(),
+                qty: leg.quantity,
+                product: Some(order.product.clone()),
+                pricetype: strategy.pricetype.clone(),
+                status: "pending".into(),
+                position_ref: leg.position_ref.clone(),
+                broker_order_id: None,
+            },
+        );
+        match row {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                tracing::error!(
+                    "Entry row for run {} leg {} not written: {}",
+                    run_id,
+                    leg.leg_id,
+                    e
+                );
+                // An entry that cannot be recorded is not placed.
+                self.state
+                    .reject_entry_intent(run_id, leg.leg_id, leg.position_ref.as_deref());
+                self.emit(
+                    strategy.id,
+                    user_id,
+                    "leg_entry_rejected",
+                    &format!(
+                        "Entry for leg {} not placed: its order row could not be written",
+                        leg.leg_id
+                    ),
+                    ev(Some(run_id), Some(leg.leg_id), "critical"),
+                )
+                .await;
+                Err(json!({
+                    "leg_id": leg.leg_id, "ok": false, "symbol": leg.symbol,
+                    "broker_order_id": null,
+                    "error": "Could not record the order before placing it",
+                }))
+            }
+        }
+    }
+
+    /// The broker's answer on the leg, when the leg still holds this entry:
+    /// its row, and open or rejected. An uncertain entry stays pending on
+    /// its row: it may become a position, so it stays managed until the
+    /// order reconciler settles it (LOG-08).
+    fn note_entry_answer(&self, run_id: i64, leg: &LegSpec, row_id: i64, result: &DispatchResult) {
+        self.state.with_run(run_id, |run| {
+            if let Some(l) = run.leg_mut(leg.leg_id) {
+                if l.position_ref == leg.position_ref && l.entry_status == "pending" {
+                    l.entry_order_id = Some(row_id);
+                    // An uncertain entry stays pending on its row: it may
+                    // become a position, so it stays managed until the
+                    // order reconciler settles it (LOG-08).
+                    if !result.uncertain {
+                        let s = if result.ok { "open" } else { "rejected" };
+                        l.entry_status = s.into();
+                        l.status = s.into();
+                    }
+                }
+            }
+        });
+    }
+
+    /// The `leg_entry_placed` or `leg_entry_rejected` event for an answered
+    /// entry.
+    async fn emit_entry_answer(
+        &self,
+        (strategy, user_id): (&StrategyRow, &str),
+        run_id: i64,
+        leg: &LegSpec,
+        action: &str,
+        result: &DispatchResult,
+    ) {
+        self.emit(
+            strategy.id,
+            user_id,
+            if result.ok {
+                "leg_entry_placed"
+            } else {
+                "leg_entry_rejected"
+            },
+            &if result.ok {
+                format!("Entry {} {} {} placed", action, leg.quantity, leg.symbol)
+            } else {
+                format!(
+                    "Entry rejected on leg {}: {}",
+                    leg.leg_id,
+                    result.error.clone().unwrap_or_default()
+                )
+            },
+            ev(
+                Some(run_id),
+                Some(leg.leg_id),
+                if result.ok { "info" } else { "warn" },
+            ),
+        )
+        .await;
+    }
+
     /// Write what the broker answered onto the order row, and say whether it
     /// stuck. Retried once; a failure leaves an `order_ack_unrecorded`
     /// critical event carrying the exact row, run, leg and broker facts, from
@@ -431,7 +475,7 @@ impl StrategyModule {
     pub(crate) async fn record_acknowledgement(
         &self,
         row_id: i64,
-        result: &crate::strategy::dispatch::DispatchResult,
+        result: &DispatchResult,
         strategy_id: i64,
         user_id: &str,
         run_id: i64,
@@ -511,7 +555,7 @@ impl StrategyModule {
     async fn record_unconfirmed(
         &self,
         row_id: i64,
-        result: &crate::strategy::dispatch::DispatchResult,
+        result: &DispatchResult,
         strategy_id: i64,
         user_id: &str,
         run_id: i64,
