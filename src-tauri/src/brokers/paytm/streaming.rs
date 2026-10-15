@@ -107,6 +107,43 @@ pub struct Packet {
     pub depth: Option<(Vec<DepthLevel>, Vec<DepthLevel>)>,
 }
 
+/// The quote fields QUOTE carries from @15 and FULL from @115 (`base` is
+/// 0 or 100): ltq, atp, volume, tbq, tsq, open, close, high, low,
+/// change_pct, change_abs.
+fn quote_fields(p: &[u8], base: usize, t: &mut NormalizedTick) {
+    t.last_quantity = i64::from(u32le(p, base + 15));
+    t.average_price = f32le(p, base + 19);
+    t.volume = i64::from(u32le(p, base + 23));
+    t.total_buy_quantity = i64::from(u32le(p, base + 27));
+    t.total_sell_quantity = i64::from(u32le(p, base + 31));
+    t.open = f32le(p, base + 35);
+    t.close = f32le(p, base + 39);
+    t.high = f32le(p, base + 43);
+    t.low = f32le(p, base + 47);
+    t.change_percent = f32le(p, base + 51);
+    t.change = f32le(p, base + 55);
+}
+
+/// FULL's 5 x 20-byte depth levels from @1.
+fn full_depth(p: &[u8]) -> (Vec<DepthLevel>, Vec<DepthLevel>) {
+    let mut buy = Vec::with_capacity(5);
+    let mut sell = Vec::with_capacity(5);
+    for i in 0..5 {
+        let o = 1 + i * 20;
+        buy.push(DepthLevel {
+            quantity: i32le(p, o),
+            price: f32le(p, o + 12),
+            orders: i16le(p, o + 8),
+        });
+        sell.push(DepthLevel {
+            quantity: i32le(p, o + 4),
+            price: f32le(p, o + 16),
+            orders: i16le(p, o + 10),
+        });
+    }
+    (buy, sell)
+}
+
 /// Decode one packet whose length matches its code.
 pub fn decode_packet(p: &[u8]) -> Option<Packet> {
     let code = *p.first()?;
@@ -134,17 +171,7 @@ pub fn decode_packet(p: &[u8]) -> Option<Packet> {
         CODE_QUOTE => {
             t.last_trade_time_ms = i64::from(u32le(p, 5)) * 1000;
             id = u32le(p, 9);
-            t.last_quantity = i64::from(u32le(p, 15));
-            t.average_price = f32le(p, 19);
-            t.volume = i64::from(u32le(p, 23));
-            t.total_buy_quantity = i64::from(u32le(p, 27));
-            t.total_sell_quantity = i64::from(u32le(p, 31));
-            t.open = f32le(p, 35);
-            t.close = f32le(p, 39);
-            t.high = f32le(p, 43);
-            t.low = f32le(p, 47);
-            t.change_percent = f32le(p, 51);
-            t.change = f32le(p, 55);
+            quote_fields(p, 0, &mut t);
         }
         // INDEX_QUOTE (`:395-414`): id@5, open@11, close@15, high@19,
         // low@23, change_abs@27, change_pct@31.
@@ -164,36 +191,11 @@ pub fn decode_packet(p: &[u8]) -> Option<Packet> {
         // close@139, high@143, low@147, change_pct@151, change_abs@155,
         // oi u32@167, oi_change@171.
         CODE_FULL => {
-            let mut buy = Vec::with_capacity(5);
-            let mut sell = Vec::with_capacity(5);
-            for i in 0..5 {
-                let o = 1 + i * 20;
-                buy.push(DepthLevel {
-                    quantity: i32le(p, o),
-                    price: f32le(p, o + 12),
-                    orders: i16le(p, o + 8),
-                });
-                sell.push(DepthLevel {
-                    quantity: i32le(p, o + 4),
-                    price: f32le(p, o + 16),
-                    orders: i16le(p, o + 10),
-                });
-            }
-            depth = Some((buy, sell));
+            depth = Some(full_depth(p));
             t.ltp = f32le(p, 101);
             t.last_trade_time_ms = i64::from(u32le(p, 105)) * 1000;
             id = u32le(p, 109);
-            t.last_quantity = i64::from(u32le(p, 115));
-            t.average_price = f32le(p, 119);
-            t.volume = i64::from(u32le(p, 123));
-            t.total_buy_quantity = i64::from(u32le(p, 127));
-            t.total_sell_quantity = i64::from(u32le(p, 131));
-            t.open = f32le(p, 135);
-            t.close = f32le(p, 139);
-            t.high = f32le(p, 143);
-            t.low = f32le(p, 147);
-            t.change_percent = f32le(p, 151);
-            t.change = f32le(p, 155);
+            quote_fields(p, 100, &mut t);
             t.oi = i64::from(u32le(p, 167));
         }
         // INDEX_FULL (`:515-533`): id@5, open@11, close@15, high@19,
