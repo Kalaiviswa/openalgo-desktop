@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resetWindowProofForTests } from '@/lib/desktop'
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import Login from './Login'
+
+const shell = vi.hoisted(() => ({ inShell: false }))
+
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...(await original<typeof import('@tauri-apps/api/core')>()),
+  isTauri: () => shell.inShell,
+  invoke: async (cmd: string) => (cmd === 'window_proof' ? 'proof-from-the-shell' : null),
+}))
 
 // Desktop: one sign-in card. After the password the server says where to
 // go: the dashboard when the saved broker session was resumed, otherwise
@@ -49,6 +58,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   window.history.pushState({}, '', '/')
+  shell.inShell = false
+  resetWindowProofForTests()
 })
 
 describe('Sign-in routing', () => {
@@ -183,5 +194,33 @@ describe('Keys of an earlier build', () => {
     expect(
       screen.getByText(/Until you sign in, the API, market data, webhooks, AI clients/)
     ).toBeInTheDocument()
+  })
+})
+
+// KEY-01 security review: only the desktop window's sign-in carries the
+// proof that lets the server move an earlier build's keys and say why keys
+// could not be opened; a browser tab's sign-in carries nothing.
+describe('The app window proof', () => {
+  const loginHeaders = () => {
+    const calls = (fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
+    const call = calls.find((c) => c[0] === '/auth/login')
+    return new Headers(call?.[1]?.headers)
+  }
+
+  it('goes with the password from the desktop window', async () => {
+    shell.inShell = true
+    serve({ login: { status: 'success', redirect: '/broker' } })
+    render(<Login />)
+    await signIn()
+    await waitFor(() => expect(window.location.pathname).toBe('/broker'))
+    expect(loginHeaders().get('X-OpenAlgo-Window')).toBe('proof-from-the-shell')
+  })
+
+  it('is not sent from a browser tab', async () => {
+    serve({ login: { status: 'success', redirect: '/broker' } })
+    render(<Login />)
+    await signIn()
+    await waitFor(() => expect(window.location.pathname).toBe('/broker'))
+    expect(loginHeaders().has('X-OpenAlgo-Window')).toBe(false)
   })
 })

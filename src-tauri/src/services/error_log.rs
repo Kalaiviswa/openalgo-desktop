@@ -48,19 +48,26 @@ impl Visit for MessageVisitor {
     }
 }
 
+/// The level and message the error log keeps of `event`: WARN and ERROR
+/// events with a message, nothing else.
+fn captured(event: &Event<'_>) -> Option<(&'static str, String)> {
+    let level = match *event.metadata().level() {
+        Level::ERROR => "ERROR",
+        Level::WARN => "WARNING",
+        _ => return None,
+    };
+    let mut v = MessageVisitor::default();
+    event.record(&mut v);
+    (!v.0.is_empty()).then_some((level, v.0))
+}
+
 impl<S: Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        let level = match *meta.level() {
-            Level::ERROR => "ERROR",
-            Level::WARN => "WARNING",
-            _ => return,
-        };
-        let mut v = MessageVisitor::default();
-        event.record(&mut v);
-        if v.0.is_empty() {
+        let Some((level, message)) = captured(event) else {
             return;
-        }
+        };
+        let v = MessageVisitor(message);
         push(ErrorEntry {
             ts: monitor::ts(Utc::now()),
             level: level.into(),
@@ -84,6 +91,27 @@ fn push(e: ErrorEntry) {
         q.pop_front();
     }
     q.push_back(e);
+}
+
+/// Test helper: run `f` on this thread and return, with its result, every
+/// message the error log (and so the Diagnostics page) would keep from it.
+#[cfg(test)]
+pub fn kept_while<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    #[derive(Clone, Default)]
+    struct Keep(std::sync::Arc<Mutex<Vec<String>>>);
+    impl<S: Subscriber> Layer<S> for Keep {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if let Some((_, m)) = captured(event) {
+                self.0.lock().push(m);
+            }
+        }
+    }
+    let keep = Keep::default();
+    let subscriber = tracing_subscriber::registry().with(keep.clone());
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let kept = keep.0.lock().clone();
+    (out, kept)
 }
 
 /// Take everything queued (the writer persists it).

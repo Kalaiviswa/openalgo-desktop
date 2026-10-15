@@ -9,6 +9,7 @@ fn main() {
         "open_external",
         "reset_account",
         "start_fresh",
+        "window_proof",
     ]);
     if let Err(e) = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(app)) {
         panic!("tauri build failed: {e:#}");

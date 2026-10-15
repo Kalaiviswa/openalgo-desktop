@@ -188,14 +188,37 @@ pub fn wrap(data_key: &[u8], pepper: &[u8], password: &str) -> Result<Wrapped> {
     })
 }
 
+/// Fewest salt bytes Argon2 takes.
+const MIN_SALT_LEN: usize = 8;
+/// The sealed data key and pepper: 64 bytes and the 16-byte GCM tag.
+const SEALED_LEN: usize = crypto::KEY_SIZE + hashing::PEPPER_SIZE + 16;
+
+/// Whether `row` is a vault this build can open, checked without any
+/// password: version, KDF, and the encoding and size of the salt, nonce and
+/// sealed keys. A sign-in checks it before it looks at the name or the
+/// password, so a damaged vault answers the same whatever was typed and is
+/// never read as a wrong password (KEY-01 security review).
+pub fn check(row: &VaultRow) -> Result<()> {
+    let damaged = || AppError::Encryption("the key vault is damaged".into());
+    if row.version != VERSION || row.kdf != KDF {
+        return Err(damaged());
+    }
+    let len = |b64: &str| B64.decode(b64).map(|v| v.len()).map_err(|_| damaged());
+    if len(&row.wrapped.salt)? < MIN_SALT_LEN
+        || len(&row.wrapped.nonce)? != crypto::NONCE_SIZE
+        || len(&row.wrapped.ciphertext)? != SEALED_LEN
+    {
+        return Err(damaged());
+    }
+    Ok(())
+}
+
 /// The data key and the pepper, or `None` when `password` does not open
 /// the vault. An unreadable row is an error, never `None`: a damaged vault
 /// must not read as a wrong password.
 pub fn unwrap(row: &VaultRow, password: &str) -> Result<Option<(SecretBytes, SecretBytes)>> {
     let damaged = || AppError::Encryption("the key vault is damaged".into());
-    if row.version != VERSION || row.kdf != KDF {
-        return Err(damaged());
-    }
+    check(row)?;
     let salt = B64.decode(&row.wrapped.salt).map_err(|_| damaged())?;
     let kek = zeroize::Zeroizing::new(hashing::derive_kek(password, &salt)?);
     let cipher = DataCipher::new(&kek[..])?;

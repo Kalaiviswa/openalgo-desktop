@@ -8,6 +8,7 @@
 //! | `open_external`  | signed-in user        | open an http(s) link in the system browser  |
 //! | `reset_account`  | the main window on the app's own page, after a native confirmation | start over with a new account |
 //! | `start_fresh`    | the main window on the app's own page, after a native confirmation | a new password without the old one: forgotten, or an earlier build's keys unreadable (KEY-01) |
+//! | `window_proof`   | the main window on the app's own page | the proof its sign-in carries, so only the app window moves an earlier build's keys and hears why keys could not be opened (KEY-01) |
 
 use crate::error::{AppError, Result};
 use crate::server::{self, ServerHandle};
@@ -30,7 +31,7 @@ pub fn require_user(ctx: &AppState) -> Result<String> {
 /// basics, opening http(s) links, and the account reset. Granted at run
 /// time to the exact origin the server listens on, never to every port on
 /// loopback (security review S-08).
-pub const REMOTE_APP_PERMISSIONS: [&str; 9] = [
+pub const REMOTE_APP_PERMISSIONS: [&str; 10] = [
     "core:app:allow-version",
     "core:window:allow-set-title",
     "core:window:allow-minimize",
@@ -40,6 +41,7 @@ pub const REMOTE_APP_PERMISSIONS: [&str; 9] = [
     "shell:allow-open",
     "allow-reset-account",
     "allow-start-fresh",
+    "allow-window-proof",
 ];
 
 /// The page addresses trusted with [`REMOTE_APP_PERMISSIONS`]: the server's
@@ -303,6 +305,31 @@ then create a new account.",
         status: "reset",
         message: "Your account was removed. Create a new account to continue.".into(),
     })
+}
+
+/// The app window's proof (KEY-01 security review): the sign-in page of
+/// the main window sends it with the password, and the server then treats
+/// the sign-in as the app window's (`security::window`). Only the main
+/// window on the app's own page gets it; a browser tab cannot call this at
+/// all. A new one every start, never stored.
+#[tauri::command]
+pub fn window_proof(window: tauri::WebviewWindow, shell: State<'_, ShellState>) -> Result<String> {
+    let url = window
+        .url()
+        .map_err(|e| AppError::Internal(format!("window address: {}", e)))?;
+    if !reset_caller_allowed(window.label(), &url, shell.ctx.live_port()) {
+        tracing::warn!("Window proof refused: not asked for by the OpenAlgo window");
+        return Err(AppError::Auth(
+            "This works only in the OpenAlgo Desktop window on this computer.".into(),
+        ));
+    }
+    Ok(shell
+        .ctx
+        .security
+        .window_proof()
+        .token()
+        .expose()
+        .to_string())
 }
 
 /// The answer the new-password form gets back.

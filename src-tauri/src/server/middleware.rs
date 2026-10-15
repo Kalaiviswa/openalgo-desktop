@@ -845,6 +845,19 @@ pub fn sign_in_refused(ctx: &AppState, headers: &HeaderMap, source: Source) -> O
         .then(|| error(StatusCode::FORBIDDEN, "Request blocked."))
 }
 
+/// Whether a request comes from the OpenAlgo Desktop window (KEY-01
+/// security review): this computer, carrying the window proof that only
+/// the shell's `window_proof` command hands out, to the main window on the
+/// app's own page (`security::window`). A browser tab or a program on this
+/// computer, another device and a tunnel cannot show it.
+pub fn from_app_window(ctx: &AppState, headers: &HeaderMap, source: Source) -> bool {
+    source.is_local()
+        && headers
+            .get(crate::security::window::HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| ctx.security.window_proof().matches(v))
+}
+
 /// The sign-in budget a caller spends (see
 /// [`crate::server::ratelimit::LoginBackoff`]): this computer, every
 /// tunnel caller together (they cannot be told apart reliably), or the

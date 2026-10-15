@@ -156,6 +156,21 @@ fn in_app(mut r: Request<Body>) -> Request<Body> {
     r
 }
 
+/// The request as the OpenAlgo Desktop window sends it: with the window
+/// proof the shell hands that window only (KEY-01 security review).
+fn from_the_app_window(ctx: &AppState, mut r: Request<Body>) -> Request<Body> {
+    r.headers_mut().insert(
+        crate::security::window::HEADER,
+        ctx.security
+            .window_proof()
+            .token()
+            .expose()
+            .parse()
+            .unwrap(),
+    );
+    r
+}
+
 fn with_session(mut r: Request<Body>, cookie: &str, csrf: Option<&str>) -> Request<Body> {
     r.headers_mut()
         .insert(header::COOKIE, cookie.parse().unwrap());

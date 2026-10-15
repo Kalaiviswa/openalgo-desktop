@@ -7,8 +7,8 @@
 use super::*;
 use crate::db::sqlite::key_vault::{self, KeychainCleanup, Source};
 use crate::db::sqlite::{api_keys, credentials, user, SqliteDb};
-use crate::security::keystore::{CountingKeyStore, DATA_KEY, PEPPER};
-use crate::security::{totp, MoveStep, Unlocked};
+use crate::security::keystore::{CountingKeyStore, KeyStore, KeyStoreError, DATA_KEY, PEPPER};
+use crate::security::{totp, MoveStep, SignInFrom, Unlocked};
 use crate::services::apikey_service::{ApiKeyService, KeyCheck};
 use crate::services::auth_service::LoginOutcome;
 use std::path::Path;
@@ -17,6 +17,10 @@ const NEW_PASSWORD: &str = "Fresh@1234";
 
 /// The app opened on `dir` with `store` as the keychain earlier builds used.
 fn open_with(dir: &Path, store: Arc<CountingKeyStore>) -> Arc<AppState> {
+    open_on(dir, store)
+}
+
+fn open_on(dir: &Path, store: Arc<dyn KeyStore>) -> Arc<AppState> {
     AppState::open(
         dir,
         crate::state::OpenOptions {
@@ -90,18 +94,27 @@ fn keychain_install(dir: &Path, store: &CountingKeyStore) -> String {
 fn set_up_and_unlock(ctx: &AppState) {
     AuthService::setup(ctx, USER, EMAIL, PASSWORD).unwrap();
     assert!(!ctx.security.is_unlocked(), "setup left the keys in memory");
-    match AuthService::verify_credentials(ctx, USER, PASSWORD).unwrap() {
-        LoginOutcome::Success(_, keys) | LoginOutcome::TotpRequired(_, keys) => {
-            ctx.security.install(&keys)
-        }
-        LoginOutcome::Invalid => panic!("the password was refused"),
+    ctx.security
+        .install(&opened(ctx, PASSWORD).expect("the password was refused"));
+}
+
+/// The keys the password opened, from the app window (as the route checks
+/// it), or the outcome when it opened none.
+fn opened(ctx: &AppState, password: &str) -> Result<Unlocked, LoginOutcome> {
+    match AuthService::verify_credentials(ctx, USER, password, SignInFrom::AppWindow) {
+        LoginOutcome::Success(_, keys) | LoginOutcome::TotpRequired(_, keys) => Ok(keys),
+        other => Err(other),
     }
 }
 
+/// A sign-in in the OpenAlgo Desktop window (with its proof).
 async fn sign_in(ctx: &Arc<AppState>, password: &str) -> (StatusCode, Value, Option<String>) {
     let (s, h, v) = send_to(
         ctx,
-        multipart("/auth/login", &[("username", USER), ("password", password)]),
+        from_the_app_window(
+            ctx,
+            multipart("/auth/login", &[("username", USER), ("password", password)]),
+        ),
     )
     .await;
     (s, v, cookie_from(&h))
@@ -225,27 +238,25 @@ async fn keychain_keys_move_once_and_the_keychain_is_never_read_again() {
     close(ctx).await;
 }
 
-/// KEY-01: a wrong password reads the keychain (the pepper is there) but
-/// moves nothing and deletes nothing; a name that is not the account's
-/// never reads it.
+/// KEY-01: a wrong password, or a name that is not the account's, in the
+/// app window moves nothing and deletes nothing (the keychain is read once
+/// per sign-in whatever the name, so its prompt tells nothing about the
+/// name). From anywhere else nothing reads the keychain at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wrong_password_moves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(CountingKeyStore::default());
     keychain_install(dir.path(), &store);
     let ctx = open_with(dir.path(), store.clone());
-    let (s, _, _) = send_to(
-        &ctx,
-        multipart(
-            "/auth/login",
-            &[("username", "someone"), ("password", PASSWORD)],
-        ),
-    )
-    .await;
+    ctx.limiter.freeze(Some(std::time::Instant::now()));
+    let (s, _) = sign_in_as(&ctx, Caller::Browser, USER, PASSWORD).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(store.calls(), 0, "a browser reached the keychain");
+    let (s, _) = sign_in_as(&ctx, Caller::AppWindow, "someone", PASSWORD).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
-    assert_eq!(store.calls(), 0, "an unknown name read the keychain");
-    let (s, _, _) = sign_in(&ctx, "Wrong@1234").await;
+    let (s, _) = sign_in_as(&ctx, Caller::AppWindow, USER, "Wrong@1234").await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(store.reads(), 4, "two reads per sign-in in the window");
     assert!(vault(&ctx).is_none());
     assert!(store.peek(DATA_KEY).is_some() && store.peek(PEPPER).is_some());
     assert!(!ctx.security.is_unlocked());
@@ -728,12 +739,7 @@ async fn a_password_change_writes_hash_and_vault_together() {
     let store = Arc::new(CountingKeyStore::default());
     let ctx = open_with(dir.path(), store.clone());
     set_up_and_unlock(&ctx);
-    let signs_in = |ctx: &AppState, p: &str| {
-        matches!(
-            AuthService::verify_credentials(ctx, USER, p),
-            Ok(LoginOutcome::Success(..)) | Ok(LoginOutcome::TotpRequired(..))
-        )
-    };
+    let signs_in = |ctx: &AppState, p: &str| opened(ctx, p).is_ok();
 
     // The vault write fails after the hash was written.
     ctx.security.fail_rewrap(true);
@@ -758,10 +764,7 @@ async fn a_password_change_writes_hash_and_vault_together() {
     assert!(!signs_in(&ctx, NEW_PASSWORD), "half a change took effect");
 
     // A completed change.
-    let opened = AuthService::verify_credentials(&ctx, USER, PASSWORD).unwrap();
-    let LoginOutcome::Success(_, keys) = opened else {
-        panic!("{:?}", opened)
-    };
+    let keys = opened(&ctx, PASSWORD).unwrap();
     ctx.security.install(&keys);
     AuthService::change_password(&ctx, USER, PASSWORD, NEW_PASSWORD, NEW_PASSWORD).unwrap();
     close(ctx).await;
@@ -859,9 +862,10 @@ async fn a_new_password_without_the_old_one_drops_only_encrypted_values() {
         .await
         .unwrap();
     assert!(!ctx.security.is_unlocked());
-    let opened = AuthService::verify_credentials(&ctx, USER, NEW_PASSWORD).unwrap();
-    let LoginOutcome::Success(_, keys) = opened else {
-        panic!("TOTP is still required: {:?}", opened)
+    let LoginOutcome::Success(_, keys) =
+        AuthService::verify_credentials(&ctx, USER, NEW_PASSWORD, SignInFrom::AppWindow)
+    else {
+        panic!("TOTP is still required, or the new password was refused")
     };
     ctx.security.install(&keys);
     let c = ctx.sqlite.conn().unwrap();
@@ -901,8 +905,8 @@ async fn a_new_password_without_the_old_one_drops_only_encrypted_values() {
     assert_eq!(n, 1, "the Telegram link stays; only its saved key goes");
     drop(c);
     assert!(matches!(
-        AuthService::verify_credentials(&ctx, USER, PASSWORD),
-        Ok(LoginOutcome::Invalid)
+        AuthService::verify_credentials(&ctx, USER, PASSWORD, SignInFrom::AppWindow),
+        LoginOutcome::Invalid
     ));
     assert_eq!(store.calls(), 0);
     close(ctx).await;
@@ -949,6 +953,22 @@ async fn a_logout_clears_every_cache() {
 
 // ------------------------------------------- what a sign-in gives away
 
+/// Who sends a sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// The OpenAlgo Desktop window, with the proof the shell hands it.
+    AppWindow,
+    /// A browser tab or any program on this computer: no proof.
+    Browser,
+    /// A program on this computer with a made-up proof.
+    WrongProof,
+    /// A browser on another device of the network.
+    AnotherDevice,
+}
+
+/// Every caller that is not the app window.
+const OTHERS: [Caller; 3] = [Caller::Browser, Caller::WrongProof, Caller::AnotherDevice];
+
 /// The request as a browser on another device of the network sends it from
 /// the app's page.
 fn from_another_device(mut r: Request<Body>) -> Request<Body> {
@@ -967,57 +987,131 @@ fn from_another_device(mut r: Request<Body>) -> Request<Body> {
     in_app(r)
 }
 
-async fn sign_in_from_another_device(ctx: &Arc<AppState>, password: &str) -> (StatusCode, Value) {
+fn sent_by(ctx: &AppState, caller: Caller, r: Request<Body>) -> Request<Body> {
+    match caller {
+        Caller::AppWindow => from_the_app_window(ctx, r),
+        Caller::Browser => r,
+        Caller::WrongProof => {
+            let mut r = r;
+            r.headers_mut().insert(
+                crate::security::window::HEADER,
+                "0".repeat(64).parse().unwrap(),
+            );
+            r
+        }
+        Caller::AnotherDevice => from_another_device(r),
+    }
+}
+
+/// A sign-in as `caller`. The limiter's clock moves on six minutes first,
+/// past the longest wait and the per-address minute limit, so neither
+/// answers instead of the sign-in itself; the failures stay counted (they
+/// are forgotten only after an hour without attempts).
+async fn sign_in_as(
+    ctx: &Arc<AppState>,
+    caller: Caller,
+    name: &str,
+    password: &str,
+) -> (StatusCode, Value) {
+    let now = ctx.limiter.now();
+    ctx.limiter
+        .freeze(Some(now + std::time::Duration::from_secs(6 * 60)));
     let (s, _, v) = send_to(
         ctx,
-        from_another_device(multipart(
-            "/auth/login",
-            &[("username", USER), ("password", password)],
-        )),
+        sent_by(
+            ctx,
+            caller,
+            multipart("/auth/login", &[("username", name), ("password", password)]),
+        ),
     )
     .await;
     (s, v)
 }
 
-fn lan_failures(ctx: &AppState) -> u32 {
-    ctx.limiter
-        .backoff
-        .failures(crate::server::middleware::sign_in_source(
-            crate::server::middleware::Source::Lan("192.168.1.50".parse().unwrap()),
-        ))
+fn failures(ctx: &AppState, caller: Caller) -> u32 {
+    use crate::server::middleware::{sign_in_source, Source};
+    let source = match caller {
+        Caller::AnotherDevice => Source::Lan("192.168.1.50".parse().unwrap()),
+        _ => Source::Local,
+    };
+    ctx.limiter.backoff.failures(sign_in_source(source))
 }
 
-/// KEY-01 security review: a caller on another device learns nothing about
-/// a password from how a sign-in fails. While an earlier build's keys still
-/// have to move, every name and password gets the same refusal before
-/// anything is checked (no keychain call, nothing moved); with the vault in
-/// place, an error after the password was proven reads as a wrong password.
-/// Each such attempt spends the caller's budget. The trader at this
-/// computer still gets the ways out.
+/// The answers `caller` gets to the right password, a wrong one and a name
+/// that is not the account's, each of which must count against its budget.
+async fn three_answers(ctx: &Arc<AppState>, caller: Caller) -> [(StatusCode, Value); 3] {
+    let before = failures(ctx, caller);
+    let answers = [
+        sign_in_as(ctx, caller, USER, PASSWORD).await,
+        sign_in_as(ctx, caller, USER, "Wrong@1234").await,
+        sign_in_as(ctx, caller, "someone", PASSWORD).await,
+    ];
+    assert_eq!(
+        failures(ctx, caller),
+        before + 3,
+        "{:?}: an attempt was not counted",
+        caller
+    );
+    answers
+}
+
+fn invalid_credentials() -> (StatusCode, Value) {
+    (
+        StatusCode::UNAUTHORIZED,
+        json!({"status": "error", "message": "Invalid credentials"}),
+    )
+}
+
+/// KEY-01 security review: nobody but the OpenAlgo Desktop window can tell
+/// a right password from a wrong one, or the account's name from another,
+/// by how a sign-in fails: a browser or a program on this computer, one
+/// with a made-up window proof, and another device each get one answer
+/// for all three, and each attempt spends their budget. Checked while an
+/// earlier build's keys still have to move (nothing reads the keychain or
+/// moves them), with the vault in place when a proven password then fails
+/// (its TOTP secret cannot be written), and with a damaged vault. The app
+/// window still hears why: a proven password that failed is not "Invalid
+/// credentials", and a damaged vault offers the fresh start whatever was
+/// typed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn another_device_cannot_tell_a_right_password_from_a_wrong_one() {
+async fn nobody_but_the_app_window_can_tell_a_right_password_from_a_wrong_one() {
     // Keys still in the keychain of an earlier build.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(CountingKeyStore::default());
     keychain_install(dir.path(), &store);
     let ctx = open_with(dir.path(), store.clone());
-    let right = sign_in_from_another_device(&ctx, PASSWORD).await;
-    let wrong = sign_in_from_another_device(&ctx, "Wrong@1234").await;
-    assert_eq!(right, wrong, "a right password answered differently");
-    assert_eq!(right.0, StatusCode::FORBIDDEN, "{}", right.1);
+    ctx.limiter.freeze(Some(std::time::Instant::now()));
+    for caller in OTHERS {
+        let [right, wrong, unknown] = three_answers(&ctx, caller).await;
+        assert_eq!(
+            right, wrong,
+            "{:?}: a right password answered differently",
+            caller
+        );
+        assert_eq!(
+            right, unknown,
+            "{:?}: the account's name answered differently",
+            caller
+        );
+        assert_eq!(right.0, StatusCode::FORBIDDEN, "{:?}: {}", caller, right.1);
+        assert_eq!(
+            right.1["message"],
+            crate::server::routes::auth::SIGN_IN_IN_APP_WINDOW_FIRST
+        );
+    }
     assert_eq!(
-        right.1["message"],
-        crate::server::routes::auth::SIGN_IN_HERE_FIRST
+        store.calls(),
+        0,
+        "a caller other than the window reached the keychain"
     );
-    assert_eq!(store.calls(), 0, "another device reached the keychain");
     assert!(vault(&ctx).is_none() && !ctx.security.is_unlocked());
-    assert_eq!(lan_failures(&ctx), 2, "the attempts were not counted");
     close(ctx).await;
 
     // The vault in place; the account's TOTP secret is missing and cannot
     // be written, so a proven password fails after its check.
     let dir = tempfile::tempdir().unwrap();
     let ctx = open_with(dir.path(), store.clone());
+    ctx.limiter.freeze(Some(std::time::Instant::now()));
     AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
     ctx.sqlite
         .conn()
@@ -1028,53 +1122,197 @@ async fn another_device_cannot_tell_a_right_password_from_a_wrong_one() {
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )
         .unwrap();
-    let right = sign_in_from_another_device(&ctx, PASSWORD).await;
-    let wrong = sign_in_from_another_device(&ctx, "Wrong@1234").await;
-    assert_eq!(right, wrong, "a right password answered differently");
-    assert_eq!(
-        right,
-        (
-            StatusCode::UNAUTHORIZED,
-            json!({"status": "error", "message": "Invalid credentials"})
-        )
-    );
-    assert_eq!(lan_failures(&ctx), 2, "the attempts were not counted");
+    for caller in OTHERS {
+        let [right, wrong, unknown] = three_answers(&ctx, caller).await;
+        assert_eq!(right, invalid_credentials(), "{:?}: {}", caller, right.1);
+        assert_eq!(wrong, right, "{:?}", caller);
+        assert_eq!(unknown, right, "{:?}", caller);
+    }
     assert_eq!(ctx.sessions.authenticated_count(), 0);
-    // This computer still sees that something is wrong (not "Invalid").
-    let (s, v, _) = sign_in(&ctx, PASSWORD).await;
-    assert_ne!(s, StatusCode::UNAUTHORIZED, "{}", v);
-    assert_ne!(s, StatusCode::OK, "{}", v);
+    // The app window sees that something is wrong once the password is
+    // proven, and only then.
+    let (s, v) = sign_in_as(&ctx, Caller::AppWindow, USER, PASSWORD).await;
+    assert!(
+        s != StatusCode::UNAUTHORIZED && s != StatusCode::OK,
+        "{} {}",
+        s,
+        v
+    );
+    assert_eq!(
+        sign_in_as(&ctx, Caller::AppWindow, USER, "Wrong@1234").await,
+        invalid_credentials()
+    );
+    assert!(!ctx.security.is_unlocked());
+    close(ctx).await;
+
+    // A damaged vault: unreadable whatever is typed.
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = open_with(dir.path(), store.clone());
+    ctx.limiter.freeze(Some(std::time::Instant::now()));
+    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
+    ctx.sqlite
+        .conn()
+        .unwrap()
+        .execute("UPDATE key_vault SET nonce = 'AAAA'", [])
+        .unwrap();
+    for caller in OTHERS {
+        for answer in three_answers(&ctx, caller).await {
+            assert_eq!(answer, invalid_credentials(), "{:?}", caller);
+        }
+    }
+    let window = [
+        sign_in_as(&ctx, Caller::AppWindow, USER, PASSWORD).await,
+        sign_in_as(&ctx, Caller::AppWindow, USER, "Wrong@1234").await,
+        sign_in_as(&ctx, Caller::AppWindow, "someone", PASSWORD).await,
+    ];
+    for answer in &window {
+        assert_eq!(
+            answer, &window[0],
+            "the window's answer depends on what was typed"
+        );
+    }
+    assert_eq!(window[0].0, StatusCode::CONFLICT, "{}", window[0].1);
+    assert_eq!(window[0].1["recovery"], json!(["start_fresh"]));
     close(ctx).await;
 }
 
-/// KEY-01 security review: a sign-in costs the same Argon2 work whatever it
-/// finds: a name that is not the account's, a wrong password and the right
-/// one each run two (open the vault, check the hash), so its timing tells
-/// neither which names exist nor which password is right.
+/// KEY-01 security review: the ways out that follow a proven password
+/// reach the app window only, and only for that password. An earlier
+/// build's `vault.json` that the password opens and whose pepper the stored
+/// hash verifies, but whose data key opens none of the data: the window
+/// is offered a fresh start for the right password and told "Invalid
+/// credentials" for a wrong one; every other caller hears the same for both
+/// and nothing is moved or deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_sign_in_costs_the_same_whatever_it_finds() {
-    use crate::security::hashing::ARGON2_RUNS;
+async fn the_ways_out_need_the_password_and_the_app_window() {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = open_with(dir.path(), Arc::new(CountingKeyStore::default()));
-    AuthService::setup(&ctx, USER, EMAIL, PASSWORD).unwrap();
-    let runs = |name: &str, password: &str| {
-        ARGON2_RUNS.with(|n| n.set(0));
-        let outcome = AuthService::verify_credentials(&ctx, name, password).unwrap();
-        (ARGON2_RUNS.with(|n| n.get()), outcome)
-    };
-    // The stand-in hash is made once per process: make it now.
-    let _ = runs("someone", PASSWORD);
-    let (unknown, o) = runs("someone-else", PASSWORD);
-    assert_eq!(o, LoginOutcome::Invalid);
-    let (wrong, o) = runs(USER, "Wrong@1234");
-    assert_eq!(o, LoginOutcome::Invalid);
-    let (right, o) = runs(USER, PASSWORD);
-    assert!(matches!(o, LoginOutcome::Success(..)), "{:?}", o);
-    assert_eq!(right, 2, "open the vault, check the hash");
+    let store = Arc::new(CountingKeyStore::default());
+    let keys = Unlocked::random().unwrap();
+    earlier_build_database(dir.path(), &keys, PASSWORD);
+    let file = dir.path().join(crate::security::VAULT_FILE);
+    crate::security::write_vault_file_for_test(&file, &keys.with_another_data_key(), PASSWORD);
+    let ctx = open_with(dir.path(), store.clone());
+    ctx.limiter.freeze(Some(std::time::Instant::now()));
+    for caller in OTHERS {
+        let [right, wrong, unknown] = three_answers(&ctx, caller).await;
+        assert_eq!(right, wrong, "{:?}", caller);
+        assert_eq!(right, unknown, "{:?}", caller);
+        assert!(
+            right.1.get("recovery").is_none(),
+            "{:?}: {}",
+            caller,
+            right.1
+        );
+    }
     assert_eq!(
-        (unknown, wrong),
-        (right, right),
-        "Argon2 runs: unknown name, wrong password, right password"
+        sign_in_as(&ctx, Caller::AppWindow, USER, "Wrong@1234").await,
+        invalid_credentials()
     );
+    let (s, v) = sign_in_as(&ctx, Caller::AppWindow, USER, PASSWORD).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    assert_eq!(v["recovery"], json!(["start_fresh"]));
+    assert!(file.exists() && vault(&ctx).is_none());
+    assert_eq!(store.calls(), 0);
+    close(ctx).await;
+}
+
+/// A keychain that fails the way an OS keychain can, saying more than the
+/// trader should be shown: its item names and a file path.
+#[derive(Default)]
+struct OutspokenKeychain {
+    inner: crate::security::keystore::MemoryKeyStore,
+    refuse_reads: std::sync::atomic::AtomicBool,
+    refuse_deletes: std::sync::atomic::AtomicBool,
+}
+
+const KEYCHAIN_SAID: &str =
+    "/Users/trader/Library/Keychains/login.keychain-db: com.openalgo.desktop";
+
+impl KeyStore for OutspokenKeychain {
+    fn get(&self, name: &str) -> Result<Option<crate::security::Secret>, KeyStoreError> {
+        if self.refuse_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(KeyStoreError::Unavailable(format!(
+                "{} {} denied",
+                KEYCHAIN_SAID, name
+            )));
+        }
+        self.inner.get(name)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), KeyStoreError> {
+        if self
+            .refuse_deletes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(KeyStoreError::Failure(format!(
+                "{} {} is read-only",
+                KEYCHAIN_SAID, name
+            )));
+        }
+        self.inner.delete(name)
+    }
+
+    fn kind(&self) -> &'static str {
+        "outspoken test keychain"
+    }
+}
+
+/// KEY-01 security review: what the system keychain says when it refuses
+/// (its item names, file paths, the system's own text) reaches neither a
+/// sign-in's answer nor the error log the Diagnostics page serves over
+/// HTTP; both carry OpenAlgo's own sentences. Checked for a refused read
+/// and for a refused deletion after a move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_error_log_never_carries_what_the_keychain_said() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(OutspokenKeychain::default());
+    let keys = Unlocked::random().unwrap();
+    earlier_build_database(dir.path(), &keys, PASSWORD);
+    let (k, p) = crate::security::keychain_entries_for_test(&keys);
+    store.inner.set(DATA_KEY, &k).unwrap();
+    store.inner.set(PEPPER, &p).unwrap();
+    let ctx = open_on(dir.path(), store.clone());
+
+    store.refuse_reads.store(true, SeqCst);
+    let (refused, mut kept) = crate::services::error_log::kept_while(|| {
+        AuthService::verify_credentials(&ctx, USER, PASSWORD, SignInFrom::AppWindow)
+    });
+    assert!(
+        matches!(
+            refused,
+            LoginOutcome::Unreadable(crate::error::AppError::KeychainUnavailable)
+        ),
+        "{:?}",
+        refused
+    );
+    assert!(!kept.is_empty(), "the refusal was not logged at all");
+    let (s, v) = sign_in_as(&ctx, Caller::AppWindow, USER, PASSWORD).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
+    kept.push(v.to_string());
+
+    store.refuse_reads.store(false, SeqCst);
+    store.refuse_deletes.store(true, SeqCst);
+    let (moved, more) = crate::services::error_log::kept_while(|| {
+        AuthService::verify_credentials(&ctx, USER, PASSWORD, SignInFrom::AppWindow)
+    });
+    assert!(moved.signed_in(), "{:?}", moved);
+    assert_eq!(
+        vault(&ctx).unwrap().keychain_cleanup,
+        KeychainCleanup::Failed
+    );
+    kept.extend(more);
+
+    for line in &kept {
+        for word in [
+            "/Users/",
+            "login.keychain-db",
+            "com.openalgo.desktop",
+            DATA_KEY,
+            PEPPER,
+        ] {
+            assert!(!line.contains(word), "{:?} reached: {}", word, line);
+        }
+    }
     close(ctx).await;
 }

@@ -14,6 +14,7 @@
 //! feature tests need no sign-in. The KEY-01 tests use `CountingKeyStore`,
 //! which behaves like the OS keychain.
 
+use crate::security::Secret;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
@@ -33,7 +34,9 @@ pub enum KeyStoreError {
 pub const NEVER_WRITTEN: &str = "OpenAlgo never writes to the system keychain";
 
 pub trait KeyStore: Send + Sync {
-    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError>;
+    /// The value stored under `name`: key material, so it comes back as a
+    /// `Secret` (never printed, zeroed when dropped; KEY-01 security review).
+    fn get(&self, name: &str) -> Result<Option<Secret>, KeyStoreError>;
     /// Only the test harness's in-memory store keeps values. Every other
     /// store, the OS keychain first, refuses without touching anything: no
     /// code writes to the keychain (KEY-01).
@@ -84,9 +87,9 @@ fn classify(e: keyring::Error) -> KeyStoreError {
 }
 
 impl KeyStore for KeyringStore {
-    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError> {
+    fn get(&self, name: &str) -> Result<Option<Secret>, KeyStoreError> {
         match self.entry(name)?.get_password() {
-            Ok(v) => Ok(Some(v)),
+            Ok(v) => Ok(Some(Secret::new(v))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(classify(e)),
         }
@@ -120,8 +123,8 @@ impl MemoryKeyStore {
 }
 
 impl KeyStore for MemoryKeyStore {
-    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError> {
-        Ok(self.values.lock().get(name).cloned())
+    fn get(&self, name: &str) -> Result<Option<Secret>, KeyStoreError> {
+        Ok(self.values.lock().get(name).cloned().map(Secret::new))
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), KeyStoreError> {
@@ -150,7 +153,7 @@ impl KeyStore for MemoryKeyStore {
 pub struct UnavailableKeyStore;
 
 impl KeyStore for UnavailableKeyStore {
-    fn get(&self, _: &str) -> Result<Option<String>, KeyStoreError> {
+    fn get(&self, _: &str) -> Result<Option<Secret>, KeyStoreError> {
         Err(KeyStoreError::Unavailable("no secret service".into()))
     }
     fn set(&self, _: &str, _: &str) -> Result<(), KeyStoreError> {
@@ -195,7 +198,7 @@ impl FaultyKeyStore {
 
 #[cfg(test)]
 impl KeyStore for FaultyKeyStore {
-    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError> {
+    fn get(&self, name: &str) -> Result<Option<Secret>, KeyStoreError> {
         self.check()?;
         self.inner.get(name)
     }
@@ -252,13 +255,18 @@ impl CountingKeyStore {
 
     /// What is stored, without counting.
     pub fn peek(&self, name: &str) -> Option<String> {
-        self.inner.inner.get(name).ok().flatten()
+        self.inner
+            .inner
+            .get(name)
+            .ok()
+            .flatten()
+            .map(|v| v.expose().to_string())
     }
 }
 
 #[cfg(test)]
 impl KeyStore for CountingKeyStore {
-    fn get(&self, name: &str) -> Result<Option<String>, KeyStoreError> {
+    fn get(&self, name: &str) -> Result<Option<Secret>, KeyStoreError> {
         self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get(name)
     }
@@ -288,9 +296,28 @@ mod tests {
         let s = MemoryKeyStore::new();
         assert_eq!(s.get(DATA_KEY).unwrap(), None);
         s.set(DATA_KEY, "abc").unwrap();
-        assert_eq!(s.get(DATA_KEY).unwrap().as_deref(), Some("abc"));
+        assert_eq!(
+            s.get(DATA_KEY).unwrap().as_ref().map(|v| v.expose()),
+            Some("abc")
+        );
         s.delete(DATA_KEY).unwrap();
         assert_eq!(s.get(DATA_KEY).unwrap(), None);
+    }
+
+    /// KEY-01 security review: what a keychain read returns is the data
+    /// key or the pepper itself (base64); printing the answer, in a log
+    /// line or a failed assertion, shows neither.
+    #[test]
+    fn a_keychain_read_never_prints_the_key() {
+        let s = MemoryKeyStore::new();
+        // A made-up key (the fake key the gitleaks allowlist names).
+        let key = "abcdef0123456789abcdef0123456789";
+        s.set(DATA_KEY, key).unwrap();
+        let read = s.get(DATA_KEY);
+        for shown in [format!("{:?}", read), format!("{:#?}", read)] {
+            assert!(!shown.contains("abcdef01"), "{}", shown);
+        }
+        assert!(read.is_ok());
     }
 
     /// KEY-01: the OS keychain store has no write: `set` refuses before

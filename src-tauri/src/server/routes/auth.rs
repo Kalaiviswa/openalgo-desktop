@@ -1,12 +1,13 @@
 //! `/auth/*` and `/setup` (web `blueprints/auth.py`, `blueprints/core.py`).
 
 use crate::events::Event;
+use crate::security::SignInFrom;
 use crate::security::{totp, Secret};
 use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::middleware::{
-    claim_sign_in, clear_session_cookie, login_limited, redirect, same_origin_navigation,
-    sign_in_refused, with_cookie, Sess, Src, User,
+    claim_sign_in, clear_session_cookie, from_app_window, login_limited, redirect,
+    same_origin_navigation, sign_in_refused, with_cookie, Sess, Src, User,
 };
 use crate::server::routes::webui::no_store;
 use crate::services::apikey_service::ApiKeyService;
@@ -164,11 +165,34 @@ async fn finish_sign_in(
     with_cookie(ok(body), &s.id)
 }
 
-/// What a sign-in from another device answers while the keys of an earlier
-/// build still have to move into openalgo.db (KEY-01): the move happens at
-/// a sign-in on this computer only.
-pub const SIGN_IN_HERE_FIRST: &str = "Sign in once on the computer where OpenAlgo Desktop is \
-installed: OpenAlgo is moving its saved keys there. After that you can sign in from here.";
+/// What a sign-in from anywhere but the OpenAlgo Desktop window answers
+/// while the keys of an earlier build still have to move into openalgo.db
+/// (KEY-01): the move happens at a sign-in in the app window only. The same
+/// answer, after the same work, for every name and password.
+pub const SIGN_IN_IN_APP_WINDOW_FIRST: &str = "Sign in once in the OpenAlgo Desktop window on \
+the computer where it is installed: OpenAlgo is moving your saved keys into its own database. \
+After that you can sign in here too.";
+
+/// The one answer to a sign-in that did not prove its password, for every
+/// caller but the app window (KEY-01 security review).
+fn invalid_credentials(
+    ctx: &AppState,
+    attempt: crate::server::middleware::SignInAttempt<'_>,
+    username: &str,
+    ip: std::net::IpAddr,
+) -> Response {
+    attempt.failed();
+    tracing::info!("Sign-in failed: invalid credentials");
+    crate::services::security_service::record_login(
+        ctx,
+        username,
+        ip,
+        "failed",
+        "password",
+        Some("invalid_credentials"),
+    );
+    error(StatusCode::UNAUTHORIZED, "Invalid credentials")
+}
 
 /// POST /auth/login (form: username, password)
 pub async fn login(
@@ -219,27 +243,17 @@ pub async fn login(
         Ok(a) => a,
         Err(r) => return r,
     };
-    // KEY-01: a caller on another device (the network, a tunnel) never
-    // moves an earlier build's keys. The keychain would ask on this
-    // computer's screen, and how a move ends (keys that open none of the
-    // data, a failed write) comes only after the password was proven, so
-    // it would tell a right password from a wrong one. Refused before any
-    // name or password is looked at: one answer for every name and
-    // password, counted like a failure.
-    if !source.is_local() {
-        match AuthService::keys_must_move(&ctx) {
-            Ok(false) => {}
-            Ok(true) => {
-                attempt.failed();
-                tracing::info!("Sign-in from another device refused: the keys still have to move");
-                return error(StatusCode::FORBIDDEN, SIGN_IN_HERE_FIRST);
-            }
-            Err(e) => {
-                attempt.released();
-                return e.into_response();
-            }
-        }
-    }
+    // KEY-01 security review: only the OpenAlgo Desktop window (this
+    // computer, with the proof only the shell hands out) reads an earlier
+    // build's keychain, moves keys, and hears why keys could not be opened.
+    // Anyone else learns nothing about the name or the password from how a
+    // sign-in fails: one answer, after the same work, spending the same
+    // budget.
+    let from = if from_app_window(&ctx, &headers, source) {
+        SignInFrom::AppWindow
+    } else {
+        SignInFrom::Elsewhere
+    };
     let password = Secret::new(form.get("password").unwrap_or_default());
     // Read before the account is: a password change that lands while the
     // password is checked voids this sign-in (`finish_sign_in`).
@@ -247,11 +261,11 @@ pub async fn login(
     let c2 = ctx.clone();
     let u2 = username.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        AuthService::verify_credentials(&c2, &u2, password.expose())
+        AuthService::verify_credentials(&c2, &u2, password.expose(), from)
     })
     .await;
     match outcome {
-        Ok(Ok(LoginOutcome::Success(user, keys))) => {
+        Ok(LoginOutcome::Success(user, keys)) => {
             attempt.succeeded();
             tracing::info!("Sign-in succeeded");
             crate::services::security_service::record_login(
@@ -266,7 +280,7 @@ pub async fn login(
             )
             .await
         }
-        Ok(Ok(LoginOutcome::TotpRequired(user, keys))) => {
+        Ok(LoginOutcome::TotpRequired(user, keys)) => {
             // The password was right, so this attempt is given back; earlier
             // failures stay until the code is right too, so someone who
             // knows the password cannot clear them between code guesses.
@@ -294,54 +308,39 @@ pub async fn login(
                 &s.id,
             )
         }
-        Ok(Ok(LoginOutcome::Invalid)) => {
-            // A wrong password and a name that is not the account's give
-            // the same answer, after the same work, and spend the same
-            // budget.
+        Ok(LoginOutcome::MoveInAppWindow) => {
+            // Never the app window's answer (it moves the keys). The same
+            // for every name and password.
             attempt.failed();
-            tracing::info!("Sign-in failed: invalid credentials");
-            crate::services::security_service::record_login(
-                &ctx,
-                &username,
-                ip,
-                "failed",
-                "password",
-                Some("invalid_credentials"),
-            );
-            error(StatusCode::UNAUTHORIZED, "Invalid credentials")
+            tracing::info!("Sign-in refused: the keys move at a sign-in in the app window");
+            error(StatusCode::FORBIDDEN, SIGN_IN_IN_APP_WINDOW_FIRST)
         }
-        Ok(Err(e)) if !source.is_local() => {
-            // KEY-01: to a caller on another device, any failure reads as a
-            // wrong password and spends the same budget. An error raised
-            // after the password was proven (a write that failed, keys that
-            // open none of the data) would otherwise tell it the password
-            // was right. The detail goes to the log; the ways out (retry,
-            // start fresh) are offered on this computer only.
-            attempt.failed();
-            tracing::warn!("Sign-in from another device failed: {}", e);
-            crate::services::security_service::record_login(
-                &ctx,
-                &username,
-                ip,
-                "failed",
-                "password",
-                Some("invalid_credentials"),
-            );
-            error(StatusCode::UNAUTHORIZED, "Invalid credentials")
-        }
-        Ok(Err(e)) => {
-            // This computer: the trader, who could copy openalgo.db and try
-            // passwords against it anyway, gets the ways out.
+        Ok(LoginOutcome::Unreadable(e)) | Ok(LoginOutcome::FailedAfterProof(e))
+            if from == SignInFrom::AppWindow =>
+        {
+            // The trader at the app window, who could copy openalgo.db and
+            // try passwords against it anyway, gets the ways out (retry,
+            // start fresh). Keys that cannot be read answer the same for
+            // every password; anything after the proof needs the password.
             attempt.released();
             e.into_response()
         }
-        Err(_) => {
+        Ok(LoginOutcome::Unreadable(e)) | Ok(LoginOutcome::FailedAfterProof(e)) => {
+            // Anyone else: the answer to a wrong password. An error after
+            // the password was proven would otherwise tell it the password
+            // was right. The detail went to the log.
+            tracing::debug!("Sign-in not from the app window failed: {}", e.code());
+            invalid_credentials(&ctx, attempt, &username, ip)
+        }
+        Ok(LoginOutcome::Invalid) => invalid_credentials(&ctx, attempt, &username, ip),
+        Err(_) if from == SignInFrom::AppWindow => {
             attempt.released();
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Login failed. Please try again.",
             )
         }
+        Err(_) => invalid_credentials(&ctx, attempt, &username, ip),
     }
 }
 

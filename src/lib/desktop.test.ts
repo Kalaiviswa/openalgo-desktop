@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const tauri = vi.hoisted(() => ({ inShell: false, open: vi.fn(async (_url: string) => {}) }))
+const tauri = vi.hoisted(() => ({
+  inShell: false,
+  open: vi.fn(async (_url: string) => {}),
+  invoke: vi.fn(async (_cmd: string): Promise<unknown> => 'proof-from-the-shell'),
+}))
 
-vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => tauri.inShell }))
+vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => tauri.inShell, invoke: tauri.invoke }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: tauri.open }))
 
 import {
+  appWindowHeaders,
   brokerSignInTarget,
   DEFAULT_WEBSOCKET_URL,
   desktopBrokerLoginUrl,
@@ -14,7 +19,9 @@ import {
   isDesktopShell,
   isExternalHttpUrl,
   layoutRedirect,
+  resetWindowProofForTests,
   signInWithSavedKeys,
+  WINDOW_PROOF_HEADER,
 } from './desktop'
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -260,5 +267,42 @@ describe('layoutRedirect', () => {
 
   it('lets a trader with a broker logged in through', () => {
     expect(layoutRedirect({ username: 'trader', broker: 'zerodha' }, true, '/dashboard')).toBeNull()
+  })
+})
+
+// KEY-01 security review: the server treats a sign-in as the app window's
+// only when it carries the proof the desktop shell hands to that window.
+describe('appWindowHeaders', () => {
+  beforeEach(() => {
+    resetWindowProofForTests()
+    tauri.invoke.mockClear()
+  })
+  afterEach(() => {
+    tauri.inShell = false
+    tauri.invoke.mockImplementation(async () => 'proof-from-the-shell')
+  })
+
+  it('sends nothing from a browser tab, and never asks the shell', async () => {
+    tauri.inShell = false
+    expect(await appWindowHeaders()).toEqual({})
+    expect(tauri.invoke).not.toHaveBeenCalled()
+  })
+
+  it('sends the proof from the desktop window, asking the shell once', async () => {
+    tauri.inShell = true
+    expect(await appWindowHeaders()).toEqual({ [WINDOW_PROOF_HEADER]: 'proof-from-the-shell' })
+    expect(await appWindowHeaders()).toEqual({ [WINDOW_PROOF_HEADER]: 'proof-from-the-shell' })
+    expect(tauri.invoke).toHaveBeenCalledTimes(1)
+    expect(tauri.invoke).toHaveBeenCalledWith('window_proof')
+  })
+
+  it('sends nothing when the shell refuses, and asks again next time', async () => {
+    tauri.inShell = true
+    tauri.invoke.mockImplementationOnce(async () => {
+      throw new Error('refused')
+    })
+    expect(await appWindowHeaders()).toEqual({})
+    expect(await appWindowHeaders()).toEqual({ [WINDOW_PROOF_HEADER]: 'proof-from-the-shell' })
+    expect(tauri.invoke).toHaveBeenCalledTimes(2)
   })
 })

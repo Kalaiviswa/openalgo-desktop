@@ -309,11 +309,16 @@ mod tests {
 
     /// Sign in as the route does and install the keys the password opened.
     fn sign_in(ctx: &AppState) {
-        match AuthService::verify_credentials(ctx, "old", "Legacy@123").unwrap() {
+        match AuthService::verify_credentials(
+            ctx,
+            "old",
+            "Legacy@123",
+            crate::security::SignInFrom::AppWindow,
+        ) {
             LoginOutcome::Success(_, keys) | LoginOutcome::TotpRequired(_, keys) => {
                 ctx.security.install(&keys)
             }
-            LoginOutcome::Invalid => panic!("the old password was refused"),
+            other => panic!("the old password was refused: {:?}", other),
         }
     }
 

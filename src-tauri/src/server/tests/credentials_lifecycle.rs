@@ -588,8 +588,13 @@ fn kite_key(ctx: &AppState) -> String {
 /// keys, install them (with the session, in the route).
 fn signs_in(ctx: &AppState, password: &str) -> bool {
     use crate::services::auth_service::LoginOutcome;
-    match AuthService::verify_credentials(ctx, USER, password) {
-        Ok(LoginOutcome::Success(_, keys)) | Ok(LoginOutcome::TotpRequired(_, keys)) => {
+    match AuthService::verify_credentials(
+        ctx,
+        USER,
+        password,
+        crate::security::SignInFrom::AppWindow,
+    ) {
+        LoginOutcome::Success(_, keys) | LoginOutcome::TotpRequired(_, keys) => {
             ctx.security.install(&keys);
             true
         }
@@ -643,15 +648,28 @@ async fn sec03_a_locked_keychain_never_gets_new_keys() {
     }
     store.inner.set_unavailable(true);
     let ctx = open_at(dir.path(), store.clone());
-    let r = AuthService::verify_credentials(&ctx, USER, PASSWORD);
+    let r = AuthService::verify_credentials(
+        &ctx,
+        USER,
+        PASSWORD,
+        crate::security::SignInFrom::AppWindow,
+    );
     assert!(
-        matches!(r, Err(crate::error::AppError::KeychainUnavailable)),
+        matches!(
+            r,
+            crate::services::auth_service::LoginOutcome::Unreadable(
+                crate::error::AppError::KeychainUnavailable
+            )
+        ),
         "{:?}",
         r
     );
     let (s, _, v) = send_to(
         &ctx,
-        multipart("/auth/login", &[("username", USER), ("password", PASSWORD)]),
+        from_the_app_window(
+            &ctx,
+            multipart("/auth/login", &[("username", USER), ("password", PASSWORD)]),
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);

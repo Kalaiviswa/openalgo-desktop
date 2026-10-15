@@ -186,6 +186,7 @@ pub fn run() {
                 commands::open_external,
                 commands::reset_account,
                 commands::start_fresh,
+                commands::window_proof,
             ])
             .build(tauri::generate_context!());
 

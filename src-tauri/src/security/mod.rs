@@ -37,13 +37,14 @@ pub mod keystore;
 pub mod legacy;
 pub mod secret;
 pub mod totp;
+pub mod window;
 
 use crate::db::sqlite::key_vault::{self, KeychainCleanup, Source, VaultRow};
 use crate::db::sqlite::{user, SqliteDb};
 use crate::error::{AppError, Result};
 use base64::Engine;
 use crypto::{Aad, DataCipher};
-use keystore::{KeyStore, KeyStoreError, DATA_KEY, PEPPER};
+use keystore::{KeyStore, DATA_KEY, PEPPER};
 use parking_lot::{Mutex, RwLock};
 use rand::RngCore;
 use rusqlite::Connection;
@@ -152,11 +153,60 @@ pub enum KeySource {
     Keychain,
 }
 
+/// Where a sign-in comes from, as far as the keys are concerned (KEY-01
+/// security review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInFrom {
+    /// The OpenAlgo Desktop window on this computer, shown by the proof
+    /// only the shell hands out ([`window::WindowProof`]): it may read an
+    /// earlier build's keychain once and move keys, and is told why keys
+    /// could not be opened.
+    AppWindow,
+    /// Anything else: a browser or a program on this computer, another
+    /// device, a tunnel.
+    Elsewhere,
+}
+
 /// What a sign-in's password opened.
 #[derive(Debug)]
 pub enum Opened {
+    /// The password opened the keys and matches the stored hash.
     Keys(Unlocked),
+    /// Not proven: a wrong password, or a name that is not the account's.
     WrongPassword,
+    /// Not proven, whatever was typed: an earlier build's keys still have
+    /// to move, and only a sign-in in the app window moves them.
+    MoveInAppWindow,
+    /// Not proven, whatever was typed: this install's keys cannot be read
+    /// (`KeychainUnavailable`, `KeysDoNotMatch`, `VaultUnreadable`, or the
+    /// database failing). The same for every name and password.
+    Unreadable(AppError),
+    /// The password was proven, then opening or moving the keys failed.
+    FailedAfterProof(AppError),
+}
+
+/// Argon2 runs every sign-in costs, whatever it finds: opening the vault
+/// with the password and checking the password hash.
+pub const SIGN_IN_ARGON2_RUNS: u32 = 2;
+
+/// This install's keys as a sign-in finds them before it looks at the
+/// name or the password.
+enum KeyState {
+    NoAccount,
+    /// The vault row, checked without a password.
+    Vault(VaultRow),
+    /// An earlier build's `vault.json` (and `vault.next.json`), checked
+    /// without a password.
+    VaultFiles(Vec<(&'static str, VaultRow)>),
+    /// Keys an earlier build kept in `secrets.dat` or the OS keychain, read
+    /// and proven on the account's data.
+    Earlier {
+        keys: Box<Keys>,
+        source: Source,
+        cleanup: KeychainCleanup,
+    },
+    /// Keys still to move, for a sign-in that is not the app window's.
+    MoveInAppWindow,
 }
 
 /// Test faults: the steps of a move at which a test stops it, as a crash
@@ -191,6 +241,8 @@ pub struct SecurityManager {
     /// reads it before it reads the account and issues its session only if
     /// it is unchanged (`issue_if_current`).
     credentials_epoch: std::sync::atomic::AtomicU64,
+    /// What shows a sign-in comes from the app window (`window`).
+    window: window::WindowProof,
     #[cfg(test)]
     fault: Mutex<Option<MoveStep>>,
     #[cfg(test)]
@@ -222,6 +274,7 @@ impl SecurityManager {
             data_dir: data_dir.to_path_buf(),
             vault_lock: Mutex::new(()),
             credentials_epoch: Default::default(),
+            window: window::WindowProof::new(),
             #[cfg(test)]
             fault: Mutex::new(None),
             #[cfg(test)]
@@ -242,6 +295,7 @@ impl SecurityManager {
             data_dir: std::env::temp_dir(),
             vault_lock: Mutex::new(()),
             credentials_epoch: Default::default(),
+            window: window::WindowProof::new(),
             #[cfg(test)]
             fault: Mutex::new(None),
             #[cfg(test)]
@@ -259,6 +313,11 @@ impl SecurityManager {
 
     pub fn is_unlocked(&self) -> bool {
         self.keys.read().is_some()
+    }
+
+    /// The proof the app window shows on its sign-in (`window`).
+    pub fn window_proof(&self) -> &window::WindowProof {
+        &self.window
     }
 
     fn keys(&self) -> Result<Arc<Keys>> {
@@ -343,143 +402,293 @@ impl SecurityManager {
     /// them into the vault first when an earlier build kept them elsewhere.
     /// Nothing is installed: the caller installs them with the session.
     ///
-    /// The password must open the vault and match the stored hash (read
-    /// again under the lock every change holds); anything less is
-    /// `WrongPassword` and leaves everything as it was. Errors:
-    /// `KeychainUnavailable` (the keychain of an earlier build could not be
-    /// read; retry or start fresh), `KeysDoNotMatch` (no keys there, or keys
-    /// that open none of the account's data), `VaultUnreadable`.
+    /// What a caller can learn (KEY-01 security review): until the password
+    /// is proven, nothing about the name or the password. The install's keys
+    /// are read first, without either (`key_state`), so keys that cannot be
+    /// read answer the same whatever was typed; every way out costs the same
+    /// Argon2 work (`hashing::pad_argon2_runs`); only a sign-in in the app
+    /// window reads an earlier build's keychain or moves keys. The route
+    /// decides who hears `Unreadable` and `FailedAfterProof`: the app window
+    /// gets the ways out, anyone else the answer to a wrong password.
     pub fn open_for_sign_in(
         &self,
         db: &SqliteDb,
         username: &str,
         password: &str,
-    ) -> Result<Opened> {
+        from: SignInFrom,
+    ) -> Opened {
         let _change = self.vault_lock.lock();
-        let (account, row) = {
+        let since = hashing::argon2_runs();
+        let mut work = SIGN_IN_ARGON2_RUNS;
+        let opened = self.open_locked(db, username, password, from, &mut work);
+        hashing::pad_argon2_runs(since, work, password);
+        opened
+    }
+
+    fn open_locked(
+        &self,
+        db: &SqliteDb,
+        username: &str,
+        password: &str,
+        from: SignInFrom,
+        work: &mut u32,
+    ) -> Opened {
+        let state = match self.key_state(db, from, work) {
+            Ok(KeyState::NoAccount) => return Opened::WrongPassword,
+            Ok(KeyState::MoveInAppWindow) => return Opened::MoveInAppWindow,
+            Ok(s) => s,
+            Err(e) => return Opened::Unreadable(e),
+        };
+        let account = match db.conn().and_then(|c| user::find_by_username(&c, username)) {
+            Ok(Some(a)) => a,
+            Ok(None) => return Opened::WrongPassword,
+            Err(e) => return Opened::Unreadable(e),
+        };
+        let hash = account.password_hash.as_str();
+        // Checks the hash with keys a password already opened (a vault or a
+        // vault file): from there on the password is proven.
+        let proven_hash =
+            |keys: &Keys| match hashing::verify_password(keys.pepper.expose(), password, hash) {
+                Ok(ok) => Ok(ok),
+                Err(e) => {
+                    tracing::error!("The stored password hash could not be checked: {}", e);
+                    Err(Opened::FailedAfterProof(AppError::VaultUnreadable))
+                }
+            };
+        match state {
+            KeyState::Vault(row) => {
+                let keys = match key_vault::unwrap(&row, password) {
+                    Ok(None) => return Opened::WrongPassword,
+                    Ok(Some((k, p))) => Keys::new(k, p),
+                    Err(e) => Err(e),
+                };
+                let keys = match keys {
+                    Ok(k) => k,
+                    Err(e) => {
+                        tracing::error!("The key vault opened but its keys are unusable: {}", e);
+                        return Opened::FailedAfterProof(AppError::VaultUnreadable);
+                    }
+                };
+                match proven_hash(&keys) {
+                    Ok(true) => {}
+                    Ok(false) => return Opened::WrongPassword,
+                    Err(o) => return o,
+                }
+                self.tidy_after_move(db, row.keychain_cleanup, from);
+                Opened::Keys(Unlocked(Arc::new(keys)))
+            }
+            KeyState::VaultFiles(files) => {
+                for (name, row) in files {
+                    let keys = match key_vault::unwrap(&row, password) {
+                        Ok(None) => continue,
+                        Ok(Some((k, p))) => Keys::new(k, p),
+                        Err(e) => Err(e),
+                    };
+                    let keys = match keys {
+                        Ok(k) => k,
+                        Err(e) => {
+                            tracing::error!("{} opened but its keys are unusable: {}", name, e);
+                            return Opened::FailedAfterProof(AppError::VaultUnreadable);
+                        }
+                    };
+                    match proven_hash(&keys) {
+                        Ok(true) => {
+                            return self.move_proven(
+                                db,
+                                keys,
+                                password,
+                                Source::VaultFile,
+                                KeychainCleanup::None,
+                            )
+                        }
+                        Ok(false) => continue,
+                        Err(o) => return o,
+                    }
+                }
+                Opened::WrongPassword
+            }
+            KeyState::Earlier {
+                keys,
+                source,
+                cleanup,
+            } => match hashing::verify_password(keys.pepper.expose(), password, hash) {
+                Ok(true) => self.move_proven(db, *keys, password, source, cleanup),
+                Ok(false) => Opened::WrongPassword,
+                Err(e) => {
+                    // Nothing proven yet: a wrong password, whoever asks.
+                    tracing::error!("The stored password hash could not be checked: {}", e);
+                    Opened::WrongPassword
+                }
+            },
+            KeyState::NoAccount | KeyState::MoveInAppWindow => Opened::WrongPassword,
+        }
+    }
+
+    /// This install's keys as they stand, read without the name or the
+    /// password: whatever this finds or fails on is the same for every name
+    /// and password typed. Sets `work` to the Argon2 runs every sign-in in
+    /// this state costs (two per vault file an earlier build left).
+    ///
+    /// Keys an earlier build kept elsewhere are read only for the app
+    /// window, and must open the account's data (the first encrypted row)
+    /// before any password is looked at: another install's keys are never
+    /// moved, whatever was typed.
+    fn key_state(&self, db: &SqliteDb, from: SignInFrom, work: &mut u32) -> Result<KeyState> {
+        let (account, row, source) = {
             let conn = db.conn()?;
             (
-                user::find_by_username(&conn, username)?,
+                user::find_first(&conn)?,
                 key_vault::read(&conn)?,
+                self.key_source(&conn)?,
             )
         };
         let Some(account) = account else {
-            hashing::stand_in_vault_open(password);
-            hashing::stand_in_password_check(password);
-            return Ok(Opened::WrongPassword);
+            return Ok(KeyState::NoAccount);
         };
-        let hash = account.password_hash.as_str();
-        if let Some(row) = row {
-            let keys = match key_vault::unwrap(&row, password) {
-                Ok(Some((k, p))) => Keys::new(k, p)?,
-                Ok(None) => {
-                    // The hash check a password that opens the vault runs:
-                    // a wrong password costs what a right one does.
-                    hashing::stand_in_password_check(password);
-                    return Ok(Opened::WrongPassword);
-                }
-                Err(e) => {
-                    tracing::error!("The key vault could not be read: {}", e);
+        if source != KeySource::Vault && from != SignInFrom::AppWindow {
+            return Ok(KeyState::MoveInAppWindow);
+        }
+        if !hashing::hash_is_readable(&account.password_hash) {
+            tracing::error!("The stored password hash is damaged");
+            return Err(AppError::VaultUnreadable);
+        }
+        match (source, row) {
+            (KeySource::Vault, Some(row)) => {
+                if let Err(e) = key_vault::check(&row) {
+                    tracing::error!("The key vault cannot be read: {}", e);
                     return Err(AppError::VaultUnreadable);
                 }
-            };
-            if !hashing::verify_password(keys.pepper.expose(), password, hash)? {
-                return Ok(Opened::WrongPassword);
+                Ok(KeyState::Vault(row))
             }
-            self.tidy_after_move(db, row.keychain_cleanup);
-            return Ok(Opened::Keys(Unlocked(Arc::new(keys))));
-        }
-        // No vault yet: an install from an earlier build.
-        let source = {
-            let conn = db.conn()?;
-            self.key_source(&conn)?
-        };
-        let (keys, src, cleanup) = match source {
-            KeySource::Vault | KeySource::NoAccount => return Ok(Opened::WrongPassword),
-            KeySource::VaultFile => match self.open_vault_files(password, hash)? {
-                Some(k) => (k, Source::VaultFile, KeychainCleanup::None),
-                None => return Ok(Opened::WrongPassword),
-            },
-            KeySource::LegacyFile => {
-                let Some((k, p)) = legacy::read(&self.data_dir)? else {
-                    return Ok(Opened::WrongPassword);
-                };
-                let keys = Keys::new(k, p)?;
-                if !hashing::verify_password(keys.pepper.expose(), password, hash)? {
-                    return Ok(Opened::WrongPassword);
+            (KeySource::VaultFile, _) => {
+                let files = self.read_vault_files()?;
+                *work = SIGN_IN_ARGON2_RUNS.saturating_mul(files.len() as u32);
+                Ok(KeyState::VaultFiles(files))
+            }
+            (KeySource::LegacyFile, _) => {
+                let keys = match legacy::read(&self.data_dir) {
+                    Ok(Some((k, p))) => Keys::new(k, p),
+                    Ok(None) => Err(AppError::VaultUnreadable),
+                    Err(e) => Err(e),
                 }
-                (keys, Source::LegacyFile, KeychainCleanup::None)
+                .map_err(|e| {
+                    tracing::error!("secrets.dat cannot be read: {}", e);
+                    AppError::VaultUnreadable
+                })?;
+                self.prove_on_data(db, &keys, AppError::VaultUnreadable)?;
+                Ok(KeyState::Earlier {
+                    keys: Box::new(keys),
+                    source: Source::LegacyFile,
+                    cleanup: KeychainCleanup::None,
+                })
             }
-            KeySource::Keychain => {
+            (KeySource::Keychain, _) => {
                 let keys = self.read_keychain()?;
-                if !hashing::verify_password(keys.pepper.expose(), password, hash)? {
-                    // A wrong password, or a keychain holding another
-                    // install's keys: the account's data tells which.
-                    let witness = {
-                        let conn = db.conn()?;
-                        key_vault::witness(&conn)?
-                    };
-                    return match witness {
-                        Some(w) if !keys.opens(&w) => Err(AppError::KeysDoNotMatch),
-                        _ => Ok(Opened::WrongPassword),
-                    };
-                }
-                (keys, Source::Keychain, KeychainCleanup::Pending)
+                self.prove_on_data(db, &keys, AppError::KeysDoNotMatch)?;
+                Ok(KeyState::Earlier {
+                    keys: Box::new(keys),
+                    source: Source::Keychain,
+                    cleanup: KeychainCleanup::Pending,
+                })
             }
-        };
-        self.move_into_vault(db, keys, password, src, cleanup)
-            .map(Opened::Keys)
+            _ => Ok(KeyState::NoAccount),
+        }
     }
 
-    /// The keys in `vault.json`, else in `vault.next.json`, whichever this
-    /// password opens with a pepper the stored hash verifies with (a
-    /// password change an earlier build left half done keeps the file that
-    /// matches the hash). None when neither does.
-    fn open_vault_files(&self, password: &str, hash: &str) -> Result<Option<Keys>> {
+    /// Keys an earlier build kept must open the account's data, checked
+    /// before the password: `otherwise` when they open none of it.
+    fn prove_on_data(&self, db: &SqliteDb, keys: &Keys, otherwise: AppError) -> Result<()> {
+        let witness = {
+            let conn = db.conn()?;
+            key_vault::witness(&conn)?
+        };
+        match witness {
+            Some(w) if !keys.opens(&w) => {
+                tracing::warn!("The keys found for the account open none of its data");
+                Err(otherwise)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `vault.json`, then `vault.next.json` (a password change an earlier
+    /// build left half done), each checked without a password. A damaged
+    /// `vault.json` makes the keys unreadable; a damaged `vault.next.json`
+    /// is left out.
+    fn read_vault_files(&self) -> Result<Vec<(&'static str, VaultRow)>> {
+        let mut files = Vec::new();
         for name in [VAULT_FILE, VAULT_NEXT_FILE] {
             let path = self.data_dir.join(name);
             if !path.exists() {
                 continue;
             }
-            let keys = match open_vault_file(&path, password) {
-                Ok(Some(k)) => k,
-                Ok(None) => continue,
+            match read_vault_file(&path) {
+                Ok(row) => files.push((name, row)),
                 Err(e) => {
-                    tracing::warn!("Could not read {}: {}", name, e);
+                    tracing::warn!("{} cannot be read: {}", name, e);
                     if name == VAULT_FILE {
                         return Err(AppError::VaultUnreadable);
                     }
-                    continue;
                 }
-            };
-            if hashing::verify_password(keys.pepper.expose(), password, hash)? {
-                return Ok(Some(keys));
             }
         }
-        Ok(None)
+        if files.is_empty() {
+            return Err(AppError::VaultUnreadable);
+        }
+        Ok(files)
     }
 
     /// The keys an earlier build kept in the OS keychain: the one last
     /// read. A locked or refusing keychain is `KeychainUnavailable`; missing
-    /// entries are `KeysDoNotMatch`.
+    /// or unreadable entries are `KeysDoNotMatch`. What the keychain said goes
+    /// to the process log only, never into the error log the Diagnostics
+    /// page serves (KEY-01 security review): it can carry the keychain's
+    /// item names and the system's own text.
     fn read_keychain(&self) -> Result<Keys> {
         let read = |name: &str| match self.store.get(name) {
             Ok(v) => Ok(v),
-            Err(KeyStoreError::Unavailable(e)) | Err(KeyStoreError::Failure(e)) => {
-                tracing::warn!("The keychain could not be read ({}): {}", name, e);
+            Err(e) => {
+                tracing::warn!(
+                    "The system keychain could not be read; the keys stay where they are"
+                );
+                tracing::info!("System keychain: {}", e);
                 Err(AppError::KeychainUnavailable)
             }
         };
         let data_key = read(DATA_KEY)?;
         let pepper = read(PEPPER)?;
         match (data_key, pepper) {
-            (Some(k), Some(p)) => Keys::new(decode_b64(&k)?, decode_b64(&p)?),
+            (Some(k), Some(p)) => Keys::new(decode_b64(k.expose())?, decode_b64(p.expose())?)
+                .map_err(|_| AppError::KeysDoNotMatch),
             (k, p) => {
                 tracing::warn!(
-                    "The keychain holds {} of the account's two keys",
+                    "The system keychain holds {} of the account's two keys",
                     usize::from(k.is_some()) + usize::from(p.is_some())
                 );
                 Err(AppError::KeysDoNotMatch)
+            }
+        }
+    }
+
+    /// Keys an earlier build kept, proven by the password: move them into
+    /// the vault. A failure here comes after the proof; only the app window
+    /// moves keys, and only it is told.
+    fn move_proven(
+        &self,
+        db: &SqliteDb,
+        keys: Keys,
+        password: &str,
+        source: Source,
+        cleanup: KeychainCleanup,
+    ) -> Opened {
+        match self.move_into_vault(db, keys, password, source, cleanup) {
+            Ok(k) => Opened::Keys(k),
+            Err(AppError::KeysDoNotMatch) if source != Source::Keychain => {
+                Opened::FailedAfterProof(AppError::VaultUnreadable)
+            }
+            Err(e) => {
+                tracing::error!("The keys could not be moved into openalgo.db: {}", e);
+                Opened::FailedAfterProof(e)
             }
         }
     }
@@ -545,18 +754,19 @@ impl SecurityManager {
                 _ => "an earlier build",
             }
         );
-        self.tidy_after_move(db, cleanup);
+        self.tidy_after_move(db, cleanup, SignInFrom::AppWindow);
         Ok(Unlocked(Arc::new(keys)))
     }
 
     /// Delete what a move copied from, once the vault row is committed and
     /// verified: `vault.json` and `vault.next.json` at once, keychain
     /// entries once (`pending` -> `done`, or `failed`: never retried, the
-    /// keychain is not touched again). `secrets.dat` goes after the stored
-    /// rows it encrypted without associated data are re-encrypted
-    /// (`finish_legacy_migration`). Failures are logged: the vault works
-    /// either way.
-    fn tidy_after_move(&self, db: &SqliteDb, cleanup: KeychainCleanup) {
+    /// keychain is not touched again), and only at a sign-in in the app
+    /// window, the one place a keychain prompt belongs. `secrets.dat` goes
+    /// after the stored rows it encrypted without associated data are
+    /// re-encrypted (`finish_legacy_migration`). Failures are logged: the
+    /// vault works either way.
+    fn tidy_after_move(&self, db: &SqliteDb, cleanup: KeychainCleanup, from: SignInFrom) {
         let mut removed = false;
         for name in [VAULT_FILE, VAULT_NEXT_FILE] {
             let p = self.data_dir.join(name);
@@ -570,7 +780,7 @@ impl SecurityManager {
         if removed {
             fsperm::sync_dir(&self.data_dir);
         }
-        if cleanup != KeychainCleanup::Pending {
+        if cleanup != KeychainCleanup::Pending || from != SignInFrom::AppWindow {
             return;
         }
         let deleted = self
@@ -583,10 +793,8 @@ impl SecurityManager {
                 KeychainCleanup::Done
             }
             Err(e) => {
-                tracing::warn!(
-                    "Could not delete the old keychain entries ({}); they are left unused",
-                    e
-                );
+                tracing::warn!("Could not delete the old keychain entries; they are left unused");
+                tracing::info!("System keychain: {}", e);
                 KeychainCleanup::Failed
             }
         };
@@ -900,11 +1108,10 @@ struct VaultFile {
     ciphertext: String,
 }
 
-/// The keys in an earlier build's vault file at `path`, or None when
-/// `password` does not open it.
-fn open_vault_file(path: &Path, password: &str) -> Result<Option<Keys>> {
+/// An earlier build's vault file at `path`, checked without a password.
+fn read_vault_file(path: &Path) -> Result<VaultRow> {
     let damaged = || AppError::Encryption("vault file is damaged".into());
-    let raw = std::fs::read(path)?;
+    let raw = zeroize::Zeroizing::new(std::fs::read(path)?);
     let vault: VaultFile = serde_json::from_slice(&raw).map_err(|_| damaged())?;
     let row = VaultRow::new(
         key_vault::Wrapped {
@@ -915,10 +1122,8 @@ fn open_vault_file(path: &Path, password: &str) -> Result<Option<Keys>> {
         Source::VaultFile,
         KeychainCleanup::None,
     );
-    match key_vault::unwrap(&row, password)? {
-        Some((k, p)) => Ok(Some(Keys::new(k, p)?)),
-        None => Ok(None),
-    }
+    key_vault::check(&row)?;
+    Ok(row)
 }
 
 /// The test harness's keys, kept in its in-memory store (made on first
@@ -926,7 +1131,7 @@ fn open_vault_file(path: &Path, password: &str) -> Result<Option<Keys>> {
 fn harness_keys(store: &dyn KeyStore) -> Result<Keys> {
     let get = |n: &str| store.get(n).map_err(|e| AppError::Keychain(e.to_string()));
     if let (Some(k), Some(p)) = (get(DATA_KEY)?, get(PEPPER)?) {
-        return Keys::new(decode_b64(&k)?, decode_b64(&p)?);
+        return Keys::new(decode_b64(k.expose())?, decode_b64(p.expose())?);
     }
     let keys = Keys::random()?;
     let set = |n: &str, v: &[u8]| {
@@ -958,6 +1163,17 @@ pub fn write_vault_file_for_test(path: &Path, keys: &Unlocked, password: &str) {
         "ciphertext": w.ciphertext,
     });
     std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+}
+
+#[cfg(test)]
+impl Unlocked {
+    /// Keys with the same pepper and another data key: what a password
+    /// opens when its keys belong to other data.
+    pub fn with_another_data_key(&self) -> Unlocked {
+        Unlocked(Arc::new(
+            Keys::new(crypto::generate_key(), self.0.pepper.clone()).unwrap(),
+        ))
+    }
 }
 
 /// Test helper: an earlier build's keychain entries for `keys`.
@@ -1005,11 +1221,11 @@ mod tests {
             Source::Setup
         );
         drop(conn);
-        let opened = m.open_for_sign_in(&db, "trader", "First@123").unwrap();
+        let opened = m.open_for_sign_in(&db, "trader", "First@123", SignInFrom::AppWindow);
         assert!(matches!(opened, Opened::Keys(_)));
         assert!(!m.is_unlocked(), "a sign-in's password step installed keys");
         assert!(matches!(
-            m.open_for_sign_in(&db, "trader", "Wrong@123").unwrap(),
+            m.open_for_sign_in(&db, "trader", "Wrong@123", SignInFrom::AppWindow),
             Opened::WrongPassword
         ));
         assert_eq!(store.calls(), 0, "the keychain was called");
@@ -1033,7 +1249,9 @@ mod tests {
             m.encrypt("x", &Aad::fixed("x")),
             Err(AppError::Locked)
         ));
-        let Opened::Keys(keys) = m.open_for_sign_in(&db, "trader", "First@123").unwrap() else {
+        let Opened::Keys(keys) =
+            m.open_for_sign_in(&db, "trader", "First@123", SignInFrom::Elsewhere)
+        else {
             panic!("the password did not open the vault")
         };
         m.install(&keys);
@@ -1055,6 +1273,157 @@ mod tests {
         m.lock();
         assert_eq!(m.issue_if_current(epoch, || ()), None);
         assert_eq!(m.issue_if_current(m.credentials_epoch(), || 1), Some(1));
+    }
+
+    /// An earlier build's install: the account and its encrypted TOTP
+    /// secret written with `keys`, and no vault row.
+    fn earlier_install(dir: &Path, keys: &Unlocked) -> SqliteDb {
+        let db = db(dir);
+        let with = keys.manager();
+        let hash = with.hash_password(PW).unwrap();
+        user::insert(
+            &db.conn().unwrap(),
+            &with,
+            "trader",
+            "t@example.com",
+            &hash,
+            "SECRET",
+        )
+        .unwrap();
+        db
+    }
+
+    const PW: &str = "First@123";
+
+    /// KEY-01 security review: every sign-in costs the same Argon2 work,
+    /// whatever it finds, so its timing tells neither the name nor the
+    /// password nor the state of the keys: two runs (open the vault, check
+    /// the hash), two per vault file an earlier build left. Checked for a
+    /// name that is not the account's, a wrong password and, where nothing
+    /// can be proven, the right one; with the vault, a damaged vault, keys
+    /// still in an earlier build's keychain (from the app window and from
+    /// anywhere else, readable and locked), `vault.json` (with and without
+    /// `vault.next.json`) and `secrets.dat`.
+    #[test]
+    fn every_sign_in_costs_the_same_work_whatever_it_finds() {
+        use SignInFrom::{AppWindow, Elsewhere};
+        // The stand-in hash is made once per process: make it now.
+        hashing::stand_in_password_check("warm up");
+        let check = |m: &SecurityManager,
+                     db: &SqliteDb,
+                     what: &str,
+                     tries: &[(&str, &str, SignInFrom)],
+                     runs: u32,
+                     expect: &dyn Fn(&Opened) -> bool| {
+            for (name, password, from) in tries {
+                let since = hashing::argon2_runs();
+                let opened = m.open_for_sign_in(db, name, password, *from);
+                let spent = hashing::argon2_runs() - since;
+                assert!(
+                    expect(&opened),
+                    "{}: {} {:?}: {:?}",
+                    what,
+                    name,
+                    from,
+                    opened
+                );
+                assert_eq!(spent, runs, "{}: {} {:?} {:?}", what, name, from, opened);
+            }
+        };
+        let wrong = |o: &Opened| matches!(o, Opened::WrongPassword);
+        let not_proven = [
+            ("someone", PW, AppWindow),
+            ("trader", "Wrong@123", AppWindow),
+            ("someone", PW, Elsewhere),
+            ("trader", "Wrong@123", Elsewhere),
+        ];
+        let anything = [
+            ("trader", PW, AppWindow),
+            ("trader", PW, Elsewhere),
+            ("trader", "Wrong@123", AppWindow),
+            ("someone", PW, Elsewhere),
+        ];
+
+        // The vault.
+        let dir = tempfile::tempdir().unwrap();
+        let m = SecurityManager::open(dir.path(), Arc::new(CountingKeyStore::default())).unwrap();
+        let vdb = db(dir.path());
+        m.create_account(&vdb, PW, |conn, with| {
+            let hash = with.hash_password(PW)?;
+            user::insert(conn, with, "trader", "t@example.com", &hash, "SECRET")?;
+            Ok(())
+        })
+        .unwrap();
+        check(&m, &vdb, "vault", &not_proven, 2, &wrong);
+        check(&m, &vdb, "vault", &[("trader", PW, Elsewhere)], 2, &|o| {
+            matches!(o, Opened::Keys(_))
+        });
+        // A damaged vault.
+        vdb.conn()
+            .unwrap()
+            .execute("UPDATE key_vault SET nonce = 'AAAA'", [])
+            .unwrap();
+        check(&m, &vdb, "damaged vault", &anything, 2, &|o| {
+            matches!(o, Opened::Unreadable(AppError::VaultUnreadable))
+        });
+
+        // Keys still in an earlier build's keychain.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Unlocked::random().unwrap();
+        let kdb = earlier_install(dir.path(), &keys);
+        let store = Arc::new(CountingKeyStore::default());
+        let (k, p) = keychain_entries_for_test(&keys);
+        store.seed(DATA_KEY, &k);
+        store.seed(PEPPER, &p);
+        let m = SecurityManager::open(dir.path(), store.clone()).unwrap();
+        let elsewhere = [
+            ("trader", PW, Elsewhere),
+            ("trader", "Wrong@123", Elsewhere),
+            ("someone", PW, Elsewhere),
+        ];
+        check(&m, &kdb, "keychain, elsewhere", &elsewhere, 2, &|o| {
+            matches!(o, Opened::MoveInAppWindow)
+        });
+        assert_eq!(store.calls(), 0, "a sign-in elsewhere read the keychain");
+        check(
+            &m,
+            &kdb,
+            "keychain, app window",
+            &not_proven[..2],
+            2,
+            &wrong,
+        );
+        store.inner.set_unavailable(true);
+        check(
+            &m,
+            &kdb,
+            "keychain locked",
+            &[
+                ("trader", PW, AppWindow),
+                ("trader", "Wrong@123", AppWindow),
+                ("someone", PW, AppWindow),
+            ],
+            2,
+            &|o| matches!(o, Opened::Unreadable(AppError::KeychainUnavailable)),
+        );
+
+        // vault.json, then vault.next.json beside it.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Unlocked::random().unwrap();
+        let fdb = earlier_install(dir.path(), &keys);
+        write_vault_file_for_test(&dir.path().join(VAULT_FILE), &keys, PW);
+        let m = SecurityManager::open(dir.path(), Arc::new(CountingKeyStore::default())).unwrap();
+        check(&m, &fdb, "vault.json", &not_proven[..2], 2, &wrong);
+        write_vault_file_for_test(&dir.path().join(VAULT_NEXT_FILE), &keys, "Next@1234");
+        check(&m, &fdb, "two vault files", &not_proven[..2], 4, &wrong);
+
+        // secrets.dat.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Unlocked::random().unwrap();
+        let ldb = earlier_install(dir.path(), &keys);
+        legacy::write_for_test(dir.path(), keys.0.raw_key.expose(), keys.0.pepper.expose());
+        let m = SecurityManager::open(dir.path(), Arc::new(CountingKeyStore::default())).unwrap();
+        check(&m, &ldb, "secrets.dat", &not_proven[..2], 2, &wrong);
     }
 
     #[test]

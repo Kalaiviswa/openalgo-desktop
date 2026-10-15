@@ -3,7 +3,7 @@
 
 use crate::db::sqlite::{api_keys, auth, credentials, user};
 use crate::error::{AppError, Result};
-use crate::security::{totp, Opened, Secret, SecurityManager, Unlocked};
+use crate::security::{totp, Opened, Secret, SecurityManager, SignInFrom, Unlocked};
 use crate::state::AppState;
 
 /// The answer to a wrong current password on a password change.
@@ -13,9 +13,9 @@ pub const WRONG_CURRENT_PASSWORD: &str = "Current password is incorrect";
 pub const PASSWORD_CHANGED_MEANWHILE: &str =
     "Your password was changed while this change was being saved. Sign in with the new password and try again.";
 
-/// How many sign-ins were checked against the stand-in hash (tests read
-/// it to see the unknown-name path ran the same work).
-pub static STAND_IN_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How many stand-in password checks ran (tests read it to see the
+/// unknown-name path ran the same work).
+pub use crate::security::hashing::STAND_IN_CHECKS;
 
 /// Same rules and messages as the web's `validate_password_strength`.
 pub fn validate_password_strength(password: &str) -> std::result::Result<(), &'static str> {
@@ -57,11 +57,32 @@ fn valid_email(email: &str) -> bool {
 /// with it: they are installed only with the signed-in session
 /// (`SecurityManager::install`, inside `issue_if_current`), so a sign-in
 /// still waiting for its authenticator code unlocks nothing (KEY-01).
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Only `Success` and `TotpRequired` prove the password. The route answers
+/// every other outcome with "Invalid credentials" to anyone but the app
+/// window (KEY-01 security review); see `Opened` for what each means.
+#[derive(Debug)]
 pub enum LoginOutcome {
     Success(String, Unlocked),
     TotpRequired(String, Unlocked),
     Invalid,
+    /// An earlier build's keys still have to move: only a sign-in in the
+    /// app window moves them. The same for every name and password.
+    MoveInAppWindow,
+    /// The keys cannot be read, whatever was typed.
+    Unreadable(AppError),
+    /// The password was proven, then something after it failed.
+    FailedAfterProof(AppError),
+}
+
+impl LoginOutcome {
+    /// Whether the password was proven and a session may follow.
+    pub fn signed_in(&self) -> bool {
+        matches!(
+            self,
+            LoginOutcome::Success(..) | LoginOutcome::TotpRequired(..)
+        )
+    }
 }
 
 pub struct AuthService;
@@ -109,67 +130,60 @@ impl AuthService {
     /// installs no keys: the keys the password opened come back in the
     /// outcome, for the caller to install with the session.
     ///
-    /// The first sign-in of an install from an earlier build moves its keys
-    /// into openalgo.db (`SecurityManager::open_for_sign_in`): from the OS
-    /// keychain (the one last read), `vault.json` or `secrets.dat`. That can
-    /// fail with `KeychainUnavailable` (retry or start fresh),
-    /// `KeysDoNotMatch` or `VaultUnreadable` (start fresh).
+    /// The first sign-in in the app window of an install from an earlier
+    /// build moves its keys into openalgo.db
+    /// (`SecurityManager::open_for_sign_in`): from the OS keychain (the one
+    /// last read), `vault.json` or `secrets.dat`. Every way it can fail, and
+    /// how much a caller may be told, is in `LoginOutcome`.
     pub fn verify_credentials(
         state: &AppState,
         username: &str,
         password: &str,
-    ) -> Result<LoginOutcome> {
-        let row = {
-            let conn = state.sqlite.conn()?;
-            user::find_by_username(&conn, username)?
-        };
-        let Some(row) = row else {
-            // A name that is not the account's costs what the account's
-            // name costs: opening a vault and checking a hash, both with
-            // the account's Argon2 parameters (KEY-01: two runs, as for a
-            // right or a wrong password). The same work, the same answer
-            // and (in the caller) the same budget as a wrong password, so
-            // nothing tells which names exist. The keychain of an earlier
-            // build is never read for it.
-            STAND_IN_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::security::hashing::stand_in_vault_open(password);
-            crate::security::hashing::stand_in_password_check(password);
-            return Ok(LoginOutcome::Invalid);
-        };
+        from: SignInFrom,
+    ) -> LoginOutcome {
         #[cfg(test)]
         test_hooks::after_account_read(state);
         // The password must open the vault and match the stored hash, read
-        // again under the lock a password change holds (SEC-02).
+        // under the lock a password change holds (SEC-02). Every way out
+        // before that costs the same work and says nothing about the name
+        // or the password (KEY-01 security review).
         let keys = match state
             .security
-            .open_for_sign_in(&state.sqlite, &row.username, password)?
+            .open_for_sign_in(&state.sqlite, username, password, from)
         {
             Opened::Keys(k) => k,
-            Opened::WrongPassword => return Ok(LoginOutcome::Invalid),
+            Opened::WrongPassword => return LoginOutcome::Invalid,
+            Opened::MoveInAppWindow => return LoginOutcome::MoveInAppWindow,
+            Opened::Unreadable(e) => return LoginOutcome::Unreadable(e),
+            Opened::FailedAfterProof(e) => return LoginOutcome::FailedAfterProof(e),
         };
-        let with = keys.manager();
-        // Rows an early build stored without associated data are
-        // re-encrypted now that the keys are open (a no-op once done).
-        crate::db::sqlite::data_migrations::run(&state.sqlite, &with)?;
-        state.security.finish_legacy_migration(&state.sqlite)?;
-        Self::ensure_totp_secret(state, &with, &row)?;
-        if row.is_totp_required_for("login") {
-            Ok(LoginOutcome::TotpRequired(row.username, keys))
-        } else {
-            Ok(LoginOutcome::Success(row.username, keys))
+        match Self::after_proof(state, username, &keys) {
+            Ok((name, true)) => LoginOutcome::TotpRequired(name, keys),
+            Ok((name, false)) => LoginOutcome::Success(name, keys),
+            Err(e) => {
+                tracing::error!("Sign-in failed after the password was checked: {}", e);
+                LoginOutcome::FailedAfterProof(e)
+            }
         }
     }
 
-    /// Whether the keys of an earlier build still have to move into
-    /// openalgo.db (keychain, `vault.json` or `secrets.dat`): an account
-    /// exists and no vault row does. Read from the database and the folder
-    /// only; never from the keychain.
-    pub fn keys_must_move(state: &AppState) -> Result<bool> {
-        let conn = state.sqlite.conn()?;
-        Ok(!matches!(
-            state.security.key_source(&conn)?,
-            crate::security::KeySource::Vault | crate::security::KeySource::NoAccount
-        ))
+    /// The steps of a sign-in once the password is proven: rows an early
+    /// build stored without associated data are re-encrypted (a no-op once
+    /// done), `secrets.dat` goes, and an account from an earlier desktop
+    /// build gets its TOTP secret. Returns the account's name and whether
+    /// it needs the authenticator code.
+    fn after_proof(state: &AppState, username: &str, keys: &Unlocked) -> Result<(String, bool)> {
+        let row = {
+            let conn = state.sqlite.conn()?;
+            user::find_by_username(&conn, username)?
+        }
+        .ok_or_else(|| AppError::Internal("the account went away during its sign-in".into()))?;
+        let with = keys.manager();
+        crate::db::sqlite::data_migrations::run(&state.sqlite, &with)?;
+        state.security.finish_legacy_migration(&state.sqlite)?;
+        Self::ensure_totp_secret(state, &with, &row)?;
+        let totp = row.is_totp_required_for("login");
+        Ok((row.username, totp))
     }
 
     /// Accounts created by earlier desktop builds have no TOTP secret.

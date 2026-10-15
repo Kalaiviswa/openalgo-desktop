@@ -431,6 +431,38 @@ export async function startFreshFromDesktop(
   }
 }
 
+// ============================================================================
+// The app window's proof (KEY-01)
+// ============================================================================
+
+/** The header the app window's sign-in carries its proof in. */
+export const WINDOW_PROOF_HEADER = 'X-OpenAlgo-Window'
+
+let windowProof: Promise<string | null> | null = null
+
+/**
+ * Headers that show a sign-in comes from the OpenAlgo Desktop window. The
+ * server cannot tell the window from a browser tab on the same computer, so
+ * the window asks the desktop shell for a proof only it can get (new at
+ * every start) and sends it with the password. Only such a sign-in moves an
+ * earlier build's keys and is told why keys could not be opened. A browser
+ * tab sends nothing and gets the ordinary answers.
+ */
+export async function appWindowHeaders(): Promise<Record<string, string>> {
+  if (!isDesktopShell()) return {}
+  windowProof ??= invoke<string>('window_proof').catch(() => {
+    windowProof = null
+    return null
+  })
+  const proof = await windowProof
+  return proof ? { [WINDOW_PROOF_HEADER]: proof } : {}
+}
+
+/** Forget the cached proof (tests). */
+export function resetWindowProofForTests(): void {
+  windowProof = null
+}
+
 /** What the sign-in answers when the keys of an earlier build cannot be read. */
 export type KeyRecovery = 'retry_keychain' | 'start_fresh'
 

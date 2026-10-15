@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { type KeyRecovery, keyRecoveryOf } from '@/lib/desktop'
+import { appWindowHeaders, type KeyRecovery, keyRecoveryOf } from '@/lib/desktop'
 import { useAuthStore } from '@/stores/authStore'
 import { showToast } from '@/utils/toast'
 
@@ -114,6 +114,10 @@ export default function Login() {
         method: 'POST',
         body: formData,
         credentials: 'include',
+        // Desktop: the OpenAlgo window shows it is the window, so it alone
+        // moves an earlier build's keys and hears why they could not be
+        // opened (KEY-01). A browser tab sends nothing.
+        headers: await appWindowHeaders(),
       })
 
       // Check content type before parsing

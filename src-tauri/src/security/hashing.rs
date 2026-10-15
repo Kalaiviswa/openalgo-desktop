@@ -15,7 +15,6 @@ pub const PEPPER_SIZE: usize = 32;
 /// OWASP baseline for Argon2id. Parameters are stored in the PHC string, so
 /// verification of older hashes keeps working if these change.
 fn argon2() -> Result<Argon2<'static>> {
-    #[cfg(test)]
     ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let params = Params::new(19456, 2, 1, None)
         .map_err(|e| AppError::Internal(format!("argon2 params: {}", e)))?;
@@ -26,9 +25,15 @@ fn argon2() -> Result<Argon2<'static>> {
     ))
 }
 
-fn peppered(pepper: &[u8], password: &str) -> String {
-    let pepper_b64 = base64::engine::general_purpose::STANDARD.encode(pepper);
-    format!("{}{}", password, pepper_b64)
+/// The password with the pepper appended, as the web hashes it. Zeroed when
+/// dropped: it holds both secrets in the clear.
+fn peppered(pepper: &[u8], password: &str) -> zeroize::Zeroizing<String> {
+    let pepper_b64 =
+        zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(pepper));
+    let mut s = zeroize::Zeroizing::new(String::with_capacity(password.len() + pepper_b64.len()));
+    s.push_str(password);
+    s.push_str(&pepper_b64);
+    s
 }
 
 pub fn hash_password(pepper: &[u8], password: &str) -> Result<String> {
@@ -40,7 +45,6 @@ pub fn hash_password(pepper: &[u8], password: &str) -> Result<String> {
 }
 
 pub fn verify_password(pepper: &[u8], password: &str, hash: &str) -> Result<bool> {
-    #[cfg(test)]
     ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let parsed = PasswordHash::new(hash)
         .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
@@ -75,11 +79,32 @@ pub fn derive_kek(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-#[cfg(test)]
 thread_local! {
-    /// Argon2 runs on this thread (tests: a sign-in costs the same whatever
-    /// it finds).
+    /// Argon2 runs on this thread: a sign-in (which runs on one blocking
+    /// thread) pads its work to the same count whatever it finds
+    /// ([`pad_argon2_runs`]), and the tests read it.
     pub static ARGON2_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Argon2 runs on this thread so far.
+pub fn argon2_runs() -> u32 {
+    ARGON2_RUNS.with(|n| n.get())
+}
+
+/// Spend stand-in Argon2 runs until this thread has run `target` since
+/// `since` (an earlier [`argon2_runs`]). A sign-in calls it on every way
+/// out, so a wrong password, a name that is not the account's and keys that
+/// cannot be read all cost what checking a password costs: no early answer
+/// before Argon2 tells them apart (KEY-01 security review).
+pub fn pad_argon2_runs(since: u32, target: u32, password: &str) {
+    while argon2_runs().wrapping_sub(since) < target {
+        stand_in_password_check(password);
+    }
+}
+
+/// Whether `hash` is a password hash this build can check (a PHC string).
+pub fn hash_is_readable(hash: &str) -> bool {
+    PasswordHash::new(hash).is_ok()
 }
 
 /// A random pepper per process for the stand-in checks: it guards
@@ -105,26 +130,19 @@ fn stand_in_hash() -> &'static str {
 }
 
 /// The work of checking `password` against the account's password hash,
-/// spent where there is no hash to check it against (a name that is not
-/// the account's) or where the check is already decided (a password that
-/// did not open the key vault), so that every sign-in costs the same and
-/// its timing tells nothing about the name or the password (KEY-01).
+/// spent where a sign-in has no hash to check or no vault to open (a name
+/// that is not the account's, a password that did not open the vault, keys
+/// that cannot be read), so that every sign-in costs the same and its
+/// timing tells nothing about the name or the password (KEY-01; see
+/// [`pad_argon2_runs`]).
 pub fn stand_in_password_check(password: &str) {
+    STAND_IN_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = verify_password(stand_in_pepper(), password, stand_in_hash());
 }
 
-/// The work of opening the key vault with `password` (the key-encryption
-/// key's Argon2id), spent where there is no vault to open, for the same
-/// reason.
-pub fn stand_in_vault_open(password: &str) {
-    static SALT: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
-    let salt = SALT.get_or_init(|| {
-        let mut s = [0u8; 16];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut s);
-        s
-    });
-    let _ = derive_kek(password, salt).map(|mut k| zeroize::Zeroize::zeroize(&mut k));
-}
+/// How many stand-in checks ran (tests read it to see a path that found no
+/// hash to check still did the work).
+pub static STAND_IN_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {

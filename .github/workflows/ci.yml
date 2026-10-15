@@ -125,7 +125,8 @@ jobs:
           cargo nextest run --locked --lib --config-file ../.github/nextest.toml
           --profile key01 --no-tests=fail
           -E 'test(/^server::tests::key_vault::/) | test(/^security::tests::/)
-          | test(/^security::keystore::tests::/) | test(/^db::sqlite::key_vault::/)
+          | test(/^security::keystore::tests::/) | test(/^security::window::tests::/)
+          | test(/^db::sqlite::key_vault::/) | test(=error::tests::key_and_os_errors_never_reach_an_answer)
           | test(/^server::tests::credentials_lifecycle::sec0[234]/)
           | test(=db::sqlite::data_migrations::tests::upgrade_from_previous_build_keeps_every_secret_readable)
           | test(/^cache::tests::/) | test(/^services::apikey_service::tests::/)'
