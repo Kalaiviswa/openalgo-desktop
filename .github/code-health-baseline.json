@@ -65,7 +65,6 @@
     "src-tauri/src/brokers/families/noren/auth.rs::authenticate": 101,
     "src-tauri/src/brokers/families/noren/data.rs::get_history": 129,
     "src-tauri/src/brokers/groww/data.rs::ohlc_batch": 101,
-    "src-tauri/src/brokers/hdfcsecurities/streaming.rs::parse_packet": 103,
     "src-tauri/src/brokers/iiflcapital/data.rs::get_multiquotes": 105,
     "src-tauri/src/brokers/iiflcapital/mqtt_relay.rs::serve": 164,
     "src-tauri/src/brokers/kotak/streaming.rs::decode_packet": 134,

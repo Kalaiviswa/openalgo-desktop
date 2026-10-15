@@ -222,61 +222,67 @@ pub fn parse_packet(p: &GenericDto) -> Option<Packet> {
             out.oi = m.oi;
             Some(out)
         }
-        _ => {
-            let is_quote = matches!(
-                ty,
-                pt::NSE_CM_ALL
-                    | pt::NSE_CD_ALL
-                    | pt::NSE_FO_ALL
-                    | pt::BSE_CM
-                    | pt::BSE_FO_ALL
-                    | pt::MCX_PKT
-            );
-            let m = match (&p.mbp_data, is_quote) {
-                (Some(m), _) => m.clone(),
-                (None, true) => Default::default(),
-                (None, false) => return None,
-            };
-            let mut out = Packet::empty(p.instrument_id, ex, Kind::Mbp, ts);
-            out.ltp = m.last_traded_price;
-            out.open = m.open_price;
-            out.high = m.high_price;
-            out.low = m.low_price;
-            out.close = m.closing_price;
-            out.volume = m.volume_traded_today;
-            out.ltq = m.last_trade_quantity;
-            out.average_price = m.average_trade_price;
-            out.total_buy_quantity = m.total_buy_quantity;
-            out.total_sell_quantity = m.total_sell_quantity;
-            out.oi = m.oi;
-            out.lower_limit = m.lower_circuit_limit;
-            out.upper_limit = m.upper_circuit_limit;
-            out.ltt = m.last_trade_time;
-            let (mut buy, mut sell) = (Vec::new(), Vec::new());
-            for l in m
-                .market_depth_dto_list
-                .map(|d| d.market_depth_dto)
-                .unwrap_or_default()
-            {
-                let level = DepthLevel {
-                    price: l.price,
-                    quantity: l.quantity,
-                    orders: l.number_of_orders,
-                };
-                if l.buy_flag {
-                    buy.push(level);
-                } else {
-                    sell.push(level);
-                }
-            }
-            if !buy.is_empty() || !sell.is_empty() {
-                buy.truncate(5);
-                sell.truncate(5);
-                out.depth = Some((buy, sell));
-            }
-            Some(out)
+        _ => mbp_packet(p, ex, ts),
+    }
+}
+
+/// A market-by-price packet: the trade fields, limits and up to five
+/// depth levels a side. A packet type that is not a quote needs its MBP
+/// data.
+fn mbp_packet(p: &GenericDto, ex: Option<&'static str>, ts: i64) -> Option<Packet> {
+    let ty = p.packet_type;
+    let is_quote = matches!(
+        ty,
+        pt::NSE_CM_ALL
+            | pt::NSE_CD_ALL
+            | pt::NSE_FO_ALL
+            | pt::BSE_CM
+            | pt::BSE_FO_ALL
+            | pt::MCX_PKT
+    );
+    let m = match (&p.mbp_data, is_quote) {
+        (Some(m), _) => m.clone(),
+        (None, true) => Default::default(),
+        (None, false) => return None,
+    };
+    let mut out = Packet::empty(p.instrument_id, ex, Kind::Mbp, ts);
+    out.ltp = m.last_traded_price;
+    out.open = m.open_price;
+    out.high = m.high_price;
+    out.low = m.low_price;
+    out.close = m.closing_price;
+    out.volume = m.volume_traded_today;
+    out.ltq = m.last_trade_quantity;
+    out.average_price = m.average_trade_price;
+    out.total_buy_quantity = m.total_buy_quantity;
+    out.total_sell_quantity = m.total_sell_quantity;
+    out.oi = m.oi;
+    out.lower_limit = m.lower_circuit_limit;
+    out.upper_limit = m.upper_circuit_limit;
+    out.ltt = m.last_trade_time;
+    let (mut buy, mut sell) = (Vec::new(), Vec::new());
+    for l in m
+        .market_depth_dto_list
+        .map(|d| d.market_depth_dto)
+        .unwrap_or_default()
+    {
+        let level = DepthLevel {
+            price: l.price,
+            quantity: l.quantity,
+            orders: l.number_of_orders,
+        };
+        if l.buy_flag {
+            buy.push(level);
+        } else {
+            sell.push(level);
         }
     }
+    if !buy.is_empty() || !sell.is_empty() {
+        buy.truncate(5);
+        sell.truncate(5);
+        out.depth = Some((buy, sell));
+    }
+    Some(out)
 }
 
 /// Decode a binary frame: `GenericDTOList`, or a bare `GenericDTO`.
