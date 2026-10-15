@@ -35,7 +35,6 @@
   },
   "rust_files": {},
   "rust_functions": {
-    "src-tauri/src/strategy/engine/exits.rs::exit_legs": 261,
     "src-tauri/src/strategy/engine/fills.rs::apply_fill_inner": 241,
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338
   }
