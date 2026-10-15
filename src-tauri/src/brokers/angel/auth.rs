@@ -11,12 +11,12 @@ use serde_json::json;
 pub const LOGIN_PATH: &str = "/rest/auth/angelbroking/user/v1/loginByPassword";
 
 #[derive(Deserialize)]
-#[allow(non_snake_case)]
+#[serde(rename_all = "camelCase")]
 struct LoginData {
     #[serde(default, deserialize_with = "string_lenient")]
-    jwtToken: String,
+    jwt_token: String,
     #[serde(default, deserialize_with = "string_lenient")]
-    feedToken: String,
+    feed_token: String,
 }
 
 pub async fn authenticate(b: &AngelBroker, creds: BrokerCredentials) -> Result<AuthResponse> {
@@ -61,10 +61,10 @@ pub async fn authenticate(b: &AngelBroker, creds: BrokerCredentials) -> Result<A
         };
     // web: success is `data.jwtToken` being present.
     match env.data {
-        Some(d) if !d.jwtToken.is_empty() => Ok(AuthResponse {
+        Some(d) if !d.jwt_token.is_empty() => Ok(AuthResponse {
             // Stored as `api_key:jwt` so every call can send X-PrivateKey.
-            auth_token: format!("{}:{}", creds.api_key, d.jwtToken),
-            feed_token: (!d.feedToken.is_empty()).then_some(d.feedToken),
+            auth_token: format!("{}:{}", creds.api_key, d.jwt_token),
+            feed_token: (!d.feed_token.is_empty()).then_some(d.feed_token),
             user_id: client_id,
             user_name: None,
         }),

@@ -39,15 +39,14 @@ pub struct AngelDepth {
 
 /// One `fetched[]` row of a FULL-mode quote.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-#[allow(non_snake_case)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AngelQuote {
     #[serde(deserialize_with = "string_lenient")]
     pub exchange: String,
     #[serde(deserialize_with = "string_lenient")]
-    pub tradingSymbol: String,
+    pub trading_symbol: String,
     #[serde(deserialize_with = "string_lenient")]
-    pub symbolToken: String,
+    pub symbol_token: String,
     #[serde(deserialize_with = "f64_lenient")]
     pub ltp: f64,
     #[serde(deserialize_with = "f64_lenient")]
@@ -59,17 +58,17 @@ pub struct AngelQuote {
     #[serde(deserialize_with = "f64_lenient")]
     pub close: f64,
     #[serde(deserialize_with = "i64_lenient")]
-    pub lastTradeQty: i64,
+    pub last_trade_qty: i64,
     #[serde(deserialize_with = "string_lenient")]
-    pub exchFeedTime: String,
+    pub exch_feed_time: String,
     #[serde(deserialize_with = "i64_lenient")]
-    pub tradeVolume: i64,
+    pub trade_volume: i64,
     #[serde(deserialize_with = "i64_lenient")]
-    pub opnInterest: i64,
+    pub opn_interest: i64,
     #[serde(deserialize_with = "i64_lenient")]
-    pub totBuyQuan: i64,
+    pub tot_buy_quan: i64,
     #[serde(deserialize_with = "i64_lenient")]
-    pub totSellQuan: i64,
+    pub tot_sell_quan: i64,
     pub depth: Option<AngelDepth>,
 }
 
@@ -104,15 +103,15 @@ pub fn to_quote(key: &QuoteKey, q: &AngelQuote) -> Quote {
         high: q.high,
         low: q.low,
         close: q.close,
-        volume: q.tradeVolume,
+        volume: q.trade_volume,
         bid: bid.price,
         ask: ask.price,
         bid_qty: bid.quantity,
         ask_qty: ask.quantity,
-        oi: q.opnInterest,
+        oi: q.opn_interest,
         change: 0.0,
         change_percent: 0.0,
-        timestamp: q.exchFeedTime.clone(),
+        timestamp: q.exch_feed_time.clone(),
     };
     if quote.close > 0.0 {
         quote.change = round2(quote.ltp - quote.close);
@@ -144,15 +143,15 @@ pub fn to_depth(key: &QuoteKey, q: &AngelQuote) -> MarketDepth {
         bids: pad(&d.buy),
         asks: pad(&d.sell),
         ltp: q.ltp,
-        ltq: q.lastTradeQty,
+        ltq: q.last_trade_qty,
         open: q.open,
         high: q.high,
         low: q.low,
         prev_close: q.close,
-        volume: q.tradeVolume,
-        oi: q.opnInterest,
-        total_buy_qty: q.totBuyQuan,
-        total_sell_qty: q.totSellQuan,
+        volume: q.trade_volume,
+        oi: q.opn_interest,
+        total_buy_qty: q.tot_buy_quan,
+        total_sell_qty: q.tot_sell_quan,
     }
 }
 
@@ -184,7 +183,7 @@ async fn fetch(
         .fetched
         .unwrap_or_default()
         .into_iter()
-        .map(|q| (format!("{}:{}", q.exchange, q.symbolToken), q))
+        .map(|q| (format!("{}:{}", q.exchange, q.symbol_token), q))
         .collect())
 }
 

@@ -34,8 +34,6 @@
   },
   "handler_db_access": {},
   "lint_allows": {
-    "src-tauri/src/brokers/angel/auth.rs::non_snake_case": 1,
-    "src-tauri/src/brokers/angel/data.rs::non_snake_case": 1,
     "src-tauri/src/brokers/hdfcsecurities/proto.rs::clippy::derive_partial_eq_without_eq": 1,
     "src-tauri/src/brokers/hdfcsky/proto.rs::clippy::derive_partial_eq_without_eq": 1,
     "src-tauri/src/brokers/nubra/proto.rs::clippy::derive_partial_eq_without_eq": 1,
