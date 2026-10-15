@@ -133,7 +133,6 @@
     "src-tauri/src/services/order_service.rs::place_smart_order": 123,
     "src-tauri/src/services/pnl_tracker_service.rs::compute": 374,
     "src-tauri/src/services/sandbox_export_service.rs::export": 184,
-    "src-tauri/src/services/system_info.rs::system_payload": 122,
     "src-tauri/src/services/ui_order_service.rs::close_position": 108,
     "src-tauri/src/strategy/book.rs::apply_fill_locked": 126,
     "src-tauri/src/strategy/engine.rs::apply_fill_inner": 241,

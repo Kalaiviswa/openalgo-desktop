@@ -277,71 +277,15 @@ pub fn system_payload(
     active_broker: Option<String>,
     user_logged_in: bool,
 ) -> Value {
-    let cfg = ctx.server_config();
-    // The feed's limits: `feed::config_from` builds the running feed on these
-    // defaults and sets only its address and handshake policy.
-    let feed = crate::feed::FeedConfig::default();
     let analyze = ctx.sqlite.get_analyze_mode().ok();
-    let distro = if cfg!(target_os = "linux") {
-        json!({
-            "name": sysinfo::System::name(),
-            "id": sysinfo::System::distribution_id(),
-            "version_id": sysinfo::System::os_version(),
-        })
-    } else {
-        Value::Null
-    };
-    let rpi = is_raspberry_pi();
     let now = ctx.now();
-    let creds = ctx
-        .sqlite
-        .conn()
-        .ok()
-        .and_then(|c| {
-            let mut st = c
-                .prepare("SELECT broker_id FROM broker_credentials ORDER BY broker_id")
-                .ok()?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))
-                .ok()?
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>();
-            Some(v)
-        })
-        .unwrap_or_default();
-    let mut secrets = Map::new();
-    secrets.insert("Broker credentials saved".into(), json!(!creds.is_empty()));
-    secrets.insert(
-        "API key created".into(),
-        json!(crate::services::apikey_service::ApiKeyService::current(ctx)
-            .ok()
-            .flatten()
-            .is_some()),
-    );
-    let mut strength = Map::new();
-    strength.insert("Keys locked with your login password".into(), json!(true));
-    strength.insert(
-        "Keys open (signed in)".into(),
-        json!(ctx.security.is_unlocked()),
-    );
+    let creds = configured_brokers(ctx);
     json!({
         "mode": {
             "analyze_mode": analyze,
             "label": match analyze { Some(true) => "ANALYZE", Some(false) => "LIVE", None => "UNKNOWN" },
         },
-        "host": {
-            "system": std::env::consts::OS,
-            "release": sysinfo::System::kernel_version(),
-            "version": sysinfo::System::long_os_version(),
-            "machine": std::env::consts::ARCH,
-            "platform": format!("{} {}", sysinfo::System::long_os_version().unwrap_or_default(), std::env::consts::ARCH).trim().to_string(),
-            "distro": distro,
-            "in_docker": false,
-            "is_raspberry_pi": rpi.is_some(),
-            "rpi_model": rpi,
-            "is_termux": false,
-            "is_android": false,
-        },
+        "host": host_json(),
         "runtime": {
             "wsgi_hint": "desktop",
             "worker_class": "OpenAlgo Desktop",
@@ -359,28 +303,7 @@ pub fn system_payload(
             "git_commit": Value::Null,
             "frontend_build_time": Value::Null,
         },
-        "config": {
-            "valid_brokers": ctx.brokers.ids(),
-            "log_level": if cfg!(debug_assertions) { "DEBUG" } else { "INFO" },
-            "log_to_file": false,
-            "log_dir": "",
-            "websocket_host": cfg.bind_host,
-            "websocket_port": cfg.ws_port.to_string(),
-            // The web's two keys describe its broker adapter's env defaults
-            // (1000 symbols per upstream socket, 3 sockets). The Diagnostics
-            // page shows them, so they carry what the desktop's feed
-            // enforces: subscriptions (instrument and mode pairs) per client,
-            // and client connections, this computer's pool plus the network's.
-            "max_symbols_per_websocket": feed.max_subscriptions_per_client.to_string(),
-            "max_websocket_connections": (feed.local_connections + feed.max_connections).to_string(),
-            "feed_max_subscriptions_per_client": feed.max_subscriptions_per_client,
-            "feed_max_connections_this_computer": feed.local_connections,
-            "feed_max_connections_network": feed.max_connections,
-            "api_rate_limit": "100 per second",
-            "flask_debug": false,
-            "secrets_present": secrets,
-            "secret_strength": strength,
-        },
+        "config": config_json(ctx, !creds.is_empty()),
         "brokers": {
             "configured_brokers": creds,
             "active_broker": active_broker,
@@ -393,6 +316,98 @@ pub fn system_payload(
             "ist_time": now.with_timezone(&Kolkata).format("%Y-%m-%d %H:%M:%S IST").to_string(),
         },
     })
+}
+
+/// The host: OS, kernel, machine, distribution and Raspberry Pi model.
+fn host_json() -> Value {
+    let distro = if cfg!(target_os = "linux") {
+        json!({
+            "name": sysinfo::System::name(),
+            "id": sysinfo::System::distribution_id(),
+            "version_id": sysinfo::System::os_version(),
+        })
+    } else {
+        Value::Null
+    };
+    let rpi = is_raspberry_pi();
+    json!({
+        "system": std::env::consts::OS,
+        "release": sysinfo::System::kernel_version(),
+        "version": sysinfo::System::long_os_version(),
+        "machine": std::env::consts::ARCH,
+        "platform": format!("{} {}", sysinfo::System::long_os_version().unwrap_or_default(), std::env::consts::ARCH).trim().to_string(),
+        "distro": distro,
+        "in_docker": false,
+        "is_raspberry_pi": rpi.is_some(),
+        "rpi_model": rpi,
+        "is_termux": false,
+        "is_android": false,
+    })
+}
+
+/// The configuration the Diagnostics page shows, with which secrets are
+/// present and how they are kept.
+fn config_json(ctx: &AppState, credentials_saved: bool) -> Value {
+    let cfg = ctx.server_config();
+    // The feed's limits: `feed::config_from` builds the running feed on these
+    // defaults and sets only its address and handshake policy.
+    let feed = crate::feed::FeedConfig::default();
+    let mut secrets = Map::new();
+    secrets.insert("Broker credentials saved".into(), json!(credentials_saved));
+    secrets.insert(
+        "API key created".into(),
+        json!(crate::services::apikey_service::ApiKeyService::current(ctx)
+            .ok()
+            .flatten()
+            .is_some()),
+    );
+    let mut strength = Map::new();
+    strength.insert("Keys locked with your login password".into(), json!(true));
+    strength.insert(
+        "Keys open (signed in)".into(),
+        json!(ctx.security.is_unlocked()),
+    );
+    json!({
+        "valid_brokers": ctx.brokers.ids(),
+        "log_level": if cfg!(debug_assertions) { "DEBUG" } else { "INFO" },
+        "log_to_file": false,
+        "log_dir": "",
+        "websocket_host": cfg.bind_host,
+        "websocket_port": cfg.ws_port.to_string(),
+        // The web's two keys describe its broker adapter's env defaults
+        // (1000 symbols per upstream socket, 3 sockets). The Diagnostics
+        // page shows them, so they carry what the desktop's feed
+        // enforces: subscriptions (instrument and mode pairs) per client,
+        // and client connections, this computer's pool plus the network's.
+        "max_symbols_per_websocket": feed.max_subscriptions_per_client.to_string(),
+        "max_websocket_connections": (feed.local_connections + feed.max_connections).to_string(),
+        "feed_max_subscriptions_per_client": feed.max_subscriptions_per_client,
+        "feed_max_connections_this_computer": feed.local_connections,
+        "feed_max_connections_network": feed.max_connections,
+        "api_rate_limit": "100 per second",
+        "flask_debug": false,
+        "secrets_present": secrets,
+        "secret_strength": strength,
+    })
+}
+
+/// The brokers with saved keys, by id.
+fn configured_brokers(ctx: &AppState) -> Vec<String> {
+    ctx.sqlite
+        .conn()
+        .ok()
+        .and_then(|c| {
+            let mut st = c
+                .prepare("SELECT broker_id FROM broker_credentials ORDER BY broker_id")
+                .ok()?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))
+                .ok()?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Some(v)
+        })
+        .unwrap_or_default()
 }
 
 fn check(name: &str, f: impl FnOnce() -> std::result::Result<String, String>) -> Value {
