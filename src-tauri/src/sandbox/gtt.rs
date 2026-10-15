@@ -366,6 +366,38 @@ fn blocked_for(cfg: &SandboxConfig, two_leg: bool, margins: &[Decimal]) -> Decim
 // Place / modify / cancel / list
 // ---------------------------------------------------------------------------
 
+/// A new GTT's legs, pending, each with its margin.
+fn insert_legs(
+    conn: &Connection,
+    gtt_id: &str,
+    (legs, margins): (&[LegSpec], &[Decimal]),
+    product: &str,
+    gtt_now: &str,
+) -> rusqlite::Result<()> {
+    for (i, (leg, margin)) in legs.iter().zip(margins.iter()).enumerate() {
+        conn.execute(
+            "INSERT INTO sandbox_gtt_legs (gtt_id, leg_number, trigger_price, trigger_direction,
+                       action, quantity, price, pricetype, product, leg_status, leg_margin,
+                       created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11, ?11)",
+            params![
+                gtt_id,
+                (i + 1) as i64,
+                dec_to_db(leg.trigger_price),
+                leg.direction,
+                leg.action,
+                leg.quantity,
+                dec_to_db(leg.price),
+                leg.pricetype,
+                product,
+                dec_to_db(*margin),
+                gtt_now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn place(core: &Arc<Core>, req: GttRequest) -> SbResult<GttReply> {
     let legs = build_legs(&req);
     if legs.is_empty() {
@@ -430,27 +462,7 @@ pub(crate) async fn place(core: &Arc<Core>, req: GttRequest) -> SbResult<GttRepl
                     Err(e) => return Err(e.into()),
                 }
             }
-            for (i, (leg, margin)) in legs.iter().zip(margins.iter()).enumerate() {
-                tx.execute(
-                    "INSERT INTO sandbox_gtt_legs (gtt_id, leg_number, trigger_price, trigger_direction,
-                       action, quantity, price, pricetype, product, leg_status, leg_margin,
-                       created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11, ?11)",
-                    params![
-                        gtt_id,
-                        (i + 1) as i64,
-                        dec_to_db(leg.trigger_price),
-                        leg.direction,
-                        leg.action,
-                        leg.quantity,
-                        dec_to_db(leg.price),
-                        leg.pricetype,
-                        product,
-                        dec_to_db(*margin),
-                        gtt_now
-                    ],
-                )?;
-            }
+            insert_legs(tx, &gtt_id, (&legs, &margins), &product, &gtt_now)?;
             tracing::info!(
                 "Sandbox GTT {} placed: {} {} margin {}",
                 gtt_id,
