@@ -234,13 +234,8 @@ pub async fn webhook_route(
         }
         count_failure(&ctx, ip, Bucket::WebhookFail);
     }
-    // A valid address while OpenAlgo is locked: refused, nothing placed
-    // (KEY-01). Checked after the id, so only its holder learns it.
     if known && !ctx.security.is_unlocked() {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"status": "error", "error": crate::services::core::WEBHOOK_LOCKED}),
-        );
+        return crate::server::envelope::webhook_while_locked("error");
     }
     let declared = req
         .headers()

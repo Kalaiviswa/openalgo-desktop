@@ -213,6 +213,18 @@ pub fn apikey_only(body: &Map<String, Value>) -> Result<String, FieldErrors> {
     }
 }
 
+/// What a valid webhook address gets while OpenAlgo is locked (KEY-01):
+/// 503 with the locked sentence under `field`, the key that webhook's own
+/// error answers use (`error` for Chartink, `message` for strategies).
+/// Nothing is placed, and nothing counts against the caller. The address is
+/// checked first, so only its holder learns OpenAlgo is locked.
+pub fn webhook_while_locked(field: &str) -> Response {
+    let mut body = Map::new();
+    body.insert("status".into(), "error".into());
+    body.insert(field.into(), crate::services::core::WEBHOOK_LOCKED.into());
+    json_response(StatusCode::SERVICE_UNAVAILABLE, Value::Object(body))
+}
+
 /// `401 {"status":"error","message":"Not authenticated"}`
 pub fn not_authenticated() -> Response {
     error(StatusCode::UNAUTHORIZED, "Not authenticated")

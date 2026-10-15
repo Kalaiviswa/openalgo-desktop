@@ -845,17 +845,27 @@ pub fn sign_in_refused(ctx: &AppState, headers: &HeaderMap, source: Source) -> O
         .then(|| error(StatusCode::FORBIDDEN, "Request blocked."))
 }
 
-/// Whether a request comes from the OpenAlgo Desktop window (KEY-01
-/// security review): this computer, carrying the window proof that only
-/// the shell's `window_proof` command hands out, to the main window on the
-/// app's own page (`security::window`). A browser tab or a program on this
-/// computer, another device and a tunnel cannot show it.
-pub fn from_app_window(ctx: &AppState, headers: &HeaderMap, source: Source) -> bool {
-    source.is_local()
+/// Where a sign-in comes from (KEY-01 security review): the OpenAlgo
+/// Desktop window when the request is from this computer and carries the
+/// window proof that only the shell's `window_proof` command hands out, to
+/// the main window on the app's own page (`security::window`); anything
+/// else (a browser tab or a program on this computer, another device, a
+/// tunnel) cannot show it.
+pub fn sign_in_from(
+    ctx: &AppState,
+    headers: &HeaderMap,
+    source: Source,
+) -> crate::security::SignInFrom {
+    let proven = source.is_local()
         && headers
             .get(crate::security::window::HEADER)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| ctx.security.window_proof().matches(v))
+            .is_some_and(|v| ctx.security.window_proof().matches(v));
+    if proven {
+        crate::security::SignInFrom::AppWindow
+    } else {
+        crate::security::SignInFrom::Elsewhere
+    }
 }
 
 /// The sign-in budget a caller spends (see

@@ -1,17 +1,16 @@
 //! `/auth/*` and `/setup` (web `blueprints/auth.py`, `blueprints/core.py`).
 
 use crate::events::Event;
-use crate::security::SignInFrom;
 use crate::security::{totp, Secret};
 use crate::server::envelope::{error, json_response};
 use crate::server::form::FormData;
 use crate::server::middleware::{
-    claim_sign_in, clear_session_cookie, from_app_window, login_limited, redirect,
-    same_origin_navigation, sign_in_refused, with_cookie, Sess, Src, User,
+    claim_sign_in, clear_session_cookie, login_limited, redirect, same_origin_navigation,
+    sign_in_from, sign_in_refused, with_cookie, Sess, Src, User,
 };
 use crate::server::routes::webui::no_store;
 use crate::services::apikey_service::ApiKeyService;
-use crate::services::auth_service::{AuthService, LoginOutcome};
+use crate::services::auth_service::{AuthService, LoginOutcome, Refusal};
 use crate::services::broker_auth_service::BrokerAuthService;
 use crate::session::web::PENDING_TOTP_SECS;
 use crate::state::AppState;
@@ -128,10 +127,7 @@ async fn finish_sign_in(
         ctx.sessions.update(&s.id, |x| {
             x.user = Some(username.to_string());
             x.authenticated_at = Some(now);
-            x.pending_totp_user = None;
-            x.pending_totp_started = None;
-            x.pending_epoch = None;
-            x.pending_keys = None;
+            x.forget_pending_sign_in();
         });
         s
     });
@@ -173,25 +169,47 @@ pub const SIGN_IN_IN_APP_WINDOW_FIRST: &str = "Sign in once in the OpenAlgo Desk
 the computer where it is installed: OpenAlgo is moving your saved keys into its own database. \
 After that you can sign in here too.";
 
-/// The one answer to a sign-in that did not prove its password, for every
-/// caller but the app window (KEY-01 security review).
-fn invalid_credentials(
+/// Answer a sign-in that issued no session as the auth service decided
+/// (`LoginOutcome::refusal`), spending the caller's budget unless the app
+/// window is being told why.
+fn refuse(
     ctx: &AppState,
     attempt: crate::server::middleware::SignInAttempt<'_>,
+    refusal: Refusal,
     username: &str,
     ip: std::net::IpAddr,
 ) -> Response {
-    attempt.failed();
-    tracing::info!("Sign-in failed: invalid credentials");
-    crate::services::security_service::record_login(
-        ctx,
-        username,
-        ip,
-        "failed",
-        "password",
-        Some("invalid_credentials"),
-    );
-    error(StatusCode::UNAUTHORIZED, "Invalid credentials")
+    match refusal {
+        Refusal::InvalidCredentials => {
+            attempt.failed();
+            tracing::info!("Sign-in failed: invalid credentials");
+            crate::services::security_service::record_login(
+                ctx,
+                username,
+                ip,
+                "failed",
+                "password",
+                Some("invalid_credentials"),
+            );
+            error(StatusCode::UNAUTHORIZED, "Invalid credentials")
+        }
+        Refusal::MoveInAppWindow => {
+            attempt.failed();
+            tracing::info!("Sign-in refused: the keys move at a sign-in in the app window");
+            error(StatusCode::FORBIDDEN, SIGN_IN_IN_APP_WINDOW_FIRST)
+        }
+        Refusal::Explain(e) => {
+            attempt.released();
+            e.into_response()
+        }
+        Refusal::TryAgain => {
+            attempt.released();
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Login failed. Please try again.",
+            )
+        }
+    }
 }
 
 /// POST /auth/login (form: username, password)
@@ -243,17 +261,9 @@ pub async fn login(
         Ok(a) => a,
         Err(r) => return r,
     };
-    // KEY-01 security review: only the OpenAlgo Desktop window (this
-    // computer, with the proof only the shell hands out) reads an earlier
-    // build's keychain, moves keys, and hears why keys could not be opened.
-    // Anyone else learns nothing about the name or the password from how a
-    // sign-in fails: one answer, after the same work, spending the same
-    // budget.
-    let from = if from_app_window(&ctx, &headers, source) {
-        SignInFrom::AppWindow
-    } else {
-        SignInFrom::Elsewhere
-    };
+    // KEY-01 security review: only the app window moves keys and hears why
+    // they could not be opened (`LoginOutcome::refusal`).
+    let from = sign_in_from(&ctx, &headers, source);
     let password = Secret::new(form.get("password").unwrap_or_default());
     // Read before the account is: a password change that lands while the
     // password is checked voids this sign-in (`finish_sign_in`).
@@ -271,14 +281,8 @@ pub async fn login(
             crate::services::security_service::record_login(
                 &ctx, &user, ip, "success", "password", None,
             );
-            finish_sign_in(
-                &ctx,
-                sess.as_ref().map(|s| s.id.as_str()),
-                &user,
-                epoch,
-                keys,
-            )
-            .await
+            let old_session = sess.as_ref().map(|s| s.id.as_str());
+            finish_sign_in(&ctx, old_session, &user, epoch, keys).await
         }
         Ok(LoginOutcome::TotpRequired(user, keys)) => {
             // The password was right, so this attempt is given back; earlier
@@ -308,39 +312,8 @@ pub async fn login(
                 &s.id,
             )
         }
-        Ok(LoginOutcome::MoveInAppWindow) => {
-            // Never the app window's answer (it moves the keys). The same
-            // for every name and password.
-            attempt.failed();
-            tracing::info!("Sign-in refused: the keys move at a sign-in in the app window");
-            error(StatusCode::FORBIDDEN, SIGN_IN_IN_APP_WINDOW_FIRST)
-        }
-        Ok(LoginOutcome::Unreadable(e)) | Ok(LoginOutcome::FailedAfterProof(e))
-            if from == SignInFrom::AppWindow =>
-        {
-            // The trader at the app window, who could copy openalgo.db and
-            // try passwords against it anyway, gets the ways out (retry,
-            // start fresh). Keys that cannot be read answer the same for
-            // every password; anything after the proof needs the password.
-            attempt.released();
-            e.into_response()
-        }
-        Ok(LoginOutcome::Unreadable(e)) | Ok(LoginOutcome::FailedAfterProof(e)) => {
-            // Anyone else: the answer to a wrong password. An error after
-            // the password was proven would otherwise tell it the password
-            // was right. The detail went to the log.
-            tracing::debug!("Sign-in not from the app window failed: {}", e.code());
-            invalid_credentials(&ctx, attempt, &username, ip)
-        }
-        Ok(LoginOutcome::Invalid) => invalid_credentials(&ctx, attempt, &username, ip),
-        Err(_) if from == SignInFrom::AppWindow => {
-            attempt.released();
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Login failed. Please try again.",
-            )
-        }
-        Err(_) => invalid_credentials(&ctx, attempt, &username, ip),
+        Ok(other) => refuse(&ctx, attempt, other.refusal(from), &username, ip),
+        Err(_) => refuse(&ctx, attempt, Refusal::sign_in_broke(from), &username, ip),
     }
 }
 
@@ -380,12 +353,7 @@ pub async fn login_totp(
         .map(|t| (now - t).num_seconds() <= PENDING_TOTP_SECS)
         .unwrap_or(false);
     if !fresh {
-        ctx.sessions.update(&s.id, |x| {
-            x.pending_totp_user = None;
-            x.pending_totp_started = None;
-            x.pending_epoch = None;
-            x.pending_keys = None;
-        });
+        ctx.sessions.update(&s.id, |x| x.forget_pending_sign_in());
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({"status": "error", "message": "Login session expired. Please sign in again.", "redirect": "/login"}),

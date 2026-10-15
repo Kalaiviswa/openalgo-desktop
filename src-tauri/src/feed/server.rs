@@ -11,7 +11,7 @@
 //! subscriptions are released on every exit path, including an abrupt
 //! disconnect or an aborted task.
 
-use super::auth::{AuthOutcome, FeedAuth};
+use super::auth::{AuthOutcome, FeedAuth, FEED_LOCKED};
 use super::orders::order_update_frame;
 use super::outbox::{Outbox, Outgoing};
 use super::protocol::{self as p, code, py_str, py_truthy, py_type_name, request_id};
@@ -1048,15 +1048,7 @@ impl Session {
                     self.close = Some((AUTH_TIMEOUT_CODE, "Invalid API key"));
                 }
             }
-            AuthOutcome::Locked => {
-                // Nothing was checked and nothing counts against the
-                // caller; the socket stays unauthenticated (KEY-01).
-                self.error(
-                    code::AUTHENTICATION_ERROR,
-                    crate::feed::auth::FEED_LOCKED,
-                    None,
-                );
-            }
+            AuthOutcome::Locked => self.error(code::AUTHENTICATION_ERROR, FEED_LOCKED, None),
             AuthOutcome::NoBroker { user_id } => {
                 // The web records the user before the broker check, so the
                 // socket counts as authenticated from here on.

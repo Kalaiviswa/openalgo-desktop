@@ -83,6 +83,47 @@ impl LoginOutcome {
             LoginOutcome::Success(..) | LoginOutcome::TotpRequired(..)
         )
     }
+    /// What the caller of a sign-in that issued no session is told
+    /// (KEY-01 security review): the app window hears why the keys could
+    /// not be opened, with the ways out; anyone else the answer to a wrong
+    /// password, so no failure says whether a name or a password was right.
+    pub fn refusal(self, from: SignInFrom) -> Refusal {
+        match self {
+            LoginOutcome::MoveInAppWindow => Refusal::MoveInAppWindow,
+            LoginOutcome::Unreadable(e) | LoginOutcome::FailedAfterProof(e)
+                if from == SignInFrom::AppWindow =>
+            {
+                Refusal::Explain(e)
+            }
+            _ => Refusal::InvalidCredentials,
+        }
+    }
+}
+
+/// How a sign-in that issued no session is answered.
+#[derive(Debug)]
+pub enum Refusal {
+    /// "Invalid credentials", counted as a failure: every failure seen
+    /// from anywhere but the app window.
+    InvalidCredentials,
+    /// An earlier build's keys still have to move, in the app window; the
+    /// same for every name and password, counted as a failure.
+    MoveInAppWindow,
+    /// The app window is told why, with the ways out; nothing counts.
+    Explain(AppError),
+    /// The app window is asked to try again: the sign-in could not run to
+    /// its end. Nothing counts.
+    TryAgain,
+}
+
+impl Refusal {
+    /// The answer when the sign-in itself could not run to its end.
+    pub fn sign_in_broke(from: SignInFrom) -> Self {
+        match from {
+            SignInFrom::AppWindow => Refusal::TryAgain,
+            SignInFrom::Elsewhere => Refusal::InvalidCredentials,
+        }
+    }
 }
 
 pub struct AuthService;
@@ -298,10 +339,7 @@ impl AuthService {
     /// `start_fresh` command, after a native confirmation); no HTTP route
     /// reaches it.
     pub fn start_fresh(state: &AppState, new: &str, confirm: &str) -> Result<()> {
-        if new != confirm {
-            return Err(AppError::Validation("The passwords do not match.".into()));
-        }
-        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))?;
+        Self::check_new_password(new, confirm)?;
         let row = {
             let conn = state.sqlite.conn()?;
             user::find_first(&conn)?
@@ -334,6 +372,16 @@ impl AuthService {
         Ok(())
     }
 
+    /// What a new password set without the old one must pass before
+    /// anything changes: the two entries match, and the web's strength
+    /// rules hold.
+    pub fn check_new_password(new: &str, confirm: &str) -> Result<()> {
+        if new != confirm {
+            return Err(AppError::Validation("The passwords do not match.".into()));
+        }
+        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))
+    }
+
     /// The fresh start as the desktop window runs it: end the live broker
     /// session and the bots, start fresh, clear every adapter's state, then
     /// sign every window out.
@@ -342,10 +390,7 @@ impl AuthService {
         new: &str,
         confirm: &str,
     ) -> Result<()> {
-        if new != confirm {
-            return Err(AppError::Validation("The passwords do not match.".into()));
-        }
-        validate_password_strength(new).map_err(|m| AppError::Validation(m.into()))?;
+        Self::check_new_password(new, confirm)?;
         if let Err(e) = crate::services::broker_auth_service::BrokerAuthService::revoke(
             ctx,
             crate::events::SessionEndReason::Logout,

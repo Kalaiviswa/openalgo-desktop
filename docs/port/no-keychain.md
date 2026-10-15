@@ -226,7 +226,7 @@ it cannot:
   loopback, with the same host and origin. Each start makes a random proof
   (`security::window`); the shell command `window_proof` gives it to the
   main window on the app's own page only, and its sign-in page sends it in
-  the `X-OpenAlgo-Window` header. `middleware::from_app_window` accepts it
+  the `X-OpenAlgo-Window` header. `middleware::sign_in_from` accepts it
   only from this computer.
 - **One answer for everyone else.** `Opened::Unreadable` (keys that cannot
   be read, whatever was typed) and `Opened::FailedAfterProof` (the password

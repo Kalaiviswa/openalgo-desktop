@@ -27,7 +27,9 @@ pub enum AuthOutcome {
     Locked,
 }
 
-/// The error frame's message while OpenAlgo is locked.
+/// The error frame's message while OpenAlgo is locked. Nothing was checked
+/// and nothing counts against the caller; the socket stays
+/// unauthenticated.
 pub const FEED_LOCKED: &str = "OpenAlgo is locked. Sign in to OpenAlgo to stream market data: \
 the feed is off after OpenAlgo starts and after you log out, until you sign in again.";
 

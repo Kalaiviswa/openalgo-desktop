@@ -244,6 +244,53 @@ pub fn reset_caller_allowed(label: &str, url: &url::Url, live_port: u16) -> bool
     label == "main" && app_page(url, live_port, cfg!(debug_assertions))
 }
 
+/// Refuse a call that does not come from the main window on the app's own
+/// page ([`reset_caller_allowed`]): `what` names it in the log, `refusal` is
+/// the trader's answer.
+fn require_app_window(
+    window: &tauri::WebviewWindow,
+    ctx: &AppState,
+    what: &str,
+    refusal: &str,
+) -> Result<()> {
+    let url = window
+        .url()
+        .map_err(|e| AppError::Internal(format!("window address: {}", e)))?;
+    if reset_caller_allowed(window.label(), &url, ctx.live_port()) {
+        return Ok(());
+    }
+    tracing::warn!("{} refused: not requested from the OpenAlgo window", what);
+    Err(AppError::Auth(refusal.into()))
+}
+
+/// A question the trader answers in a native dialog, which page scripts
+/// cannot click.
+struct Question {
+    title: &'static str,
+    message: &'static str,
+    yes: &'static str,
+    no: &'static str,
+}
+
+/// Whether the trader chose `yes` (closing the dialog is a no).
+async fn confirmed(app: &AppHandle, window: &tauri::WebviewWindow, q: Question) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(q.message)
+        .title(q.title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            q.yes.into(),
+            q.no.into(),
+        ))
+        .parent(window)
+        .show(move |yes| {
+            let _ = tx.send(yes);
+        });
+    rx.await.unwrap_or(false)
+}
+
 /// The answer the reset page gets back.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ResetOutcome {
@@ -264,37 +311,22 @@ pub async fn reset_account(
     window: tauri::WebviewWindow,
     shell: State<'_, ShellState>,
 ) -> Result<ResetOutcome> {
-    let url = window
-        .url()
-        .map_err(|e| AppError::Internal(format!("window address: {}", e)))?;
-    if !reset_caller_allowed(window.label(), &url, shell.ctx.live_port()) {
-        tracing::warn!("Account reset refused: not requested from the OpenAlgo window");
-        return Err(AppError::Auth(
-            "Reset account works only from the OpenAlgo Desktop window on this computer.".into(),
-        ));
-    }
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        app.dialog()
-            .message(
-                "This removes your OpenAlgo login, API key and saved broker keys, ends your \
+    require_app_window(
+        &window,
+        &shell.ctx,
+        "Account reset",
+        "Reset account works only from the OpenAlgo Desktop window on this computer.",
+    )?;
+    let question = Question {
+        title: "Reset your OpenAlgo account?",
+        message: "This removes your OpenAlgo login, API key and saved broker keys, ends your \
 broker session, stops every AI client (MCP) token, unlinks Telegram and WhatsApp, and gives \
 your strategy and Chartink webhooks new addresses. Your trade and strategy history stays. You \
 then create a new account.",
-            )
-            .title("Reset your OpenAlgo account?")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Reset account".into(),
-                "Keep my account".into(),
-            ))
-            .parent(&window)
-            .show(move |confirmed| {
-                let _ = tx.send(confirmed);
-            });
-    }
-    if !rx.await.unwrap_or(false) {
+        yes: "Reset account",
+        no: "Keep my account",
+    };
+    if !confirmed(&app, &window, question).await {
         return Ok(ResetOutcome {
             status: "cancelled",
             message: "Your account was not changed.".into(),
@@ -314,15 +346,12 @@ then create a new account.",
 /// all. A new one every start, never stored.
 #[tauri::command]
 pub fn window_proof(window: tauri::WebviewWindow, shell: State<'_, ShellState>) -> Result<String> {
-    let url = window
-        .url()
-        .map_err(|e| AppError::Internal(format!("window address: {}", e)))?;
-    if !reset_caller_allowed(window.label(), &url, shell.ctx.live_port()) {
-        tracing::warn!("Window proof refused: not asked for by the OpenAlgo window");
-        return Err(AppError::Auth(
-            "This works only in the OpenAlgo Desktop window on this computer.".into(),
-        ));
-    }
+    require_app_window(
+        &window,
+        &shell.ctx,
+        "Window proof",
+        "This works only in the OpenAlgo Desktop window on this computer.",
+    )?;
     Ok(shell
         .ctx
         .security
@@ -338,6 +367,28 @@ pub struct StartFreshOutcome {
     /// `done` or `cancelled`.
     pub status: &'static str,
     pub message: String,
+}
+
+/// What the trader confirms before a fresh start: for a forgotten password
+/// (`forgot`) or for an earlier build's keys that cannot be read.
+fn start_fresh_question(forgot: bool) -> Question {
+    Question {
+        title: if forgot {
+            "Set a new password?"
+        } else {
+            "Start fresh with a new password?"
+        },
+        message: "Your account, settings, strategies and history stay. Your saved broker keys, \
+your API key and two-factor login cannot be opened without the old password, so they are \
+removed: afterwards you enter your broker keys again, copy your new API key into the programs \
+that use it, and set up two-factor login again. Telegram and WhatsApp are set up again too.",
+        yes: if forgot {
+            "Set new password"
+        } else {
+            "Start fresh"
+        },
+        no: "Keep everything as it is",
+    }
 }
 
 /// A new password without the old one (KEY-01): keeps the account, its
@@ -357,67 +408,25 @@ pub async fn start_fresh(
     confirm_password: String,
     reason: String,
 ) -> Result<StartFreshOutcome> {
-    let url = window
-        .url()
-        .map_err(|e| AppError::Internal(format!("window address: {}", e)))?;
-    if !reset_caller_allowed(window.label(), &url, shell.ctx.live_port()) {
-        tracing::warn!("Fresh start refused: not requested from the OpenAlgo window");
-        return Err(AppError::Auth(
-            "A new password can be set only from the OpenAlgo Desktop window on this computer."
-                .into(),
-        ));
-    }
-    let new_password = crate::security::Secret::new(new_password);
-    let confirm_password = crate::security::Secret::new(confirm_password);
+    use crate::services::auth_service::AuthService;
+    require_app_window(
+        &window,
+        &shell.ctx,
+        "Fresh start",
+        "A new password can be set only from the OpenAlgo Desktop window on this computer.",
+    )?;
+    let new = crate::security::Secret::new(new_password);
+    let confirm = crate::security::Secret::new(confirm_password);
     // Checked before the dialog, so the trader is not asked to confirm a
     // password that would be refused.
-    if new_password.expose() != confirm_password.expose() {
-        return Err(AppError::Validation("The passwords do not match.".into()));
-    }
-    crate::services::auth_service::validate_password_strength(new_password.expose())
-        .map_err(|m| AppError::Validation(m.into()))?;
-    let forgot = reason == "forgot";
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        app.dialog()
-            .message(
-                "Your account, settings, strategies and history stay. Your saved broker keys, \
-your API key and two-factor login cannot be opened without the old password, so they are \
-removed: afterwards you enter your broker keys again, copy your new API key into the programs \
-that use it, and set up two-factor login again. Telegram and WhatsApp are set up again too.",
-            )
-            .title(if forgot {
-                "Set a new password?"
-            } else {
-                "Start fresh with a new password?"
-            })
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                if forgot {
-                    "Set new password".into()
-                } else {
-                    "Start fresh".into()
-                },
-                "Keep everything as it is".into(),
-            ))
-            .parent(&window)
-            .show(move |confirmed| {
-                let _ = tx.send(confirmed);
-            });
-    }
-    if !rx.await.unwrap_or(false) {
+    AuthService::check_new_password(new.expose(), confirm.expose())?;
+    if !confirmed(&app, &window, start_fresh_question(reason == "forgot")).await {
         return Ok(StartFreshOutcome {
             status: "cancelled",
             message: "Nothing was changed.".into(),
         });
     }
-    crate::services::auth_service::AuthService::start_fresh_everywhere(
-        &shell.ctx,
-        new_password.expose(),
-        confirm_password.expose(),
-    )
-    .await?;
+    AuthService::start_fresh_everywhere(&shell.ctx, new.expose(), confirm.expose()).await?;
     tracing::info!("New password set from the desktop window");
     Ok(StartFreshOutcome {
         status: "done",
@@ -425,6 +434,21 @@ that use it, and set up two-factor login again. Telegram and WhatsApp are set up
 on Broker Configuration and copy your new API key from the API Key page."
             .into(),
     })
+}
+
+/// Every shell command a window may call; each is reachable only from a
+/// capability that grants its permission (`build.rs`, `default.json`,
+/// [`REMOTE_APP_PERMISSIONS`]).
+pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        startup_status,
+        retry_server,
+        restart_server,
+        open_external,
+        reset_account,
+        start_fresh,
+        window_proof,
+    ]
 }
 
 #[cfg(test)]

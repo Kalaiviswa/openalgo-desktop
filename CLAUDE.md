@@ -979,7 +979,7 @@ and add each new one here.
   password (`key_state`), so a broken state answers the same whatever was
   typed; end every path with `hashing::pad_argon2_runs` (two runs, two per
   vault file); answer `Unreadable` and `FailedAfterProof` with "Invalid
-  credentials" to anyone but the app window (`from_app_window`). Loopback
+  credentials" to anyone but the app window (`middleware::sign_in_from`). Loopback
   is not the app window: a browser tab and any local program are loopback
   too. What the keychain says (item names, paths, the system's text) goes to
   the process log at INFO only, never into a WARN or ERROR: those land in

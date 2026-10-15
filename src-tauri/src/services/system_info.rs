@@ -318,9 +318,6 @@ pub fn system_payload(
             .flatten()
             .is_some()),
     );
-    // KEY-01: the keys are always wrapped with the login password in
-    // openalgo.db, never in the OS keychain; they are open only while the
-    // trader is signed in.
     let mut strength = Map::new();
     strength.insert("Keys locked with your login password".into(), json!(true));
     strength.insert(

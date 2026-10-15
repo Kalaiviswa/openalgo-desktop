@@ -8,7 +8,7 @@
 //! sign-in page sends it in the `X-OpenAlgo-Window` header. A sign-in from
 //! this computer that carries it is the app window's: only that one reads an
 //! earlier build's keychain, moves keys, and is told why keys could not be
-//! opened (`server::middleware::from_app_window`).
+//! opened (`server::middleware::sign_in_from`).
 //!
 //! The token is never stored, never logged, and new at every start.
 

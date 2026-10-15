@@ -879,13 +879,8 @@ pub async fn webhook(
         }
         count_failure(&ctx, ip, Bucket::WebhookFail);
     }
-    // A valid address while OpenAlgo is locked: refused, nothing placed
-    // (KEY-01). Checked after the token, so only its holder learns it.
     if known && !ctx.security.is_unlocked() {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"status": "error", "message": crate::services::core::WEBHOOK_LOCKED}),
-        );
+        return crate::server::envelope::webhook_while_locked("message");
     }
     let ua = headers
         .get(axum::http::header::USER_AGENT)

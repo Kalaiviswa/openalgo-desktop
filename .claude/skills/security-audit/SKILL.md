@@ -120,7 +120,7 @@ arithmetic, and one shared budget reserved before any work starts.
     window anything: every failure is the same 401 "Invalid credentials"
     to a browser, a local program, another device or a tunnel, after the
     same Argon2 work (`hashing::pad_argon2_runs`); only a sign-in carrying
-    the window proof (`security::window`, `middleware::from_app_window`)
+    the window proof (`security::window`, `middleware::sign_in_from`)
     reads an earlier build's keychain, moves keys or hears why keys could
     not be opened; the key state is read before the name and the password
     (`nobody_but_the_app_window_can_tell_a_right_password_from_a_wrong_one`,

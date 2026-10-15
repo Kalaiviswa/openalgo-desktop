@@ -47,6 +47,17 @@ impl std::fmt::Debug for WebSession {
     }
 }
 
+impl WebSession {
+    /// Forget a sign-in waiting for its authenticator code, and the keys
+    /// its password opened (KEY-01: they leave memory with it).
+    pub fn forget_pending_sign_in(&mut self) {
+        self.pending_totp_user = None;
+        self.pending_totp_started = None;
+        self.pending_epoch = None;
+        self.pending_keys = None;
+    }
+}
+
 pub fn random_token() -> String {
     let mut b = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut b);
@@ -226,10 +237,7 @@ impl WebSessionStore {
                 .map(|t| now - t > Duration::seconds(PENDING_TOTP_SECS))
                 .unwrap_or(true);
             if s.pending_keys.is_some() && stale {
-                s.pending_totp_user = None;
-                s.pending_totp_started = None;
-                s.pending_epoch = None;
-                s.pending_keys = None;
+                s.forget_pending_sign_in();
                 n += 1;
             }
         }
