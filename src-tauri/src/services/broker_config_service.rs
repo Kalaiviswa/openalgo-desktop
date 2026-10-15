@@ -82,6 +82,46 @@ fn valid_broker(broker: &str) -> Result<()> {
     }
 }
 
+/// Whether a save carries any key.
+fn keys_changed(u: &CredentialUpdate) -> bool {
+    u.api_key.is_some()
+        || u.api_secret.is_some()
+        || u.client_id.is_some()
+        || u.api_key_market.is_some()
+        || u.api_secret_market.is_some()
+}
+
+/// The redirect URL a save carries: `None` to keep the saved one,
+/// `Some(None)` for the automatic one, else the full address ending in
+/// `/<broker>/callback` (parsed as strictly as every other address,
+/// CFG-02).
+fn checked_redirect(
+    broker: &str,
+    name: &str,
+    given: Option<String>,
+) -> Result<Option<Option<String>>> {
+    match given.map(|u| u.trim().to_string()) {
+        None => Ok(None),
+        Some(_) if !setup_guide::uses_redirect_url(broker) => Err(AppError::Validation(format!(
+            "{} does not use a redirect URL.",
+            name
+        ))),
+        Some(u) if u.is_empty() => Ok(Some(None)),
+        Some(u) => {
+            let suffix = format!("/{}/callback", broker);
+            if !crate::config::url_with_scheme(&u, &["http", "https"], true)
+                || !u.trim_end_matches('/').ends_with(&suffix)
+            {
+                return Err(AppError::Validation(format!(
+                    "Enter the redirect URL as a full address ending in {}, or use the automatic one.",
+                    suffix
+                )));
+            }
+            Ok(Some(Some(u.trim_end_matches('/').to_string())))
+        }
+    }
+}
+
 impl BrokerConfigService {
     /// The API key formats the web checks on save (`utils/env_check.py`):
     /// 5paisa `User_Key:::User_ID:::client_id`, Flattrade and Dhan
@@ -280,53 +320,9 @@ impl BrokerConfigService {
         valid_broker(broker)?;
         let guide = setup_guide::guide(broker);
         let name = setup_guide::display_name(broker);
-        // Only the keys this broker uses are saved.
-        let mut update = req.update;
-        let uses = |k: KeyName| guide.fields.iter().any(|f| f.key == k);
-        if !uses(KeyName::ApiSecret) {
-            update.api_secret = None;
-        }
-        if !uses(KeyName::ClientId) {
-            update.client_id = None;
-        }
-        if !uses(KeyName::ApiKeyMarket) {
-            update.api_key_market = None;
-        }
-        if !uses(KeyName::ApiSecretMarket) {
-            update.api_secret_market = None;
-        }
-        if let Some(k) = &update.api_key {
-            Self::check_api_key_format(broker, k.expose())
-                .map_err(|m| AppError::Validation(m.into()))?;
-        }
-        let redirect = match req.redirect_url.map(|u| u.trim().to_string()) {
-            None => None,
-            Some(_) if !setup_guide::uses_redirect_url(broker) => {
-                return Err(AppError::Validation(format!(
-                    "{} does not use a redirect URL.",
-                    name
-                )))
-            }
-            Some(u) if u.is_empty() => Some(None),
-            Some(u) => {
-                let suffix = format!("/{}/callback", broker);
-                // Parsed as strictly as every other address (CFG-02).
-                if !crate::config::url_with_scheme(&u, &["http", "https"], true)
-                    || !u.trim_end_matches('/').ends_with(&suffix)
-                {
-                    return Err(AppError::Validation(format!(
-                        "Enter the redirect URL as a full address ending in {}, or use the automatic one.",
-                        suffix
-                    )));
-                }
-                Some(Some(u.trim_end_matches('/').to_string()))
-            }
-        };
-        let keys_changed = update.api_key.is_some()
-            || update.api_secret.is_some()
-            || update.client_id.is_some()
-            || update.api_key_market.is_some()
-            || update.api_secret_market.is_some();
+        let update = Self::keys_it_uses(broker, &guide, req.update)?;
+        let redirect = checked_redirect(broker, &name, req.redirect_url)?;
+        let keys_changed = keys_changed(&update);
         if !keys_changed && redirect.is_none() {
             return Err(AppError::Validation(
                 "Nothing to save. Enter a new value to replace a saved one.".into(),
@@ -344,52 +340,8 @@ impl BrokerConfigService {
                 return Ok(SaveOutcome::Refused(why));
             }
         }
-        let global_named_broker;
-        {
-            let mut conn = state.sqlite.conn()?;
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current = credentials::load(&tx, &state.security, broker)?;
-            let configured = current.as_ref().is_some_and(|c| !c.api_key.is_empty());
-            if !configured {
-                if let Some(f) = guide.fields.iter().find(|f| {
-                    f.required
-                        && !match f.key {
-                            KeyName::ApiKey => update.api_key.is_some(),
-                            KeyName::ApiSecret => update.api_secret.is_some(),
-                            KeyName::ClientId => update.client_id.is_some(),
-                            KeyName::ApiKeyMarket => update.api_key_market.is_some(),
-                            KeyName::ApiSecretMarket => update.api_secret_market.is_some(),
-                        }
-                }) {
-                    return Err(AppError::Validation(format!(
-                        "Enter the {} to save {}.",
-                        f.label, name
-                    )));
-                }
-            }
-            if keys_changed {
-                Self::save_keys(&tx, &state.security, broker, update)?;
-            }
-            // The URL kept with this broker's keys is the one source for it
-            // from now on: the single web-shaped setting stops naming it.
-            global_named_broker = state
-                .server_config()
-                .redirect_url
-                .is_some_and(|u| u.ends_with(&format!("/{}/callback", broker)));
-            if let Some(url) = &redirect {
-                credentials::set_redirect_url(&tx, broker, url.as_deref())?;
-                if global_named_broker {
-                    crate::config::save(
-                        &tx,
-                        &crate::config::ServerConfigUpdate {
-                            redirect_url: Some(String::new()),
-                            ..Default::default()
-                        },
-                    )?;
-                }
-            }
-            tx.commit()?;
-        }
+        let global_named_broker =
+            Self::store(state, broker, &guide, &name, update, redirect.as_ref())?;
         if redirect.is_some() && global_named_broker {
             // Saved already: a reload that fails must not skip the sign-out.
             if let Err(e) = state.reload_config() {
@@ -418,6 +370,91 @@ impl BrokerConfigService {
             },
             signed_out,
         })
+    }
+
+    /// The keys of `update` this broker uses (the rest are dropped), with
+    /// the API key's format checked.
+    fn keys_it_uses(
+        broker: &str,
+        guide: &setup_guide::SetupGuide,
+        mut update: CredentialUpdate,
+    ) -> Result<CredentialUpdate> {
+        let uses = |k: KeyName| guide.fields.iter().any(|f| f.key == k);
+        if !uses(KeyName::ApiSecret) {
+            update.api_secret = None;
+        }
+        if !uses(KeyName::ClientId) {
+            update.client_id = None;
+        }
+        if !uses(KeyName::ApiKeyMarket) {
+            update.api_key_market = None;
+        }
+        if !uses(KeyName::ApiSecretMarket) {
+            update.api_secret_market = None;
+        }
+        if let Some(k) = &update.api_key {
+            Self::check_api_key_format(broker, k.expose())
+                .map_err(|m| AppError::Validation(m.into()))?;
+        }
+        Ok(update)
+    }
+
+    /// Store the keys and the redirect URL in one transaction. A broker's
+    /// first save needs every required key. Answers whether the single
+    /// web-shaped redirect URL named this broker (and so was cleared with
+    /// a new URL saved here).
+    fn store(
+        state: &AppState,
+        broker: &str,
+        guide: &setup_guide::SetupGuide,
+        name: &str,
+        update: CredentialUpdate,
+        redirect: Option<&Option<String>>,
+    ) -> Result<bool> {
+        let mut conn = state.sqlite.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = credentials::load(&tx, &state.security, broker)?;
+        let configured = current.as_ref().is_some_and(|c| !c.api_key.is_empty());
+        if !configured {
+            if let Some(f) = guide.fields.iter().find(|f| {
+                f.required
+                    && !match f.key {
+                        KeyName::ApiKey => update.api_key.is_some(),
+                        KeyName::ApiSecret => update.api_secret.is_some(),
+                        KeyName::ClientId => update.client_id.is_some(),
+                        KeyName::ApiKeyMarket => update.api_key_market.is_some(),
+                        KeyName::ApiSecretMarket => update.api_secret_market.is_some(),
+                    }
+            }) {
+                return Err(AppError::Validation(format!(
+                    "Enter the {} to save {}.",
+                    f.label, name
+                )));
+            }
+        }
+        if keys_changed(&update) {
+            Self::save_keys(&tx, &state.security, broker, update)?;
+        }
+        // The URL kept with this broker's keys is the one source for it
+        // from now on: the single web-shaped setting stops naming it.
+        let global_named_broker = state
+            .server_config()
+            .redirect_url
+            .is_some_and(|u| u.ends_with(&format!("/{}/callback", broker)));
+        if let Some(url) = redirect {
+            credentials::set_redirect_url(&tx, broker, url.as_deref())?;
+            if global_named_broker {
+                crate::config::save(
+                    &tx,
+                    &crate::config::ServerConfigUpdate {
+                        redirect_url: Some(String::new()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(global_named_broker)
     }
 
     /// Forget one broker: its keys, its redirect URL and its stored session
