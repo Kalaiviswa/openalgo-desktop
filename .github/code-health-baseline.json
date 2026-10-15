@@ -49,7 +49,6 @@
     "src-tauri/src/strategy/signals.rs::day_run": 117,
     "src-tauri/src/strategy/signals.rs::signal_exit": 118,
     "src-tauri/src/strategy/signals.rs::signal_place_entry": 136,
-    "src-tauri/src/strategy/signals.rs::signal_place_exit": 155,
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338
   }
 }

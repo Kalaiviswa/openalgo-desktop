@@ -20,7 +20,9 @@
 //! configuration. An opposite entry squares first, then opens. A leg returns
 //! to `configured` after an exit so it can be signalled again the same day.
 
-use super::dispatch::{build_order, entry_action, exit_action, RunMode, EXIT_PRICETYPE};
+use super::dispatch::{
+    build_order, entry_action, exit_action, DispatchResult, RunMode, EXIT_PRICETYPE,
+};
 use super::resolver::{contract_exists, is_derivative_exchange, resolve_quantity};
 use super::state::{ClaimId, EntryDecision, LegSpec};
 use super::store::{EventFields, NewOrder, StrategyRow};
@@ -760,60 +762,83 @@ impl StrategyModule {
         run_id: i64,
         exit: SignalExit<'_>,
     ) -> Result<(), (String, Option<ClaimId>)> {
-        let SignalExit {
-            lid,
-            position,
-            symbol,
-            exchange,
-            quantity,
-            position_ref,
-            claim_token,
-            superseded,
-        } = exit;
-        let mut claim = ClaimId::Token(claim_token.to_string());
+        let mut claim = ClaimId::Token(exit.claim_token.to_string());
         let mode = self.run_mode(run_id);
         if let Err(e) = self.gateway.authorised(mode) {
             return Err((e, Some(claim)));
         }
-        let action = exit_action(position).map_err(|e| (e, Some(claim.clone())))?;
+        let action = exit_action(exit.position).map_err(|e| (e, Some(claim.clone())))?;
         let order = build_order(
-            symbol,
-            exchange,
+            exit.symbol,
+            exit.exchange,
             action,
-            quantity,
+            exit.quantity,
             &strategy.product,
             &strategy.name,
             EXIT_PRICETYPE,
         );
+        let row_id = self
+            .record_signal_exit(strategy, run_id, &exit, (action, &order.product))
+            .await
+            .map_err(|e| (e, Some(claim.clone())))?;
+        claim = ClaimId::Row(row_id);
+        let result = self.gateway.place(mode, &order).await;
+        self.record_acknowledgement(
+            row_id,
+            &result,
+            strategy.id,
+            &strategy.user_id,
+            run_id,
+            exit.lid,
+        )
+        .await;
+        self.emit_signal_exit_placed(strategy, run_id, &exit, action, &result)
+            .await;
+        if result.ok {
+            self.replay_for(result.broker_order_id.as_deref()).await;
+        }
+        signal_exit_outcome(result, claim)
+    }
+
+    /// Records a signal exit's order and binds it to the leg's claim before
+    /// it is sent. An exit with no row is not sent (P2-6): it could not be
+    /// found again if its answer were lost; the caller releases the claim,
+    /// the leg stays managed and the exit is tried again.
+    async fn record_signal_exit(
+        &self,
+        strategy: &StrategyRow,
+        run_id: i64,
+        exit: &SignalExit<'_>,
+        (action, product): (&str, &str),
+    ) -> Result<i64, String> {
         let row = self.store.record_order(
             run_id,
-            lid,
+            exit.lid,
             "exit_signal",
             &NewOrder {
-                symbol: symbol.into(),
-                exchange: exchange.into(),
+                symbol: exit.symbol.into(),
+                exchange: exit.exchange.into(),
                 action: action.into(),
-                qty: quantity,
-                product: Some(order.product.clone()),
+                qty: exit.quantity,
+                product: Some(product.to_string()),
                 pricetype: EXIT_PRICETYPE.into(),
                 status: "pending".into(),
-                position_ref: position_ref.clone(),
+                position_ref: exit.position_ref.clone(),
                 broker_order_id: None,
             },
         );
-        let row_id = row.as_ref().ok().copied();
-        match row_id {
+        match row.as_ref().ok().copied() {
             Some(row_id) => {
-                let bound = if superseded {
+                let bound = if exit.superseded {
                     self.state
-                        .bind_superseded_exit(run_id, lid, claim_token, row_id)
+                        .bind_superseded_exit(run_id, exit.lid, exit.claim_token, row_id)
                 } else {
                     self.state.bind_live_exit(
                         run_id,
-                        lid,
-                        claim_token,
+                        exit.lid,
+                        exit.claim_token,
                         row_id,
-                        position_ref.as_deref(),
+                        exit.position_ref.as_deref(),
                     )
                 };
                 if !bound {
@@ -821,18 +846,15 @@ impl StrategyModule {
                         row_id,
                         Some("rejected"),
                         None,
-                        Some(if superseded {
+                        Some(if exit.superseded {
                             "Outgoing position exit claim changed before dispatch"
                         } else {
                             "Live position exit claim changed before dispatch"
                         }),
                     );
-                    return Err((
-                        "The position changed before its exit could be placed".into(),
-                        Some(claim),
-                    ));
+                    return Err("The position changed before its exit could be placed".into());
                 }
-                claim = ClaimId::Row(row_id);
+                Ok(row_id)
             }
             None => {
                 // Not sent (P2-6): an exit with no row cannot be found again
@@ -842,7 +864,7 @@ impl StrategyModule {
                     tracing::error!(
                         "Signal exit row for run {} leg {} not written: {}",
                         run_id,
-                        lid,
+                        exit.lid,
                         e
                     );
                 }
@@ -852,34 +874,30 @@ impl StrategyModule {
                     "leg_exit_rejected",
                     &format!(
                         "Signal exit for leg {} was not sent: its order could not be recorded. The leg stays managed; check the disk and the app's data folder.",
-                        lid
+                        exit.lid
                     ),
                     EventFields {
                         run_id: Some(run_id),
-                        leg_id: Some(lid),
+                        leg_id: Some(exit.lid),
                         severity: Some("critical"),
                         payload: None,
                     },
                 )
                 .await;
-                return Err((
-                    "The exit could not be recorded, so it was not sent".into(),
-                    Some(claim),
-                ));
+                Err("The exit could not be recorded, so it was not sent".into())
             }
         }
-        let result = self.gateway.place(mode, &order).await;
-        if let Some(row_id) = row_id {
-            self.record_acknowledgement(
-                row_id,
-                &result,
-                strategy.id,
-                &strategy.user_id,
-                run_id,
-                lid,
-            )
-            .await;
-        }
+    }
+
+    /// The `leg_exit_placed` event: the exit, and how the broker answered.
+    async fn emit_signal_exit_placed(
+        &self,
+        strategy: &StrategyRow,
+        run_id: i64,
+        exit: &SignalExit<'_>,
+        action: &str,
+        result: &DispatchResult,
+    ) {
         self.emit(
             strategy.id,
             &strategy.user_id,
@@ -887,8 +905,8 @@ impl StrategyModule {
             &format!(
                 "Signal {} {} {}{}",
                 action,
-                quantity,
-                symbol,
+                exit.quantity,
+                exit.symbol,
                 if result.ok {
                     String::new()
                 } else if result.uncertain {
@@ -899,32 +917,38 @@ impl StrategyModule {
             ),
             EventFields {
                 run_id: Some(run_id),
-                leg_id: Some(lid),
+                leg_id: Some(exit.lid),
                 severity: Some(if result.ok { "info" } else { "warn" }),
                 payload: None,
             },
         )
         .await;
-        if result.ok {
-            if row_id.is_some() {
-                self.replay_for(result.broker_order_id.as_deref()).await;
-            }
-            Ok(())
-        } else if result.uncertain {
-            // The exit may be at the broker: its claim stays bound to the
-            // row until the order reconciler settles it (LOG-08).
-            Err((
-                result
-                    .error
-                    .unwrap_or_else(|| crate::brokers::common::outcome::UNCERTAIN_MESSAGE.into()),
-                None,
-            ))
-        } else {
-            Err((
-                result.error.unwrap_or_else(|| "Order rejected".into()),
-                Some(claim),
-            ))
-        }
+    }
+}
+
+/// A signal exit's outcome: placed, uncertain (its claim stays bound to the
+/// row until the order reconciler settles it, LOG-08) or refused (its
+/// claim goes back to the caller).
+fn signal_exit_outcome(
+    result: DispatchResult,
+    claim: ClaimId,
+) -> Result<(), (String, Option<ClaimId>)> {
+    if result.ok {
+        Ok(())
+    } else if result.uncertain {
+        // The exit may be at the broker: its claim stays bound to the
+        // row until the order reconciler settles it (LOG-08).
+        Err((
+            result
+                .error
+                .unwrap_or_else(|| crate::brokers::common::outcome::UNCERTAIN_MESSAGE.into()),
+            None,
+        ))
+    } else {
+        Err((
+            result.error.unwrap_or_else(|| "Order rejected".into()),
+            Some(claim),
+        ))
     }
 }
 
