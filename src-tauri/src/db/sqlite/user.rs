@@ -106,16 +106,6 @@ pub fn find_by_username(conn: &Connection, username: &str) -> Result<Option<User
         .optional()?)
 }
 
-pub fn find_by_email(conn: &Connection, email: &str) -> Result<Option<UserRow>> {
-    Ok(conn
-        .query_row(
-            &format!("SELECT {} FROM users WHERE email = ?1 COLLATE NOCASE", COLS),
-            [email],
-            map,
-        )
-        .optional()?)
-}
-
 pub fn insert(
     conn: &Connection,
     security: &SecurityManager,
@@ -145,14 +135,6 @@ pub fn set_totp_secret(
         "UPDATE users SET totp_secret_encrypted = ?1, totp_nonce = ?2, updated_at = datetime('now')
          WHERE username = ?3",
         params![ct, nonce, username],
-    )?;
-    Ok(())
-}
-
-pub fn update_password_hash(conn: &Connection, id: i64, hash: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE users SET password_hash = ?1, updated_at = datetime('now') WHERE id = ?2",
-        params![hash, id],
     )?;
     Ok(())
 }
