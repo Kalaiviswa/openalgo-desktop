@@ -390,16 +390,7 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
         .network_address()
         .is_some_and(|a| ctx.monitor.is_banned_peer(a, now));
     if banned {
-        let mut r = (
-            StatusCode::FORBIDDEN,
-            "Access Denied: Your IP has been banned",
-        )
-            .into_response();
-        r.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        return r;
+        return banned_reply();
     }
     let path = loggable_path(req.uri().path());
     if skip_traffic(&path) {
@@ -414,19 +405,13 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
     let is_api = path.starts_with("/api/v1/");
     let started = Instant::now();
 
-    let mut symbol = None;
-    let req = if is_api && method == Method::POST {
-        let (parts, body) = req.into_parts();
-        let bytes = match axum::body::to_bytes(body, crate::config::BODY_LIMIT_BYTES).await {
-            Ok(b) => b,
-            Err(_) => return too_large(),
-        };
-        symbol = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| v.get("symbol").and_then(|s| s.as_str()).map(String::from));
-        Request::from_parts(parts, Body::from(bytes))
+    let (req, symbol) = if is_api && method == Method::POST {
+        match with_symbol(req).await {
+            Ok(r) => r,
+            Err(r) => return r,
+        }
     } else {
-        req
+        (req, None)
     };
 
     let resp = next.run(req).await;
@@ -434,49 +419,15 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let resp = if is_api {
-        let (resp, body) = scan_body(resp).await;
-        let not_route =
-            status == StatusCode::NOT_FOUND && body.as_ref().and_then(|b| b.get("path")).is_some();
-        if !not_route {
-            let field = |k: &str| {
-                body.as_ref().and_then(|b| b.get(k)).and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                })
-            };
-            let order_id = field("orderid")
-                .or_else(|| field("request_id"))
-                .unwrap_or_else(|| "unknown".into());
-            let error = if status.as_u16() >= 400 {
-                field("message")
-            } else {
-                None
-            };
-            ctx.monitor.send(Record::Latency(LatencyRow {
-                timestamp: store::ts(now),
-                order_id,
-                broker: ctx.get_broker_session().map(|b| b.broker_id),
-                symbol: symbol.take(),
-                order_type: api_type(&path),
-                rtt_ms: elapsed_ms,
-                validation_latency_ms: 0.0,
-                response_latency_ms: 0.0,
-                overhead_ms: 0.0,
-                total_latency_ms: elapsed_ms,
-                status: if status.as_u16() < 400 {
-                    "SUCCESS".into()
-                } else {
-                    "FAILED".into()
-                },
-                error,
-                ..Default::default()
-            }));
-        }
-        if status == StatusCode::FORBIDDEN {
-            ctx.monitor.send(Record::InvalidKey { ip: ip.clone() });
-        }
-        resp
+        let call = ApiCall {
+            now,
+            path: &path,
+            status,
+            elapsed_ms,
+            symbol,
+            ip: &ip,
+        };
+        record_api_reply(&ctx, resp, call).await
     } else {
         resp
     };
@@ -497,6 +448,94 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
         host,
         error: None,
     }));
+    resp
+}
+
+/// The plain-text 403 a banned address gets.
+fn banned_reply() -> Response {
+    let mut r = (
+        StatusCode::FORBIDDEN,
+        "Access Denied: Your IP has been banned",
+    )
+        .into_response();
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    r
+}
+
+/// Read an API POST's body (refused past the body limit) for the symbol it
+/// names, and rebuild the request.
+async fn with_symbol(req: Request) -> Result<(Request, Option<String>), Response> {
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, crate::config::BODY_LIMIT_BYTES).await {
+        Ok(b) => b,
+        Err(_) => return Err(too_large()),
+    };
+    let symbol = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("symbol").and_then(|s| s.as_str()).map(String::from));
+    Ok((Request::from_parts(parts, Body::from(bytes)), symbol))
+}
+
+/// One `/api/v1` call, as its latency row records it.
+struct ApiCall<'a> {
+    now: DateTime<Utc>,
+    path: &'a str,
+    status: StatusCode,
+    elapsed_ms: f64,
+    symbol: Option<String>,
+    ip: &'a str,
+}
+
+/// Record an `/api/v1` reply's latency (not for a path no route answers)
+/// and an invalid key (403); the reply passes through.
+async fn record_api_reply(ctx: &AppState, resp: Response, call: ApiCall<'_>) -> Response {
+    let (resp, body) = scan_body(resp).await;
+    let not_route =
+        call.status == StatusCode::NOT_FOUND && body.as_ref().and_then(|b| b.get("path")).is_some();
+    if !not_route {
+        let field = |k: &str| {
+            body.as_ref().and_then(|b| b.get(k)).and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+        };
+        let order_id = field("orderid")
+            .or_else(|| field("request_id"))
+            .unwrap_or_else(|| "unknown".into());
+        let error = if call.status.as_u16() >= 400 {
+            field("message")
+        } else {
+            None
+        };
+        ctx.monitor.send(Record::Latency(LatencyRow {
+            timestamp: store::ts(call.now),
+            order_id,
+            broker: ctx.get_broker_session().map(|b| b.broker_id),
+            symbol: call.symbol,
+            order_type: api_type(call.path),
+            rtt_ms: call.elapsed_ms,
+            validation_latency_ms: 0.0,
+            response_latency_ms: 0.0,
+            overhead_ms: 0.0,
+            total_latency_ms: call.elapsed_ms,
+            status: if call.status.as_u16() < 400 {
+                "SUCCESS".into()
+            } else {
+                "FAILED".into()
+            },
+            error,
+            ..Default::default()
+        }));
+    }
+    if call.status == StatusCode::FORBIDDEN {
+        ctx.monitor.send(Record::InvalidKey {
+            ip: call.ip.to_string(),
+        });
+    }
     resp
 }
 

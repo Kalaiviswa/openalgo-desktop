@@ -128,7 +128,6 @@
     "src-tauri/src/services/action_center_service.rs::parse_pending_order": 169,
     "src-tauri/src/services/broker_auth_service.rs::complete_oauth": 113,
     "src-tauri/src/services/history_tools_service.rs::vol_surface": 116,
-    "src-tauri/src/services/monitor.rs::layer": 122,
     "src-tauri/src/services/order_service.rs::place_smart_order": 123,
     "src-tauri/src/services/pnl_tracker_service.rs::compute": 374,
     "src-tauri/src/services/sandbox_export_service.rs::export": 184,
