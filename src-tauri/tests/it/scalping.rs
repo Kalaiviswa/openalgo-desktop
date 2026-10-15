@@ -33,6 +33,16 @@ use tokio::sync::broadcast;
 
 const OPT: &str = "NIFTY06OCT2622000CE";
 
+/// The whole-lot exit chunk the monitor uses for `OPT` (NIFTY, lot 65): the
+/// exchange freeze rounded down to whole lots. The split tests take their
+/// sizes from it, so a new NSE freeze table (as on 5 October 2026, web
+/// #2218) does not break them.
+fn freeze_chunk() -> i64 {
+    let raw = openalgo_desktop_lib::services::symbol_service::freeze_qty_for_option(OPT, "NFO");
+    assert!(raw >= 65, "no freeze limit for {}", OPT);
+    (raw / 65) * 65
+}
+
 // ------------------------------------------------------------------ route harness
 
 fn session(h: &H) -> (String, String) {
@@ -937,10 +947,11 @@ async fn an_exit_rejected_after_acceptance_keeps_the_leg_and_exits_again() {
 /// the refused part, never the whole position again.
 #[tokio::test]
 async fn a_partly_refused_split_exit_retries_only_what_is_not_working() {
+    let f = freeze_chunk();
     let m = monitor();
-    *m.gw.net.lock() = 1950;
+    *m.gw.net.lock() = f + 195;
     let mut l = leg("live");
-    l.quantity = Some(1950);
+    l.quantity = Some(f + 195);
     m.store.upsert_sl(&l).unwrap();
     m.mon.sync().await;
     // First chunk accepted, second refused.
@@ -951,17 +962,17 @@ async fn a_partly_refused_split_exit_retries_only_what_is_not_working() {
     let placed = m.gw.placed.lock().clone();
     assert_eq!(
         placed.iter().map(|p| p.1.quantity).collect::<Vec<_>>(),
-        vec![1755, 195]
+        vec![f, 195]
     );
     // A delayed partial fill of the first chunk, and the book follows it.
-    *m.gw.net.lock() = 950;
+    *m.gw.net.lock() = f + 195 - 1000;
     m.mon
         .reconcile_book(
             RunMode::Live,
             &book(
                 vec![json!({
                     "orderid": "X1", "symbol": OPT, "exchange": "NFO", "action": "SELL",
-                    "quantity": 1755, "product": "MIS", "order_status": "open",
+                    "quantity": f, "product": "MIS", "order_status": "open",
                     "filled_quantity": 1000, "average_price": 94.5, "timestamp": "",
                 })],
                 m.clock.now(),
@@ -976,11 +987,11 @@ async fn a_partly_refused_split_exit_retries_only_what_is_not_working() {
     assert_eq!(placed.len(), 3);
     assert_eq!(
         placed[2].1.quantity, 195,
-        "1950 less 1000 filled less the 755 still working"
+        "the position less 1000 filled less the rest still working"
     );
     // Total exit quantity sent never exceeds the position.
     let accepted: i64 = [placed[0].1.quantity, placed[2].1.quantity].iter().sum();
-    assert_eq!(accepted, 1950);
+    assert_eq!(accepted, f + 195);
     // The working chunk covers the rest: further breaches send nothing.
     m.clock.advance(chrono::Duration::seconds(4));
     m.mon.process_tick(OPT, "NFO", 92.0).await;
@@ -993,7 +1004,7 @@ async fn a_partly_refused_split_exit_retries_only_what_is_not_working() {
             RunMode::Live,
             &book(
                 vec![
-                    order_row("X1", "SELL", 1755, "complete"),
+                    order_row("X1", "SELL", f, "complete"),
                     order_row("X3", "SELL", 195, "complete"),
                 ],
                 m.clock.now(),
@@ -1494,10 +1505,11 @@ async fn an_exit_that_cannot_be_saved_is_not_sent() {
 
 #[tokio::test]
 async fn a_split_exit_stops_at_the_first_order_it_cannot_save() {
+    let f = freeze_chunk();
     let m = monitor();
-    *m.gw.net.lock() = 1950;
+    *m.gw.net.lock() = f + 195;
     let mut l = leg("live");
-    l.quantity = Some(1950);
+    l.quantity = Some(f + 195);
     m.store.upsert_sl(&l).unwrap();
     m.mon.sync().await;
     // The empty attempt saves; one that records a sent order does not.
@@ -1514,7 +1526,7 @@ async fn a_split_exit_stops_at_the_first_order_it_cannot_save() {
     let placed = m.gw.placed.lock().clone();
     assert_eq!(
         placed.iter().map(|p| p.1.quantity).collect::<Vec<_>>(),
-        vec![1755],
+        vec![f],
         "the second chunk is not sent while the first cannot be saved"
     );
     assert_eq!(m.mon.leg_count(), 1);
@@ -1581,13 +1593,14 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
     use openalgo_desktop_lib::services::order_reconciler::{
         ABSENT_READS, ABSENT_SPAN_SECS, LIVE_RELEASE_SECS,
     };
+    let f = freeze_chunk();
     let m = monitor();
-    *m.gw.net.lock() = 3705;
+    *m.gw.net.lock() = 2 * f + 195;
     let mut l = leg("live");
-    l.quantity = Some(3705);
+    l.quantity = Some(2 * f + 195);
     m.store.upsert_sl(&l).unwrap();
     m.mon.sync().await;
-    // 1755 unconfirmed, 1755 accepted (X2), 195 refused.
+    // One chunk unconfirmed, one accepted (X2), 195 refused.
     {
         let mut s = m.gw.script.lock();
         s.push_back(Some(UNCERTAIN));
@@ -1602,7 +1615,7 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
             .iter()
             .map(|p| p.1.quantity)
             .collect::<Vec<_>>(),
-        vec![1755, 1755, 195]
+        vec![f, f, 195]
     );
     // The unconfirmed order's absence is confirmed: held (Live).
     let start = m.clock.now();
@@ -1617,7 +1630,7 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
     let mut partly = book(
         vec![json!({
             "orderid": "X2", "symbol": OPT, "exchange": "NFO", "action": "SELL",
-            "quantity": 1755, "product": "MIS", "order_status": "open",
+            "quantity": f, "product": "MIS", "order_status": "open",
             "filled_quantity": 1000, "average_price": 94.5, "timestamp": "2026-10-05 10:30:05",
         })],
         start + chrono::Duration::seconds(LIVE_RELEASE_SECS + 1),
@@ -1634,7 +1647,7 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
     assert_eq!(m.gw.placed.lock().len(), 4);
     // X2's 1000 shows in the position: the unconfirmed order is not
     // released (the position is not what it was before sending).
-    *m.gw.net.lock() = 2705;
+    *m.gw.net.lock() = 2 * f + 195 - 1000;
     *m.gw.trades_gate.lock() = None;
     gate.notify_one();
     pass.await.unwrap();
