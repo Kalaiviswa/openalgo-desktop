@@ -33,22 +33,7 @@ impl StrategyModule {
         let Some(run_mode) = RunMode::parse(mode) else {
             return StartResult::fail(format!("Unknown run mode: '{}'", mode));
         };
-        if strategy.strategy_kind == "signal" {
-            return StartResult::fail(
-                "A signal strategy has no start. Its run opens on the first long_entry or short_entry signal after the session boundary.",
-            );
-        }
-        // Live is opt-in per strategy, checked here as the last point before
-        // real orders as well as at every caller.
-        if run_mode == RunMode::Live && !strategy.live_enabled {
-            return StartResult::fail(LIVE_NOT_ENABLED);
-        }
-        if let Err(e) = self.gateway.authorised(run_mode) {
-            return StartResult::fail(e);
-        }
-        // A gap in order facts is being repaired: no new exposure until the
-        // book has been read (ARCH-01). Exits are never held by this.
-        if let Some(why) = self.entry_refusal(run_mode) {
+        if let Some(why) = self.start_refusal(&strategy, run_mode) {
             return StartResult::fail(why);
         }
 
@@ -70,6 +55,74 @@ impl StrategyModule {
             return StartResult::fail(refusal);
         }
 
+        let run_id = match self.open_linked_run(
+            strategy_id,
+            &resolved,
+            (mode, run_mode),
+            trigger_source,
+            webhook_event_id,
+        ) {
+            Ok(id) => id,
+            Err(failed) => return failed,
+        };
+
+        if let Err(failed) = self
+            .install_run(
+                run_id,
+                strategy_id,
+                user_id,
+                &resolved,
+                (mode, trigger_source),
+            )
+            .await
+        {
+            return failed;
+        }
+
+        let placed = self
+            .place_entries(run_id, &strategy, &resolved, run_mode, user_id)
+            .await;
+
+        self.start_outcome(run_id, strategy_id, user_id, placed)
+            .await
+    }
+
+    /// Why this strategy cannot start in `run_mode`: a signal strategy has
+    /// no start, Live is opt-in per strategy (checked here as the last
+    /// point before real orders as well as at every caller), the gateway
+    /// must allow the mode, and no new exposure is taken while a gap in
+    /// order facts is repaired (ARCH-01).
+    fn start_refusal(&self, strategy: &StrategyRow, run_mode: RunMode) -> Option<String> {
+        if strategy.strategy_kind == "signal" {
+            return Some(
+                "A signal strategy has no start. Its run opens on the first long_entry or short_entry signal after the session boundary.".into(),
+            );
+        }
+        // Live is opt-in per strategy, checked here as the last point before
+        // real orders as well as at every caller.
+        if run_mode == RunMode::Live && !strategy.live_enabled {
+            return Some(LIVE_NOT_ENABLED.into());
+        }
+        if let Err(e) = self.gateway.authorised(run_mode) {
+            return Some(e);
+        }
+        // A gap in order facts is being repaired: no new exposure until the
+        // book has been read (ARCH-01). Exits are never held by this.
+        self.entry_refusal(run_mode)
+    }
+
+    /// Opens the run row (with the resolved expiries) and links the
+    /// strategy to it. A run that cannot be opened releases the claim; one
+    /// that cannot be linked is finished and its empty claim released, and
+    /// no order is placed (`Err`: the start's answer).
+    fn open_linked_run(
+        &self,
+        strategy_id: i64,
+        resolved: &[LegSpec],
+        (mode, run_mode): (&str, RunMode),
+        trigger_source: &str,
+        webhook_event_id: Option<i64>,
+    ) -> Result<i64, StartResult> {
         let expiries: serde_json::Map<String, Value> = resolved
             .iter()
             .filter_map(|l| {
@@ -90,7 +143,7 @@ impl StrategyModule {
             Err(e) => {
                 tracing::error!("Could not open a run for strategy {}: {}", strategy_id, e);
                 let _ = self.store.release_strategy(strategy_id);
-                return StartResult::fail("Could not open a run");
+                return Err(StartResult::fail("Could not open a run"));
             }
         };
 
@@ -110,18 +163,32 @@ impl StrategyModule {
                     strategy_id
                 );
             }
-            return StartResult {
+            return Err(StartResult {
                 ok: false,
                 run_id: if cleaned { None } else { Some(run_id) },
                 error: Some(
                     "Could not link the new run to its strategy; no order was placed".into(),
                 ),
                 legs: vec![],
-            };
+            });
         }
+        Ok(run_id)
+    }
 
+    /// The run's live state, its prices (before entries: a fill can be
+    /// reported within milliseconds), the run_started event and the run's
+    /// first push. A leg whose state cannot be built finishes the run
+    /// before any entry (`Err`: the start's answer).
+    async fn install_run(
+        &self,
+        run_id: i64,
+        strategy_id: i64,
+        user_id: &str,
+        resolved: &[LegSpec],
+        (mode, trigger_source): (&str, &str),
+    ) -> Result<(), StartResult> {
         let mut legs = Vec::with_capacity(resolved.len());
-        for spec in &resolved {
+        for spec in resolved {
             match new_leg_state(spec) {
                 Ok(l) => legs.push(l),
                 Err(e) => {
@@ -134,12 +201,12 @@ impl StrategyModule {
                         "Start failed before any entry dispatch",
                     )
                     .await;
-                    return StartResult {
+                    return Err(StartResult {
                         ok: false,
                         run_id: Some(run_id),
                         error: Some("Could not start the strategy".into()),
                         legs: vec![],
-                    };
+                    });
                 }
             }
         }
@@ -163,13 +230,20 @@ impl StrategyModule {
                 .push_run_update(strategy_id, run.to_dict())
                 .await;
         }
+        Ok(())
+    }
 
-        let placed = self
-            .place_entries(run_id, &strategy, &resolved, run_mode, user_id)
-            .await;
-
-        // An unconfirmed entry may be a position: the run stays open and
-        // managed until the order reconciler settles it (LOG-08).
+    /// The start's answer once the entries were sent. An unconfirmed entry
+    /// may be a position: the run stays open and managed until the order
+    /// reconciler settles it (LOG-08); with no entry accepted or
+    /// unconfirmed, the run is finished.
+    async fn start_outcome(
+        &self,
+        run_id: i64,
+        strategy_id: i64,
+        user_id: &str,
+        placed: Vec<Value>,
+    ) -> StartResult {
         if !placed
             .iter()
             .any(|l| l["ok"] == json!(true) || l["unconfirmed"] == json!(true))
