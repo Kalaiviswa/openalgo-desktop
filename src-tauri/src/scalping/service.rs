@@ -26,7 +26,6 @@ pub const DERIVATIVE_PRODUCTS: &[&str] = &["MIS", "NRML"];
 pub const EQUITY_PRODUCTS: &[&str] = &["MIS", "CNC"];
 pub const VALID_PRODUCTS: &[&str] = &["MIS", "NRML", "CNC"];
 pub const MAX_ORDER_QUANTITY: i64 = 100_000;
-pub const IST_OFFSET_SECONDS: i64 = 19800;
 
 /// The supported index underlyings (web `SUPPORTED_UNDERLYINGS`), in order.
 pub const SUPPORTED_UNDERLYINGS: &[(&str, &str, &str)] = &[
@@ -288,7 +287,7 @@ pub async fn history(
         .iter()
         .map(|(ts, r)| {
             json!({
-                "time": ((ts + IST_OFFSET_SECONDS).div_euclid(60)) * 60,
+                "time": ((ts + crate::clock::IST_OFFSET_SECS).div_euclid(60)) * 60,
                 "open": num(r, "open"),
                 "high": num(r, "high"),
                 "low": num(r, "low"),

@@ -11,7 +11,7 @@ use crate::brokers::common::mpp::py_round;
 use crate::brokers::common::streaming::OrderUpdate;
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
-use chrono::{FixedOffset, NaiveDateTime, NaiveTime, Offset, Utc};
+use chrono::{FixedOffset, NaiveDateTime, NaiveTime, Utc};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ pub fn order_from(r: &Value, symbols: &SymbolResolver) -> Order {
 
 /// India Standard Time (+05:30).
 pub fn ist() -> FixedOffset {
-    FixedOffset::east_opt(19_800).unwrap_or(Utc.fix())
+    crate::clock::ist_offset()
 }
 
 /// web `transform_tradebook_data` fill time: `DD-MM-YYYY HH:MM:SS` ->

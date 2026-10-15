@@ -643,7 +643,7 @@ pub async fn get_market_depth(
 
 /// Today's date in IST.
 pub fn today_ist() -> NaiveDate {
-    (chrono::Utc::now() + chrono::Duration::minutes(330)).date_naive()
+    (chrono::Utc::now() + chrono::Duration::seconds(crate::clock::IST_OFFSET_SECS)).date_naive()
 }
 
 /// web `_today_bar`: today's daily candle from a live quote, stamped at

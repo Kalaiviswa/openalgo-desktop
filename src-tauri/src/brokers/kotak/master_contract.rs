@@ -23,13 +23,13 @@
 //! rows whose pSymbol happens to equal an NSE one.
 
 use super::{KotakBroker, KotakSession};
-use crate::brokers::common::history::IST_OFFSET_SECS;
 use crate::brokers::common::http::DOWNLOAD_TIMEOUT;
 use crate::brokers::common::master_contract::{
     format_expiry, parse_broker_expiry, part_missing, split_csv_line,
 };
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::AuthToken;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use reqwest::StatusCode;
 use serde_json::Value;

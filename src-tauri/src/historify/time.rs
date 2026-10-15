@@ -2,11 +2,9 @@
 //! for its users is IST; the desktop pins IST so results do not depend on
 //! the machine's zone.
 
+use crate::clock::IST_OFFSET_SECS;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
-
-/// IST is UTC+05:30.
-pub const IST_OFFSET: i64 = 19_800;
 
 /// Wall-clock IST of an instant, to the second (how timestamps are stored).
 pub fn ist_naive(t: DateTime<Utc>) -> NaiveDateTime {
@@ -19,20 +17,20 @@ pub fn ist_naive(t: DateTime<Utc>) -> NaiveDateTime {
 pub fn from_ist(n: NaiveDateTime) -> DateTime<Utc> {
     match Kolkata.from_local_datetime(&n).single() {
         Some(t) => t.with_timezone(&Utc),
-        None => Utc.from_utc_datetime(&(n - Duration::seconds(IST_OFFSET))),
+        None => Utc.from_utc_datetime(&(n - Duration::seconds(IST_OFFSET_SECS))),
     }
 }
 
 /// Epoch seconds of IST midnight on `d`.
 pub fn day_start(d: NaiveDate) -> i64 {
     d.and_hms_opt(0, 0, 0)
-        .map(|n| n.and_utc().timestamp() - IST_OFFSET)
+        .map(|n| n.and_utc().timestamp() - IST_OFFSET_SECS)
         .unwrap_or(0)
 }
 
 /// IST calendar date of an epoch (web `datetime.fromtimestamp(ts).date()`).
 pub fn ist_day(ts: i64) -> NaiveDate {
-    DateTime::from_timestamp(ts + IST_OFFSET, 0)
+    DateTime::from_timestamp(ts + IST_OFFSET_SECS, 0)
         .map(|d| d.date_naive())
         .unwrap_or_default()
 }
@@ -44,7 +42,7 @@ pub fn ist_date(ts: i64) -> String {
 
 /// `(date, time)` strings of an epoch shifted by IST.
 pub fn ist_date_time(ts: i64) -> (String, String) {
-    match DateTime::from_timestamp(ts + IST_OFFSET, 0) {
+    match DateTime::from_timestamp(ts + IST_OFFSET_SECS, 0) {
         Some(d) => (
             d.format("%Y-%m-%d").to_string(),
             d.format("%H:%M:%S").to_string(),

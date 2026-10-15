@@ -162,7 +162,7 @@ pub fn ist_epoch(d: NaiveDate, end_of_day: bool) -> i64 {
         NaiveTime::from_hms_opt(0, 0, 0)
     }
     .unwrap_or(NaiveTime::MIN);
-    d.and_time(t).and_utc().timestamp() - 19_800
+    d.and_time(t).and_utc().timestamp() - crate::clock::IST_OFFSET_SECS
 }
 
 /// One candle in either shape Delta sends: `[t, o, h, l, c, v(, oi)]` or a

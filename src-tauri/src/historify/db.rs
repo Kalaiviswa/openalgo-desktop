@@ -3,10 +3,10 @@
 //! serialized mutation through [`crate::db::duckdb::HistorifyDb`].
 
 use super::interval::{self, Kind};
-use super::time::{http_date, ist_date, IST_OFFSET};
+use super::time::{http_date, ist_date};
 use crate::brokers::types::Candle;
 use crate::db::duckdb::migrations::next_id;
-use crate::error::Result;
+use crate::{clock::IST_OFFSET_SECS, error::Result};
 use chrono::NaiveDateTime;
 use duckdb::types::Value as Dv;
 use duckdb::{params, params_from_iter, Connection};
@@ -346,7 +346,7 @@ fn intraday_bucket(open_secs: i64, interval_secs: i64) -> String {
     format!(
         "CAST((FLOOR((timestamp + {o}) / 86400) * 86400 - {o}) + {m} + \
          FLOOR((((timestamp + {o}) % 86400) - {m}) / {i}) * {i} AS BIGINT)",
-        o = IST_OFFSET,
+        o = IST_OFFSET_SECS,
         m = open_secs,
         i = interval_secs
     )
@@ -377,7 +377,7 @@ pub fn aggregated_intraday(
     if after_open {
         sql.push_str(&format!(
             " AND ((timestamp + {}) % 86400) >= {}",
-            IST_OFFSET, open
+            IST_OFFSET_SECS, open
         ));
     }
     sql.push_str(&range_clause(start, end, &mut params));
@@ -389,7 +389,7 @@ pub fn aggregated_intraday(
 fn daily_group(kind: Kind, value: u32) -> Option<String> {
     let t = format!(
         "make_timestamp(CAST(timestamp + {} AS BIGINT) * 1000000)",
-        IST_OFFSET
+        IST_OFFSET_SECS
     );
     let n = i64::from(value);
     Some(match kind {

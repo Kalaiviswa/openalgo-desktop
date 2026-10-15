@@ -231,7 +231,7 @@ pub fn parse_indexes(csv: &str) -> Vec<SymbolData> {
 
 /// Today's date in IST (the refdata snapshot date).
 fn today_ist() -> NaiveDate {
-    (chrono::Utc::now() + chrono::Duration::seconds(19_800)).date_naive()
+    (chrono::Utc::now() + chrono::Duration::seconds(crate::clock::IST_OFFSET_SECS)).date_naive()
 }
 
 pub async fn download(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<SymbolData>> {

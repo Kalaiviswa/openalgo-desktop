@@ -211,13 +211,13 @@ pub fn cancel_body(order_id: &str) -> Result<Value> {
 pub fn is_on_ist_day(created_at: &str, today: NaiveDate) -> bool {
     let head: String = created_at.chars().take(19).collect();
     NaiveDateTime::parse_from_str(&head, "%Y-%m-%dT%H:%M:%S")
-        .map(|utc| (utc + chrono::Duration::minutes(330)).date() == today)
+        .map(|utc| (utc + chrono::Duration::seconds(crate::clock::IST_OFFSET_SECS)).date() == today)
         .unwrap_or(false)
 }
 
 /// IST calendar date of an epoch-seconds instant.
 pub fn ist_date(epoch_secs: i64) -> NaiveDate {
-    chrono::DateTime::from_timestamp(epoch_secs + 19_800, 0)
+    chrono::DateTime::from_timestamp(epoch_secs + crate::clock::IST_OFFSET_SECS, 0)
         .map(|d| d.date_naive())
         .unwrap_or_default()
 }
