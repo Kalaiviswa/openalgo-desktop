@@ -78,6 +78,7 @@ mod historify;
 mod mcp_caps;
 mod mcp_contract;
 mod mcp_http;
+mod mcp_outputs;
 mod mcp_research;
 mod mcp_security;
 mod mcp_subcommand;
