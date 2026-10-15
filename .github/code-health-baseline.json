@@ -137,7 +137,6 @@
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
     "src-tauri/src/services/action_center_service.rs::execute_approved": 166,
     "src-tauri/src/services/action_center_service.rs::parse_pending_order": 169,
-    "src-tauri/src/services/batch_order_service.rs::split_order_decided": 101,
     "src-tauri/src/services/broker_auth_service.rs::complete_oauth": 113,
     "src-tauri/src/services/broker_config_service.rs::save": 148,
     "src-tauri/src/services/health_service.rs::sample_once": 114,

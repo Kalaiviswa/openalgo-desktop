@@ -303,45 +303,74 @@ pub async fn split_order_decided(
             MAX_SPLIT_ORDERS
         ));
     }
-    let n_orders = chunks.len();
-    let leg = |qty: i64| {
-        let mut o = req.clone();
-        if let Some(m) = o.as_object_mut() {
-            m.insert("quantity".into(), json!(qty));
-        }
-        o
-    };
     if analyze {
-        let quote = prefetch(ctx, &[(s(req, "symbol"), s(req, "exchange"))])
-            .await
-            .into_values()
-            .next();
-        let mut results = Vec::with_capacity(n_orders);
-        for (k, qty) in chunks.iter().enumerate() {
-            match sandbox_place(ctx, &leg(*qty), quote).await {
-                Ok(id) => results.push(json!({"order_num": k + 1, "quantity": qty, "status": "success", "orderid": id})),
-                Err(m) => results.push(json!({"order_num": k + 1, "quantity": qty, "status": "error", "message": m})),
-            }
-        }
-        let reply = Reply::ok(json!({
-            "mode": "analyze", "status": "success", "total_quantity": total,
-            "split_size": size, "results": results,
-        }));
-        publish(
-            ctx,
-            split_event(
-                Mode::Analyze,
-                analyzer_request(req, "splitorder"),
-                &reply,
-                req,
-            ),
-        );
-        return reply;
+        split_to_sandbox(ctx, req, &chunks, total, size).await
+    } else {
+        split_to_broker(ctx, req, &chunks, total, size).await
     }
+}
+
+/// `req` with its quantity replaced: one chunk of a split.
+fn chunk_order(req: &Value, qty: i64) -> Value {
+    let mut o = req.clone();
+    if let Some(m) = o.as_object_mut() {
+        m.insert("quantity".into(), json!(qty));
+    }
+    o
+}
+
+/// The chunks of a split, all to the sandbox.
+async fn split_to_sandbox(
+    ctx: &AppState,
+    req: &Value,
+    chunks: &[i64],
+    total: i64,
+    size: i64,
+) -> Reply {
+    let quote = prefetch(ctx, &[(s(req, "symbol"), s(req, "exchange"))])
+        .await
+        .into_values()
+        .next();
+    let mut results = Vec::with_capacity(chunks.len());
+    for (k, qty) in chunks.iter().enumerate() {
+        match sandbox_place(ctx, &chunk_order(req, *qty), quote).await {
+            Ok(id) => results.push(
+                json!({"order_num": k + 1, "quantity": qty, "status": "success", "orderid": id}),
+            ),
+            Err(m) => results.push(
+                json!({"order_num": k + 1, "quantity": qty, "status": "error", "message": m}),
+            ),
+        }
+    }
+    let reply = Reply::ok(json!({
+        "mode": "analyze", "status": "success", "total_quantity": total,
+        "split_size": size, "results": results,
+    }));
+    publish(
+        ctx,
+        split_event(
+            Mode::Analyze,
+            analyzer_request(req, "splitorder"),
+            &reply,
+            req,
+        ),
+    );
+    reply
+}
+
+/// The chunks of a split, one after another to the broker.
+async fn split_to_broker(
+    ctx: &AppState,
+    req: &Value,
+    chunks: &[i64],
+    total: i64,
+    size: i64,
+) -> Reply {
     let h = match broker_handle(ctx) {
         Ok(h) => h,
         Err(r) => return r,
     };
+    let n_orders = chunks.len();
     let mut results = Vec::with_capacity(n_orders);
     let mut uncertain: Vec<String> = Vec::new();
     for (k, qty) in chunks.iter().enumerate() {
@@ -361,7 +390,7 @@ pub async fn split_order_decided(
         if k > 0 {
             tokio::time::sleep(SPLIT_PAUSE).await;
         }
-        let r = place_live(&h, ctx, &leg(*qty)).await;
+        let r = place_live(&h, ctx, &chunk_order(req, *qty)).await;
         if r.placement.as_ref().is_some_and(|p| p.is_uncertain()) {
             uncertain.push(format!("order {} of {} ({})", order_num, n_orders, qty));
         }
