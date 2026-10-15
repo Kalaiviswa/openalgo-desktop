@@ -742,11 +742,13 @@ async fn s03_the_shared_tunnel_identity_is_never_banned() {
     let c = h.ctx().logs.conn().unwrap();
     assert!(!crate::db::sqlite::monitor::ban_ip(
         &c,
-        &proxied,
-        "manual",
-        Some(24),
-        false,
-        "test",
+        crate::db::sqlite::monitor::Ban {
+            ip: &proxied,
+            reason: "manual",
+            duration_hours: Some(24),
+            permanent: false,
+            created_by: "test"
+        },
         h.ctx().now(),
         5
     )
@@ -1823,11 +1825,13 @@ fn ban(h: &H, ip: &str) {
     let c = h.ctx().logs.conn().unwrap();
     assert!(crate::db::sqlite::monitor::ban_ip(
         &c,
-        ip,
-        "test",
-        Some(24),
-        false,
-        "test",
+        crate::db::sqlite::monitor::Ban {
+            ip,
+            reason: "test",
+            duration_hours: Some(24),
+            permanent: false,
+            created_by: "test"
+        },
         h.ctx().now(),
         5
     )
@@ -1939,11 +1943,13 @@ async fn s03_forged_forwarding_headers_never_match_or_escape_a_ban() {
     let c = h.ctx().logs.conn().unwrap();
     assert!(!crate::db::sqlite::monitor::ban_ip(
         &c,
-        &PROXIED_CALLER.to_string(),
-        "manual",
-        Some(24),
-        false,
-        "test",
+        crate::db::sqlite::monitor::Ban {
+            ip: &PROXIED_CALLER.to_string(),
+            reason: "manual",
+            duration_hours: Some(24),
+            permanent: false,
+            created_by: "test"
+        },
         h.ctx().now(),
         5
     )
@@ -2825,11 +2831,13 @@ async fn s02_rotating_through_our_own_ipv6_network_hits_the_aggregate_cap() {
         let c = h.ctx().logs.conn().unwrap();
         crate::db::sqlite::monitor::ban_ip(
             &c,
-            "fe80::bad",
-            "test",
-            Some(1),
-            false,
-            "admin",
+            crate::db::sqlite::monitor::Ban {
+                ip: "fe80::bad",
+                reason: "test",
+                duration_hours: Some(1),
+                permanent: false,
+                created_by: "admin",
+            },
             h.ctx().now(),
             5,
         )

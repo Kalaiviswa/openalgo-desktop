@@ -722,7 +722,19 @@ mod tests {
             .unwrap();
         assert!(!permanent);
         // A ban entered by hand is never shortened.
-        ban_ip(&c, "192.168.1.70", "manual", None, true, "admin", now, 5).unwrap();
+        ban_ip(
+            &c,
+            Ban {
+                ip: "192.168.1.70",
+                reason: "manual",
+                duration_hours: None,
+                permanent: true,
+                created_by: "admin",
+            },
+            now,
+            5,
+        )
+        .unwrap();
         assert!(!ban("192.168.1.70", AUTO_BAN_CAP));
         let still: bool = c
             .query_row(
@@ -939,9 +951,33 @@ mod tests {
     #[test]
     fn repeat_bans_become_permanent_and_loopback_is_never_banned() {
         let c = db();
-        assert!(!ban_ip(&c, "127.0.0.1", "x", Some(1), false, "manual", now(), 2).unwrap());
+        assert!(!ban_ip(
+            &c,
+            Ban {
+                ip: "127.0.0.1",
+                reason: "x",
+                duration_hours: Some(1),
+                permanent: false,
+                created_by: "manual"
+            },
+            now(),
+            2
+        )
+        .unwrap());
         for _ in 0..3 {
-            ban_ip(&c, "10.0.0.9", "x", Some(1), false, "system", now(), 2).unwrap();
+            ban_ip(
+                &c,
+                Ban {
+                    ip: "10.0.0.9",
+                    reason: "x",
+                    duration_hours: Some(1),
+                    permanent: false,
+                    created_by: "system",
+                },
+                now(),
+                2,
+            )
+            .unwrap();
         }
         let b = all_bans(&c, now()).unwrap();
         assert_eq!(b.len(), 1);

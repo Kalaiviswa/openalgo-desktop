@@ -197,7 +197,18 @@ pub fn ban_address(
     let limit = ctx.monitor.security_settings(ctx).repeat_offender_limit;
     let banned = {
         let c = ctx.logs.conn()?;
-        store::ban_ip(&c, ip, reason, hours, permanent, "manual", now, limit)?
+        store::ban_ip(
+            &c,
+            store::Ban {
+                ip,
+                reason,
+                duration_hours: hours,
+                permanent,
+                created_by: "manual",
+            },
+            now,
+            limit,
+        )?
     };
     if banned {
         ctx.monitor.reload_bans(ctx);
@@ -227,11 +238,13 @@ pub fn ban_host_addresses(
             if !store::never_banned(ip)
                 && store::ban_ip(
                     &c,
-                    ip,
-                    &format!("Host ban: {} - {}", host, reason),
-                    hours,
-                    permanent,
-                    "host_ban",
+                    store::Ban {
+                        ip,
+                        reason: &format!("Host ban: {} - {}", host, reason),
+                        duration_hours: hours,
+                        permanent,
+                        created_by: "host_ban",
+                    },
                     now,
                     limit,
                 )?

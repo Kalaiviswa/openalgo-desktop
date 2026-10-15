@@ -37,19 +37,33 @@ pub fn never_banned(ip: &str) -> bool {
         )
 }
 
+/// A ban to record ([`ban_ip`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Ban<'a> {
+    pub ip: &'a str,
+    pub reason: &'a str,
+    /// How long it lasts; `None` (or `permanent`) never expires.
+    pub duration_hours: Option<i64>,
+    pub permanent: bool,
+    /// Who banned it: "manual", "host_ban", "system".
+    pub created_by: &'a str,
+}
+
 /// Ban (or re-ban) an address. A fifth ban, or `repeat_limit` bans, makes it
 /// permanent as on the web. Loopback is never banned.
-#[allow(clippy::too_many_arguments)]
 pub fn ban_ip(
     conn: &Connection,
-    ip: &str,
-    reason: &str,
-    duration_hours: Option<i64>,
-    permanent: bool,
-    created_by: &str,
+    ban: Ban<'_>,
     now: DateTime<Utc>,
     repeat_limit: i64,
 ) -> Result<bool> {
+    let Ban {
+        ip,
+        reason,
+        duration_hours,
+        permanent,
+        created_by,
+    } = ban;
     // Stored in the one spelling every check looks up: `::ffff:1.2.3.4`
     // is `1.2.3.4`, IPv6 in its compressed lower-case form.
     let Some(ip) = crate::server::addr::canonical_text(ip) else {
