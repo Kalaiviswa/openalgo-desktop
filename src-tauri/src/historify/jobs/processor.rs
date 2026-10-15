@@ -6,11 +6,11 @@ use super::{jitter, until_cancel, Ctl, Finished, Interrupted, JobEngine, SAVE_FA
 use crate::historify::db::{self, Item};
 use crate::historify::interval;
 use crate::historify::time::{ist_day, parse_date};
-use chrono::{Duration as CDuration, NaiveDate};
+use chrono::{Duration as CDuration, NaiveDate, NaiveDateTime};
 use serde_json::{json, Value};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{watch, Mutex as AsyncMutex, OwnedSemaphorePermit};
 
 impl JobEngine {
     pub(super) async fn process(
@@ -84,30 +84,32 @@ impl JobEngine {
         }
     }
 
-    async fn run(
+    /// Waits for a download slot and marks the job running: the slot and
+    /// the job. `None` when the job ends first: cancelled while queued or
+    /// before it ran, or not found.
+    async fn begin(
         &self,
         job_id: &str,
-        gen: u64,
-        mut rx: watch::Receiver<Ctl>,
+        rx: &watch::Receiver<Ctl>,
         st: &Arc<AsyncMutex<()>>,
         fin: &mut Finished,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Option<(OwnedSemaphorePermit, Value)>> {
         // Queue for a download slot; a cancel while queued ends the job.
-        let _permit = tokio::select! {
+        let permit = tokio::select! {
             p = self.inner.permits.clone().acquire_owned() => match p {
                 Ok(p) => p,
-                Err(_) => return Ok(()),
+                Err(_) => return Ok(None),
             },
             _ = until_cancel(rx.clone()) => {
                 fin.status = "cancelled".into();
-                return Ok(());
+                return Ok(None);
             }
         };
 
         let id = job_id.to_string();
         let Some(job) = self.inner.db.run(move |c| db::job(c, &id)).await? else {
             tracing::error!("Historify job {} not found", job_id);
-            return Ok(());
+            return Ok(None);
         };
         fin.config = job
             .get("config")
@@ -118,143 +120,98 @@ impl JobEngine {
             let _g = st.lock().await;
             if *rx.borrow() == Ctl::Cancel {
                 fin.status = "cancelled".into();
-                return Ok(());
+                return Ok(None);
             }
             self.write_status(job_id, "running", None).await;
         }
+        Ok(Some((permit, job)))
+    }
 
-        let id = job_id.to_string();
-        let items = self.inner.db.run(move |c| db::items(c, &id)).await?;
-        if items.is_empty() {
-            self.write_status(job_id, "failed", Some("No items to process".into()))
-                .await;
-            return Ok(());
-        }
-        let total = items.len() as i64;
-        let already_completed = items.iter().filter(|i| i.status == "success").count() as i64;
-        let already_failed = items.iter().filter(|i| i.status == "error").count() as i64;
-        let (mut completed, mut failed) = (already_completed, already_failed);
-        let mut processed = already_completed + already_failed;
-        fin.total = total;
-        fin.completed = completed;
-        fin.failed = failed;
+    /// Sets an item's status, with no records or error.
+    async fn mark_item(
+        &self,
+        iid: i64,
+        status: &'static str,
+        now: NaiveDateTime,
+    ) -> crate::error::Result<()> {
+        self.inner
+            .db
+            .write(move |c| db::set_item_status(c, iid, status, 0, None, now))
+            .await
+    }
 
-        let incremental = fin
-            .config
-            .get("incremental")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let interval = job["interval"].as_str().unwrap_or("D").to_string();
-        let start = job["start_date"].as_str().and_then(parse_date);
-        let end = job["end_date"].as_str().and_then(parse_date);
+    /// Tells the page which symbol the job has reached.
+    fn notify_progress(&self, job_id: &str, processed: i64, total: i64, symbol: &str) {
+        self.inner.notify.notify(
+            "historify_progress",
+            json!({
+                "job_id": job_id,
+                "current": processed,
+                "total": total,
+                "symbol": symbol,
+                "percent": ((processed as f64 / total as f64) * 1000.0).round() / 10.0,
+            }),
+        );
+    }
 
-        let pending: Vec<Item> = items
-            .into_iter()
-            .filter(|i| i.status == "pending" || i.status == "downloading")
-            .collect();
+    /// Stores an item's outcome and, unless it was skipped, the job's
+    /// counts.
+    async fn record_item(
+        &self,
+        job_id: &str,
+        iid: i64,
+        (status, records, error): (&'static str, i64, Option<String>),
+        (completed, failed): (i64, i64),
+    ) -> crate::error::Result<()> {
+        let (id, now) = (job_id.to_string(), self.now());
+        let progress = status != "skipped";
+        self.inner
+            .db
+            .write(move |c| {
+                db::set_item_status(c, iid, status, records, error.as_deref(), now)?;
+                if progress {
+                    db::set_job_progress(c, &id, completed, failed)?;
+                }
+                Ok(())
+            })
+            .await
+    }
 
-        for item in pending {
-            if self
-                .wait_running(job_id, &mut rx, processed, total)
-                .await
-                .is_err()
-            {
-                tracing::info!("Historify job {} cancelled", job_id);
-                fin.status = "cancelled".into();
-                return Ok(());
-            }
-
-            let (iid, now) = (item.id, self.now());
-            self.inner
-                .db
-                .write(move |c| db::set_item_status(c, iid, "downloading", 0, None, now))
-                .await?;
-            processed += 1;
-            self.inner.notify.notify(
-                "historify_progress",
-                json!({
-                    "job_id": job_id,
-                    "current": processed,
-                    "total": total,
-                    "symbol": item.symbol,
-                    "percent": ((processed as f64 / total as f64) * 1000.0).round() / 10.0,
-                }),
+    /// The pause after a symbol, and the longer cooldown after each batch.
+    async fn pause_after_item(&self, rx: &watch::Receiver<Ctl>, job_id: &str, done_this_run: i64) {
+        let cfg = &self.inner.cfg;
+        self.pause_between(rx, jitter(cfg.delay_min, cfg.delay_max))
+            .await;
+        if cfg.batch_size > 0 && done_this_run > 0 && done_this_run % cfg.batch_size as i64 == 0 {
+            let d = jitter(cfg.batch_cooldown_min, cfg.batch_cooldown_max);
+            tracing::info!(
+                "Historify job {}: cooldown after {} symbols, waiting {:.1}s",
+                job_id,
+                done_this_run,
+                d.as_secs_f64()
             );
-
-            let outcome = self
-                .download_item(&rx, &item, &interval, start, end, incremental)
-                .await;
-            let (status, records, error) = match outcome {
-                Err(Interrupted::Cancelled) => {
-                    // Not finished: leave it for a retry or resume.
-                    let iid = item.id;
-                    self.inner
-                        .db
-                        .write(move |c| {
-                            db::set_item_status(c, iid, "pending", 0, None, Default::default())
-                        })
-                        .await?;
-                    fin.status = "cancelled".into();
-                    return Ok(());
-                }
-                Ok(ItemOutcome::Skipped(msg)) => ("skipped", 0, Some(msg)),
-                Ok(ItemOutcome::Done(Ok(n))) => {
-                    completed += 1;
-                    ("success", n, None)
-                }
-                Ok(ItemOutcome::Done(Err((n, msg)))) => {
-                    failed += 1;
-                    ("error", n, Some(msg))
-                }
-            };
-            let (iid, id, now) = (item.id, job_id.to_string(), self.now());
-            let progress = status != "skipped";
-            self.inner
-                .db
-                .write(move |c| {
-                    db::set_item_status(c, iid, status, records, error.as_deref(), now)?;
-                    if progress {
-                        db::set_job_progress(c, &id, completed, failed)?;
-                    }
-                    Ok(())
-                })
-                .await?;
-            fin.completed = completed;
-            fin.failed = failed;
-            if !progress {
-                tracing::info!(
-                    "Skipping {} - data already covers requested range",
-                    item.symbol
-                );
-                continue;
-            }
-
-            let cfg = &self.inner.cfg;
-            self.pause_between(&rx, jitter(cfg.delay_min, cfg.delay_max))
-                .await;
-            let done_this_run = processed - already_completed - already_failed;
-            if cfg.batch_size > 0 && done_this_run > 0 && done_this_run % cfg.batch_size as i64 == 0
-            {
-                let d = jitter(cfg.batch_cooldown_min, cfg.batch_cooldown_max);
-                tracing::info!(
-                    "Historify job {}: cooldown after {} symbols, waiting {:.1}s",
-                    job_id,
-                    done_this_run,
-                    d.as_secs_f64()
-                );
-                self.pause_between(&rx, d).await;
-            }
+            self.pause_between(rx, d).await;
         }
+    }
 
-        // Claim the terminal state under the status lock; honour a pause
-        // that landed after the last item.
+    /// Claims the terminal state under the status lock, honouring a pause
+    /// that landed after the last item.
+    async fn finish(
+        &self,
+        job_id: &str,
+        gen: u64,
+        rx: &mut watch::Receiver<Ctl>,
+        st: &Arc<AsyncMutex<()>>,
+        fin: &mut Finished,
+        (completed, failed, processed, total): (i64, i64, i64, i64),
+    ) {
         loop {
             let g = st.lock().await;
             let c = *rx.borrow_and_update();
             match c {
                 Ctl::Cancel => {
                     fin.status = "cancelled".into();
-                    return Ok(());
+                    return;
                 }
                 Ctl::Pause => {
                     drop(g);
@@ -262,7 +219,7 @@ impl JobEngine {
                     tokio::select! {
                         r = rx.changed() => if r.is_err() {
                             fin.status = "cancelled".into();
-                            return Ok(());
+                            return;
                         },
                         _ = tokio::time::sleep(self.inner.cfg.pause_heartbeat) => {}
                     }
@@ -293,10 +250,108 @@ impl JobEngine {
                         completed,
                         failed
                     );
-                    return Ok(());
+                    return;
                 }
             }
         }
+    }
+
+    async fn run(
+        &self,
+        job_id: &str,
+        gen: u64,
+        mut rx: watch::Receiver<Ctl>,
+        st: &Arc<AsyncMutex<()>>,
+        fin: &mut Finished,
+    ) -> crate::error::Result<()> {
+        let Some((_permit, job)) = self.begin(job_id, &rx, st, fin).await? else {
+            return Ok(());
+        };
+
+        let id = job_id.to_string();
+        let items = self.inner.db.run(move |c| db::items(c, &id)).await?;
+        if items.is_empty() {
+            self.write_status(job_id, "failed", Some("No items to process".into()))
+                .await;
+            return Ok(());
+        }
+        let (pending, total, already_completed, already_failed) = split_items(items);
+        let (mut completed, mut failed) = (already_completed, already_failed);
+        let mut processed = already_completed + already_failed;
+        fin.total = total;
+        fin.completed = completed;
+        fin.failed = failed;
+
+        let (interval, start, end, incremental) = job_range(&job, &fin.config);
+
+        for item in pending {
+            if self
+                .wait_running(job_id, &mut rx, processed, total)
+                .await
+                .is_err()
+            {
+                tracing::info!("Historify job {} cancelled", job_id);
+                fin.status = "cancelled".into();
+                return Ok(());
+            }
+
+            self.mark_item(item.id, "downloading", self.now()).await?;
+            processed += 1;
+            self.notify_progress(job_id, processed, total, &item.symbol);
+
+            let outcome = self
+                .download_item(&rx, &item, &interval, start, end, incremental)
+                .await;
+            let (status, records, error) = match outcome {
+                Err(Interrupted::Cancelled) => {
+                    // Not finished: leave it for a retry or resume.
+                    self.mark_item(item.id, "pending", Default::default())
+                        .await?;
+                    fin.status = "cancelled".into();
+                    return Ok(());
+                }
+                Ok(ItemOutcome::Skipped(msg)) => ("skipped", 0, Some(msg)),
+                Ok(ItemOutcome::Done(Ok(n))) => {
+                    completed += 1;
+                    ("success", n, None)
+                }
+                Ok(ItemOutcome::Done(Err((n, msg)))) => {
+                    failed += 1;
+                    ("error", n, Some(msg))
+                }
+            };
+            let progress = status != "skipped";
+            self.record_item(
+                job_id,
+                item.id,
+                (status, records, error),
+                (completed, failed),
+            )
+            .await?;
+            fin.completed = completed;
+            fin.failed = failed;
+            if !progress {
+                tracing::info!(
+                    "Skipping {} - data already covers requested range",
+                    item.symbol
+                );
+                continue;
+            }
+
+            let done_this_run = processed - already_completed - already_failed;
+            self.pause_after_item(&rx, job_id, done_this_run).await;
+        }
+
+        self.finish(
+            job_id,
+            gen,
+            &mut rx,
+            st,
+            fin,
+            (completed, failed, processed, total),
+        )
+        .await;
+        Ok(())
     }
 
     /// Sleep `d`, ending early on a cancel.
@@ -482,6 +537,32 @@ impl JobEngine {
             Err(Interrupted::Cancelled) => Err("The download was stopped.".into()),
         }
     }
+}
+
+/// The items still to download (pending, or cut off while downloading),
+/// with the total and the counts already done and already failed.
+fn split_items(items: Vec<Item>) -> (Vec<Item>, i64, i64, i64) {
+    let total = items.len() as i64;
+    let already_completed = items.iter().filter(|i| i.status == "success").count() as i64;
+    let already_failed = items.iter().filter(|i| i.status == "error").count() as i64;
+    let pending: Vec<Item> = items
+        .into_iter()
+        .filter(|i| i.status == "pending" || i.status == "downloading")
+        .collect();
+    (pending, total, already_completed, already_failed)
+}
+
+/// What a job downloads: its interval (daily when unset), its date range,
+/// and whether it is incremental.
+fn job_range(job: &Value, config: &Value) -> (String, Option<NaiveDate>, Option<NaiveDate>, bool) {
+    let incremental = config
+        .get("incremental")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let interval = job["interval"].as_str().unwrap_or("D").to_string();
+    let start = job["start_date"].as_str().and_then(parse_date);
+    let end = job["end_date"].as_str().and_then(parse_date);
+    (interval, start, end, incremental)
 }
 
 enum ItemOutcome {
