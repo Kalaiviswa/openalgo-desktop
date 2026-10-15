@@ -161,18 +161,7 @@ pub fn sample_once(ctx: &AppState) -> Result<HealthRow> {
     let (main_conns, _) = ctx.sqlite.pool_state();
     let (logs_conns, _) = ctx.logs.pool_state();
     let db_total = (main_conns + logs_conns) as i64;
-    let mut ws = Map::new();
-    let symbols = ctx.websocket.instrument_count() as i64;
-    let ws_total = if ctx.websocket.is_connected() {
-        let broker = ctx
-            .get_broker_session()
-            .map(|b| b.broker_id)
-            .unwrap_or_else(|| "broker".into());
-        ws.insert(broker, json!({"count": 1, "symbols": symbols}));
-        1
-    } else {
-        0
-    };
+    let (ws, ws_total, symbols) = broker_feed(ctx);
     let fd_levels = fd_levels();
     let fd_status = status_of(
         p.fd_count.map(|v| v as f64),
@@ -231,43 +220,71 @@ pub fn sample_once(ctx: &AppState) -> Result<HealthRow> {
     };
     let conn = ctx.logs.conn()?;
     let id = store::insert_health(&conn, &row)?;
+    sample_alerts(&conn, now, &row, fd_levels)?;
+    Ok(HealthRow { id, ..row })
+}
+
+/// The broker feed's connections for a sample: per broker, the total and
+/// the instruments it streams.
+fn broker_feed(ctx: &AppState) -> (Map<String, Value>, i64, i64) {
+    let mut ws = Map::new();
+    let symbols = ctx.websocket.instrument_count() as i64;
+    let ws_total = if ctx.websocket.is_connected() {
+        let broker = ctx
+            .get_broker_session()
+            .map(|b| b.broker_id)
+            .unwrap_or_else(|| "broker".into());
+        ws.insert(broker, json!({"count": 1, "symbols": symbols}));
+        1
+    } else {
+        0
+    };
+    (ws, ws_total, symbols)
+}
+
+/// Raise or resolve the alert of each measured level in `row`.
+fn sample_alerts(
+    conn: &rusqlite::Connection,
+    now: DateTime<Utc>,
+    row: &HealthRow,
+    fd_levels: (i64, i64),
+) -> Result<()> {
     alerts(
-        &conn,
+        conn,
         now,
         "fd_count",
         "Open files",
-        p.fd_count.map(|v| v as f64),
+        row.fd_count.map(|v| v as f64),
         (fd_levels.0 as f64, fd_levels.1 as f64),
         "",
     )?;
     alerts(
-        &conn,
+        conn,
         now,
         "memory_rss_mb",
         "Memory use",
-        p.rss_mb,
+        row.memory_rss_mb,
         MEMORY_LEVELS_MB,
         " MB",
     )?;
     alerts(
-        &conn,
+        conn,
         now,
         "db_connections_total",
         "Database connections",
-        Some(db_total as f64),
+        row.db_connections_total.map(|v| v as f64),
         (DB_LEVELS.0 as f64, DB_LEVELS.1 as f64),
         "",
     )?;
     alerts(
-        &conn,
+        conn,
         now,
         "thread_count",
         "Threads",
-        p.threads.map(|v| v as f64),
+        row.thread_count.map(|v| v as f64),
         (THREAD_LEVELS.0 as f64, THREAD_LEVELS.1 as f64),
         "",
-    )?;
-    Ok(HealthRow { id, ..row })
+    )
 }
 
 fn alerts(
