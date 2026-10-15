@@ -59,6 +59,15 @@ fn upload_route() -> MethodRouter<Arc<AppState>> {
 
 /// The Historify routes, each with its access rule.
 pub fn table() -> Vec<RouteSpec> {
+    let mut t = data_routes();
+    t.extend(job_routes());
+    t.extend(schedule_routes());
+    t
+}
+
+/// The watchlist, downloads, data, catalog, export, upload and utility
+/// routes.
+fn data_routes() -> Vec<RouteSpec> {
     vec![
         h!(GET, "/historify/api/watchlist", watchlist),
         h!(POST, "/historify/api/watchlist", watchlist_add),
@@ -100,6 +109,12 @@ pub fn table() -> Vec<RouteSpec> {
             make: upload_route,
         },
         h!(GET, "/historify/api/sample/{format}", sample),
+    ]
+}
+
+/// The F&O lookups, download jobs and metadata enrichment.
+fn job_routes() -> Vec<RouteSpec> {
+    vec![
         h!(GET, "/historify/api/fno/underlyings", fno_underlyings),
         h!(GET, "/historify/api/fno/expiries", fno_expiries),
         h!(GET, "/historify/api/fno/chain", fno_chain),
@@ -114,6 +129,12 @@ pub fn table() -> Vec<RouteSpec> {
         h!(POST, "/historify/api/jobs/{id}/resume", job_resume),
         h!(POST, "/historify/api/jobs/{id}/retry", job_retry),
         h!(POST, "/historify/api/metadata/enrich", metadata_enrich),
+    ]
+}
+
+/// The schedule routes.
+fn schedule_routes() -> Vec<RouteSpec> {
+    vec![
         h!(GET, "/historify/api/schedules", schedules_list),
         h!(POST, "/historify/api/schedules", schedule_create),
         h!(GET, "/historify/api/schedules/{id}", schedule_get),
