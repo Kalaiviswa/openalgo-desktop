@@ -161,7 +161,16 @@ const GENERIC_FIELDS: &[KeyField] = &[
 
 /// The Broker Configuration entry for `broker`.
 pub fn guide(broker: &str) -> SetupGuide {
-    match broker {
+    guide_a_to_d(broker)
+        .or_else(|| guide_d_to_g(broker))
+        .or_else(|| guide_h_to_m(broker))
+        .or_else(|| guide_m_to_t(broker))
+        .or_else(|| guide_t_to_z(broker))
+        .unwrap_or_else(|| generic_guide(broker))
+}
+
+fn guide_a_to_d(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "aliceblue" => SetupGuide {
             name: "Alice Blue",
             fields: const { &[
@@ -232,6 +241,12 @@ pub fn guide(broker: &str) -> SetupGuide {
             banner: "Login with Delta Exchange signs you in with one click using the API key and secret you saved; there is nothing to type.",
             redirect_hint: "",
         },
+        _ => return None,
+    })
+}
+
+fn guide_d_to_g(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "dhan" => SetupGuide {
             name: "Dhan",
             fields: const { &[
@@ -314,6 +329,12 @@ pub fn guide(broker: &str) -> SetupGuide {
             banner: "Login with Groww opens a short form in OpenAlgo. For a TOTP key, enter the current code from your authenticator app; otherwise OpenAlgo signs in with the API key and secret you saved.",
             redirect_hint: "",
         },
+        _ => return None,
+    })
+}
+
+fn guide_h_to_m(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "hdfcsecurities" => SetupGuide {
             name: "HDFC Securities",
             fields: const { &[
@@ -400,6 +421,12 @@ pub fn guide(broker: &str) -> SetupGuide {
             banner: "Login with Motilal Oswal opens a short form in OpenAlgo. Each time, enter your user ID, password, date of birth and, if you use one, your TOTP.",
             redirect_hint: "",
         },
+        _ => return None,
+    })
+}
+
+fn guide_m_to_t(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "mstock" => SetupGuide {
             name: "mStock by Mirae Asset",
             fields: const { &[
@@ -491,6 +518,12 @@ pub fn guide(broker: &str) -> SetupGuide {
             banner: "Login with Tradejini opens a short form in OpenAlgo. Each time, enter your CubePlus login PIN and TOTP.",
             redirect_hint: "",
         },
+        _ => return None,
+    })
+}
+
+fn guide_t_to_z(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "tradesmart" => SetupGuide {
             name: "TradeSmart",
             fields: const { &[
@@ -537,16 +570,21 @@ pub fn guide(broker: &str) -> SetupGuide {
             banner: "Login with Zerodha takes you to Zerodha's Kite login page. Log in there and Zerodha sends you back to OpenAlgo. Market data needs an active Kite Connect subscription.",
             redirect_hint: REDIRECT_REGISTER,
         },
-        _ => SetupGuide {
-            name: "",
-            fields: GENERIC_FIELDS,
-            banner: match catalog::sign_in(broker) {
-                SignIn::Redirect => "Login takes you to your broker's login page. Log in there and your broker sends you back to OpenAlgo.",
-                SignIn::Form => "Login opens a short form in OpenAlgo for the details your broker asks for at each login.",
-                SignIn::SavedKeys => "Login signs you in with one click using the keys you saved.",
-            },
-            redirect_hint: REDIRECT_REGISTER,
+        _ => return None,
+    })
+}
+
+/// Any other broker: the generic fields, and a banner for how it signs in.
+fn generic_guide(broker: &str) -> SetupGuide {
+    SetupGuide {
+        name: "",
+        fields: GENERIC_FIELDS,
+        banner: match catalog::sign_in(broker) {
+            SignIn::Redirect => "Login takes you to your broker's login page. Log in there and your broker sends you back to OpenAlgo.",
+            SignIn::Form => "Login opens a short form in OpenAlgo for the details your broker asks for at each login.",
+            SignIn::SavedKeys => "Login signs you in with one click using the keys you saved.",
         },
+        redirect_hint: REDIRECT_REGISTER,
     }
 }
 

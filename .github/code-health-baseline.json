@@ -86,7 +86,6 @@
     "src-tauri/src/brokers/paytm/streaming.rs::decode_packet": 112,
     "src-tauri/src/brokers/samco/data.rs::get_history": 104,
     "src-tauri/src/brokers/samco/master_contract.rs::row_to_symbol": 138,
-    "src-tauri/src/brokers/setup_guide.rs::guide": 389,
     "src-tauri/src/brokers/tradejini/master_contract.rs::parse_row": 125,
     "src-tauri/src/brokers/upstox/streaming.rs::normalise": 112,
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
