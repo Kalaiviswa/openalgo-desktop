@@ -43,7 +43,7 @@ README and in `docs/user/troubleshooting.md`:
 
 ## The vault
 
-Migration `081_key_vault` (`src-tauri/src/db/sqlite/key_vault.rs`):
+Migration `082_key_vault` (`src-tauri/src/db/sqlite/key_vault.rs`):
 
 ```sql
 CREATE TABLE key_vault (

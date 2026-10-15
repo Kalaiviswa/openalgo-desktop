@@ -639,7 +639,7 @@ async fn sec03_a_locked_keychain_never_gets_new_keys() {
         )
         .unwrap();
         conn.execute_batch(
-            "DROP TABLE key_vault; DELETE FROM migrations WHERE name = '081_key_vault';",
+            "DROP TABLE key_vault; DELETE FROM migrations WHERE name = '082_key_vault';",
         )
         .unwrap();
         let (k, p) = crate::security::keychain_entries_for_test(&keys);

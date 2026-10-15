@@ -71,7 +71,7 @@ fn earlier_build_database(dir: &Path, keys: &Unlocked, password: &str) -> String
     .unwrap();
     // As an earlier build left it: no key_vault table at all.
     conn.execute_batch(
-        "DROP TABLE key_vault; DELETE FROM migrations WHERE name = '081_key_vault';",
+        "DROP TABLE key_vault; DELETE FROM migrations WHERE name = '082_key_vault';",
     )
     .unwrap();
     key

@@ -35,7 +35,7 @@ fn aad() -> Aad {
     Aad::fixed("vault")
 }
 
-/// Migration `081_key_vault`.
+/// Migration `082_key_vault`.
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS key_vault (
