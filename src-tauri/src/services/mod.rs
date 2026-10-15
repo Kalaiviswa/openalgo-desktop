@@ -40,6 +40,7 @@ pub mod chain_tools_service;
 pub mod chart_test_service;
 pub mod core;
 pub mod error_log;
+pub mod freeze_qty_service;
 pub mod gtt_service;
 pub mod health_service;
 pub mod history_tools_service;
