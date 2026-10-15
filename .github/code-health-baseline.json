@@ -58,7 +58,6 @@
     "src-tauri/src/strategy/store.rs": 1784
   },
   "rust_functions": {
-    "src-tauri/src/analytics/straddle.rs::simulate": 144,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/feed/server/mod.rs::serve_conn": 248,
     "src-tauri/src/historify/import.rs::read_file": 194,

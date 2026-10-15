@@ -161,6 +161,125 @@ fn trade(kind: &'static str, time: i64, strike: f64, spot: f64) -> Trade {
     }
 }
 
+/// The bars (with their ATM strike) grouped by IST date, in date order.
+fn by_ist_day(
+    underlying: &[Bar],
+    atms: &[Option<f64>],
+) -> BTreeMap<chrono::NaiveDate, Vec<(Bar, Option<f64>)>> {
+    let mut by_day: BTreeMap<chrono::NaiveDate, Vec<(Bar, Option<f64>)>> = BTreeMap::new();
+    for (b, atm) in underlying.iter().zip(atms) {
+        if let Some(d) = ist_date(b.time) {
+            by_day.entry(d).or_default().push((*b, *atm));
+        }
+    }
+    by_day
+}
+
+impl Trade {
+    /// The pair's call, put and straddle prices, rounded as the web does.
+    fn set_prices(&mut self, ce: f64, pe: f64) {
+        self.ce_price = py_round(ce, 2);
+        self.pe_price = py_round(pe, 2);
+        self.straddle = py_round(ce + pe, 2);
+    }
+}
+
+/// One point of the P&L series at bar `b`: the total P&L, the ATM pair's
+/// prices and the synthetic future (the spot when either price is
+/// missing). `(atm, entry)` are the bar's ATM strike and the held strike.
+fn sim_point(
+    data: &StrikeMap,
+    b: &Bar,
+    (atm, entry): (f64, f64),
+    total: f64,
+    adjustments: i64,
+) -> SimPoint {
+    let (t, spot) = (b.time, b.close);
+    let atm_ce = data.ce(atm, t).unwrap_or(0.0);
+    let atm_pe = data.pe(atm, t).unwrap_or(0.0);
+    let synthetic = if atm_ce != 0.0 && atm_pe != 0.0 {
+        py_round(atm + atm_ce - atm_pe, 2)
+    } else {
+        py_round(spot, 2)
+    };
+    SimPoint {
+        time: t,
+        pnl: py_round(total, 2),
+        spot: py_round(spot, 2),
+        atm_strike: atm,
+        entry_strike: entry,
+        ce_price: py_round(atm_ce, 2),
+        pe_price: py_round(atm_pe, 2),
+        straddle: py_round(atm_ce + atm_pe, 2),
+        synthetic_future: synthetic,
+        adjustments,
+    }
+}
+
+/// The P&L at time `t` of the pair sold at `(strike, ce, pe)`, when both
+/// of its prices exist then.
+fn pair_pnl(
+    data: &StrikeMap,
+    (k, e_ce, e_pe): (f64, f64, f64),
+    t: i64,
+    quantity: f64,
+) -> Option<f64> {
+    match (data.ce(k, t), data.pe(k, t)) {
+        (Some(c), Some(p)) => Some(((e_ce - c) + (e_pe - p)) * quantity),
+        _ => None,
+    }
+}
+
+/// An adjustment at bar `b`: the pair at the old strike bought back at
+/// `exit` (realising `leg`), and the ATM pair sold at `new`.
+fn adjustment_trade(
+    b: &Bar,
+    (old_strike, atm): (f64, f64),
+    exit: (f64, f64),
+    new: (f64, f64),
+    leg: f64,
+    cumulative_pnl: f64,
+) -> Trade {
+    let mut tr = trade("ADJUSTMENT", b.time, atm, b.close);
+    tr.old_strike = Some(old_strike);
+    tr.exit_ce = Some(py_round(exit.0, 2));
+    tr.exit_pe = Some(py_round(exit.1, 2));
+    tr.exit_straddle = Some(py_round(exit.0 + exit.1, 2));
+    tr.set_prices(new.0, new.1);
+    tr.leg_pnl = py_round(leg, 2);
+    tr.cumulative_pnl = py_round(cumulative_pnl, 2);
+    tr
+}
+
+/// The day's exit at bar `b`: the pair held at `strike` bought back (a
+/// missing price shown as zero), realising `leg`.
+fn exit_trade(data: &StrikeMap, b: &Bar, strike: f64, leg: f64, cumulative_pnl: f64) -> Trade {
+    let t = b.time;
+    let (c, p) = (
+        data.ce(strike, t).unwrap_or(0.0),
+        data.pe(strike, t).unwrap_or(0.0),
+    );
+    let mut tr = trade("EXIT", t, strike, b.close);
+    tr.set_prices(c, p);
+    tr.leg_pnl = py_round(leg, 2);
+    tr.cumulative_pnl = py_round(cumulative_pnl, 2);
+    tr
+}
+
+/// The run's summary: total P&L, adjustments, and the series' best and
+/// worst P&L (zero for an empty series).
+fn summarize(series: &[SimPoint], cumulative: f64, total_adjustments: i64) -> Summary {
+    let pnls = series.iter().map(|p| p.pnl);
+    let max_pnl = pnls.clone().fold(f64::NEG_INFINITY, f64::max);
+    let min_pnl = pnls.fold(f64::INFINITY, f64::min);
+    Summary {
+        total_pnl: py_round(cumulative, 2),
+        total_adjustments,
+        max_pnl: if series.is_empty() { 0.0 } else { max_pnl },
+        min_pnl: if series.is_empty() { 0.0 } else { min_pnl },
+    }
+}
+
 /// Web `get_custom_straddle_simulation`, over the last `days` IST trading
 /// dates present in `underlying` (sorted by time):
 ///
@@ -180,12 +299,7 @@ pub fn simulate(
     adjustment_points: f64,
     quantity: f64,
 ) -> Simulation {
-    let mut by_day: BTreeMap<chrono::NaiveDate, Vec<(Bar, Option<f64>)>> = BTreeMap::new();
-    for (b, atm) in underlying.iter().zip(atms) {
-        if let Some(d) = ist_date(b.time) {
-            by_day.entry(d).or_default().push((*b, *atm));
-        }
-    }
+    let by_day = by_ist_day(underlying, atms);
     let skip = by_day.len().saturating_sub(days.max(1) as usize);
     let mut cumulative = 0.0;
     let mut total_adjustments = 0i64;
@@ -212,9 +326,7 @@ pub fn simulate(
                     };
                     entry = Some((atm, ce, pe));
                     let mut tr = trade("ENTRY", t, atm, spot);
-                    tr.ce_price = py_round(ce, 2);
-                    tr.pe_price = py_round(pe, 2);
-                    tr.straddle = py_round(ce + pe, 2);
+                    tr.set_prices(ce, pe);
                     tr.cumulative_pnl = py_round(cumulative, 2);
                     trades.push(tr);
                 }
@@ -229,17 +341,14 @@ pub fn simulate(
                             let leg = ((e_ce - o_ce) + (e_pe - o_pe)) * quantity;
                             day_realized += leg;
                             day_adjustments += 1;
-                            let mut tr = trade("ADJUSTMENT", t, atm, spot);
-                            tr.old_strike = Some(k);
-                            tr.exit_ce = Some(py_round(o_ce, 2));
-                            tr.exit_pe = Some(py_round(o_pe, 2));
-                            tr.exit_straddle = Some(py_round(o_ce + o_pe, 2));
-                            tr.ce_price = py_round(n_ce, 2);
-                            tr.pe_price = py_round(n_pe, 2);
-                            tr.straddle = py_round(n_ce + n_pe, 2);
-                            tr.leg_pnl = py_round(leg, 2);
-                            tr.cumulative_pnl = py_round(cumulative + day_realized, 2);
-                            trades.push(tr);
+                            trades.push(adjustment_trade(
+                                b,
+                                (k, atm),
+                                (o_ce, o_pe),
+                                (n_ce, n_pe),
+                                leg,
+                                cumulative + day_realized,
+                            ));
                             entry = Some((atm, n_ce, n_pe));
                         }
                     }
@@ -248,68 +357,33 @@ pub fn simulate(
             let Some((k, e_ce, e_pe)) = entry else {
                 continue;
             };
-            let unrealized = match (data.ce(k, t), data.pe(k, t)) {
-                (Some(c), Some(p)) => {
-                    last_unrealized = ((e_ce - c) + (e_pe - p)) * quantity;
-                    last_unrealized
-                }
-                _ => last_unrealized,
-            };
+            if let Some(v) = pair_pnl(data, (k, e_ce, e_pe), t, quantity) {
+                last_unrealized = v;
+            }
+            let unrealized = last_unrealized;
             let total = cumulative + day_realized + unrealized;
-            let atm_ce = data.ce(atm, t).unwrap_or(0.0);
-            let atm_pe = data.pe(atm, t).unwrap_or(0.0);
-            let synthetic = if atm_ce != 0.0 && atm_pe != 0.0 {
-                py_round(atm + atm_ce - atm_pe, 2)
-            } else {
-                py_round(spot, 2)
-            };
-            series.push(SimPoint {
-                time: t,
-                pnl: py_round(total, 2),
-                spot: py_round(spot, 2),
-                atm_strike: atm,
-                entry_strike: k,
-                ce_price: py_round(atm_ce, 2),
-                pe_price: py_round(atm_pe, 2),
-                straddle: py_round(atm_ce + atm_pe, 2),
-                synthetic_future: synthetic,
-                adjustments: total_adjustments + day_adjustments,
-            });
+            series.push(sim_point(
+                data,
+                b,
+                (atm, k),
+                total,
+                total_adjustments + day_adjustments,
+            ));
             if is_last {
-                let (x_ce, x_pe) = (data.ce(k, t), data.pe(k, t));
-                let leg = match (x_ce, x_pe) {
-                    (Some(c), Some(p)) => ((e_ce - c) + (e_pe - p)) * quantity,
-                    _ => last_unrealized,
-                };
-                let (c, p) = (x_ce.unwrap_or(0.0), x_pe.unwrap_or(0.0));
-                let mut tr = trade("EXIT", t, k, spot);
-                tr.ce_price = py_round(c, 2);
-                tr.pe_price = py_round(p, 2);
-                tr.straddle = py_round(c + p, 2);
-                tr.leg_pnl = py_round(leg, 2);
-                tr.cumulative_pnl = py_round(cumulative + day_realized + leg, 2);
-                trades.push(tr);
+                let leg = pair_pnl(data, (k, e_ce, e_pe), t, quantity).unwrap_or(last_unrealized);
+                let cumulative_pnl = cumulative + day_realized + leg;
+                trades.push(exit_trade(data, b, k, leg, cumulative_pnl));
             }
         }
         if let Some((k, e_ce, e_pe)) = entry {
             let last_t = candles[n - 1].0.time;
-            let final_leg = match (data.ce(k, last_t), data.pe(k, last_t)) {
-                (Some(c), Some(p)) => ((e_ce - c) + (e_pe - p)) * quantity,
-                _ => last_unrealized,
-            };
+            let final_leg =
+                pair_pnl(data, (k, e_ce, e_pe), last_t, quantity).unwrap_or(last_unrealized);
             cumulative += day_realized + final_leg;
         }
         total_adjustments += day_adjustments;
     }
-    let pnls = series.iter().map(|p| p.pnl);
-    let max_pnl = pnls.clone().fold(f64::NEG_INFINITY, f64::max);
-    let min_pnl = pnls.fold(f64::INFINITY, f64::min);
-    let summary = Summary {
-        total_pnl: py_round(cumulative, 2),
-        total_adjustments,
-        max_pnl: if series.is_empty() { 0.0 } else { max_pnl },
-        min_pnl: if series.is_empty() { 0.0 } else { min_pnl },
-    };
+    let summary = summarize(&series, cumulative, total_adjustments);
     Simulation {
         pnl_series: series,
         trades,
