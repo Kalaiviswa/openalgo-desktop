@@ -102,7 +102,6 @@
     "src-tauri/src/mcp/research/tools.rs::snapshot": 147,
     "src-tauri/src/mcp/ta/surface.rs::call": 115,
     "src-tauri/src/mcp/ta/surface.rs::compute": 232,
-    "src-tauri/src/mcp/tools.rs::run": 488,
     "src-tauri/src/messaging/telegram/bot.rs::cmd_chart": 108,
     "src-tauri/src/messaging/telegram/bot.rs::on_callback": 174,
     "src-tauri/src/messaging/telegram/bot.rs::on_command": 104,

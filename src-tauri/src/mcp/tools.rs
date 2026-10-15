@@ -181,10 +181,48 @@ pub async fn call(ctx: &Arc<AppState>, tool: &ToolDef, a: &Args) -> String {
 }
 
 async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
+    if let Some(out) = run_placing(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_managing(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_account(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_quotes(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_symbols(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_calendar(ctx, name, a).await {
+        return out;
+    }
+    if let Some(out) = run_utility(name) {
+        return out;
+    }
+    match name {
+        "get_historical_data"
+        | "calculate_indicator"
+        | "get_trend_snapshot"
+        | "get_momentum_snapshot"
+        | "get_volatility_snapshot"
+        | "get_support_resistance"
+        | "detect_signals"
+        | "screen_instruments"
+        | "multi_timeframe_analysis"
+        | "correlation_beta" => research::run(ctx, name, a).await.into(),
+        other => error(format!("unknown tool '{}'", other), &[]).into(),
+    }
+}
+
+/// Placing orders: regular, smart, basket and split; `None` for a tool of
+/// another group.
+async fn run_placing(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
     let v = DEFAULT_VERIFY_WITH;
     let strategy = || json!(st(a, "strategy"));
-    match name {
-        // ---- orders ----
+    Some(match name {
         "place_order" => {
             let mut p = payload(&[
                 ("strategy", strategy()),
@@ -265,6 +303,16 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             )
             .into()
         }
+        _ => return None,
+    })
+}
+
+/// Options orders, changing and cancelling orders, closing positions and
+/// the analyzer toggle; `None` for a tool of another group.
+async fn run_managing(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
+    let v = DEFAULT_VERIFY_WITH;
+    let strategy = || json!(st(a, "strategy"));
+    Some(match name {
         "place_options_order" => {
             let mut p = payload(&[
                 ("strategy", strategy()),
@@ -358,7 +406,15 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             )
             .into()
         }
-        // ---- account ----
+        _ => return None,
+    })
+}
+
+/// The account tools: books, funds, margin, status; `None` for a tool of
+/// another group.
+async fn run_account(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
+    let strategy = || json!(st(a, "strategy"));
+    Some(match name {
         "get_open_position" => sdk_post(
             ctx,
             "openposition",
@@ -430,7 +486,14 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             )
             .into()
         }
-        // ---- market data ----
+        _ => return None,
+    })
+}
+
+/// Quotes, depth, the option chain and instrument search; `None` for a
+/// tool of another group.
+async fn run_quotes(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
+    Some(match name {
         "get_quote" | "get_market_depth" => {
             let endpoint = if name == "get_quote" {
                 "quotes"
@@ -459,10 +522,10 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
                 match (field("symbol"), field("exchange")) {
                     (Some(sym), Some(ex)) => list.push(json!({"symbol": sym, "exchange": ex})),
                     (None, _) => {
-                        return fail("getting multi quotes", "'symbol'", "KeyError").into()
+                        return Some(fail("getting multi quotes", "'symbol'", "KeyError").into())
                     }
                     (_, None) => {
-                        return fail("getting multi quotes", "'exchange'", "KeyError").into()
+                        return Some(fail("getting multi quotes", "'exchange'", "KeyError").into())
                     }
                 }
             }
@@ -500,6 +563,14 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             }
             sdk_post(ctx, "search", p).await.into()
         }
+        _ => return None,
+    })
+}
+
+/// Symbols, indices, expiries, intervals, option symbols and the
+/// synthetic future; `None` for a tool of another group.
+async fn run_symbols(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
+    Some(match name {
         "get_symbol_info" => {
             let symbol = up(a, "symbol");
             let mut exchange = st(a, "exchange");
@@ -577,6 +648,14 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
         )
         .await
         .into(),
+        _ => return None,
+    })
+}
+
+/// Option greeks, the market calendar and the instrument list; `None` for
+/// a tool of another group.
+async fn run_calendar(ctx: &Arc<AppState>, name: &str, a: &Args) -> Option<Output> {
+    Some(match name {
         "get_option_greeks" => {
             let mut p = payload(&[
                 ("symbol", json!(up(a, "symbol"))),
@@ -624,7 +703,14 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             Ok(admission) => instruments(ctx, &admission.args).await.into(),
             Err(refused) => refused.into(),
         },
-        // ---- utility ----
+        _ => return None,
+    })
+}
+
+/// The utility tools (they read no arguments); `None` for a tool of
+/// another group.
+fn run_utility(name: &str) -> Option<Output> {
+    Some(match name {
         "get_openalgo_version" => {
             Output::Text(format!("OpenAlgo version: {}", env!("CARGO_PKG_VERSION")))
         }
@@ -654,19 +740,8 @@ async fn run(ctx: &Arc<AppState>, name: &str, a: &Args) -> Output {
             "intervals": ["1m", "3m", "5m", "10m", "15m", "30m", "1h", "D"],
         })
         .into(),
-        // ---- research ----
-        "get_historical_data"
-        | "calculate_indicator"
-        | "get_trend_snapshot"
-        | "get_momentum_snapshot"
-        | "get_volatility_snapshot"
-        | "get_support_resistance"
-        | "detect_signals"
-        | "screen_instruments"
-        | "multi_timeframe_analysis"
-        | "correlation_beta" => research::run(ctx, name, a).await.into(),
-        other => error(format!("unknown tool '{}'", other), &[]).into(),
-    }
+        _ => return None,
+    })
 }
 
 /// The SDK's `optionsmultiorder` leg processing (`int()` / `float()` of the
