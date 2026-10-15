@@ -491,6 +491,47 @@ fn no_action_event(mode: Mode, req: &Value, request: Value, reply: &Reply) -> Ev
     }
 }
 
+/// `placesmartorder` in analyzer mode: the sandbox decides and places,
+/// with the web's analyze-mode events.
+async fn smart_order_in_sandbox(ctx: &AppState, req: &Value, target: i64) -> Reply {
+    let sreq = crate::sandbox::SmartOrderRequest {
+        symbol: s(req, "symbol"),
+        exchange: s(req, "exchange"),
+        product: s(req, "product"),
+        action: action(req),
+        quantity: i(req, "quantity"),
+        position_size: target,
+        price: opt_dec(f(req, "price")),
+        trigger_price: opt_dec(f(req, "trigger_price")),
+        price_type: s(req, "pricetype"),
+        strategy: s(req, "strategy"),
+    };
+    let request = analyzer_request(req, "placesmartorder");
+    match ctx.sandbox.place_smart_order(sreq).await {
+        Ok(crate::sandbox::replies::SmartOrderReply::Placed(p)) => {
+            let reply = Reply::from_ser(&p);
+            publish(
+                ctx,
+                placed_event(Mode::Analyze, "placesmartorder", req, request, &reply),
+            );
+            reply
+        }
+        Ok(crate::sandbox::replies::SmartOrderReply::NoAction(m)) => {
+            let reply = Reply::from_ser(&m);
+            publish(ctx, no_action_event(Mode::Analyze, req, request, &reply));
+            reply
+        }
+        Err(e) => {
+            let reply = Reply::sandbox(&e);
+            publish(
+                ctx,
+                placed_event(Mode::Analyze, "placesmartorder", req, request, &reply),
+            );
+            reply
+        }
+    }
+}
+
 /// `placesmartorder`.
 pub async fn place_smart_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
     if let Some(r) =
@@ -504,42 +545,7 @@ pub async fn place_smart_order(ctx: &AppState, req: &Value, route: Route) -> Rep
         Err(r) => return r,
     };
     if analyze {
-        let sreq = crate::sandbox::SmartOrderRequest {
-            symbol: s(req, "symbol"),
-            exchange: s(req, "exchange"),
-            product: s(req, "product"),
-            action: action(req),
-            quantity: i(req, "quantity"),
-            position_size: target,
-            price: opt_dec(f(req, "price")),
-            trigger_price: opt_dec(f(req, "trigger_price")),
-            price_type: s(req, "pricetype"),
-            strategy: s(req, "strategy"),
-        };
-        let request = analyzer_request(req, "placesmartorder");
-        return match ctx.sandbox.place_smart_order(sreq).await {
-            Ok(crate::sandbox::replies::SmartOrderReply::Placed(p)) => {
-                let reply = Reply::from_ser(&p);
-                publish(
-                    ctx,
-                    placed_event(Mode::Analyze, "placesmartorder", req, request, &reply),
-                );
-                reply
-            }
-            Ok(crate::sandbox::replies::SmartOrderReply::NoAction(m)) => {
-                let reply = Reply::from_ser(&m);
-                publish(ctx, no_action_event(Mode::Analyze, req, request, &reply));
-                reply
-            }
-            Err(e) => {
-                let reply = Reply::sandbox(&e);
-                publish(
-                    ctx,
-                    placed_event(Mode::Analyze, "placesmartorder", req, request, &reply),
-                );
-                reply
-            }
-        };
+        return smart_order_in_sandbox(ctx, req, target).await;
     }
     let h = match broker_handle(ctx) {
         Ok(h) => h,
