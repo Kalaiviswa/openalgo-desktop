@@ -127,18 +127,6 @@ impl AngelBroker {
         }
     }
 
-    /// Point the market-data and order-update sockets at other addresses
-    /// (tests run a local fake server).
-    pub fn with_feed_urls(
-        mut self,
-        feed_url: impl Into<String>,
-        order_feed_url: impl Into<String>,
-    ) -> Self {
-        self.feed_url = feed_url.into();
-        self.order_feed_url = order_feed_url.into();
-        self
-    }
-
     pub(crate) fn resolver(&self) -> &SymbolResolver {
         &self.symbols
     }

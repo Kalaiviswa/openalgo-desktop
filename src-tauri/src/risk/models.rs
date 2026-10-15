@@ -87,11 +87,6 @@ pub fn is_price(value: Option<f64>) -> bool {
     matches!(value, Some(v) if v.is_finite() && v > 0.0)
 }
 
-/// `is_price` on a loose JSON value.
-pub fn is_price_value(value: &Value) -> bool {
-    is_price(value_to_f64(value))
-}
-
 /// Coerce to a float, with `default` for anything unusable or non-finite.
 pub fn as_float(value: &Value, default: f64) -> f64 {
     match value_to_f64(value) {
@@ -349,24 +344,6 @@ impl PositionDecision {
             "current_sl": opt(self.stop_price),
             "breached": self.breached,
             "reason": self.reason.map(|r| r.as_str()),
-        })
-    }
-
-    /// JSON-ready form for a REST response or a log line.
-    pub fn as_dict(&self) -> Value {
-        serde_json::json!({
-            "identifier": self.identifier,
-            "evaluated": self.evaluated,
-            "stop_price": opt(self.stop_price),
-            "target_price": opt(self.target_price),
-            "highest_price": opt(self.highest_price),
-            "lowest_price": opt(self.lowest_price),
-            "pnl": num(self.pnl),
-            "breached": self.breached,
-            "reason": self.reason.map(|r| r.as_str()),
-            "detail": self.detail,
-            "stop_moved": self.stop_moved,
-            "trail_armed": self.trail_armed,
         })
     }
 }

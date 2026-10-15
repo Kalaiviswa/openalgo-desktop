@@ -20,13 +20,8 @@ pub use crate::brokers::common::underlying::{extract_underlying, is_fno, FNO_EXC
 /// Web `fno_search_symbols` default limit.
 pub const FNO_LIMIT: usize = 10_000;
 
-/// The public row shape of `/search/api/search`.
-pub fn api_row(r: &SymToken) -> Value {
-    api_row_with(r, None)
-}
-
-/// `api_row` with the row's contract multiplier (crypto masters; `null`
-/// for instruments that have none, as before).
+/// The public row shape of `/search/api/search`, with the row's contract
+/// multiplier (crypto masters; `null` for instruments that have none).
 pub fn api_row_with(r: &SymToken, contract_value: Option<f64>) -> Value {
     json!({
         "symbol": r.symbol,

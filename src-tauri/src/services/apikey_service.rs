@@ -319,17 +319,6 @@ impl ApiKeyService {
     }
 }
 
-/// Used by the older services that re-check the key.
-pub fn require_valid(state: &AppState, api_key: &str) -> Result<()> {
-    if ApiKeyService::is_valid(state, api_key) {
-        Ok(())
-    } else {
-        Err(crate::error::AppError::Auth(
-            "Invalid openalgo apikey".into(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

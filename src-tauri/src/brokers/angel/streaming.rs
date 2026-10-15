@@ -38,8 +38,8 @@
 
 use super::mapping::oa_symbol;
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, OrderUpdate, WsRequest,
+    now_ms, BrokerFeed, FeedEvent, FeedSubscription, Message, NormalizedDepth, NormalizedTick,
+    OrderUpdate, WsRequest,
 };
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::{AuthToken, DepthLevel};
@@ -517,9 +517,4 @@ impl BrokerFeed for AngelOrderFeed {
     fn heartbeat(&self) -> Option<(Duration, Message)> {
         Some((ORDER_HEARTBEAT, Message::Ping(Vec::new())))
     }
-}
-
-/// Feed mode to Angel mode code (identical numbering; Angel mode 4 unused).
-pub fn angel_mode(mode: FeedMode) -> u8 {
-    mode.code()
 }

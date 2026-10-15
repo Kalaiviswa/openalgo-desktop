@@ -1,32 +1,13 @@
 {
   "_doc": "Code-health ratchet: what was over a limit when the gate started, with its size then. Entries may only go down; `python3 scripts/ci/code_health.py --update` lowers them after an improvement. Adding or raising one needs the maintainer (the code-health-exception label). See CLAUDE.md, Code health.",
   "dead_public_functions": [
-    "src-tauri/src/analytics/black76.rs::from_type",
-    "src-tauri/src/brokers/angel/mod.rs::with_feed_urls",
-    "src-tauri/src/brokers/angel/streaming.rs::angel_mode",
-    "src-tauri/src/brokers/dhan/auth.rs::consume_partner_consent",
-    "src-tauri/src/brokers/dhan/auth.rs::generate_partner_consent",
-    "src-tauri/src/brokers/fyers/mod.rs::create_depth50_feed",
     "src-tauri/src/brokers/kotak/mod.rs::create_hsm_feed",
-    "src-tauri/src/brokers/upstox/mapping.rs::parse_exchange",
-    "src-tauri/src/db/sqlite/api_keys.rs::has_key",
-    "src-tauri/src/feed/source.rs::set_supported_depths",
-    "src-tauri/src/risk/models.rs::as_dict",
-    "src-tauri/src/risk/models.rs::is_price_value",
     "src-tauri/src/sandbox/catch_up.rs::before_session",
     "src-tauri/src/sandbox/clock.rs::now_ist_aware",
     "src-tauri/src/sandbox/events.rs::into_events",
     "src-tauri/src/sandbox/mod.rs::watched_symbols",
     "src-tauri/src/services/account_service.rs::holdings_statistics",
-    "src-tauri/src/services/apikey_service.rs::require_valid",
-    "src-tauri/src/services/search_ui_service.rs::api_row",
-    "src-tauri/src/state.rs::get_symbol_by_name",
-    "src-tauri/src/state.rs::get_symbol_by_token",
-    "src-tauri/src/state.rs::get_symbols_by_exchange",
-    "src-tauri/src/state.rs::get_token_by_symbol",
-    "src-tauri/src/state.rs::symbol_exists",
-    "src-tauri/src/strategy/dispatch.rs::is_refused",
-    "src-tauri/src/trading/runner/mod.rs::push_bars"
+    "src-tauri/src/strategy/dispatch.rs::is_refused"
   ],
   "frontend_files": {
     "src/api/strategy_module.ts": "web",

@@ -1953,19 +1953,6 @@ impl Runner {
         }
     }
 
-    /// Push bars to a run's page as if history had answered them (tests and
-    /// a future tick source share this door).
-    pub fn push_bars(&self, run_id: &str, bars: Vec<Value>) -> bool {
-        let Some(entry) = self.reg.lock().runs.get(run_id).cloned() else {
-            return false;
-        };
-        if let Some(newest) = bars.last() {
-            *entry.last_bar.lock() = Some(newest.clone());
-        }
-        entry.inbox.push(Message::Bars(bars));
-        true
-    }
-
     /// One pass of the pump for one run, for tests that do not wait on it.
     pub async fn pump_once(&self, run_id: &str) {
         let Some(entry) = self.reg.lock().runs.get(run_id).cloned() else {

@@ -541,25 +541,6 @@ impl AppState {
         self.sessions.signed_in_user()
     }
 
-    /// Master row by exchange and broker token.
-    pub fn get_symbol_by_token(&self, exchange: &str, token: &str) -> Option<SymbolInfo> {
-        self.symbols.by_token(exchange, token)
-    }
-
-    /// Master row by exchange and OpenAlgo symbol.
-    pub fn get_symbol_by_name(&self, exchange: &str, symbol: &str) -> Option<SymbolInfo> {
-        self.symbols.by_symbol(exchange, symbol)
-    }
-
-    /// Broker token by exchange and OpenAlgo symbol.
-    pub fn get_token_by_symbol(&self, exchange: &str, symbol: &str) -> Option<String> {
-        self.symbols.token(symbol, exchange)
-    }
-
-    pub fn symbol_exists(&self, exchange: &str, symbol: &str) -> bool {
-        self.symbols.by_symbol(exchange, symbol).is_some()
-    }
-
     /// Instruments in the loaded master.
     pub fn symbol_count(&self) -> usize {
         self.symbols.len()
@@ -573,17 +554,6 @@ impl AppState {
     /// Drop the master (logout).
     pub fn clear_symbol_cache(&self) {
         self.symbols.clear();
-    }
-
-    /// Every instrument on one exchange.
-    pub fn get_symbols_by_exchange(&self, exchange: &str) -> Vec<SymbolInfo> {
-        self.symbols
-            .snapshot()
-            .rows()
-            .iter()
-            .filter(|s| s.exchange.eq_ignore_ascii_case(exchange))
-            .cloned()
-            .collect()
     }
 }
 

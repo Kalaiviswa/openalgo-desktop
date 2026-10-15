@@ -8,7 +8,7 @@
 //! `get_symbol(instrument_token, exchange)`.
 
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
-use crate::brokers::common::mapping::{Exchange, PriceType, Product};
+use crate::brokers::common::mapping::{PriceType, Product};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
 use serde::Deserialize;
@@ -576,11 +576,6 @@ pub fn map_holdings(rows: Vec<UpstoxHolding>, symbols: &SymbolResolver) -> Vec<H
 /// statuses `open` and `trigger pending`).
 pub fn is_cancellable_raw(status: &str) -> bool {
     matches!(status, "open" | "trigger pending")
-}
-
-/// The OpenAlgo exchange enum for a book row, when it is one.
-pub fn parse_exchange(s: &str) -> Option<Exchange> {
-    s.parse().ok()
 }
 
 #[cfg(test)]
