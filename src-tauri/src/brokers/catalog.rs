@@ -412,199 +412,134 @@ pub struct LoginField {
     pub required: bool,
 }
 
+/// A field typed in clear and required.
+const fn shown(name: &'static str, label: &'static str) -> LoginField {
+    LoginField {
+        name,
+        label,
+        secret: false,
+        required: true,
+    }
+}
+
+/// A masked field, required.
+const fn masked(name: &'static str, label: &'static str) -> LoginField {
+    LoginField {
+        name,
+        label,
+        secret: true,
+        required: true,
+    }
+}
+
+/// A masked field the trader may leave empty.
+const fn masked_optional(name: &'static str, label: &'static str) -> LoginField {
+    LoginField {
+        name,
+        label,
+        secret: true,
+        required: false,
+    }
+}
+
+/// Firstock: user id, password and TOTP typed at each login (the
+/// stored API key is the vendor code, the secret the API key).
+const FIRSTOCK_LOGIN: &[LoginField] = &[
+    shown("userid", "Firstock user id"),
+    masked("password", "Password"),
+    masked_optional("totp", "TOTP"),
+];
+
+/// 5paisa (web BrokerTOTP.tsx): login email, PIN and TOTP typed at
+/// each login; the stored API key is `api_key:::user_id:::client_id`
+/// and the secret the app's encryption key.
+const FIVEPAISA_LOGIN: &[LoginField] = &[
+    shown("userid", "5paisa login email"),
+    masked("pin", "PIN"),
+    masked("totp", "TOTP from your authenticator app"),
+];
+
+/// Groww: TOTP for a TOTP API key, or a pasted access token; with
+/// neither, the stored API key and secret sign in (approval flow).
+const GROWW_LOGIN: &[LoginField] = &[
+    masked_optional("totp", "TOTP (if your Groww API key uses TOTP)"),
+    masked_optional("password", "Access token (if you paste one from Groww)"),
+];
+
+/// Kotak Neo (web BrokerTOTP.tsx): the stored API key is the UCC and
+/// the secret the Neo access token; the form carries the mobile
+/// number and TOTP (step one) and the MPIN (step two), posted
+/// together as on the web.
+const KOTAK_LOGIN: &[LoginField] = &[
+    shown("mobile", "Mobile number"),
+    masked("totp", "TOTP from the Kotak NEO app"),
+    masked("mpin", "MPIN"),
+];
+
+/// INDmoney (INDstocks): the stored API key is the Client ID; MPIN and
+/// TOTP mint a 24-hour token. Both are optional because a pasted
+/// token saved as the API secret signs in without them.
+const INDMONEY_LOGIN: &[LoginField] = &[
+    masked_optional("mpin", "MPIN"),
+    masked_optional("totp", "TOTP from your authenticator app"),
+];
+
+/// Nubra (web authenticate_broker, the phone-OTP flow): the stored
+/// API key is the registered mobile number and the secret the MPIN;
+/// opening the login page sends an SMS OTP and the form posts it as
+/// `otp` (`totp` is accepted too, as on the web).
+const NUBRA_LOGIN: &[LoginField] = &[masked("otp", "OTP sent to your registered mobile number")];
+
+/// Tradejini (web BrokerTOTP form): the CubePlus login PIN goes in
+/// `password`, the authenticator code in `twofa`. The stored API key
+/// is the individual app's API key.
+const TRADEJINI_LOGIN: &[LoginField] = &[
+    masked("password", "CubePlus login PIN"),
+    masked("twofa", "TOTP"),
+];
+
+/// Definedge (web brlogin): opening the login page sends an OTP to
+/// the registered mobile/email; the form posts it as `otp`.
+const DEFINEDGE_LOGIN: &[LoginField] = &[masked("otp", "OTP sent to your registered mobile/email")];
+
+/// mStock Type B (web brlogin): the stored API key is the client
+/// code; password and TOTP are posted together.
+const MSTOCK_LOGIN: &[LoginField] = &[
+    masked("password", "mStock password"),
+    masked("totp", "TOTP"),
+];
+
+/// Dhan signs in by consent redirect; a pasted access token (web
+/// brlogin `access_token`) is accepted through the form instead.
+const DHAN_LOGIN: &[LoginField] = &[masked(
+    "access_token",
+    "Access token (if you paste one from Dhan)",
+)];
+
+/// Motilal Oswal: client code, password, date of birth (the 2FA
+/// field, DD/MM/YYYY) and the authenticator TOTP.
+const MOTILAL_LOGIN: &[LoginField] = &[
+    shown("userid", "User ID"),
+    masked("password", "Password"),
+    masked("dob", "Date of birth (DD/MM/YYYY)"),
+    masked_optional("totp", "TOTP"),
+];
+
 /// Extra fields a broker's login form shows (beyond the stored API key and
 /// secret). Empty for brokers that sign in by redirect or need nothing.
 pub fn login_fields(broker: &str) -> &'static [LoginField] {
     match broker {
-        // Firstock: user id, password and TOTP typed at each login (the
-        // stored API key is the vendor code, the secret the API key).
-        "firstock" => &[
-            LoginField {
-                name: "userid",
-                label: "Firstock user id",
-                secret: false,
-                required: true,
-            },
-            LoginField {
-                name: "password",
-                label: "Password",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP",
-                secret: true,
-                required: false,
-            },
-        ],
-        // 5paisa (web BrokerTOTP.tsx): login email, PIN and TOTP typed at
-        // each login; the stored API key is `api_key:::user_id:::client_id`
-        // and the secret the app's encryption key.
-        "fivepaisa" => &[
-            LoginField {
-                name: "userid",
-                label: "5paisa login email",
-                secret: false,
-                required: true,
-            },
-            LoginField {
-                name: "pin",
-                label: "PIN",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP from your authenticator app",
-                secret: true,
-                required: true,
-            },
-        ],
-        // Groww: TOTP for a TOTP API key, or a pasted access token; with
-        // neither, the stored API key and secret sign in (approval flow).
-        "groww" => &[
-            LoginField {
-                name: "totp",
-                label: "TOTP (if your Groww API key uses TOTP)",
-                secret: true,
-                required: false,
-            },
-            LoginField {
-                name: "password",
-                label: "Access token (if you paste one from Groww)",
-                secret: true,
-                required: false,
-            },
-        ],
-        // Kotak Neo (web BrokerTOTP.tsx): the stored API key is the UCC and
-        // the secret the Neo access token; the form carries the mobile
-        // number and TOTP (step one) and the MPIN (step two), posted
-        // together as on the web.
-        "kotak" => &[
-            LoginField {
-                name: "mobile",
-                label: "Mobile number",
-                secret: false,
-                required: true,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP from the Kotak NEO app",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "mpin",
-                label: "MPIN",
-                secret: true,
-                required: true,
-            },
-        ],
-        // INDmoney (INDstocks): the stored API key is the Client ID; MPIN and
-        // TOTP mint a 24-hour token. Both are optional because a pasted
-        // token saved as the API secret signs in without them.
-        "indmoney" => &[
-            LoginField {
-                name: "mpin",
-                label: "MPIN",
-                secret: true,
-                required: false,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP from your authenticator app",
-                secret: true,
-                required: false,
-            },
-        ],
-        // Nubra (web authenticate_broker, the phone-OTP flow): the stored
-        // API key is the registered mobile number and the secret the MPIN;
-        // opening the login page sends an SMS OTP and the form posts it as
-        // `otp` (`totp` is accepted too, as on the web).
-        "nubra" => &[LoginField {
-            name: "otp",
-            label: "OTP sent to your registered mobile number",
-            secret: true,
-            required: true,
-        }],
-        // Tradejini (web BrokerTOTP form): the CubePlus login PIN goes in
-        // `password`, the authenticator code in `twofa`. The stored API key
-        // is the individual app's API key.
-        "tradejini" => &[
-            LoginField {
-                name: "password",
-                label: "CubePlus login PIN",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "twofa",
-                label: "TOTP",
-                secret: true,
-                required: true,
-            },
-        ],
-        // Definedge (web brlogin): opening the login page sends an OTP to
-        // the registered mobile/email; the form posts it as `otp`.
-        "definedge" => &[LoginField {
-            name: "otp",
-            label: "OTP sent to your registered mobile/email",
-            secret: true,
-            required: true,
-        }],
-        // mStock Type B (web brlogin): the stored API key is the client
-        // code; password and TOTP are posted together.
-        "mstock" => &[
-            LoginField {
-                name: "password",
-                label: "mStock password",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP",
-                secret: true,
-                required: true,
-            },
-        ],
-        // Dhan signs in by consent redirect; a pasted access token (web
-        // brlogin `access_token`) is accepted through the form instead.
-        "dhan" => &[LoginField {
-            name: "access_token",
-            label: "Access token (if you paste one from Dhan)",
-            secret: true,
-            required: true,
-        }],
-        // Motilal Oswal: client code, password, date of birth (the 2FA
-        // field, DD/MM/YYYY) and the authenticator TOTP.
-        "motilal" => &[
-            LoginField {
-                name: "userid",
-                label: "User ID",
-                secret: false,
-                required: true,
-            },
-            LoginField {
-                name: "password",
-                label: "Password",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "dob",
-                label: "Date of birth (DD/MM/YYYY)",
-                secret: true,
-                required: true,
-            },
-            LoginField {
-                name: "totp",
-                label: "TOTP",
-                secret: true,
-                required: false,
-            },
-        ],
+        "firstock" => FIRSTOCK_LOGIN,
+        "fivepaisa" => FIVEPAISA_LOGIN,
+        "groww" => GROWW_LOGIN,
+        "kotak" => KOTAK_LOGIN,
+        "indmoney" => INDMONEY_LOGIN,
+        "nubra" => NUBRA_LOGIN,
+        "tradejini" => TRADEJINI_LOGIN,
+        "definedge" => DEFINEDGE_LOGIN,
+        "mstock" => MSTOCK_LOGIN,
+        "dhan" => DHAN_LOGIN,
+        "motilal" => MOTILAL_LOGIN,
         // Samco Trade API v3.2 signs in server to server with the stored API
         // key and secret; the form has no fields (web SamcoAuth page).
         _ => &[],
