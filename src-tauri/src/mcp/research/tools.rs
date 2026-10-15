@@ -4,7 +4,9 @@ use super::args::{
     bundle, check_indicator, f, i, kw, latest, lookback, no_params, resolve_inputs, s, tag,
     ToolResult,
 };
-use super::history::{f64_col, load_history, opt, plan, records, resolve, tail_start, Interval};
+use super::history::{
+    f64_col, load_history, opt, plan, records, resolve, tail_start, Frame, Interval,
+};
 use super::limits::{admit, RESEARCH_DEADLINE};
 use crate::mcp::envelope::{error, fail};
 use crate::mcp::ta::{self, Out, PyErr};
@@ -426,6 +428,68 @@ async fn detect_signals(
     }))
 }
 
+/// One instrument against a screen condition: its metric and whether it
+/// passed, or `None` for a condition the screen does not know.
+fn screen_check(
+    df: &Frame,
+    condition: &str,
+    value: f64,
+    period: i64,
+) -> Result<Option<(Value, bool)>, PyErr> {
+    let close = df.col("close")?;
+    Ok(match condition {
+        "rsi_below" | "rsi_above" => {
+            let m = ta::last(&one_series(ta::call(
+                "rsi",
+                &[&close],
+                &kw(json!({"period": period})),
+            )?));
+            let passed = m.is_some_and(|m| {
+                if condition == "rsi_below" {
+                    m < value
+                } else {
+                    m > value
+                }
+            });
+            Some((opt(m), passed))
+        }
+        "price_above_sma" | "price_below_sma" => {
+            let sma = ta::last(&one_series(ta::call(
+                "sma",
+                &[&close],
+                &kw(json!({"period": period})),
+            )?));
+            let c = ta::last(&close);
+            let passed = match (sma, c) {
+                (Some(sv), Some(cv)) => {
+                    if condition == "price_above_sma" {
+                        cv > sv
+                    } else {
+                        cv < sv
+                    }
+                }
+                _ => false,
+            };
+            Some((opt(c), passed))
+        }
+        "supertrend_bullish" | "supertrend_bearish" => {
+            let (h, l) = (df.col("high")?, df.col("low")?);
+            let v = many(ta::call("supertrend", &[&h, &l, &close], &no_params())?);
+            let m = ta::last(&v[1]);
+            // As the web: a positive direction counts as bullish.
+            let passed = m.is_some_and(|m| {
+                if condition == "supertrend_bullish" {
+                    m > 0.0
+                } else {
+                    m < 0.0
+                }
+            });
+            Some((opt(m), passed))
+        }
+        _ => None,
+    })
+}
+
 async fn screen(ctx: &Arc<AppState>, a: &Map<String, Value>, today: NaiveDate) -> ToolResult {
     let condition = s(a, "condition").unwrap_or_else(|| "rsi_below".into());
     let value = f(a, "value").unwrap_or(30.0);
@@ -456,61 +520,7 @@ async fn screen(ctx: &Arc<AppState>, a: &Map<String, Value>, today: NaiveDate) -
                 continue;
             }
         };
-        let evaluate = || -> Result<Option<(Value, bool)>, PyErr> {
-            let close = df.col("close")?;
-            Ok(match condition.as_str() {
-                "rsi_below" | "rsi_above" => {
-                    let m = ta::last(&one_series(ta::call(
-                        "rsi",
-                        &[&close],
-                        &kw(json!({"period": period})),
-                    )?));
-                    let passed = m.is_some_and(|m| {
-                        if condition == "rsi_below" {
-                            m < value
-                        } else {
-                            m > value
-                        }
-                    });
-                    Some((opt(m), passed))
-                }
-                "price_above_sma" | "price_below_sma" => {
-                    let sma = ta::last(&one_series(ta::call(
-                        "sma",
-                        &[&close],
-                        &kw(json!({"period": period})),
-                    )?));
-                    let c = ta::last(&close);
-                    let passed = match (sma, c) {
-                        (Some(sv), Some(cv)) => {
-                            if condition == "price_above_sma" {
-                                cv > sv
-                            } else {
-                                cv < sv
-                            }
-                        }
-                        _ => false,
-                    };
-                    Some((opt(c), passed))
-                }
-                "supertrend_bullish" | "supertrend_bearish" => {
-                    let (h, l) = (df.col("high")?, df.col("low")?);
-                    let v = many(ta::call("supertrend", &[&h, &l, &close], &no_params())?);
-                    let m = ta::last(&v[1]);
-                    // As the web: a positive direction counts as bullish.
-                    let passed = m.is_some_and(|m| {
-                        if condition == "supertrend_bullish" {
-                            m > 0.0
-                        } else {
-                            m < 0.0
-                        }
-                    });
-                    Some((opt(m), passed))
-                }
-                _ => None,
-            })
-        };
-        match evaluate() {
+        match screen_check(&df, &condition, value, period) {
             Ok(Some((metric, passed))) => results.push(json!({
                 "symbol": sym.to_uppercase(),
                 "exchange": exch.to_uppercase(),
