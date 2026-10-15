@@ -101,6 +101,10 @@ up, no Python runtime and no `.env` file.
   CI on every platform.
 - Release builds attach the installers and a `SHA256SUMS.txt` to a draft
   GitHub release. The installers are not yet code-signed.
+- Your data is backed up before a new version changes it, put back if the
+  new version cannot open it, and the copy is deleted as soon as the new
+  version has opened your data. An older version refuses data that a newer
+  one has used, and changes nothing.
 
 ### Not included
 

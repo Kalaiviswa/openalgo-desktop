@@ -53,13 +53,29 @@ Each was traced against the code; the decisions:
    - The one exception is a backup that could not be put back after a
      failed migration. It is kept and named on the start-up page, because it
      is then the only good copy of the data. The app has not run since it
-     was made, so it holds nothing the trader has deleted since.
+     was made, so it holds nothing the trader has deleted since. A later
+     start that fails again and puts its own backup back removes only that
+     one, so this copy is not lost; the next successful open deletes it.
+   - Second line (follow-up of 2026-10-15): a successful start that cannot
+     delete a backup (on Windows another program, such as a virus scanner
+     reading the new files, can hold one open) logs it and goes on, so a
+     leftover could sit in `backups/` while the app runs. Every action of
+     the review's list therefore also empties `backups/`
+     (`upgrade::purge_backups`): forgetting a broker
+     (`BrokerConfigService::forget`), every broker sign-out, logout's
+     included (`BrokerAuthService::revoke_held`), a password change or
+     forgotten-password reset (`AuthService::set_password`) and account
+     reset (`AuthService::reset_account`). This is not the primary
+     guarantee (a new deleting action that forgets the call still has no
+     backup to leak into after a normal start); it only closes the
+     leftover case.
    - Cost: OpenAlgo offers no way back to an earlier version's data. The
      user guide says to keep a copy of the whole folder made by hand.
    - Tests: `no_backup_outlives_a_successful_open`,
      `an_upgrade_backs_up_every_store_before_the_open_then_deletes_the_backup`
      (unit), `an_upgrade_backs_up_every_store_and_keeps_no_copy_once_open`
-     (integration, account reset included).
+     and `no_backup_survives_a_deleting_action` (integration: a leftover
+     planted while the app runs is gone after each of the four actions).
 2. **Restore resurrecting revoked state: partly held, fixed.** The
    automatic restore already ran only for a failed open, immediately, from
    the backup made at that same start. That backup is the state the old
@@ -69,8 +85,13 @@ Each was traced against the code; the decisions:
    hash and vault (a leaked password would unlock again).
    - The manual path is gone. Backups no longer outlive a start (1), and
      the guide now says to keep a whole-folder copy by hand.
+   - `db::upgrade::restore` is private: the only caller is `open_data`,
+     right after the failed open, with the backup that same start made. No
+     command, route or later start can put an older copy back.
    - The SEC-05b revoke marker (`broker-revoke.pending`) is not a store, so
-     a restore never removes it.
+     a restore never removes it, and nothing in `AppState::open` reads or
+     clears it (the session poll and sign-in do, after the open), so a
+     failed open cannot have consumed it either.
    - Tests: `a_failed_migration_puts_every_store_back_from_that_starts_backup`.
      An older planted backup is never the one restored, and the revoke
      marker survives (unit and integration).
@@ -82,8 +103,12 @@ Each was traced against the code; the decisions:
    first byte: the `VACUUM INTO` target is created owner-only and empty
    first, the DuckDB and key files are streamed into owner-only files, and
    so are a restore's staging files and the folder lock. On Windows the
-   data folder's ACL is inherited.
-   - Test: `backups_are_owner_only_from_the_first_byte` (Unix).
+   data folder's ACL is inherited: every folder and file is created with
+   the default security of its parent, and nothing sets an entry of its
+   own.
+   - Tests: `backups_are_owner_only_from_the_first_byte` (Unix),
+     `backups_carry_only_the_data_folders_acl_on_windows` (Windows: every
+     access entry on `backups/`, the backup and its files is inherited).
 4. **Bounded retention and link safety: held, fixed.** Pruning kept three.
    But a `backups` that was a link was followed: making a backup chmod-ed,
    and cleanup deleted `.partial-` folders in, the folder it pointed to.

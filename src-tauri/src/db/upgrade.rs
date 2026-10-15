@@ -25,14 +25,20 @@
 //!   a rename), the recorded version stays the old one, and the backup is
 //!   deleted: the live folder now equals it;
 //! - only a backup that could not be put back is kept, and the start-up
-//!   page names it, since it is then the one good copy.
+//!   page names it, since it is then the one good copy (a later start that
+//!   fails and puts its own backup back leaves it; the next successful open
+//!   deletes it).
 //!
 //! So no backup outlives a successful start: broker keys forgotten, a
 //! session revoked, an API key regenerated, a password or TOTP changed, or
 //! an account reset while the app runs are never kept in an older copy,
-//! and no older copy can be restored over newer state (account reset also
-//! empties `backups/`). The broker-revoke marker (`broker-revoke.pending`)
-//! is not a store: a restore never removes it.
+//! and no older copy can be restored over newer state. A leftover that a
+//! successful start could not delete (another program holding one of its
+//! files) is deleted again by every action that removes something a copy
+//! would still hold ([`purge_backups`]: forgetting a broker, any broker
+//! sign-out, a password change or reset, account reset). The broker-revoke
+//! marker (`broker-revoke.pending`) is not a store: a restore never
+//! removes it.
 //!
 //! A backup is made in `backups/.partial-<name>/` and renamed into place
 //! only once every file and its manifest are on disk, so a crash mid-backup
@@ -331,8 +337,13 @@ pub fn open_data<T>(
             match restore(dir, &backup) {
                 Ok(()) => {
                     tracing::info!("Put the data back from {}", backup.display());
-                    // The folder now equals the backup.
-                    discard_backups(dir);
+                    // The folder now equals this start's backup. A copy an
+                    // earlier start could not put back stays (bounded): no
+                    // start has opened the folder since it was made, and it
+                    // may be the only good copy.
+                    if let Err(e) = fs::remove_dir_all(&backup) {
+                        tracing::warn!("Could not remove the data backup just put back: {}", e);
+                    }
                     Err(OpenError::Refused(Refusal::Restored {
                         from,
                         current: current.to_string(),
@@ -352,10 +363,19 @@ pub fn open_data<T>(
 }
 
 fn discard_backups(dir: &Path) {
+    purge_backups(dir, "The data opened");
+}
+
+/// Delete every backup in `backups/` after `after` (a short description
+/// for the log) removed something a copy would still hold. Normally there
+/// is none (a successful start deletes them); this catches a leftover that
+/// start could not delete. Failures are logged, never raised: the action
+/// itself has happened.
+pub fn purge_backups(dir: &Path, after: &str) {
     match delete_backups(dir) {
         Ok(0) => {}
-        Ok(n) => tracing::info!("Removed {} data backup(s) no longer needed", n),
-        Err(e) => tracing::warn!("Could not remove the data backups: {}", e),
+        Ok(n) => tracing::info!("{}: removed {} data backup(s) no longer needed", after, n),
+        Err(e) => tracing::warn!("{}: could not remove the data backups: {}", after, e),
     }
 }
 
@@ -375,18 +395,15 @@ fn label(version: &str) -> String {
 /// A new folder, owner-only from the start (0700 on Unix; on Windows the
 /// parent's ACL is inherited).
 fn create_private_dir(p: &Path) -> io::Result<()> {
-    let mut b = fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        b.mode(0o700);
-    }
-    b.create(p)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().mode(0o700).create(p)?;
+        // Exactly 0700 whatever the umask (which can only narrow it).
         fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    fs::DirBuilder::new().create(p)?;
     Ok(())
 }
 
@@ -624,7 +641,11 @@ pub fn delete_backups(dir: &Path) -> io::Result<usize> {
 /// first, and each store is replaced by a rename of an owner-only copy, so
 /// a crash leaves either the old file or the backup's, never half of one.
 /// Files that are not stores (the broker-revoke marker) are not touched.
-pub fn restore(dir: &Path, backup: &Path) -> io::Result<()> {
+///
+/// Private on purpose: the only restore is [`open_data`]'s, right after a
+/// failed open, from the backup that same start made. No command, route or
+/// later start may put an older copy back over newer state.
+fn restore(dir: &Path, backup: &Path) -> io::Result<()> {
     let text = fs::read_to_string(backup.join(MANIFEST))?;
     let manifest: Manifest = serde_json::from_str(&text).map_err(io::Error::other)?;
     let held = |n: &str| manifest.files.iter().any(|f| f == n);
@@ -902,10 +923,11 @@ mod tests {
         // A pending broker revoke (SEC-05b) is not a store: a restore never
         // removes it.
         fs::write(dir.join("broker-revoke.pending"), b"pending").unwrap();
-        // Security review, finding 2: an older backup (made at an earlier
+        // Security review, finding 2: an older backup (left by an earlier
         // start) is never what a restore puts back.
         let older = backup(&dir, "0.9.0", "1.0.0", at(1)).unwrap();
         sqlite_store(&older.join("openalgo.db"), &["old api key"]);
+        let older_before = snapshot(&older);
         let got: Result<(), OpenError> = open_data(&dir, "1.1.0", at(5), || {
             // A migration that half ran: new rows and schema, a new store,
             // a DuckDB change and a WAL left behind, then the failure.
@@ -967,8 +989,14 @@ mod tests {
             fs::read(dir.join("broker-revoke.pending")).unwrap(),
             b"pending"
         );
-        // The old version still owns the folder; no copy is kept.
+        // The old version still owns the folder. This start's backup is
+        // gone (the folder equals it); the older leftover was neither used
+        // nor changed, and the next successful open deletes it.
         assert_eq!(version_of(&dir), v("1.0.0"));
+        let left: Vec<PathBuf> = backups(&dir).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(left, vec![older.clone()]);
+        assert_eq!(snapshot(&older), older_before);
+        open_data(&dir, "1.0.0", at(9), || Ok(())).unwrap();
         assert!(backups(&dir).is_empty());
     }
 
@@ -1191,6 +1219,35 @@ mod tests {
         }
         let _lock = DataFolderLock::acquire(&dir).unwrap();
         assert_eq!(mode(&dir.join(LOCK_FILE)), 0o600);
+    }
+
+    /// Security review, finding 3 on Windows: backup folders and files carry
+    /// only what they inherit from the data folder's ACL (no entry of their
+    /// own), so they are exactly as private as the data folder.
+    #[cfg(windows)]
+    #[test]
+    fn backups_carry_only_the_data_folders_acl_on_windows() {
+        let d = folder(Some("1.0.0"));
+        let dir = d.path().to_path_buf();
+        open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
+            let (b, _) = &backups(&dir)[0];
+            let mut paths = vec![dir.join(BACKUPS_DIR), b.clone()];
+            paths.extend(fs::read_dir(b).unwrap().flatten().map(|e| e.path()));
+            for p in paths {
+                let out = std::process::Command::new("icacls")
+                    .arg(&p)
+                    .output()
+                    .unwrap();
+                let text = String::from_utf8_lossy(&out.stdout);
+                let entries: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
+                assert!(!entries.is_empty(), "{}: {}", p.display(), text);
+                for e in entries {
+                    assert!(e.contains("(I)"), "{}: {}", p.display(), e);
+                }
+            }
+            Err(AppError::Internal("migration failed".into()))
+        })
+        .unwrap_err();
     }
 
     /// Security review, finding 4: clearing and pruning backups never

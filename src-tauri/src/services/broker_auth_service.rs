@@ -796,7 +796,11 @@ impl BrokerAuthService {
         state.runtime.teardown(state).await;
         state.clear_symbol_cache();
         state.bus.publish(Event::BrokerSessionEnded { reason });
-        Self::retry_pending_revoke(state)
+        let written = Self::retry_pending_revoke(state);
+        // No copy of the ended session may outlive it in the data folder's
+        // update backups (REL-02 security review).
+        crate::db::upgrade::purge_backups(&state.data_dir, "Broker session ended");
+        written
     }
 
     /// Whether an ended session's stored row is still to be revoked, in

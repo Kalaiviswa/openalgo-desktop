@@ -314,6 +314,9 @@ impl AuthService {
             })?;
         state.sessions.clear();
         Self::clear_caches(state);
+        // No copy of the old password hash or vault may outlive the change
+        // (REL-02 security review).
+        crate::db::upgrade::purge_backups(&state.data_dir, "Password changed");
         Ok(())
     }
 
@@ -504,6 +507,9 @@ impl AuthService {
                 }
             }
         }
+        // No copy of the old account may outlive it in the data folder's
+        // update backups (REL-02 security review).
+        crate::db::upgrade::purge_backups(&state.data_dir, "Account reset");
         // The stored broker sessions are gone, so nothing is left to revoke.
         crate::services::broker_auth_service::BrokerAuthService::clear_pending_revoke(state);
         // The account and its keys are gone: the keys are locked, every
@@ -567,12 +573,6 @@ impl AuthService {
             .await
             .map_err(|e| AppError::Internal(format!("account reset task: {}", e)))??;
         Self::forget_adapter_state(ctx).await;
-        // No copy of the old account may outlive it in the data folder's
-        // update backups (REL-02 security review; normally there are none:
-        // a successful start deletes them).
-        if let Err(e) = crate::db::upgrade::delete_backups(&ctx.data_dir) {
-            tracing::warn!("Account reset: could not remove the data backups: {}", e);
-        }
         ctx.bus.publish(crate::events::Event::ForceLogout {
             message: "OpenAlgo was reset on this computer. Create a new account to continue."
                 .into(),

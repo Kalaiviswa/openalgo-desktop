@@ -1,18 +1,21 @@
 //! REL-02 against the real stores (`AppState::open_upgrading`): an upgrade
 //! backs up every store before the migrations run and keeps no copy once it
 //! opened, a migration that fails puts that start's backup back so the
-//! older version opens the folder as before, account reset leaves no backup,
-//! and a folder written by a newer version is refused before anything is
-//! opened. The decisions are unit-tested in `db::upgrade`.
+//! older version opens the folder as before, no leftover backup survives
+//! an action that deletes what it would hold (forgetting a broker, a broker
+//! sign-out, a password reset, account reset), and a folder written by a
+//! newer version is refused before anything is opened. The decisions are unit-tested in `db::upgrade`.
 
 use openalgo_desktop_lib::brokers::BrokerRegistry;
 use openalgo_desktop_lib::clock::ManualClock;
 use openalgo_desktop_lib::db::upgrade::{self, OpenError, Recorded, Refusal};
+use openalgo_desktop_lib::events::SessionEndReason;
 use openalgo_desktop_lib::security::keystore::MemoryKeyStore;
 use openalgo_desktop_lib::services::auth_service::AuthService;
-use openalgo_desktop_lib::services::broker_auth_service::REVOKE_MARKER;
+use openalgo_desktop_lib::services::broker_auth_service::{BrokerAuthService, REVOKE_MARKER};
+use openalgo_desktop_lib::services::broker_config_service::{BrokerConfigService, ForgetOutcome};
 use openalgo_desktop_lib::state::{AppState, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -112,9 +115,13 @@ async fn an_upgrade_backs_up_every_store_and_keeps_no_copy_once_open() {
         upgrade::backups(dir.path()).is_empty(),
         "a good upgrade keeps no copy of the older state"
     );
-    // Account reset leaves none either (a leftover planted while it runs).
+    close(ctx).await;
+}
+
+/// A backup a successful start could not delete (another program held one
+/// of its files), as it sits in `backups/` while the app runs.
+fn plant_leftover(dir: &Path) -> PathBuf {
     let leftover = dir
-        .path()
         .join(upgrade::BACKUPS_DIR)
         .join("1.0.0-20261015T093000Z");
     std::fs::create_dir_all(&leftover).unwrap();
@@ -124,15 +131,60 @@ async fn an_upgrade_backs_up_every_store_and_keeps_no_copy_once_open() {
             from_version: "1.0.0".into(),
             to_version: "1.1.0".into(),
             created_at: "2026-10-15T09:30:00.000Z".into(),
-            files: vec![],
+            files: vec!["openalgo.db".into()],
         })
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(upgrade::backups(dir.path()).len(), 1);
-    AuthService::reset_account_everywhere(&ctx).await.unwrap();
-    assert!(upgrade::backups(dir.path()).is_empty());
-    close(ctx).await;
+    std::fs::write(leftover.join("openalgo.db"), b"the account as it was").unwrap();
+    assert_eq!(upgrade::backups(dir).len(), 1);
+    leftover
+}
+
+/// Security review, finding 1: what the trader deletes never survives in
+/// `backups/`. A successful start deletes every backup; a leftover it
+/// could not delete goes with the first action that removes something a
+/// copy would still hold: forgetting a broker, a broker sign-out (logout),
+/// a forgotten-password reset and account reset.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_backup_survives_a_deleting_action() {
+    let mut survived = Vec::new();
+    for action in [
+        "forget broker",
+        "broker sign-out",
+        "password reset",
+        "account reset",
+    ] {
+        let keys = Arc::new(MemoryKeyStore::new());
+        let dir = folder_of_1_0_0(&keys).await;
+        let ctx = AppState::open_upgrading(dir.path(), opts(&keys), "1.0.0").unwrap();
+        let leftover = plant_leftover(dir.path());
+        match action {
+            "forget broker" => {
+                let got = BrokerConfigService::forget(&ctx, "zerodha", false)
+                    .await
+                    .unwrap();
+                assert!(matches!(got, ForgetOutcome::Forgotten { .. }), "{:?}", got);
+            }
+            "broker sign-out" => BrokerAuthService::revoke(&ctx, SessionEndReason::Logout)
+                .await
+                .unwrap(),
+            "password reset" => {
+                AuthService::reset_password(&ctx, "trader@example.com", "Another@456").unwrap()
+            }
+            "account reset" => AuthService::reset_account_everywhere(&ctx).await.unwrap(),
+            other => unreachable!("{}", other),
+        }
+        if leftover.exists() || !upgrade::backups(dir.path()).is_empty() {
+            survived.push(action);
+        }
+        close(ctx).await;
+    }
+    assert!(
+        survived.is_empty(),
+        "a leftover backup survived: {:?}",
+        survived
+    );
 }
 
 /// A migration that fails half way (one migration already applied, a later

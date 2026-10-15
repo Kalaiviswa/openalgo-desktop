@@ -738,12 +738,16 @@ Every flaky test found so far was a race, not a slow machine:
   or migrates a folder the first has open.
 - A data backup lives only for the start that made it (REL-02 security
   review, `docs/port/data-upgrades.md`): deleted once the upgraded open
-  succeeds or after it was put back, and on account reset. Never add a
-  manual restore of an older backup or keep backups "just in case": an older
-  copy brings back forgotten broker keys, a revoked session, an old API key
-  or a leaked password. Backup files and folders are created owner-only
-  (never widened then narrowed), and nothing in `backups/` is followed
-  through a link.
+  succeeds or after it was put back. A leftover a start could not delete
+  goes with the next action that deletes something a copy would hold
+  (`db::upgrade::purge_backups`: forgetting a broker, any broker sign-out,
+  a password change or reset, account reset); a new action of that kind
+  calls it too. Never add a manual restore of an older backup or keep
+  backups "just in case": an older copy brings back forgotten broker keys,
+  a revoked session, an old API key or a leaked password. `restore` stays
+  private to `open_data`. Backup files and folders are created owner-only
+  (never widened then narrowed; Windows inherits the data folder's ACL),
+  and nothing in `backups/` is followed through a link.
 
 ### Sandbox deviations from the web
 

@@ -476,6 +476,9 @@ impl BrokerConfigService {
             }
         }
         drop(held);
+        // No copy of the forgotten keys may outlive them in the data
+        // folder's update backups (REL-02 security review).
+        crate::db::upgrade::purge_backups(&state.data_dir, "Broker forgotten");
         tracing::info!("Broker keys forgotten for {}", broker);
         Ok(ForgetOutcome::Forgotten { signed_out: live })
     }
