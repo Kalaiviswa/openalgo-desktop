@@ -46,6 +46,7 @@ pub mod freeze_qty_service;
 pub mod gtt_service;
 pub mod health_service;
 pub mod history_tools_service;
+pub mod latency_probe;
 pub mod latency_service;
 pub mod market_calendar_service;
 pub mod market_data_service;
