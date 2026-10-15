@@ -368,6 +368,34 @@ fn identity(inst: &Value) -> String {
     )
 }
 
+/// The market-quote rows for the instruments, by `EXCHANGE:token` where a
+/// row names them and in answer order.
+async fn market_quote_rows(
+    b: &IiflCapitalBroker,
+    auth: &AuthToken,
+    insts: Vec<Value>,
+) -> Result<(HashMap<String, Value>, Vec<Value>)> {
+    let mut by_id: HashMap<String, Value> = HashMap::new();
+    let mut positional: Vec<Value> = Vec::new();
+    let data = post(b, auth, "/marketdata/marketquotes", &Value::Array(insts)).await?;
+    for row in market_rows(&data) {
+        let row = try_json(&row);
+        if !row.is_object() {
+            continue;
+        }
+        let ex = text(first(&row, &["exchange", "exchangeSegment"])).to_ascii_uppercase();
+        let tok = text(first(
+            &row,
+            &["instrumentId", "token", "exchangeInstrumentID"],
+        ));
+        if !ex.is_empty() && !tok.is_empty() {
+            by_id.insert(format!("{}:{}", ex, tok), row.clone());
+        }
+        positional.push(row);
+    }
+    Ok((by_id, positional))
+}
+
 pub async fn get_multiquotes(
     b: &IiflCapitalBroker,
     auth: &AuthToken,
@@ -384,32 +412,11 @@ pub async fn get_multiquotes(
             Err(e) => slots.push(Err(e.client_message())),
         }
     }
-    let mut by_id: HashMap<String, Value> = HashMap::new();
-    let mut positional: Vec<Value> = Vec::new();
-    if !insts.is_empty() {
-        let data = post(
-            b,
-            auth,
-            "/marketdata/marketquotes",
-            &Value::Array(insts.clone()),
-        )
-        .await?;
-        for row in market_rows(&data) {
-            let row = try_json(&row);
-            if !row.is_object() {
-                continue;
-            }
-            let ex = text(first(&row, &["exchange", "exchangeSegment"])).to_ascii_uppercase();
-            let tok = text(first(
-                &row,
-                &["instrumentId", "token", "exchangeInstrumentID"],
-            ));
-            if !ex.is_empty() && !tok.is_empty() {
-                by_id.insert(format!("{}:{}", ex, tok), row.clone());
-            }
-            positional.push(row);
-        }
-    }
+    let (by_id, positional) = if insts.is_empty() {
+        (HashMap::new(), Vec::new())
+    } else {
+        market_quote_rows(b, auth, insts).await?
+    };
     // OI for the derivative legs, fanned out (no batch OI endpoint).
     let oi_insts: Vec<Value> = keys
         .iter()
