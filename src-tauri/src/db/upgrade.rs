@@ -262,104 +262,139 @@ pub fn open_data<T>(
     now: DateTime<Utc>,
     open: impl FnOnce() -> crate::error::Result<T>,
 ) -> Result<T, OpenError> {
-    let this = semver::Version::parse(current).map_err(|e| {
-        OpenError::Open(AppError::Internal(format!(
-            "this build's version {} is not a version: {}",
-            current, e
-        )))
-    })?;
+    let this = this_version(current)?;
     let recorded = read_recorded(dir);
-    if let Recorded::Version(v) = &recorded {
-        if v.cmp_precedence(&this) == Ordering::Greater {
-            let r = Refusal::Downgrade {
-                recorded: v.to_string(),
-                current: current.to_string(),
-            };
-            tracing::error!(
-                "Data folder was written by OpenAlgo {}; this is {}: not opened",
-                v,
-                current
-            );
-            return Err(OpenError::Refused(r));
-        }
-    }
-    let older = match &recorded {
-        Recorded::Version(v) => v.cmp_precedence(&this) == Ordering::Less,
-        Recorded::Nothing | Recorded::Unreadable => true,
-    };
+    refuse_newer(&recorded, &this, current)?;
     let from = match &recorded {
         Recorded::Version(v) => v.to_string(),
         _ => "unknown".to_string(),
     };
-    let backup = if older && holds_stores(dir) {
-        match backup(dir, &from, current, now) {
-            Ok(b) => {
-                tracing::info!(
-                    "Backed up the data of OpenAlgo {} to {} before opening it with {}",
-                    from,
-                    b.display(),
-                    current
-                );
-                if let Err(e) = prune(dir, KEEP_BACKUPS) {
-                    tracing::warn!("Could not remove old data backups: {}", e);
-                }
-                Some(b)
-            }
-            Err(e) => {
-                tracing::error!("Could not back up the data before the upgrade: {}", e);
-                return Err(OpenError::Refused(Refusal::BackupFailed {
-                    detail: e.to_string(),
-                }));
-            }
-        }
-    } else {
-        None
-    };
+    let backup = back_up_before_upgrade(dir, &recorded, &this, &from, current, now)?;
     match open() {
         Ok(t) => {
-            if let Err(e) = write_recorded(dir, current, now) {
-                // The next start backs up again and records then.
-                tracing::warn!("Could not record the data folder's version: {}", e);
-            }
-            // The upgrade is good: no copy of older state is kept.
-            discard_backups(dir);
+            record_good_open(dir, current, now);
             Ok(t)
         }
-        Err(e) => {
-            let Some(backup) = backup else {
-                return Err(OpenError::Open(e));
-            };
-            tracing::error!(
-                "OpenAlgo {} could not open the data after backing it up: {}",
-                current,
-                e
-            );
-            match restore(dir, &backup) {
-                Ok(()) => {
-                    tracing::info!("Put the data back from {}", backup.display());
-                    // The folder now equals this start's backup. A copy an
-                    // earlier start could not put back stays (bounded): no
-                    // start has opened the folder since it was made, and it
-                    // may be the only good copy.
-                    if let Err(e) = fs::remove_dir_all(&backup) {
-                        tracing::warn!("Could not remove the data backup just put back: {}", e);
-                    }
-                    Err(OpenError::Refused(Refusal::Restored {
-                        from,
-                        current: current.to_string(),
-                        cause: cause_of(&e),
-                    }))
-                }
-                Err(re) => {
-                    tracing::error!("Could not put the backup back: {}", re);
-                    Err(OpenError::Refused(Refusal::RestoreFailed {
-                        backup,
-                        detail: re.to_string(),
-                    }))
-                }
-            }
-        }
+        Err(e) => match backup {
+            Some(backup) => Err(put_back_after_failed_open(dir, backup, from, current, e)),
+            None => Err(OpenError::Open(e)),
+        },
     }
+}
+
+/// This build's version, which must be a semantic version.
+fn this_version(current: &str) -> Result<semver::Version, OpenError> {
+    semver::Version::parse(current).map_err(|e| {
+        OpenError::Open(AppError::Internal(format!(
+            "this build's version {} is not a version: {}",
+            current, e
+        )))
+    })
+}
+
+/// A folder written by a newer version is refused before anything is
+/// opened: an older version could damage data in a newer format.
+fn refuse_newer(
+    recorded: &Recorded,
+    this: &semver::Version,
+    current: &str,
+) -> Result<(), OpenError> {
+    let Recorded::Version(v) = recorded else {
+        return Ok(());
+    };
+    if v.cmp_precedence(this) != Ordering::Greater {
+        return Ok(());
+    }
+    tracing::error!(
+        "Data folder was written by OpenAlgo {}; this is {}: not opened",
+        v,
+        current
+    );
+    Err(OpenError::Refused(Refusal::Downgrade {
+        recorded: v.to_string(),
+        current: current.to_string(),
+    }))
+}
+
+/// Back up every store when an older version (or an unrecorded one) left
+/// the folder, before this version's migrations change it. `None` when no
+/// backup is needed; a backup that cannot be made refuses the open.
+fn back_up_before_upgrade(
+    dir: &Path,
+    recorded: &Recorded,
+    this: &semver::Version,
+    from: &str,
+    current: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<PathBuf>, OpenError> {
+    let older = match recorded {
+        Recorded::Version(v) => v.cmp_precedence(this) == Ordering::Less,
+        Recorded::Nothing | Recorded::Unreadable => true,
+    };
+    if !older || !holds_stores(dir) {
+        return Ok(None);
+    }
+    let b = backup(dir, from, current, now).map_err(|e| {
+        tracing::error!("Could not back up the data before the upgrade: {}", e);
+        OpenError::Refused(Refusal::BackupFailed {
+            detail: e.to_string(),
+        })
+    })?;
+    tracing::info!(
+        "Backed up the data of OpenAlgo {} to {} before opening it with {}",
+        from,
+        b.display(),
+        current
+    );
+    if let Err(e) = prune(dir, KEEP_BACKUPS) {
+        tracing::warn!("Could not remove old data backups: {}", e);
+    }
+    Ok(Some(b))
+}
+
+/// The open succeeded: record this version and keep no copy of the older
+/// state.
+fn record_good_open(dir: &Path, current: &str, now: DateTime<Utc>) {
+    if let Err(e) = write_recorded(dir, current, now) {
+        // The next start backs up again and records then.
+        tracing::warn!("Could not record the data folder's version: {}", e);
+    }
+    discard_backups(dir);
+}
+
+/// The open after this start's backup failed: put that backup back (never
+/// an older one) and say so on the start-up page.
+fn put_back_after_failed_open(
+    dir: &Path,
+    backup: PathBuf,
+    from: String,
+    current: &str,
+    e: AppError,
+) -> OpenError {
+    tracing::error!(
+        "OpenAlgo {} could not open the data after backing it up: {}",
+        current,
+        e
+    );
+    if let Err(re) = restore(dir, &backup) {
+        tracing::error!("Could not put the backup back: {}", re);
+        return OpenError::Refused(Refusal::RestoreFailed {
+            backup,
+            detail: re.to_string(),
+        });
+    }
+    tracing::info!("Put the data back from {}", backup.display());
+    // The folder now equals this start's backup. A copy an earlier start
+    // could not put back stays (bounded): no start has opened the folder
+    // since it was made, and it may be the only good copy.
+    if let Err(e) = fs::remove_dir_all(&backup) {
+        tracing::warn!("Could not remove the data backup just put back: {}", e);
+    }
+    OpenError::Refused(Refusal::Restored {
+        from,
+        current: current.to_string(),
+        cause: cause_of(&e),
+    })
 }
 
 fn discard_backups(dir: &Path) {

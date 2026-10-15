@@ -371,11 +371,6 @@ impl AppState {
         Ok(ctx)
     }
 
-    /// Production defaults: OS keychain, system clock, every broker adapter.
-    pub fn open_default(data_dir: &Path) -> Result<Arc<Self>> {
-        Self::open(data_dir, OpenOptions::production())
-    }
-
     /// Open the data folder as version `version` of the app (REL-02):
     /// refuse a folder written by a newer version, back up one from an
     /// older version before the migrations run, put the backup back if

@@ -86,6 +86,43 @@ fn show_data_refusal(
     Ok(())
 }
 
+/// Open the data folder for this version (REL-02, `db::upgrade`): one
+/// running copy per folder; a folder from a newer version is refused; an
+/// older one is backed up before its migrations and put back if they fail.
+/// `None` when it was refused: the start-up page then shows why and nothing
+/// else starts. The folder lock is held for the life of the app.
+fn open_data_folder(
+    app: &mut tauri::App,
+) -> std::result::Result<Option<Arc<AppState>>, Box<dyn std::error::Error>> {
+    let data_dir = app.path().app_data_dir()?;
+    let lock = match db::upgrade::DataFolderLock::acquire(&data_dir) {
+        Ok(lock) => lock,
+        Err(refusal) => {
+            show_data_refusal(app, refusal)?;
+            return Ok(None);
+        }
+    };
+    // `AppState::open` spawns its subscribers, so it runs on the runtime.
+    let opened = tauri::async_runtime::block_on(async {
+        AppState::open_upgrading(
+            &data_dir,
+            state::OpenOptions::production(),
+            env!("CARGO_PKG_VERSION"),
+        )
+    });
+    match opened {
+        Ok(ctx) => {
+            app.manage(commands::DataFolderHold(lock));
+            Ok(Some(ctx))
+        }
+        Err(db::upgrade::OpenError::Refused(r)) => {
+            show_data_refusal(app, r)?;
+            Ok(None)
+        }
+        Err(db::upgrade::OpenError::Open(e)) => Err(e.into()),
+    }
+}
+
 fn init_logging() {
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(log_filter(cfg!(
@@ -108,29 +145,9 @@ pub fn run() {
             // Rust-side native dialogs only (account reset); no JS permission.
             .plugin(tauri_plugin_dialog::init())
             .setup(|app| {
-                let data_dir = app.path().app_data_dir()?;
-                // REL-02: one running copy per data folder; a folder from a
-                // newer version is refused; an older one is backed up
-                // before its migrations and put back if they fail
-                // (`db::upgrade`). A refusal shows the start-up page with
-                // the reason and starts nothing else.
-                let lock = match db::upgrade::DataFolderLock::acquire(&data_dir) {
-                    Ok(lock) => lock,
-                    Err(refusal) => return show_data_refusal(app, refusal),
+                let Some(ctx) = open_data_folder(app)? else {
+                    return Ok(());
                 };
-                let opened = tauri::async_runtime::block_on(async {
-                    AppState::open_upgrading(
-                        &data_dir,
-                        state::OpenOptions::production(),
-                        env!("CARGO_PKG_VERSION"),
-                    )
-                });
-                let ctx = match opened {
-                    Ok(ctx) => ctx,
-                    Err(db::upgrade::OpenError::Refused(r)) => return show_data_refusal(app, r),
-                    Err(db::upgrade::OpenError::Open(e)) => return Err(e.into()),
-                };
-                app.manage(commands::DataFolderHold(lock));
                 let (server, feed) = tauri::async_runtime::block_on(async {
                     session::spawn_expiry_task(ctx.clone());
                     services::system_info::mark_start();
@@ -149,8 +166,8 @@ pub fn run() {
                     // its status with a trader-facing message.
                     let feed = feed::FeedService::new(ctx.clone());
                     feed.start().await;
-                    Ok::<_, error::AppError>((server, feed))
-                })?;
+                    (server, feed)
+                });
                 app.manage(feed);
                 if let Some(h) = &server {
                     commands::trust_app_origin(app.handle(), h.addr.port());
