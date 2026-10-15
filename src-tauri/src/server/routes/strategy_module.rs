@@ -17,7 +17,8 @@ use crate::server::envelope::json_response;
 use crate::server::middleware::{ClientIp, User};
 use crate::state::AppState;
 use crate::strategy::store::{
-    ALREADY_RUNNING, CHANGED_WHILE_EDITING, CHANGED_WHILE_STARTING, RUN_MODES, STRATEGY_STATUSES,
+    StrategyRow, ALREADY_RUNNING, CHANGED_WHILE_EDITING, CHANGED_WHILE_STARTING, RUN_MODES,
+    STRATEGY_STATUSES,
 };
 use crate::strategy::validate::{config_fields, validate_strategy_config};
 use axum::{
@@ -248,6 +249,94 @@ pub async fn detail(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> 
     )
 }
 
+/// The edit's fields the strategy does not accept, as the refusal.
+fn unknown_fields(payload: &Map<String, Value>, fields: &[&str]) -> Option<Response> {
+    let mut unknown: Vec<&String> = payload
+        .keys()
+        .filter(|k| !fields.contains(&k.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    unknown.sort();
+    Some(err(
+        format!(
+            "The request does not accept {}. Updatable fields: {}",
+            unknown
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            fields.join(", ")
+        ),
+        StatusCode::BAD_REQUEST,
+    ))
+}
+
+/// An edit refused for the strategy as it stands: while it runs, or one
+/// that changes its kind.
+fn edit_refused(row: &StrategyRow, payload: &Map<String, Value>) -> Option<Response> {
+    if row.status == "running" {
+        return Some(err(
+            "Stop the strategy before editing it",
+            StatusCode::CONFLICT,
+        ));
+    }
+    if let Some(kind) = payload.get("strategy_kind").filter(|v| !v.is_null()) {
+        if kind.as_str() != Some(row.strategy_kind.as_str()) {
+            return Some(err(
+                "A strategy cannot change between batch and signal. The two kinds do not share a leg shape, so every leg would describe the wrong kind of contract. Create a new strategy instead.",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+    None
+}
+
+/// The stored configuration with the edit's fields over it.
+fn merged_with(
+    row: &StrategyRow,
+    payload: &Map<String, Value>,
+    fields: &[&str],
+) -> Map<String, Value> {
+    let stored = row.to_dict(true);
+    let mut merged = Map::new();
+    for f in fields {
+        if let Some(v) = stored.get(*f) {
+            merged.insert((*f).to_string(), v.clone());
+        }
+    }
+    for (k, v) in payload {
+        merged.insert(k.clone(), v.clone());
+    }
+    merged
+}
+
+/// The `strategy_updated` event naming the changed fields.
+async fn record_update(ctx: &AppState, sid: i64, user: &str, changes: &Map<String, Value>) {
+    let mut names: Vec<&String> = changes.keys().collect();
+    names.sort();
+    record(
+        ctx,
+        sid,
+        user,
+        "strategy_updated",
+        &format!(
+            "Updated {}",
+            names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::strategy::store::EventFields {
+            payload: Some(json!({"fields": names})),
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
 /// PATCH /strategy/api/strategies/{sid}
 pub async fn update(
     State(ctx): Ctx,
@@ -267,50 +356,16 @@ pub async fn update(
         return err("Nothing to update", StatusCode::BAD_REQUEST);
     }
     let fields = config_fields();
-    let mut unknown: Vec<&String> = payload
-        .keys()
-        .filter(|k| !fields.contains(&k.as_str()))
-        .collect();
-    if !unknown.is_empty() {
-        unknown.sort();
-        return err(
-            format!(
-                "The request does not accept {}. Updatable fields: {}",
-                unknown
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                fields.join(", ")
-            ),
-            StatusCode::BAD_REQUEST,
-        );
-    }
-    if row.status == "running" {
-        return err("Stop the strategy before editing it", StatusCode::CONFLICT);
-    }
-    if let Some(kind) = payload.get("strategy_kind").filter(|v| !v.is_null()) {
-        if kind.as_str() != Some(row.strategy_kind.as_str()) {
-            return err(
-                "A strategy cannot change between batch and signal. The two kinds do not share a leg shape, so every leg would describe the wrong kind of contract. Create a new strategy instead.",
-                StatusCode::BAD_REQUEST,
-            );
-        }
+    if let Some(refusal) =
+        unknown_fields(&payload, &fields).or_else(|| edit_refused(&row, &payload))
+    {
+        return refusal;
     }
     payload.remove("strategy_kind");
     if payload.is_empty() {
         return err("Nothing to update", StatusCode::BAD_REQUEST);
     }
-    let stored = row.to_dict(true);
-    let mut merged = Map::new();
-    for f in &fields {
-        if let Some(v) = stored.get(*f) {
-            merged.insert((*f).to_string(), v.clone());
-        }
-    }
-    for (k, v) in &payload {
-        merged.insert(k.clone(), v.clone());
-    }
+    let merged = merged_with(&row, &payload, &fields);
     let config = match validate_strategy_config(&Value::Object(merged), &ctx.symbols.snapshot()) {
         Ok(c) => c,
         Err(m) => return err(m, StatusCode::BAD_REQUEST),
@@ -325,27 +380,7 @@ pub async fn update(
         Ok(r) => r,
         Err(e) => return store_error(e),
     };
-    let mut names: Vec<&String> = changes.keys().collect();
-    names.sort();
-    record(
-        &ctx,
-        row.id,
-        &u.username,
-        "strategy_updated",
-        &format!(
-            "Updated {}",
-            names
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        crate::strategy::store::EventFields {
-            payload: Some(json!({"fields": names})),
-            ..Default::default()
-        },
-    )
-    .await;
+    record_update(&ctx, row.id, &u.username, &changes).await;
     sync_schedule(&ctx, row.id, false);
     ok200(json!({"data": updated.to_dict(true)}))
 }

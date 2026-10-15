@@ -35,7 +35,6 @@
   },
   "rust_files": {},
   "rust_functions": {
-    "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
     "src-tauri/src/strategy/book.rs::apply_fill_locked": 126,
     "src-tauri/src/strategy/engine/exits.rs::exit_legs": 261,
