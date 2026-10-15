@@ -186,85 +186,109 @@ pub fn parse_segment(segment: &str, exchange: &str, csv: &str) -> Vec<SymbolData
             continue;
         }
         let row = match segment {
-            "NSEEQ" | "BSEEQ" => {
-                if get(&f, c.itype) == "INDEX" {
-                    continue;
-                }
-                SymbolData {
-                    symbol: underlying.to_string(),
-                    brsymbol: get(&f, c.tsym).to_string(),
-                    name: get(&f, c.name).to_string(),
-                    exchange: exchange.to_string(),
-                    brexchange: segment.to_string(),
-                    token: token.to_string(),
-                    expiry: String::new(),
-                    strike: 0.0,
-                    lot_size: lot(&f, &c),
-                    instrument_type: "EQ".into(),
-                    tick_size: tick(&f, &c),
-                }
-            }
-            "INDICES" => {
-                let csv_ex = get(&f, c.exchange).to_ascii_uppercase();
-                let oa_ex = match csv_ex.as_str() {
-                    "NSEEQ" => "NSE_INDEX",
-                    "BSEEQ" => "BSE_INDEX",
-                    _ => continue,
-                };
-                let base = underlying.to_ascii_uppercase().replace(' ', "");
-                let table = if oa_ex == "NSE_INDEX" {
-                    NSE_INDEX_MAP
-                } else {
-                    BSE_INDEX_MAP
-                };
-                let symbol = rename(table, &base).map(str::to_string).unwrap_or(base);
-                SymbolData {
-                    symbol: symbol.clone(),
-                    brsymbol: get(&f, c.tsym).to_string(),
-                    name: symbol,
-                    exchange: oa_ex.to_string(),
-                    brexchange: get(&f, c.exchange).to_string(),
-                    token: token.to_string(),
-                    expiry: String::new(),
-                    strike: 0.0,
-                    lot_size: 1,
-                    instrument_type: "INDEX".into(),
-                    tick_size: 0.01,
-                }
-            }
-            _ => {
-                let itype = match get(&f, c.otype).to_ascii_uppercase().as_str() {
-                    "XX" => "FUT",
-                    "CE" => "CE",
-                    "PE" => "PE",
-                    _ => continue,
-                };
-                let exp = expiry(get(&f, c.expiry));
-                let compact = exp.replace('-', "");
-                let strike = get(&f, c.strike).parse::<f64>().unwrap_or(0.0);
-                let symbol = if itype == "FUT" {
-                    format!("{}{}FUT", underlying, compact)
-                } else {
-                    format!("{}{}{}{}", underlying, compact, strike_text(strike), itype)
-                };
-                SymbolData {
-                    symbol,
-                    brsymbol: get(&f, c.tsym).to_string(),
-                    name: get(&f, c.name).to_string(),
-                    exchange: exchange.to_string(),
-                    brexchange: segment.to_string(),
-                    token: token.to_string(),
-                    expiry: exp,
-                    strike,
-                    lot_size: lot(&f, &c),
-                    instrument_type: itype.into(),
-                    tick_size: tick(&f, &c),
-                }
-            }
+            "NSEEQ" | "BSEEQ" => equity_row(&f, &c, segment, exchange, token, underlying),
+            "INDICES" => index_row(&f, &c, token, underlying),
+            _ => derivative_row(&f, &c, segment, exchange, token, underlying),
         };
-        out.push(row);
+        out.extend(row);
     }
     out
+}
+
+/// An equity row (an INDEX row of an equity file is skipped).
+fn equity_row(
+    f: &[String],
+    c: &Cols,
+    segment: &str,
+    exchange: &str,
+    token: &str,
+    underlying: &str,
+) -> Option<SymbolData> {
+    if get(f, c.itype) == "INDEX" {
+        return None;
+    }
+    Some(SymbolData {
+        symbol: underlying.to_string(),
+        brsymbol: get(f, c.tsym).to_string(),
+        name: get(f, c.name).to_string(),
+        exchange: exchange.to_string(),
+        brexchange: segment.to_string(),
+        token: token.to_string(),
+        expiry: String::new(),
+        strike: 0.0,
+        lot_size: lot(f, c),
+        instrument_type: "EQ".into(),
+        tick_size: tick(f, c),
+    })
+}
+
+/// An index row, from the INDICES file: NSE and BSE indices only, named as
+/// the web names them.
+fn index_row(f: &[String], c: &Cols, token: &str, underlying: &str) -> Option<SymbolData> {
+    let csv_ex = get(f, c.exchange).to_ascii_uppercase();
+    let oa_ex = match csv_ex.as_str() {
+        "NSEEQ" => "NSE_INDEX",
+        "BSEEQ" => "BSE_INDEX",
+        _ => return None,
+    };
+    let base = underlying.to_ascii_uppercase().replace(' ', "");
+    let table = if oa_ex == "NSE_INDEX" {
+        NSE_INDEX_MAP
+    } else {
+        BSE_INDEX_MAP
+    };
+    let symbol = rename(table, &base).map(str::to_string).unwrap_or(base);
+    Some(SymbolData {
+        symbol: symbol.clone(),
+        brsymbol: get(f, c.tsym).to_string(),
+        name: symbol,
+        exchange: oa_ex.to_string(),
+        brexchange: get(f, c.exchange).to_string(),
+        token: token.to_string(),
+        expiry: String::new(),
+        strike: 0.0,
+        lot_size: 1,
+        instrument_type: "INDEX".into(),
+        tick_size: 0.01,
+    })
+}
+
+/// A future or option row (XX, CE, PE); other option types are skipped.
+fn derivative_row(
+    f: &[String],
+    c: &Cols,
+    segment: &str,
+    exchange: &str,
+    token: &str,
+    underlying: &str,
+) -> Option<SymbolData> {
+    let itype = match get(f, c.otype).to_ascii_uppercase().as_str() {
+        "XX" => "FUT",
+        "CE" => "CE",
+        "PE" => "PE",
+        _ => return None,
+    };
+    let exp = expiry(get(f, c.expiry));
+    let compact = exp.replace('-', "");
+    let strike = get(f, c.strike).parse::<f64>().unwrap_or(0.0);
+    let symbol = if itype == "FUT" {
+        format!("{}{}FUT", underlying, compact)
+    } else {
+        format!("{}{}{}{}", underlying, compact, strike_text(strike), itype)
+    };
+    Some(SymbolData {
+        symbol,
+        brsymbol: get(f, c.tsym).to_string(),
+        name: get(f, c.name).to_string(),
+        exchange: exchange.to_string(),
+        brexchange: segment.to_string(),
+        token: token.to_string(),
+        expiry: exp,
+        strike,
+        lot_size: lot(f, c),
+        instrument_type: itype.into(),
+        tick_size: tick(f, c),
+    })
 }
 
 async fn fetch(b: &IiflCapitalBroker, segment: &str) -> Result<String> {
