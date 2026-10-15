@@ -272,15 +272,61 @@ pub fn gamma_density(
     } else {
         INTRADAY_T_YEARS
     };
-    struct Leg {
-        input: DensityInput,
-        ce_iv: Option<f64>,
-        pe_iv: Option<f64>,
-        strike_iv: Option<f64>,
+    let priced = implied_legs(chain, forward, atm_strike, t_years, r);
+    let (atm_iv, atm_iv_source) = chosen_atm_iv(priced.atm_iv, priced.strike_ivs);
+    let estimated_iv_legs = legs_without_own_iv(&priced.legs);
+    let horizons = Horizons {
+        forward,
+        t_expiry: t_years,
+        t_intraday,
+        r,
+    };
+    let (rows, peak_intraday_strike, peak_expiry_strike) =
+        density_rows(&priced.legs, &horizons, atm_iv);
+    let sigma_i = spot * atm_iv * INTRADAY_T_YEARS.sqrt();
+    let sigma_e = spot * atm_iv * t_years.max(1e-9).sqrt();
+    GammaDensity {
+        rows,
+        atm_iv,
+        atm_iv_source,
+        estimated_iv_legs,
+        peak_intraday_strike,
+        peak_expiry_strike,
+        intraday_band: Band::around(spot, sigma_i),
+        expiry_band: Band::around(spot, sigma_e),
     }
-    let mut legs = Vec::new();
-    let mut valid = Vec::new();
-    let mut atm_iv = None;
+}
+
+/// One strike with the IV each leg's price implies, if any.
+struct ImpliedLeg {
+    input: DensityInput,
+    ce_iv: Option<f64>,
+    pe_iv: Option<f64>,
+    /// The mean of the legs that implied one.
+    strike_iv: Option<f64>,
+}
+
+struct ImpliedChain {
+    legs: Vec<ImpliedLeg>,
+    /// Every strike IV, for the median when the ATM strike has none.
+    strike_ivs: Vec<f64>,
+    /// The ATM strike's own IV.
+    atm_iv: Option<f64>,
+}
+
+/// Each valid strike's legs priced for their IV against `forward`.
+fn implied_legs(
+    chain: &[DensityInput],
+    forward: f64,
+    atm_strike: Option<f64>,
+    t_years: f64,
+    r: f64,
+) -> ImpliedChain {
+    let mut out = ImpliedChain {
+        legs: Vec::new(),
+        strike_ivs: Vec::new(),
+        atm_iv: None,
+    };
     for c in chain {
         if !c.strike.is_finite() || c.strike <= 0.0 {
             continue;
@@ -290,33 +336,60 @@ pub fn gamma_density(
         let sides: Vec<f64> = [ce_iv, pe_iv].into_iter().flatten().collect();
         let strike_iv = (!sides.is_empty()).then(|| sides.iter().sum::<f64>() / sides.len() as f64);
         if let Some(v) = strike_iv {
-            valid.push(v);
+            out.strike_ivs.push(v);
             if atm_strike == Some(c.strike) {
-                atm_iv = Some(v);
+                out.atm_iv = Some(v);
             }
         }
-        legs.push(Leg {
+        out.legs.push(ImpliedLeg {
             input: *c,
             ce_iv,
             pe_iv,
             strike_iv,
         });
     }
-    let (atm_iv, atm_iv_source) = match atm_iv {
+    out
+}
+
+/// The ATM strike's own IV, else the median strike IV, else the assumed
+/// fallback, and which of the three it is (TOOLS-15).
+fn chosen_atm_iv(atm_iv: Option<f64>, mut strike_ivs: Vec<f64>) -> (f64, AtmIvSource) {
+    match atm_iv {
         Some(v) => (v, AtmIvSource::Atm),
-        None if !valid.is_empty() => {
-            valid.sort_by(|a, b| a.total_cmp(b));
-            (valid[valid.len() / 2], AtmIvSource::Median)
+        None if !strike_ivs.is_empty() => {
+            strike_ivs.sort_by(|a, b| a.total_cmp(b));
+            (strike_ivs[strike_ivs.len() / 2], AtmIvSource::Median)
         }
         None => (FALLBACK_IV, AtmIvSource::Assumed),
-    };
-    let estimated_iv_legs = legs
-        .iter()
+    }
+}
+
+/// Legs with open interest that are priced with the ATM IV because their
+/// own price implied none.
+fn legs_without_own_iv(legs: &[ImpliedLeg]) -> usize {
+    legs.iter()
         .map(|l| {
             usize::from(l.ce_iv.is_none() && l.input.ce_oi > 0.0)
                 + usize::from(l.pe_iv.is_none() && l.input.pe_oi > 0.0)
         })
-        .sum();
+        .sum()
+}
+
+/// The pricing inputs shared by every strike.
+struct Horizons {
+    forward: f64,
+    t_expiry: f64,
+    t_intraday: f64,
+    r: f64,
+}
+
+/// Gamma x OI per strike at both horizons, and the strikes where each
+/// peaks.
+fn density_rows(
+    legs: &[ImpliedLeg],
+    h: &Horizons,
+    atm_iv: f64,
+) -> (Vec<DensityRow>, Option<f64>, Option<f64>) {
     let (mut max_i, mut max_e) = (0.0, 0.0);
     let (mut peak_i, mut peak_e) = (None, None);
     let rows = legs
@@ -326,10 +399,11 @@ pub fn gamma_density(
             let ce_sigma = l.ce_iv.unwrap_or(atm_iv);
             let pe_sigma = l.pe_iv.unwrap_or(atm_iv);
             // Black-76 gamma is the same for a call and a put.
-            let e = safe_gamma(forward, k, t_years, r, ce_sigma) * l.input.ce_oi
-                + safe_gamma(forward, k, t_years, r, pe_sigma) * l.input.pe_oi;
-            let i = safe_gamma(forward, k, t_intraday, r, ce_sigma) * l.input.ce_oi
-                + safe_gamma(forward, k, t_intraday, r, pe_sigma) * l.input.pe_oi;
+            let density = |t: f64| {
+                safe_gamma(h.forward, k, t, h.r, ce_sigma) * l.input.ce_oi
+                    + safe_gamma(h.forward, k, t, h.r, pe_sigma) * l.input.pe_oi
+            };
+            let (e, i) = (density(h.t_expiry), density(h.t_intraday));
             if e > max_e {
                 max_e = e;
                 peak_e = Some(k);
@@ -348,18 +422,7 @@ pub fn gamma_density(
             }
         })
         .collect();
-    let sigma_i = spot * atm_iv * INTRADAY_T_YEARS.sqrt();
-    let sigma_e = spot * atm_iv * t_years.max(1e-9).sqrt();
-    GammaDensity {
-        rows,
-        atm_iv,
-        atm_iv_source,
-        estimated_iv_legs,
-        peak_intraday_strike: peak_i,
-        peak_expiry_strike: peak_e,
-        intraday_band: Band::around(spot, sigma_i),
-        expiry_band: Band::around(spot, sigma_e),
-    }
+    (rows, peak_i, peak_e)
 }
 
 #[cfg(test)]

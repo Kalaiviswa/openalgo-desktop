@@ -427,18 +427,60 @@ pub async fn gamma_density(
         .map(|(d, y)| (y, d))
         .unwrap_or((0.0, 0.0));
     let rate_pct = 0.0;
+    let forward = chain_forward(ctx, &h, &body, underlying, exchange, expiry).await;
+    let f = forward.unwrap_or(spot);
+    let atm = body.get("atm_strike").and_then(Value::as_f64);
+    let g = chain::gamma_density(
+        &density_inputs(&items),
+        spot,
+        f,
+        atm,
+        t_years,
+        rate_pct / 100.0,
+    );
+    if g.atm_iv_source == chain::AtmIvSource::Assumed {
+        tracing::warn!(
+            "No invertible IV for {} {}; using fallback IV {}",
+            underlying,
+            expiry,
+            chain::FALLBACK_IV
+        );
+    }
+    let priced = DensityPricing {
+        spot,
+        forward,
+        dte_days,
+    };
+    Reply::ok(gamma_density_body(
+        &body, underlying, exchange, expiry, &priced, &g,
+    ))
+}
+
+/// The synthetic future of the chain's underlying and expiry, which
+/// prices the options; `None` when it cannot be read (spot is used).
+async fn chain_forward(
+    ctx: &AppState,
+    h: &BrokerHandle,
+    body: &Value,
+    underlying: &str,
+    exchange: &str,
+    expiry: &str,
+) -> Option<f64> {
     let base = body
         .get("underlying")
         .and_then(Value::as_str)
         .unwrap_or(underlying)
         .to_string();
     let ux = greeks_underlying_exchange(&base, &exchange.to_ascii_uppercase());
-    let forward = synthetic_future_price(ctx, &h, &base, &ux, &expiry.to_ascii_uppercase())
+    synthetic_future_price(ctx, h, &base, &ux, &expiry.to_ascii_uppercase())
         .await
         .ok()
-        .map(|(_, f, _)| py_round(f, 2));
-    let f = forward.unwrap_or(spot);
-    let input: Vec<DensityInput> = items
+        .map(|(_, f, _)| py_round(f, 2))
+}
+
+/// Strike, OI and LTP of both legs of each chain row.
+fn density_inputs(items: &[Value]) -> Vec<DensityInput> {
+    items
         .iter()
         .map(|item| {
             let (ce, pe) = (leg(item, "ce"), leg(item, "pe"));
@@ -450,17 +492,27 @@ pub async fn gamma_density(
                 pe_ltp: lf(pe, "ltp"),
             }
         })
-        .collect();
-    let atm = body.get("atm_strike").and_then(Value::as_f64);
-    let g = chain::gamma_density(&input, spot, f, atm, t_years, rate_pct / 100.0);
-    if g.atm_iv_source == chain::AtmIvSource::Assumed {
-        tracing::warn!(
-            "No invertible IV for {} {}; using fallback IV {}",
-            underlying,
-            expiry,
-            chain::FALLBACK_IV
-        );
-    }
+        .collect()
+}
+
+/// What the gamma density was priced against.
+struct DensityPricing {
+    spot: f64,
+    /// The synthetic future, when it could be read.
+    forward: Option<f64>,
+    dte_days: f64,
+}
+
+/// The web's gamma density answer, with the provenance fields (TOOLS-15).
+fn gamma_density_body(
+    body: &Value,
+    underlying: &str,
+    exchange: &str,
+    expiry: &str,
+    p: &DensityPricing,
+    g: &chain::GammaDensity,
+) -> Value {
+    let f = p.forward.unwrap_or(p.spot);
     let rows_json: Vec<Value> = g
         .rows
         .iter()
@@ -475,23 +527,23 @@ pub async fn gamma_density(
             })
         })
         .collect();
-    let b = g.intraday_band;
-    Reply::ok(json!({
+    let b = &g.intraday_band;
+    json!({
         "status": "success",
         "underlying": body.get("underlying").cloned().unwrap_or_else(|| json!(underlying)),
         "exchange": exchange,
         "expiry_date": expiry,
-        "spot_price": num(py_round(spot, 2)),
-        "forward_price": if forward.is_some() { float(f) } else { num(py_round(f, 2)) },
-        "atm_strike": field(&body, "atm_strike"),
+        "spot_price": num(py_round(p.spot, 2)),
+        "forward_price": if p.forward.is_some() { float(f) } else { num(py_round(f, 2)) },
+        "atm_strike": field(body, "atm_strike"),
         "atm_iv": float(py_round(g.atm_iv * 100.0, 2)),
         // Provenance the web does not report (TOOLS-15): where the ATM IV
         // came from, how many legs priced with it instead of their own IV,
         // and what the options were priced against.
         "atm_iv_source": g.atm_iv_source,
         "estimated_iv_legs": g.estimated_iv_legs,
-        "pricing_reference": if forward.is_some() { "forward" } else { "spot" },
-        "dte_days": float(py_round(dte_days, 2)),
+        "pricing_reference": if p.forward.is_some() { "forward" } else { "spot" },
+        "dte_days": float(py_round(p.dte_days, 2)),
         "interest_rate": 0,
         "peak_intraday_strike": opt_float(g.peak_intraday_strike),
         "peak_expiry_strike": opt_float(g.peak_expiry_strike),
@@ -503,7 +555,7 @@ pub async fn gamma_density(
         "intraday_band": b,
         "expiry_band": g.expiry_band,
         "chain": rows_json,
-    }))
+    })
 }
 
 /// Previous-day OI per option (web `_fetch_daily_oi_changes`): the
