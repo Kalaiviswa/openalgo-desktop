@@ -218,6 +218,73 @@ pub fn parse_group(csv: &str, group: &Group) -> Vec<SymbolData> {
     out
 }
 
+/// An index row: its exchange is the id's last part (NSE and BSE map to
+/// their index exchanges).
+fn index_row(
+    r: &HashMap<&str, &str>,
+    id: &str,
+    token: String,
+    parts: &[&str],
+) -> Option<SymbolData> {
+    let get = |k: &str| r.get(k).copied().unwrap_or("").trim().to_string();
+    if parts.len() < 3 {
+        return None;
+    }
+    let raw_exchange = parts[parts.len() - 1];
+    let exchange = match raw_exchange {
+        "NSE" => "NSE_INDEX",
+        "BSE" => "BSE_INDEX",
+        other => other,
+    };
+    Some(SymbolData {
+        symbol: index_symbol(exchange, &get("symbol")),
+        brsymbol: id.to_string(),
+        name: get("dispName"),
+        exchange: exchange.to_string(),
+        brexchange: raw_exchange.to_string(),
+        token,
+        expiry: String::new(),
+        strike: 0.0,
+        lot_size: 1,
+        instrument_type: "INDEX".into(),
+        tick_size: 0.05,
+    })
+}
+
+/// A cash security row: the exchange the id names (else its last part),
+/// the display name as the symbol.
+fn security_row(
+    r: &HashMap<&str, &str>,
+    id: &str,
+    token: String,
+    parts: &[&str],
+    parsed_exchange: Option<&String>,
+) -> Option<SymbolData> {
+    let get = |k: &str| r.get(k).copied().unwrap_or("").trim().to_string();
+    if parts.len() < 4 {
+        return None;
+    }
+    let exchange = parsed_exchange
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| parts[parts.len() - 1].to_string());
+    let disp = get("dispName");
+    let desc = get("desc");
+    Some(SymbolData {
+        symbol: disp.clone(),
+        brsymbol: id.to_string(),
+        name: if desc.is_empty() { disp } else { desc },
+        exchange: exchange.clone(),
+        brexchange: exchange,
+        token,
+        expiry: String::new(),
+        strike: 0.0,
+        lot_size: lot(r),
+        instrument_type: "EQ".into(),
+        tick_size: tick(r),
+    })
+}
+
 fn parse_row(r: &HashMap<&str, &str>, group: &Group) -> Option<SymbolData> {
     let get = |k: &str| r.get(k).copied().unwrap_or("").trim().to_string();
     let id = get("id");
@@ -227,28 +294,7 @@ fn parse_row(r: &HashMap<&str, &str>, group: &Group) -> Option<SymbolData> {
     }
     let parts: Vec<&str> = id.split('_').collect();
     if group.name == "Index" {
-        if parts.len() < 3 {
-            return None;
-        }
-        let raw_exchange = parts[parts.len() - 1];
-        let exchange = match raw_exchange {
-            "NSE" => "NSE_INDEX",
-            "BSE" => "BSE_INDEX",
-            other => other,
-        };
-        return Some(SymbolData {
-            symbol: index_symbol(exchange, &get("symbol")),
-            brsymbol: id.clone(),
-            name: get("dispName"),
-            exchange: exchange.to_string(),
-            brexchange: raw_exchange.to_string(),
-            token,
-            expiry: String::new(),
-            strike: 0.0,
-            lot_size: 1,
-            instrument_type: "INDEX".into(),
-            tick_size: 0.05,
-        });
+        return index_row(r, &id, token, &parts);
     }
     if id.to_ascii_lowercase().contains("spot") || get("asset") == "spot" || parts.len() < 2 {
         return None;
@@ -263,31 +309,7 @@ fn parse_row(r: &HashMap<&str, &str>, group: &Group) -> Option<SymbolData> {
             .unwrap_or_default()
     };
     match group.name.as_str() {
-        "Securities" => {
-            if parts.len() < 4 {
-                return None;
-            }
-            let exchange = c
-                .get("exchange")
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .unwrap_or_else(|| parts[parts.len() - 1].to_string());
-            let disp = get("dispName");
-            let desc = get("desc");
-            Some(SymbolData {
-                symbol: disp.clone(),
-                brsymbol: id.clone(),
-                name: if desc.is_empty() { disp } else { desc },
-                exchange: exchange.clone(),
-                brexchange: exchange,
-                token,
-                expiry: String::new(),
-                strike: 0.0,
-                lot_size: lot(r),
-                instrument_type: "EQ".into(),
-                tick_size: tick(r),
-            })
-        }
+        "Securities" => security_row(r, &id, token, &parts, c.get("exchange")),
         "FutureContracts" | "CurrencyFuture" | "CommodityFuture" => {
             let base = comp("symbol", "symbol", 1);
             let exchange = comp("exchange", "", 2);
