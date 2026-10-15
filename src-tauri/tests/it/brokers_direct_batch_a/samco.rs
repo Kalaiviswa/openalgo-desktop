@@ -868,9 +868,10 @@ fn book_with(edits: &[(&str, &str, &str)], extra: Option<Value>) -> Value {
 /// `_POLLING_BROKERS`). The first poll publishes nothing; each later
 /// change (a partial fill, a cancel, a fill, a new rejected order) is
 /// published once; a failed poll (500) is retried, not the end of updates.
+/// The poller `create_order_feed` starts polls every 5 s; here it polls
+/// every second (the minimum), so the back-off fits the waits.
 #[tokio::test]
 async fn order_poller_publishes_each_change_once() {
-    use openalgo_desktop_lib::brokers::common::streaming::OrderFeed;
     let polls = Arc::new(AtomicUsize::new(0));
     let seen = polls.clone();
     let rejected = json!({
@@ -904,9 +905,9 @@ async fn order_poller_publishes_each_change_once() {
     .await;
     let b = broker(&fake);
     assert!(b.capabilities().order_feed);
-    let OrderFeed::Stream(mut rx) = Broker::create_order_feed(&b, &auth()).unwrap() else {
-        panic!("expected the poller stream")
-    };
+    let mut rx = b
+        .start_order_updates(&auth(), Duration::from_secs(1))
+        .unwrap();
     let mut got = Vec::new();
     while got.len() < 4 {
         let u = tokio::time::timeout(Duration::from_secs(15), rx.recv())
@@ -939,7 +940,9 @@ async fn order_poller_publishes_each_change_once() {
 /// BF-01: Samco's endpoints are IP-gated, so a 403 (an unregistered IP or
 /// a dead session; Samco does not say which) backs the poller off instead
 /// of ending order updates for good; only a confirmed expired session
-/// (401) stops it. Logout stops it with no late update.
+/// (401) stops it. Logout stops the poller `create_order_feed` started,
+/// with no late update. Polled every second (the minimum) so the back-off
+/// fits the waits.
 #[tokio::test]
 async fn order_poller_backs_off_on_ip_refusal_and_stops_on_expiry() {
     use openalgo_desktop_lib::brokers::common::streaming::OrderFeed;
@@ -956,10 +959,10 @@ async fn order_poller_backs_off_on_ip_refusal_and_stops_on_expiry() {
     })
     .await;
     let b = broker(&fake);
-    let OrderFeed::Stream(mut rx) = Broker::create_order_feed(&b, &auth()).unwrap() else {
-        panic!("expected the poller stream")
-    };
-    // Two refused polls (then 2 s of back-off): still polling.
+    let mut rx = b
+        .start_order_updates(&auth(), Duration::from_secs(1))
+        .unwrap();
+    // Two refused polls (2 s, then 4 s of back-off): still polling.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while polls.load(Ordering::SeqCst) < 2 {
         assert!(tokio::time::Instant::now() < deadline, "no second poll");
