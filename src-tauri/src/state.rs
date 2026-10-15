@@ -500,6 +500,20 @@ impl AppState {
         self.tasks.lock().len()
     }
 
+    /// Run synchronous database work on the blocking pool, so a slow query
+    /// or a database busy with a long write never holds an async worker
+    /// (DB-01; four of them on a Raspberry Pi).
+    pub async fn blocking<T, F>(self: &Arc<Self>, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T> + Send + 'static,
+    {
+        let ctx = self.clone();
+        tokio::task::spawn_blocking(move || f(&ctx))
+            .await
+            .map_err(|e| crate::error::AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
     /// The context as an `Arc` (for work that outlives a call).
     pub fn arc(&self) -> Option<Arc<Self>> {
         self.me.upgrade()
