@@ -600,7 +600,7 @@ async fn history_chunk(
     );
     let mut attempt = 0u32;
     let (status, v) = loop {
-        b.history_pacer.acquire().await;
+        b.history_pacer.acquire().await?;
         let resp = b
             .http
             .get(&url)

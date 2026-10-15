@@ -235,7 +235,7 @@ pub async fn download(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Symbol
     let mut rows = Vec::new();
     let mut fetched = 0;
     for src in SOURCES {
-        b.pace(Bucket::Data).await;
+        b.pace(Bucket::Data).await?;
         let resp = b
             .http
             .get(b.url("/market/instruments"))

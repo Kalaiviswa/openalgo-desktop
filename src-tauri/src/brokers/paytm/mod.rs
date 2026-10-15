@@ -173,9 +173,9 @@ impl PaytmBroker {
         let mut last_err = None;
         for attempt in 0..attempts {
             if is_read {
-                self.other_pacer.acquire().await;
+                self.other_pacer.acquire().await?;
             } else {
-                self.order_pacer.acquire().await;
+                self.order_pacer.acquire().await?;
             }
             match self.send_once(&method, path, auth, body).await {
                 Ok((status, _)) if status.is_server_error() => {

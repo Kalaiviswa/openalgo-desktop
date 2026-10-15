@@ -824,12 +824,29 @@ async fn window_limiter_holds_the_budget() {
     let l = WindowLimiter::new(Duration::from_secs(10), 3);
     let start = tokio::time::Instant::now();
     for _ in 0..3 {
-        l.acquire().await;
+        l.acquire().await.unwrap();
     }
     assert_eq!(start.elapsed(), Duration::ZERO);
-    l.acquire().await;
+    l.acquire().await.unwrap();
     assert!(start.elapsed() >= Duration::from_secs(10));
-    assert!(l.in_window().await <= 3);
+    assert!(l.in_window() <= 3);
+}
+
+/// BRL-05: a read whose turn is more than ten seconds away (the window is
+/// full for minutes) is refused at once, before sending; it used to wait
+/// up to the whole 15-minute window.
+#[tokio::test(start_paused = true)]
+async fn window_limiter_refuses_a_wait_past_the_queue_bound() {
+    let l = WindowLimiter::new(Duration::from_secs(900), 2);
+    l.acquire().await.unwrap();
+    l.acquire().await.unwrap();
+    let start = tokio::time::Instant::now();
+    let e = l.acquire().await.unwrap_err();
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    assert_eq!(
+        e.client_message(),
+        crate::brokers::common::ratelimit::BUSY_MESSAGE
+    );
 }
 
 #[test]

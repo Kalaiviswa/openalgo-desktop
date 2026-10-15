@@ -3,14 +3,17 @@
 //! Upstox publishes three simultaneous rolling windows per category (per
 //! second, per minute, per 30 minutes). The shared `common::ratelimit::Pacer`
 //! only spaces requests, which would let the standard category run at its
-//! per-second rate for a whole minute and blow the per-minute budget, so this
-//! is a port of the web's `SlidingWindowLimiter.reserve`: every caller books
-//! a send slot that satisfies all three windows, then sleeps until it,
-//! outside the lock. State is the list of slots booked in the last 30
-//! minutes, so it is bounded by the 30-minute cap plus callers in flight.
+//! per-second rate for a whole minute and blow the per-minute budget, so
+//! each category is a `common::ratelimit::Budget` with the three windows.
+//! A send is claimed at the moment it goes (a caller dropped while it
+//! waits books nothing), and a caller waits at most
+//! `ratelimit::MAX_QUEUE_WAIT` before it is refused, before sending
+//! (BRL-05). The web books slots ahead (`SlidingWindowLimiter.reserve`).
+//! State is the sends of the last 30 minutes, bounded by that window's cap.
 
-use parking_lot::Mutex;
-use std::collections::VecDeque;
+use crate::brokers::common::outcome;
+use crate::brokers::common::ratelimit::{Budget, Limits, Rolling, BUSY_MESSAGE, MAX_QUEUE_WAIT};
+use crate::error::Result;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -19,20 +22,24 @@ const HORIZON: Duration = Duration::from_secs(1800);
 /// One rolling-window limiter.
 #[derive(Debug)]
 pub struct WindowLimiter {
-    /// `(cap, span)` per window.
-    windows: [(usize, Duration); 3],
-    reserved: Mutex<VecDeque<Instant>>,
+    budget: Budget,
 }
 
 impl WindowLimiter {
     pub fn new(per_second: usize, per_minute: usize, per_30min: usize) -> Self {
+        let cap = |n: usize| u32::try_from(n.max(1)).unwrap_or(u32::MAX);
         Self {
-            windows: [
-                (per_second.max(1), Duration::from_secs(1)),
-                (per_minute.max(1), Duration::from_secs(60)),
-                (per_30min.max(1), HORIZON),
-            ],
-            reserved: Mutex::new(VecDeque::new()),
+            budget: Budget::new(Limits {
+                windows: vec![
+                    Rolling::per_second(cap(per_second)),
+                    Rolling::per_minute(cap(per_minute)),
+                    Rolling {
+                        max: cap(per_30min),
+                        span: HORIZON,
+                    },
+                ],
+                per_day: None,
+            }),
         }
     }
 
@@ -46,38 +53,23 @@ impl WindowLimiter {
         Self::new(45, 475, 1900)
     }
 
-    /// Book the next slot that keeps every window within its cap.
-    fn reserve(&self) -> Instant {
-        let now = Instant::now();
-        let mut reserved = self.reserved.lock();
-        while let Some(front) = reserved.front() {
-            if now.duration_since(*front) >= HORIZON && *front <= now {
-                reserved.pop_front();
-            } else {
-                break;
-            }
-        }
-        let mut slot = now;
-        for (cap, span) in self.windows {
-            if reserved.len() >= cap {
-                if let Some(at) = reserved.get(reserved.len() - cap) {
-                    slot = slot.max(*at + span);
-                }
-            }
-        }
-        reserved.push_back(slot);
-        slot
+    /// Wait for a send slot, at most `MAX_QUEUE_WAIT`; refused before
+    /// sending past it (a definite refusal inside an order placement).
+    pub async fn acquire(&self) -> Result<()> {
+        self.acquire_until(Instant::now() + MAX_QUEUE_WAIT).await
     }
 
-    /// Wait for a send slot.
-    pub async fn acquire(&self) {
-        let slot = self.reserve();
-        tokio::time::sleep_until(slot).await;
+    /// Wait for a send slot until `deadline`.
+    pub async fn acquire_until(&self, deadline: Instant) -> Result<()> {
+        self.budget.acquire(deadline).await.map_err(|d| {
+            tracing::warn!("Upstox request refused before sending: {:?}", d);
+            outcome::refusal(BUSY_MESSAGE)
+        })
     }
 
     #[cfg(test)]
     pub fn booked(&self) -> usize {
-        self.reserved.lock().len()
+        self.budget.recent()
     }
 }
 
@@ -108,19 +100,28 @@ mod tests {
         let l = WindowLimiter::new(2, 100, 1000);
         let start = Instant::now();
         for _ in 0..5 {
-            l.acquire().await;
+            l.acquire().await.unwrap();
         }
         // Slots: 0, 0, 1, 1, 2 seconds.
         assert_eq!(start.elapsed(), Duration::from_secs(2));
     }
 
+    /// The minute window binds after the second window; a send it would
+    /// hold past the queue bound is refused at once (BRL-05), and one with
+    /// a longer deadline waits for the minute.
     #[tokio::test(start_paused = true)]
     async fn per_minute_window_binds_after_the_second_window() {
         let l = WindowLimiter::new(100, 3, 1000);
         let start = Instant::now();
-        for _ in 0..4 {
-            l.acquire().await;
+        for _ in 0..3 {
+            l.acquire().await.unwrap();
         }
+        let e = l.acquire().await.unwrap_err();
+        assert_eq!(e.client_message(), BUSY_MESSAGE);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        l.acquire_until(start + Duration::from_secs(120))
+            .await
+            .unwrap();
         assert_eq!(start.elapsed(), Duration::from_secs(60));
     }
 
@@ -128,10 +129,10 @@ mod tests {
     async fn old_slots_are_purged() {
         let l = WindowLimiter::new(10, 100, 1000);
         for _ in 0..5 {
-            l.acquire().await;
+            l.acquire().await.unwrap();
         }
         tokio::time::sleep(HORIZON + Duration::from_secs(1)).await;
-        l.acquire().await;
+        l.acquire().await.unwrap();
         assert_eq!(l.booked(), 1);
     }
 

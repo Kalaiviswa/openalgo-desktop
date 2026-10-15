@@ -266,8 +266,8 @@ impl DhanBroker {
     ) -> Result<(StatusCode, Value)> {
         if self.variant == Variant::Live {
             match category {
-                Category::Data => self.data_pacer.acquire().await,
-                Category::Quote => self.quote_pacer.acquire().await,
+                Category::Data => self.data_pacer.acquire().await?,
+                Category::Quote => self.quote_pacer.acquire().await?,
                 Category::Trade => {}
             }
         }

@@ -690,6 +690,19 @@ and add each new one here.
   through `options_service::Expiry::parse` or `parse_compact_expiry`, at
   every API, page and MCP boundary, before any master or broker lookup.
 
+### Broker request limits
+
+- **A broker request waits at most ten seconds for its turn.**
+  `common::ratelimit::Pacer::acquire` (and the Upstox and AliceBlue
+  window limiters, now on `common::ratelimit::Budget`) refuse a request
+  whose turn is further away, before sending (`outcome::refusal`: never an
+  uncertain order), and book a slot only when its caller's wait is over,
+  so a caller dropped while it waits delays nobody. Turns on a `Pacer` go
+  in arrival order. Background work that may wait (Historify) asks with
+  `acquire_within(Duration::MAX)`; a new call site decides which it is.
+  The web bounds the wait only under its gthread worker: a recorded
+  deviation.
+
 ### Security work
 
 - **Broker sessions change under one lock.** Completing a sign-in, resuming

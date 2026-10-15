@@ -164,9 +164,9 @@ impl IiflCapitalBroker {
         let mut attempt = 0u32;
         loop {
             if read {
-                self.read_pacer.acquire().await;
+                self.read_pacer.acquire().await?;
             } else {
-                self.order_pacer.acquire().await;
+                self.order_pacer.acquire().await?;
             }
             let url = format!("{}{}", self.base_url, path);
             let mut req = self

@@ -538,7 +538,7 @@ pub async fn get_history(
             &end.format("%Y-%m-%dT%H:%M:%S.000Z").to_string(),
             interval,
         );
-        b.history_pacer.acquire().await;
+        b.history_pacer.acquire().await?;
         match b
             .call(Method::POST, "/charts/timeseries", auth, Some(&body))
             .await

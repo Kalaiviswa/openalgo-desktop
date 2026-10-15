@@ -216,7 +216,7 @@ impl FivepaisaBroker {
         s: &Session,
         timeout: Duration,
     ) -> Result<Value> {
-        self.pacer.acquire().await;
+        self.pacer.acquire().await?;
         let resp = self
             .http
             .post(format!("{}{}", self.base_url, path))
@@ -235,7 +235,7 @@ impl FivepaisaBroker {
 
     /// GET `{base}{path}` (history).
     pub(crate) async fn get(&self, path: &str, s: &Session) -> Result<Value> {
-        self.pacer.acquire().await;
+        self.pacer.acquire().await?;
         let resp = self
             .http
             .get(format!("{}{}", self.base_url, path))

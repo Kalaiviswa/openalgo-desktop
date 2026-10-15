@@ -178,7 +178,7 @@ impl AngelBroker {
         r
     }
 
-    async fn pace(&self, cat: Category) {
+    async fn pace(&self, cat: Category) -> Result<()> {
         match cat {
             Category::Order => self.order_pacer.acquire().await,
             Category::Quote => self.quote_pacer.acquire().await,
@@ -205,7 +205,7 @@ impl AngelBroker {
         };
         let mut attempt = 0;
         loop {
-            self.pace(cat).await;
+            self.pace(cat).await?;
             let mut req = self.request(method.clone(), path, api_key, Some(jwt));
             if let Some(b) = body {
                 req = req.json(b);

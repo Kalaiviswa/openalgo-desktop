@@ -201,7 +201,7 @@ pub async fn get_multiquotes(
         wanted.push((idx, ex.to_string(), row.token));
     }
     for batch in wanted.chunks(QUOTE_BATCH) {
-        b.data_pacer.acquire().await;
+        b.data_pacer.acquire().await?;
         let items: Vec<(String, String)> = batch
             .iter()
             .map(|(_, e, t)| (e.clone(), t.clone()))
@@ -449,7 +449,7 @@ async fn historical(
     let days = chunk_days(interval).unwrap_or(1);
     let mut out = Vec::new();
     for (from, to) in chunks(start, end, days) {
-        b.data_pacer.acquire().await;
+        b.data_pacer.acquire().await?;
         // Each chunk spans whole days: 00:00 to 23:59 (the web leaves
         // intermediate chunks ending at 00:00, which drops their last day).
         let body = json!({
@@ -501,7 +501,7 @@ async fn intraday(
         "symboltoken": token,
         "interval": broker_interval(interval)?,
     });
-    b.data_pacer.acquire().await;
+    b.data_pacer.acquire().await?;
     let v = b
         .call(Method::POST, INTRADAY_PATH, auth, Some(&body))
         .await?;

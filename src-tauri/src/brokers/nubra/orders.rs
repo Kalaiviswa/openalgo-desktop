@@ -135,8 +135,11 @@ pub async fn cancel_all_orders(b: &NubraBroker, auth: &AuthToken) -> Result<Canc
             Some(Value::String(s)) if !s.is_empty() => s.clone(),
             _ => continue,
         };
-        b.loop_pacer.acquire().await;
-        match cancel_order(b, auth, &id).await {
+        let cancelled = match b.loop_pacer.acquire().await {
+            Ok(()) => cancel_order(b, auth, &id).await,
+            Err(e) => Err(e),
+        };
+        match cancelled {
             Ok(_) => out.cancelled.push(id),
             Err(e @ AppError::Auth(_)) => return Err(e),
             Err(e) => {
@@ -179,9 +182,11 @@ pub async fn close_all_positions(b: &NubraBroker, auth: &AuthToken) -> Result<Cl
             disclosed_quantity: None,
             amo: false,
         };
-        b.loop_pacer.acquire().await;
-        let outcome = match ResolvedOrder::resolve(&req, &symbols) {
-            Ok(order) => place_order(b, auth, &order).await,
+        let outcome = match b.loop_pacer.acquire().await {
+            Ok(()) => match ResolvedOrder::resolve(&req, &symbols) {
+                Ok(order) => place_order(b, auth, &order).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         match outcome {

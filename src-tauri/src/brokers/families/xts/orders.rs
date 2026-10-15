@@ -134,8 +134,11 @@ pub(crate) async fn close_all_positions(b: &XtsBroker, auth: &AuthToken) -> Resu
                 .unwrap_or_else(|| mapping::s(p, "TradingSymbol"));
             format!("{} ({})", sym, ex)
         };
-        b.order_pacer.acquire().await;
-        match place_raw(b, auth, &payload).await {
+        let placed = match b.order_pacer.acquire().await {
+            Ok(()) => place_raw(b, auth, &payload).await,
+            Err(e) => Err(e),
+        };
+        match placed {
             Ok(r) => out.placed.push(r.order_id),
             Err(e) => out
                 .failed

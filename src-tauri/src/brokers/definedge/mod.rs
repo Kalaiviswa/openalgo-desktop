@@ -224,7 +224,7 @@ impl DefinedgeBroker {
         const MAX_RETRIES: u32 = 3;
         let mut attempt = 0u32;
         loop {
-            self.pacer_for(url).acquire().await;
+            self.pacer_for(url).acquire().await?;
             let mut req = self
                 .http
                 .request(method.clone(), url)

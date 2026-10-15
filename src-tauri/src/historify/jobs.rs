@@ -1032,7 +1032,17 @@ impl JobEngine {
             )));
         }
         let fetch = async {
-            self.inner.pacer.acquire().await;
+            // A background job waits its turn however long it takes; it is
+            // cancelled, never refused for the queue bound interactive
+            // requests have.
+            if let Err(wait) = self
+                .inner
+                .pacer
+                .acquire_within(std::time::Duration::MAX)
+                .await
+            {
+                tracing::debug!("Historify pacer turn {:?} away", wait);
+            }
             self.inner
                 .source
                 .fetch(symbol, exchange, interval, start, end)

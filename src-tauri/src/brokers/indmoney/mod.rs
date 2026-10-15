@@ -265,7 +265,7 @@ impl IndmoneyBroker {
         self.order_ids.clone()
     }
 
-    async fn pace(&self, bucket: Bucket) {
+    async fn pace(&self, bucket: Bucket) -> Result<()> {
         match bucket {
             Bucket::Order => self.order_pacer.acquire().await,
             Bucket::Data => self.data_pacer.acquire().await,
@@ -293,7 +293,7 @@ impl IndmoneyBroker {
         let url = self.url(path);
         let mut attempt = 0;
         loop {
-            self.pace(bucket).await;
+            self.pace(bucket).await?;
             let mut req = self
                 .http
                 .request(method.clone(), &url)
