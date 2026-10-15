@@ -51,20 +51,21 @@ pub const SETTINGS_FIELDS: &[&str] = &[
 pub const TOKEN_HEADER: &str = "x-runner-token";
 
 pub fn table() -> Vec<RouteSpec> {
-    let user =
-        |path: &'static str, method: Method, make: fn() -> MethodRouter<Arc<AppState>>| RouteSpec {
-            path,
-            method,
-            access: Access::User,
-            make,
-        };
-    let page =
-        |path: &'static str, method: Method, make: fn() -> MethodRouter<Arc<AppState>>| RouteSpec {
-            path,
-            method,
-            access: Access::Public,
-            make,
-        };
+    let mut t = user_routes();
+    t.extend(page_routes());
+    t
+}
+
+type Make = fn() -> MethodRouter<Arc<AppState>>;
+
+/// The runner's routes for the signed-in user.
+fn user_routes() -> Vec<RouteSpec> {
+    let user = |path: &'static str, method: Method, make: Make| RouteSpec {
+        path,
+        method,
+        access: Access::User,
+        make,
+    };
     vec![
         user("/openscript/runner/start/{name}", Method::POST, || {
             post(start)
@@ -115,7 +116,18 @@ pub fn table() -> Vec<RouteSpec> {
         user("/openscript/runner/positions/{name}", Method::GET, || {
             get(positions)
         }),
-        // The runner page's channel (per-run secret, see the module note).
+    ]
+}
+
+/// The runner page's channel (per-run secret, see the module note).
+fn page_routes() -> Vec<RouteSpec> {
+    let page = |path: &'static str, method: Method, make: Make| RouteSpec {
+        path,
+        method,
+        access: Access::Public,
+        make,
+    };
+    vec![
         page("/openscript/runner/host/{run}/spec", Method::GET, || {
             get(host_spec)
         }),
