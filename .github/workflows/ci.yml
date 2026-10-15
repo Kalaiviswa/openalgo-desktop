@@ -8,6 +8,7 @@ name: CI
 #   frontend-test (node 20/22/24, coverage thresholds) ------------------+
 #   e2e (Playwright against vite preview)
 #   secret-scan (gitleaks, full history)
+#   code-health (size, dead code and suppression ratchet; CLAUDE.md "Code health")
 #
 #   ci-ok needs every job above and fails unless all of them succeeded.
 #   Branch protection should require only the "ci-ok" check
@@ -319,6 +320,31 @@ jobs:
       - name: Scan full git history
         run: gitleaks git --config .github/gitleaks.toml --redact --verbose --exit-code 1 .
 
+  # --------------------------------------------------------- Code health
+  code-health:
+    name: code-health (ratchet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checker tests
+        run: python3 scripts/ci/test_code_health.py
+      - name: Nothing new over the limits (CLAUDE.md, Code health)
+        # On a pull request the baseline may not gain or raise an entry
+        # against the target branch's, unless the maintainer added the
+        # code-health-exception label.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'code-health-exception') }}
+        run: |
+          args=()
+          if [ "$EVENT" = "pull_request" ] && [ "$EXCEPTION" != "true" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF"
+            args=(--base-ref FETCH_HEAD)
+          fi
+          python3 scripts/ci/code_health.py "${args[@]}"
+
   # ------------------------------------------------------- Tauri bundles
   tauri-build:
     name: tauri-build (${{ matrix.name }})
@@ -408,6 +434,7 @@ jobs:
       - frontend-test
       - e2e
       - secret-scan
+      - code-health
       - tauri-build
     runs-on: ubuntu-latest
     timeout-minutes: 5
