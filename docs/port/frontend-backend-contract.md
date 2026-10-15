@@ -46,6 +46,7 @@ useSocket, MarketDataManager, errorReporter and Footer.
 | `close_position_event` | listen | subscribers/socketio_subscriber.py:122 | shell, order refresh hook |
 | `analyzer_update` | listen | subscribers/socketio_subscriber.py:273; services/orderstatus_service.py:27; services/openposition_service.py:26 | shell, order refresh hook |
 | `order_update` | listen | subscribers/socketio_subscriber.py:248; websocket_proxy/server.py:1874 | /trading blotter |
+| `analyzer_mode_changed` | listen | none: desktop only (UI-01), `{analyze_mode, mode}` after every analyzer mode change from the app, `/api/v1/analyzer/toggle`, MCP or Telegram | shell (`components/desktop/ModeSync`) |
 | `force_logout` | listen | blueprints/auth.py:728, :832, :1336, :1463; utils/session.py:276 | shell |
 | `active_sessions_update` | listen | blueprints/auth.py:1341; utils/session.py:285; utils/auth_utils.py:496 | shell |
 | `master_contract_download` | listen | broker/*/database/master_contract_db.py (zerodha :443) | shell |
