@@ -38,6 +38,7 @@ impl Subscriber for LogSubscriber {
             Topic::OptionsCompleted,
             Topic::MultiOrderCompleted,
             Topic::AnalyzerError,
+            Topic::AnalyzerRequest,
             Topic::GttPlaced,
             Topic::GttFailed,
             Topic::GttModified,

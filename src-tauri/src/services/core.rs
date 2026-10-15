@@ -228,6 +228,22 @@ pub fn analyzer_error(
     reply
 }
 
+/// Web `openposition_service`: an analyzer-mode answer that is not an
+/// order event, logged to `analyzer_logs` and pushed as `analyzer_update`.
+pub fn analyzer_logged(ctx: &AppState, api_type: &str, request: &Value, reply: &Reply) {
+    publish(
+        ctx,
+        Event::AnalyzerRequest {
+            meta: meta(
+                Mode::Analyze,
+                api_type,
+                analyzer_request(request, api_type),
+                &reply.body,
+            ),
+        },
+    );
+}
+
 /// Live-mode failure published as `order.failed`.
 pub fn order_failed(
     ctx: &AppState,

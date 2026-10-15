@@ -7,7 +7,9 @@
 //! are shaped like the web's broker `transform_*` functions. Books always
 //! carry OpenAlgo symbols (the adapters translate).
 
-use super::core::{analyze_mode, broker_handle, float, round2, s, BrokerHandle, Reply, UNEXPECTED};
+use super::core::{
+    analyze_mode, analyzer_logged, broker_handle, float, round2, s, BrokerHandle, Reply, UNEXPECTED,
+};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::{ExactRow, Funds, Holding, Order, Position, Trade};
 use crate::state::AppState;
@@ -404,11 +406,16 @@ pub async fn open_position(ctx: &AppState, req: &Value) -> Reply {
         Err(r) => return r,
     };
     if analyze {
-        return sandbox(
+        let reply = sandbox(
             ctx.sandbox
                 .open_position(&symbol, &exchange, &product)
                 .await,
         );
+        // Logged like the web: every answer, a flat position included.
+        if reply.is_success() {
+            analyzer_logged(ctx, "openposition", req, &reply);
+        }
+        return reply;
     }
     let h = match handle(ctx) {
         Ok(h) => h,

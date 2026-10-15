@@ -364,6 +364,7 @@ impl Subscriber for SocketIoSubscriber {
             Topic::OptionsCompleted,
             Topic::MultiOrderCompleted,
             Topic::AnalyzerError,
+            Topic::AnalyzerRequest,
             Topic::SandboxOrderFilled,
             Topic::SandboxAutoSquareoff,
             Topic::SandboxT1Settlement,
@@ -477,6 +478,19 @@ mod tests {
         let (n, p) = translate(&g).unwrap();
         assert_eq!(n, "gtt_event");
         assert_eq!(p["event"], "triggered");
+    }
+
+    #[test]
+    fn an_analyzer_request_reaches_the_analyzer_page() {
+        // Web `openposition_service` emits `analyzer_update` for each answer.
+        let sub = SocketIoSubscriber::new(Arc::new(SocketEmitter::default()));
+        assert!(sub.topics().contains(&Topic::AnalyzerRequest));
+        let e = Event::AnalyzerRequest {
+            meta: meta(Mode::Analyze),
+        };
+        let (name, p) = translate(&e).unwrap();
+        assert_eq!(name, "analyzer_update");
+        assert_eq!(p["response"]["status"], "success");
     }
 
     #[test]

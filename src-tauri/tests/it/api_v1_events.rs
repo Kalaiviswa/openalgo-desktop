@@ -342,6 +342,94 @@ async fn analyzer_mode_never_reaches_the_broker_and_publishes_analyze_events() {
     h.shutdown().await;
 }
 
+/// The analyzer log rows of `api_type` (request, response), oldest first.
+fn analyzer_log(h: &H, api_type: &str) -> Vec<(Value, Value)> {
+    let conn = h.ctx.logs.conn().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT request_data, response_data FROM analyzer_logs
+             WHERE api_type = ?1 ORDER BY id",
+        )
+        .unwrap();
+    let mut out = Vec::new();
+    for r in stmt
+        .query_map([api_type], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+    {
+        let (q, a) = r.unwrap();
+        out.push((
+            serde_json::from_str(&q).unwrap(),
+            serde_json::from_str(&a).unwrap(),
+        ));
+    }
+    out
+}
+
+/// [`analyzer_log`] once the log subscriber has written `n` rows (or 2 s).
+async fn analyzer_rows(h: &H, api_type: &str, n: usize) -> Vec<(Value, Value)> {
+    for _ in 0..200 {
+        let rows = analyzer_log(h, api_type);
+        if rows.len() >= n {
+            return rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    analyzer_log(h, api_type)
+}
+
+/// Web `openposition_service`: in analyzer mode every answer, a flat
+/// position included, is written to the analyzer log and pushed to the
+/// Analyzer page (TOOLS-16: the golden replay found the seven of session 2
+/// missing). Order status is not logged in analyzer mode, as on the web.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn analyzer_mode_open_position_is_logged_like_the_web() {
+    let h = H::new().await;
+    h.analyze(true);
+    let (s, v) = call(&h, "/api/v1/placeorder", order_body()).await;
+    assert_eq!(s, 200, "{}", v);
+    let id = v["orderid"].as_str().unwrap().to_string();
+    let (s, _) = call(
+        &h,
+        "/api/v1/orderstatus",
+        json!({"strategy": "t", "orderid": id}),
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    let ask = |symbol: &str| json!({"strategy": "t", "exchange": "NSE", "symbol": symbol, "product": "MIS"});
+    let (s, v, t) = topics_of(&h, "/api/v1/openposition", ask("SBIN"), 1).await;
+    assert_eq!(
+        (s, t.as_slice()),
+        (200, ["analyzer.request"].as_slice()),
+        "{}",
+        v
+    );
+    assert_eq!(
+        v,
+        json!({"quantity": 1, "status": "success", "mode": "analyze"})
+    );
+    let (s, flat) = call(&h, "/api/v1/openposition", ask("INFY")).await;
+    assert_eq!((s, flat["quantity"].clone()), (200, json!(0)));
+
+    let rows = analyzer_rows(&h, "openposition", 2).await;
+    assert_eq!(rows.len(), 2, "one entry per openposition answer");
+    let (req, resp) = &rows[0];
+    assert_eq!(*resp, v);
+    assert_eq!(req["api_type"], "openposition");
+    assert_eq!(req["symbol"], "SBIN");
+    assert!(req.get("apikey").is_none());
+    assert!(!req.to_string().contains(&h.key));
+    assert_eq!(rows[1].1, flat);
+    assert!(
+        analyzer_log(&h, "orderstatus").is_empty(),
+        "the web does not log analyzer-mode order status"
+    );
+    no_key_anywhere(&h);
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn analyzer_toggle_starts_and_stops_the_sandbox_engine() {
     let h = H::new().await;

@@ -33,6 +33,9 @@ pub enum Topic {
     OptionsCompleted,
     MultiOrderCompleted,
     AnalyzerError,
+    /// An analyzer-mode answer the web logs without an order event
+    /// (`openposition_service.py` writes it inline; desktop topic).
+    AnalyzerRequest,
     SandboxOrderFilled,
     SandboxAutoSquareoff,
     SandboxT1Settlement,
@@ -74,6 +77,7 @@ impl Topic {
             Topic::OptionsCompleted => "options.completed",
             Topic::MultiOrderCompleted => "multiorder.completed",
             Topic::AnalyzerError => "analyzer.error",
+            Topic::AnalyzerRequest => "analyzer.request",
             Topic::SandboxOrderFilled => "sandbox.order_filled",
             Topic::SandboxAutoSquareoff => "sandbox.auto_squareoff",
             Topic::SandboxT1Settlement => "sandbox.t1_settlement",
@@ -283,6 +287,11 @@ pub enum Event {
     AnalyzerError {
         meta: OrderMeta,
     },
+    /// Logged to `analyzer_logs` and pushed as `analyzer_update`, nothing
+    /// else (no alert): the web's analyzer-mode `openposition`.
+    AnalyzerRequest {
+        meta: OrderMeta,
+    },
     SandboxOrderFilled {
         meta: OrderMeta,
     },
@@ -355,6 +364,7 @@ impl Event {
             Event::OptionsCompleted { .. } => Topic::OptionsCompleted,
             Event::MultiOrderCompleted { .. } => Topic::MultiOrderCompleted,
             Event::AnalyzerError { .. } => Topic::AnalyzerError,
+            Event::AnalyzerRequest { .. } => Topic::AnalyzerRequest,
             Event::SandboxOrderFilled { .. } => Topic::SandboxOrderFilled,
             Event::SandboxAutoSquareoff { .. } => Topic::SandboxAutoSquareoff,
             Event::SandboxT1Settlement { .. } => Topic::SandboxT1Settlement,
@@ -397,6 +407,7 @@ impl Event {
             | Event::OptionsCompleted { meta, .. }
             | Event::MultiOrderCompleted { meta, .. }
             | Event::AnalyzerError { meta }
+            | Event::AnalyzerRequest { meta }
             | Event::SandboxOrderFilled { meta }
             | Event::SandboxAutoSquareoff { meta }
             | Event::SandboxT1Settlement { meta }

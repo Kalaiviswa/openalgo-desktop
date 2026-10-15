@@ -392,6 +392,7 @@ impl Subscriber for Recorder {
             Topic::OptionsCompleted,
             Topic::MultiOrderCompleted,
             Topic::AnalyzerError,
+            Topic::AnalyzerRequest,
             Topic::GttPlaced,
             Topic::GttFailed,
             Topic::GttModified,

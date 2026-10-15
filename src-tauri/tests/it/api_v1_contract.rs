@@ -536,10 +536,12 @@ enum Allow {
     Pair(&'static str, &'static str),
 }
 
-/// The web had two analyzer entries before the recording and wrote five
-/// more than the desktop over session 2 (83 against 76): an open parity
-/// item, not yet traced to its requests (evaluation F, TOOLS-16).
-const OPEN_LOGS: &str = "open: analyzer entry count";
+/// Web defect 2 also kept session 2's two failed GTT modifies out of the
+/// web's analyzer log: the event raised before the log subscriber saw it.
+/// The desktop logs them, so from then on it counts two entries more (the
+/// replay starts from the web's two earlier entries; evaluation F, TOOLS-16).
+const WEB_DEFECT_2_LOGS: &str = "web defect 2: the failed GTT modifies were not logged";
+
 const OPEN_MARGIN: &str = "open: margin blocked after session 2's activity";
 
 /// Fields of successful replies that are not compared by value (TOOLS-16).
@@ -785,26 +787,20 @@ const VARIABLE: &[(&str, &str, Allow, &str)] = &[
     (
         "analyzer/",
         ".data.total_logs",
-        Allow::Pair("2", "0"),
-        OPEN_LOGS,
+        Allow::Pair("83", "85"),
+        WEB_DEFECT_2_LOGS,
     ),
     (
         "analyzer/",
         ".data.total_logs",
-        Allow::Pair("83", "76"),
-        OPEN_LOGS,
-    ),
-    (
-        "analyzer/",
-        ".data.total_logs",
-        Allow::Pair("86", "79"),
-        OPEN_LOGS,
+        Allow::Pair("86", "88"),
+        WEB_DEFECT_2_LOGS,
     ),
     (
         "analyzer/status.json",
         ".data.total_logs",
-        Allow::Pair("2", "79"),
-        OPEN_LOGS,
+        Allow::Pair("2", "88"),
+        "recorded in session 1, before session 2's entries",
     ),
     // Open: with the same positions and orders, the desktop blocks
     // 3,030.45 more margin than the web at this point of session 2; not
@@ -1025,6 +1021,14 @@ async fn replay_rate_limit(h: &H, rel: &str) -> Result<(), String> {
 async fn every_web_fixture_replays_against_the_desktop() {
     let h = H::new().await;
     h.analyze(true);
+    // The web held two analyzer entries before the recording
+    // (`analyzer/status_before_mutations`); the replay starts from the same.
+    for _ in 0..2 {
+        h.ctx
+            .logs
+            .insert_analyzer_log("placeorder", &json!({}), &json!({}))
+            .unwrap();
+    }
     let all = all_fixtures();
     let mut skipped: BTreeMap<String, &str> = BTreeMap::new();
     let mut to_run: Vec<String> = Vec::new();
