@@ -1019,6 +1019,29 @@ mod tests {
         assert!(other.carried.lock().is_none(), "zerodha carries nothing");
         download(ctx, &fs, &auth).await.unwrap();
         assert_eq!(firstock.carried.lock().clone(), Some(vec![]));
+        // MC-01, the abort window: Firstock downloaded last, then another
+        // broker's rows committed without their history (its download was
+        // aborted at logout). The history still names Firstock, but the
+        // stored rows are not Firstock's, so none are carried.
+        t.clock.advance(chrono::Duration::minutes(1));
+        download(ctx, &fs, &auth).await.unwrap();
+        assert_eq!(firstock.carried.lock().clone(), Some(vec![nifty.clone()]));
+        {
+            let mut c = ctx.sqlite.conn().unwrap();
+            symbol::store_master(
+                &mut c,
+                "zerodha",
+                ctx.now(),
+                &crate::brokers::types::MasterContract::new(vec![sbin, nifty]),
+            )
+            .unwrap();
+        }
+        download(ctx, &fs, &auth).await.unwrap();
+        assert_eq!(
+            firstock.carried.lock().clone(),
+            Some(vec![]),
+            "another broker's rows were carried"
+        );
     }
 
     /// Web #2117 (`try_start_master_contract_download(reset_status=True)`):
