@@ -65,6 +65,7 @@ pub mod schemas;
 pub mod search_ui_service;
 pub mod security_service;
 pub mod settings_service;
+pub mod strategy_portfolio_service;
 pub mod symbol_service;
 pub mod system_info;
 pub mod tools_service;

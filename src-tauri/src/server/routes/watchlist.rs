@@ -4,7 +4,7 @@
 use crate::db::sqlite::alert_log;
 use crate::server::envelope::{error, json_response, not_found};
 use crate::server::middleware::User;
-use crate::server::routes::webui::{failed, ok, JsonBody};
+use crate::server::routes::webui::{failed, int_id, ok, JsonBody};
 use crate::services::{alert_log_service, watchlist_service};
 use crate::state::AppState;
 use axum::{
@@ -36,12 +36,6 @@ fn name_from(body: &JsonBody) -> Result<String, String> {
         ));
     }
     Ok(name)
-}
-
-fn int_id(raw: &str) -> Option<i64> {
-    (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| raw.parse().ok())
-        .flatten()
 }
 
 fn db_failed(what: &str, e: crate::error::AppError) -> Response {

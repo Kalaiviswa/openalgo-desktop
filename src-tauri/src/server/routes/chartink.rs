@@ -6,6 +6,7 @@ use super::{Access, RouteSpec};
 use crate::chartink::{service as svc, webhook};
 use crate::server::envelope::json_response;
 use crate::server::middleware::{ClientIp, User};
+use crate::server::routes::webui::int_id;
 use crate::services::core::Reply;
 use crate::state::AppState;
 use axum::{
@@ -65,14 +66,6 @@ fn send(r: Reply) -> Response {
         StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         r.body,
     )
-}
-
-/// `<int:id>`: anything else is the web's 404.
-fn int_id(raw: &str) -> Option<i64> {
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    raw.parse().ok()
 }
 
 fn not_found() -> Response {
