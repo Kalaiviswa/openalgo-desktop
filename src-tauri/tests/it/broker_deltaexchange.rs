@@ -19,6 +19,7 @@ use openalgo_desktop_lib::brokers::deltaexchange::ratelimit::{Bucket, Quota};
 use openalgo_desktop_lib::brokers::deltaexchange::{auth, master_contract, DeltaBroker};
 use openalgo_desktop_lib::brokers::types::*;
 use openalgo_desktop_lib::brokers::{Broker, BrokerCredentials, BrokerRegistry};
+use openalgo_desktop_lib::db::sqlite::market_calendar;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -1437,7 +1438,14 @@ async fn crypto_is_always_open_for_the_sandbox_and_market_hours() {
     );
     let s = serve(&m).await;
     let app = app::App::new(&s).await;
-    assert!(app.ctx.sqlite.is_market_open("CRYPTO").unwrap());
+    // The market calendar keeps crypto open all day, weekends included.
+    let saturday = chrono::NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
+    let conn = app.ctx.sqlite.conn().unwrap();
+    let open = market_calendar::timings_for_date(&conn, saturday).unwrap();
+    drop(conn);
+    assert!(open
+        .iter()
+        .any(|w| w.exchange == "CRYPTO" && w.end_time - w.start_time == 86_399_000));
     let cfg = app.ctx.sandbox.config().await.unwrap();
     assert_eq!(cfg.square_off_time("CRYPTO"), None);
     assert!(cfg.square_off_time("NSE").is_some());
