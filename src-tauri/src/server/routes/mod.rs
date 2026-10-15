@@ -85,8 +85,47 @@ macro_rules! r {
     (@route PATCH, $f:path) => { patch($f) };
 }
 
+/// Every session route, by area.
 pub fn table() -> Vec<RouteSpec> {
-    let mut t = vec![
+    [
+        public(),
+        master_contract(),
+        signed_in(),
+        broker_and_server_settings(),
+        admin(),
+        mcp_tokens(),
+        logs_and_security(),
+        health_playground_leverage(),
+        search_and_orders(),
+        sandbox_and_charts(),
+        watchlists(),
+        oi_and_iv_tools(),
+        straddle_and_builder_tools(),
+        strategy_management(),
+        strategy_controls(),
+        strategy_records(),
+        strategy_portfolio(),
+        messaging(),
+        historify::table(),
+        broker_config::table(),
+        // The /trading terminal (web custom_indicators.py, openscript.py,
+        // openscript_runner.py).
+        custom_indicators::table(),
+        openscript::table(),
+        openscript_runner::table(),
+        scalping::table(),
+        chartink::table(),
+        update::table(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Routes that need no session: setup and sign-in, the strategy webhook
+/// and MCP (each with its own credential), and broker sign-in returns.
+fn public() -> Vec<RouteSpec> {
+    vec![
         // Public
         r!(GET, "/auth/csrf-token", Public, auth::csrf_token),
         r!(GET, "/auth/check-setup", Public, auth::check_setup),
@@ -125,6 +164,13 @@ pub fn table() -> Vec<RouteSpec> {
             BrokerCallback,
             broker::callback_post
         ),
+    ]
+}
+
+/// Master contract status and the symbol cache (web
+/// `blueprints/master_contract_status.py`).
+fn master_contract() -> Vec<RouteSpec> {
+    vec![
         // Master contract status and symbol cache (web
         // blueprints/master_contract_status.py)
         r!(
@@ -163,6 +209,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             master_contract::cache_reload
         ),
+    ]
+}
+
+/// The signed-in user's session, profile, API key and broker sign-in.
+fn signed_in() -> Vec<RouteSpec> {
+    vec![
         // Signed-in user
         r!(GET, "/samco/ip-status", User, broker::samco_ip_status),
         r!(
@@ -213,6 +265,12 @@ pub fn table() -> Vec<RouteSpec> {
         ),
         r!(GET, "/api/broker/capabilities", User, broker::capabilities),
         r!(GET, "/api/broker/configured", User, broker::configured),
+    ]
+}
+
+/// Broker Configuration, Select Broker and the server settings (desktop).
+fn broker_and_server_settings() -> Vec<RouteSpec> {
+    vec![
         // Desktop: Broker Configuration and Select Broker (one key set per
         // broker, one broker logged in at a time).
         r!(GET, "/api/broker/list", User, broker_config::list),
@@ -247,6 +305,12 @@ pub fn table() -> Vec<RouteSpec> {
             websocket_example::apikey
         ),
         r!(GET, "/api/config/host", User, app_config::host),
+    ]
+}
+
+/// Admin (web `blueprints/admin.py`).
+fn admin() -> Vec<RouteSpec> {
+    vec![
         // Admin (web blueprints/admin.py)
         r!(GET, "/admin/api/mcp/audit", User, crate::mcp::admin::audit),
         r!(
@@ -285,6 +349,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             crate::mcp::admin::oauth_client_action
         ),
+    ]
+}
+
+/// MCP tokens and client configuration (API key page, desktop only).
+fn mcp_tokens() -> Vec<RouteSpec> {
+    vec![
         // MCP tokens and client configuration (API key page, desktop only)
         r!(GET, "/api/mcp/tokens", User, crate::mcp::admin::tokens_list),
         r!(
@@ -339,6 +409,12 @@ pub fn table() -> Vec<RouteSpec> {
             admin::diagnostics
         ),
         r!(GET, "/admin/api/system/report", User, admin::report),
+    ]
+}
+
+/// Logs, traffic, latency and security.
+fn logs_and_security() -> Vec<RouteSpec> {
+    vec![
         // Logs and monitoring
         r!(GET, "/logs", UserJson, log::view),
         r!(GET, "/logs/export", User, log::export),
@@ -379,6 +455,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             security::active_sessions
         ),
+    ]
+}
+
+/// The Health Monitor, the Playground and leverage.
+fn health_playground_leverage() -> Vec<RouteSpec> {
+    vec![
         r!(GET, "/health", UserJson, health::status),
         r!(GET, "/health/status", User, health::status),
         r!(GET, "/health/check", User, health::check),
@@ -410,6 +492,12 @@ pub fn table() -> Vec<RouteSpec> {
         r!(GET, "/playground/endpoints", User, playground::endpoints),
         r!(GET, "/leverage/api/current", User, leverage::current),
         r!(POST, "/leverage/api/update", User, leverage::update),
+    ]
+}
+
+/// Search, order actions from the pages and the Action Center.
+fn search_and_orders() -> Vec<RouteSpec> {
+    vec![
         // Search (web blueprints/search.py)
         r!(GET, "/search/api/search", User, search::api_search),
         r!(GET, "/search/api/expiries", User, search::api_expiries),
@@ -444,6 +532,12 @@ pub fn table() -> Vec<RouteSpec> {
             orders::approve_all
         ),
         r!(GET, "/action-center/api/data", User, orders::data),
+    ]
+}
+
+/// The sandbox, the analyzer log and the charts.
+fn sandbox_and_charts() -> Vec<RouteSpec> {
+    vec![
         // Sandbox (web blueprints/sandbox.py)
         r!(GET, "/sandbox/api/configs", User, sandbox::configs),
         r!(POST, "/sandbox/update", User, sandbox::update),
@@ -473,6 +567,12 @@ pub fn table() -> Vec<RouteSpec> {
         // Charts (web blueprints/pnltracker.py, chart_test.py)
         r!(POST, "/pnltracker/api/pnl", User, charts::pnl),
         r!(GET, "/chart/test/api/history", User, charts::chart_history),
+    ]
+}
+
+/// Watchlists and the alert log (web `blueprints/watchlist.py`, `alerts.py`).
+fn watchlists() -> Vec<RouteSpec> {
+    vec![
         // Watchlists and the alert log (web blueprints/watchlist.py, alerts.py)
         r!(GET, "/watchlist/api/lists", User, watchlist::lists),
         r!(POST, "/watchlist/api/lists", User, watchlist::create),
@@ -505,6 +605,13 @@ pub fn table() -> Vec<RouteSpec> {
         r!(POST, "/alerts/fired", User, watchlist::alert_fired),
         r!(GET, "/alerts/log", User, watchlist::alert_log_list),
         r!(DELETE, "/alerts/log", User, watchlist::alert_log_clear),
+    ]
+}
+
+/// Options tools: OI profile and tracker, IV chart, gamma density and the
+/// straddle chart.
+fn oi_and_iv_tools() -> Vec<RouteSpec> {
+    vec![
         // Options tools (web blueprints oiprofile, oitracker, ivchart,
         // gamma_density, straddle_chart, custom_straddle, vol_surface, gex,
         // ivsmile, arbitrage, strategy_chart)
@@ -558,6 +665,13 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             options_tools::all_intervals
         ),
+    ]
+}
+
+/// Options tools: straddle P&L, volatility surface, GEX, IV smile,
+/// arbitrage and the Strategy Builder charts.
+fn straddle_and_builder_tools() -> Vec<RouteSpec> {
+    vec![
         r!(
             POST,
             "/straddlepnl/api/simulate",
@@ -613,6 +727,13 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             options_tools::all_intervals
         ),
+    ]
+}
+
+/// Strategy module (web `blueprints/strategy_module.py`): the strategies
+/// and their settings.
+fn strategy_management() -> Vec<RouteSpec> {
+    vec![
         // Strategy module (web blueprints/strategy_module.py)
         r!(GET, "/strategy/api/strategies", User, strategy_module::list),
         r!(
@@ -657,6 +778,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             strategy_module::kill_switch
         ),
+    ]
+}
+
+/// Strategy module: starting, stopping and closing a strategy.
+fn strategy_controls() -> Vec<RouteSpec> {
+    vec![
         r!(
             POST,
             "/strategy/api/strategies/{sid}/start",
@@ -687,6 +814,13 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             strategy_module::unlock_webhook
         ),
+    ]
+}
+
+/// Strategy module: what a strategy has done (runs, orders, events, books,
+/// checkpoints).
+fn strategy_records() -> Vec<RouteSpec> {
+    vec![
         r!(
             GET,
             "/strategy/api/strategies/{sid}/runs",
@@ -735,6 +869,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             strategy_module::checkpoints
         ),
+    ]
+}
+
+/// Strategy Builder portfolio (web `blueprints/strategy_portfolio.py`).
+fn strategy_portfolio() -> Vec<RouteSpec> {
+    vec![
         // Strategy Builder portfolio (web blueprints/strategy_portfolio.py)
         r!(
             GET,
@@ -766,6 +906,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             strategy_portfolio::delete
         ),
+    ]
+}
+
+/// Telegram and WhatsApp (web `blueprints/telegram.py`, `whatsapp.py`).
+fn messaging() -> Vec<RouteSpec> {
+    vec![
         // Telegram (web blueprints/telegram.py). GET /telegram/config is
         // the page for a browser and the settings for a JSON request.
         r!(POST, "/telegram/config", User, telegram::configuration),
@@ -811,18 +957,7 @@ pub fn table() -> Vec<RouteSpec> {
         r!(POST, "/whatsapp/test-message", User, whatsapp::test_message),
         r!(POST, "/whatsapp/send", User, whatsapp::send),
         r!(GET, "/whatsapp/stats", User, whatsapp::stats),
-    ];
-    t.extend(historify::table());
-    t.extend(broker_config::table());
-    // The /trading terminal (web custom_indicators.py, openscript.py,
-    // openscript_runner.py).
-    t.extend(custom_indicators::table());
-    t.extend(openscript::table());
-    t.extend(openscript_runner::table());
-    t.extend(scalping::table());
-    t.extend(chartink::table());
-    t.extend(update::table());
-    t
+    ]
 }
 
 /// Build the session router from the table, applying the guard per access.
