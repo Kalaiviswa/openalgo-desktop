@@ -5,8 +5,8 @@
 
 use super::core::{broker_handle, float, num, BrokerHandle, Reply};
 use super::options_service::{
-    calculate_greeks, expiry_datetime, greeks_underlying_exchange, option_chain_answer,
-    parse_option_symbol, synthetic_future_price, time_to_expiry, today_ist, ChainAnswer,
+    expiry_datetime, greeks_underlying_exchange, option_chain_answer, parse_option_symbol,
+    synthetic_future_price, time_to_expiry, today_ist, ChainAnswer, GreeksInput,
 };
 use super::tools_service::{
     chain_options_exchange, fan_out, history_gate, history_rows, nearest_future, quote,
@@ -283,16 +283,7 @@ fn leg_greeks(
     ltp: f64,
 ) -> Option<Value> {
     let c = parse_option_symbol(symbol).ok()?;
-    let r = calculate_greeks(
-        symbol,
-        options_exchange,
-        &c,
-        spot,
-        ltp,
-        None,
-        None,
-        ctx.now(),
-    );
+    let r = GreeksInput::new(symbol, options_exchange, &c, spot, ltp).calculate(ctx.now());
     (r.is_success() && r.body.get("status").and_then(Value::as_str) == Some("success"))
         .then_some(r.body)
 }

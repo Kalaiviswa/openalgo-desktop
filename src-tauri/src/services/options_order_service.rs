@@ -4,9 +4,10 @@
 
 use super::batch_order_service::{buy_then_sell, split_chunks, MAX_SPLIT_ORDERS, SPLIT_PAUSE};
 use super::core::{
-    analyzer_request, broker_handle, i, meta, mode_of, num, publish, s, safe_request, Reply,
+    analyzer_request, broker_handle, i, meta, mode_of, num, publish, s, safe_request, BrokerHandle,
+    Reply,
 };
-use super::options_service::{resolve_option, ResolvedOption};
+use super::options_service::{resolve_option, OptionPick, ResolvedOption};
 use super::order_service::{place_order_with, route_to_pending, Route};
 use crate::events::Event;
 use crate::state::AppState;
@@ -73,19 +74,7 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         Ok(a) => a,
         Err(r) => return r,
     };
-    let opt = match resolve_option(
-        ctx,
-        &h,
-        &s(req, "underlying"),
-        &s(req, "exchange"),
-        req.get("expiry_date").and_then(Value::as_str),
-        req.get("strike_int").and_then(Value::as_f64),
-        &s(req, "offset"),
-        &s(req, "option_type"),
-        None,
-    )
-    .await
-    {
+    let opt = match resolve_option(ctx, &h, &OptionPick::from_request(req)).await {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -175,8 +164,39 @@ pub async fn options_multi_order(ctx: &AppState, req: &Value, route: Route) -> R
         Ok(a) => a,
         Err(r) => return r,
     };
-    let legs: Vec<Value> = req
-        .get("legs")
+    let legs = numbered_legs(req);
+    if legs.is_empty() {
+        let msg = "No legs provided in the request";
+        return if analyze {
+            super::core::analyzer_error(ctx, "optionsmultiorder", req, msg, 400)
+        } else {
+            Reply::error(400, msg)
+        };
+    }
+    let shared_ltp = shared_underlying_ltp(ctx, &h, req, &legs).await;
+    let order = MultiOrder {
+        ctx,
+        h: &h,
+        route,
+        req,
+        analyze,
+        shared_ltp,
+    };
+    let mut results: Vec<(i64, Value)> = Vec::with_capacity(legs.len());
+    let has_split = legs.iter().any(|l| i(l, "splitsize") > 0);
+    for (n, leg) in buy_then_sell(&legs).iter().enumerate() {
+        if n > 0 && has_split {
+            tokio::time::sleep(SPLIT_PAUSE).await;
+        }
+        results.push((i(leg, "_leg"), order.leg(leg).await));
+    }
+    multi_order_reply(ctx, req, results, shared_ltp, analyze)
+}
+
+/// The legs of a multi-order, each numbered in `_leg` (from 1) in request
+/// order.
+fn numbered_legs(req: &Value) -> Vec<Value> {
+    req.get("legs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
@@ -188,122 +208,134 @@ pub async fn options_multi_order(ctx: &AppState, req: &Value, route: Route) -> R
             }
             l
         })
-        .collect();
-    if legs.is_empty() {
-        let msg = "No legs provided in the request";
-        return if analyze {
-            super::core::analyzer_error(ctx, "optionsmultiorder", req, msg, 400)
-        } else {
-            Reply::error(400, msg)
+        .collect()
+}
+
+/// The underlying's LTP once, shared by every leg: from the ATM call of the
+/// request's expiry, else the first leg's.
+async fn shared_underlying_ltp(
+    ctx: &AppState,
+    h: &BrokerHandle,
+    req: &Value,
+    legs: &[Value],
+) -> Option<f64> {
+    let expiry = req.get("expiry_date").and_then(Value::as_str).or_else(|| {
+        legs.iter()
+            .find_map(|l| l.get("expiry_date").and_then(Value::as_str))
+    });
+    let named = OptionPick::from_request(req);
+    let atm = OptionPick::atm(named.underlying, named.exchange, expiry, "CE");
+    resolve_option(ctx, h, &atm)
+        .await
+        .ok()
+        .map(|o| o.underlying_ltp)
+}
+
+/// One `optionsmultiorder` request: what every leg shares.
+struct MultiOrder<'a> {
+    ctx: &'a AppState,
+    h: &'a BrokerHandle,
+    route: Route,
+    req: &'a Value,
+    analyze: bool,
+    /// The underlying's LTP, resolved once.
+    shared_ltp: Option<f64>,
+}
+
+/// What a leg's reply entry repeats from the leg.
+struct LegHead {
+    leg_no: i64,
+    offset: String,
+    ot: String,
+    action: String,
+}
+
+impl MultiOrder<'_> {
+    /// Resolve and place one leg; its entry in the reply.
+    async fn leg(&self, leg: &Value) -> Value {
+        let head = LegHead {
+            leg_no: i(leg, "_leg"),
+            offset: s(leg, "offset"),
+            ot: s(leg, "option_type").to_ascii_uppercase(),
+            action: s(leg, "action").to_ascii_uppercase(),
         };
-    }
-    // The underlying's LTP once, shared by every leg.
-    let shared_ltp = match resolve_option(
-        ctx,
-        &h,
-        &s(req, "underlying"),
-        &s(req, "exchange"),
-        req.get("expiry_date").and_then(Value::as_str).or_else(|| {
-            legs.iter()
-                .find_map(|l| l.get("expiry_date").and_then(Value::as_str))
-        }),
-        None,
-        "ATM",
-        "CE",
-        None,
-    )
-    .await
-    {
-        Ok(o) => Some(o.underlying_ltp),
-        Err(_) => None,
-    };
-    let strike_int = req.get("strike_int").and_then(Value::as_f64);
-    let mut results: Vec<(i64, Value)> = Vec::with_capacity(legs.len());
-    let has_split = legs.iter().any(|l| i(l, "splitsize") > 0);
-    for (n, leg) in buy_then_sell(&legs).iter().enumerate() {
-        if n > 0 && has_split {
-            tokio::time::sleep(super::batch_order_service::SPLIT_PAUSE).await;
-        }
-        let leg_no = i(leg, "_leg");
-        let offset = s(leg, "offset");
-        let ot = s(leg, "option_type").to_ascii_uppercase();
-        let action = s(leg, "action").to_ascii_uppercase();
         let expiry = leg
             .get("expiry_date")
             .and_then(Value::as_str)
-            .or_else(|| req.get("expiry_date").and_then(Value::as_str));
-        let opt = match resolve_option(
-            ctx,
-            &h,
-            &s(req, "underlying"),
-            &s(req, "exchange"),
-            expiry,
-            strike_int,
-            &offset,
-            &ot,
-            shared_ltp,
-        )
-        .await
-        {
-            Ok(o) => o,
-            Err(r) => {
-                results.push((
-                    leg_no,
-                    json!({
-                        "leg": leg_no, "offset": offset, "strike": null, "option_type": ot,
-                        "action": action, "status": "error", "message": r.message(),
-                    }),
-                ));
-                continue;
-            }
+            .or_else(|| self.req.get("expiry_date").and_then(Value::as_str));
+        let pick = OptionPick {
+            expiry_date: expiry,
+            offset: &head.offset,
+            option_type: &head.ot,
+            known_ltp: self.shared_ltp,
+            ..OptionPick::from_request(self.req)
         };
-        let qty = i(leg, "quantity");
-        let size = i(leg, "splitsize");
-        if size > 0 {
-            if split_chunks(qty, size).len() as i64 > MAX_SPLIT_ORDERS {
-                results.push((leg_no, json!({
-                    "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
-                    "strike": null, "option_type": ot, "action": action, "status": "error",
-                    "message": "Split orders would exceed maximum limit of 100 per leg",
-                })));
-                continue;
-            }
-            let split = place_split(ctx, route, req, leg, &opt, qty, size).await;
-            let any_ok = split.iter().any(|r| r["status"] == "success");
-            results.push((
-                leg_no,
-                json!({
-                    "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
-                    "product": s(leg, "product"), "offset": offset, "strike": null,
-                    "option_type": ot, "action": action,
-                    "status": if any_ok { "success" } else { "error" },
-                    "total_quantity": qty, "split_size": size, "split_results": split,
-                    "mode": if analyze { "analyze" } else { "live" },
-                }),
-            ));
-            continue;
-        }
-        let r = place_order_with(ctx, &order_body(req, leg, &opt, qty), route, false).await;
-        if r.is_success() {
-            results.push((
-                leg_no,
-                json!({
-                    "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
-                    "product": s(leg, "product"), "offset": offset, "strike": null,
-                    "option_type": ot, "action": action, "status": "success",
-                    "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null),
-                    "mode": r.body.get("mode").cloned().unwrap_or(json!("live")),
-                }),
-            ));
-        } else {
-            let msg = r.message();
-            results.push((leg_no, json!({
-                "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
-                "strike": null, "option_type": ot, "action": action, "status": "error",
-                "message": if msg.is_empty() { "Order placement failed".to_string() } else { msg },
-            })));
+        let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
+        match resolve_option(self.ctx, self.h, &pick).await {
+            Ok(opt) if i(leg, "splitsize") > 0 => self.place_split_leg(leg, &opt, &head).await,
+            Ok(opt) => self.place_leg(leg, &opt, &head).await,
+            Err(r) => json!({
+                "leg": leg_no, "offset": offset, "strike": null, "option_type": ot,
+                "action": action, "status": "error", "message": r.message(),
+            }),
         }
     }
+
+    /// One leg in chunks of its `splitsize`.
+    async fn place_split_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> Value {
+        let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
+        let qty = i(leg, "quantity");
+        let size = i(leg, "splitsize");
+        if split_chunks(qty, size).len() as i64 > MAX_SPLIT_ORDERS {
+            return json!({
+                "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
+                "strike": null, "option_type": ot, "action": action, "status": "error",
+                "message": "Split orders would exceed maximum limit of 100 per leg",
+            });
+        }
+        let split = place_split(self.ctx, self.route, self.req, leg, opt, qty, size).await;
+        let any_ok = split.iter().any(|r| r["status"] == "success");
+        json!({
+            "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
+            "product": s(leg, "product"), "offset": offset, "strike": null,
+            "option_type": ot, "action": action,
+            "status": if any_ok { "success" } else { "error" },
+            "total_quantity": qty, "split_size": size, "split_results": split,
+            "mode": if self.analyze { "analyze" } else { "live" },
+        })
+    }
+
+    /// One leg as one order.
+    async fn place_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> Value {
+        let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
+        let body = order_body(self.req, leg, opt, i(leg, "quantity"));
+        let r = place_order_with(self.ctx, &body, self.route, false).await;
+        if r.is_success() {
+            return json!({
+                "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
+                "product": s(leg, "product"), "offset": offset, "strike": null,
+                "option_type": ot, "action": action, "status": "success",
+                "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null),
+                "mode": r.body.get("mode").cloned().unwrap_or(json!("live")),
+            });
+        }
+        let msg = r.message();
+        json!({
+            "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
+            "strike": null, "option_type": ot, "action": action, "status": "error",
+            "message": if msg.is_empty() { "Order placement failed".to_string() } else { msg },
+        })
+    }
+}
+
+/// The `optionsmultiorder` reply, legs in request order, and its event.
+fn multi_order_reply(
+    ctx: &AppState,
+    req: &Value,
+    mut results: Vec<(i64, Value)>,
+    shared_ltp: Option<f64>,
+    analyze: bool,
+) -> Reply {
     results.sort_by_key(|(n, _)| *n);
     let results: Vec<Value> = results.into_iter().map(|(_, v)| v).collect();
     let successful = results.iter().filter(|r| r["status"] == "success").count() as i64;

@@ -7,7 +7,7 @@
 use super::core::{broker_handle, float, num, BrokerHandle, Reply};
 use super::market_data_service;
 use super::options_service::{
-    available_strikes, calculate_greeks, expiry_datetime, parse_option_symbol, today_ist,
+    available_strikes, expiry_datetime, parse_option_symbol, today_ist, GreeksInput,
 };
 use super::tools_service::{
     history_bars, many_histories, quote, resolve_reference, strategy_reference, Reference,
@@ -540,7 +540,7 @@ pub async fn vol_surface(
                 let Ok(c) = parse_option_symbol(sym) else {
                     return Value::Null;
                 };
-                let g = calculate_greeks(sym, &r.options_exchange, &c, q.ltp, px, None, None, now);
+                let g = GreeksInput::new(sym, &r.options_exchange, &c, q.ltp, px).calculate(now);
                 g.body
                     .get("implied_volatility")
                     .and_then(Value::as_f64)

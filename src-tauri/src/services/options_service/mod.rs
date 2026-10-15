@@ -478,31 +478,70 @@ async fn underlying_ltp(
     }
 }
 
-/// Web `get_option_symbol`, reused by optionsorder, optionsmultiorder and
-/// syntheticfuture.
-#[allow(clippy::too_many_arguments)]
-pub async fn resolve_option(
-    ctx: &AppState,
-    h: &BrokerHandle,
-    underlying: &str,
-    exchange: &str,
-    expiry_date: Option<&str>,
-    strike_int: Option<f64>,
-    offset: &str,
-    option_type: &str,
-    known_ltp: Option<f64>,
-) -> Result<ResolvedOption, Reply> {
-    let ot = option_type.trim().to_ascii_uppercase();
+/// What [`resolve_option`] resolves: the web `get_option_symbol`
+/// arguments.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptionPick<'a> {
+    pub underlying: &'a str,
+    pub exchange: &'a str,
+    pub expiry_date: Option<&'a str>,
+    /// The strike interval; `None` picks among the listed strikes.
+    pub strike_int: Option<f64>,
+    /// `ATM`, `ITM<n>` or `OTM<n>`.
+    pub offset: &'a str,
+    /// `CE` or `PE`, in any case.
+    pub option_type: &'a str,
+    /// The underlying's LTP when the caller already has it.
+    pub known_ltp: Option<f64>,
+}
+
+impl<'a> OptionPick<'a> {
+    /// The contract a request names (`underlying`, `exchange`,
+    /// `expiry_date`, `strike_int`, `offset`, `option_type`).
+    pub fn from_request(req: &'a Value) -> Self {
+        let s = |k: &str| req.get(k).and_then(Value::as_str).unwrap_or_default();
+        Self {
+            underlying: s("underlying"),
+            exchange: s("exchange"),
+            expiry_date: req.get("expiry_date").and_then(Value::as_str),
+            strike_int: req.get("strike_int").and_then(Value::as_f64),
+            offset: s("offset"),
+            option_type: s("option_type"),
+            known_ltp: None,
+        }
+    }
+
+    /// The at-the-money `option_type` of `expiry_date`.
+    pub fn atm(
+        underlying: &'a str,
+        exchange: &'a str,
+        expiry_date: Option<&'a str>,
+        option_type: &'a str,
+    ) -> Self {
+        Self {
+            underlying,
+            exchange,
+            expiry_date,
+            offset: "ATM",
+            option_type,
+            ..Self::default()
+        }
+    }
+}
+
+/// The option type in capitals, once it and the strike interval are valid.
+fn checked_option_type(p: &OptionPick<'_>) -> Result<String, Reply> {
+    let ot = p.option_type.trim().to_ascii_uppercase();
     if ot != "CE" && ot != "PE" {
         return Err(Reply::error(
             400,
             format!(
                 "Invalid option_type: '{}'. Supported option types are CE and PE.",
-                option_type
+                p.option_type
             ),
         ));
     }
-    if let Some(si) = strike_int {
+    if let Some(si) = p.strike_int {
         if !si.is_finite() || si <= 0.0 {
             return Err(Reply::error(
                 400,
@@ -513,63 +552,84 @@ pub async fn resolve_option(
             ));
         }
     }
-    let u = resolve_underlying(ctx, underlying, exchange, expiry_date, false)?;
-    let ltp = match known_ltp {
+    Ok(ot)
+}
+
+/// The listed strike `offset` steps from the one nearest `ltp`.
+fn listed_strike(
+    rows: &[SymToken],
+    u: &Underlying,
+    ot: &str,
+    opt_ex: &str,
+    offset: &str,
+    ltp: f64,
+) -> Result<f64, Reply> {
+    let strikes = available_strikes(rows, &u.base, &u.expiry, ot, opt_ex);
+    if strikes.is_empty() {
+        return Err(no_strikes(&u.base, &u.expiry));
+    }
+    let Some(atm) = atm_index(&strikes, ltp) else {
+        return Err(Reply::error(
+            500,
+            "Failed to determine ATM strike from available strikes.",
+        ));
+    };
+    match offset_index(offset, atm, ot == "CE", strikes.len()) {
+        Ok(Some(i)) => Ok(strikes[i]),
+        Ok(None) => Err(Reply::error(
+            400,
+            format!(
+                "Offset {} is out of range for available strikes. Please use a smaller offset.",
+                offset
+            ),
+        )),
+        Err(m) => Err(Reply::error(400, m)),
+    }
+}
+
+/// The strike `offset` intervals of `si` from the multiple of `si` nearest
+/// `ltp`.
+fn interval_strike(si: f64, ltp: f64, offset: &str, ot: &str) -> Result<f64, Reply> {
+    let atm = (ltp / si).round_ties_even() * si;
+    let up = offset.to_ascii_uppercase();
+    if up == "ATM" {
+        return Ok(atm);
+    }
+    let (kind, n) = if let Some(n) = up.strip_prefix("ITM") {
+        ("ITM", n)
+    } else if let Some(n) = up.strip_prefix("OTM") {
+        ("OTM", n)
+    } else {
+        return Err(Reply::error(400, format!("Invalid offset: {}", up)));
+    };
+    let n: f64 = n.parse::<i64>().map_err(|_| {
+        Reply::error(
+            400,
+            format!("invalid literal for int() with base 10: '{}'", n),
+        )
+    })? as f64;
+    let up_side = (kind == "ITM") != (ot == "CE");
+    Ok(if up_side { atm + n * si } else { atm - n * si })
+}
+
+/// Web `get_option_symbol`, reused by optionsorder, optionsmultiorder and
+/// syntheticfuture.
+pub async fn resolve_option(
+    ctx: &AppState,
+    h: &BrokerHandle,
+    p: &OptionPick<'_>,
+) -> Result<ResolvedOption, Reply> {
+    let ot = checked_option_type(p)?;
+    let u = resolve_underlying(ctx, p.underlying, p.exchange, p.expiry_date, false)?;
+    let ltp = match p.known_ltp {
         Some(l) => l,
         None => underlying_ltp(ctx, h, &u, ".").await?.ltp,
     };
     let opt_ex = option_exchange(&u.quote_exchange);
     let snap = ctx.symbols.snapshot();
-    let strike = match strike_int {
-        None => {
-            let strikes = available_strikes(snap.rows(), &u.base, &u.expiry, &ot, &opt_ex);
-            if strikes.is_empty() {
-                return Err(no_strikes(&u.base, &u.expiry));
-            }
-            let Some(atm) = atm_index(&strikes, ltp) else {
-                return Err(Reply::error(
-                    500,
-                    "Failed to determine ATM strike from available strikes.",
-                ));
-            };
-            match offset_index(offset, atm, ot == "CE", strikes.len()) {
-                Ok(Some(i)) => strikes[i],
-                Ok(None) => {
-                    return Err(Reply::error(400, format!(
-                        "Offset {} is out of range for available strikes. Please use a smaller offset.",
-                        offset
-                    )))
-                }
-                Err(m) => return Err(Reply::error(400, m)),
-            }
-        }
-        Some(si) => {
-            let atm = (ltp / si).round_ties_even() * si;
-            let up = offset.to_ascii_uppercase();
-            if up == "ATM" {
-                atm
-            } else {
-                let (kind, n) = if let Some(n) = up.strip_prefix("ITM") {
-                    ("ITM", n)
-                } else if let Some(n) = up.strip_prefix("OTM") {
-                    ("OTM", n)
-                } else {
-                    return Err(Reply::error(400, format!("Invalid offset: {}", up)));
-                };
-                let n: f64 = n.parse::<i64>().map_err(|_| {
-                    Reply::error(
-                        400,
-                        format!("invalid literal for int() with base 10: '{}'", n),
-                    )
-                })? as f64;
-                let up_side = (kind == "ITM") != (ot == "CE");
-                if up_side {
-                    atm + n * si
-                } else {
-                    atm - n * si
-                }
-            }
-        }
+    let strike = match p.strike_int {
+        None => listed_strike(snap.rows(), &u, &ot, &opt_ex, p.offset, ltp)?,
+        Some(si) => interval_strike(si, ltp, p.offset, &ot)?,
     };
     let symbol = format!("{}{}{}{}", u.base, u.expiry, format_strike(strike), ot);
     let Some(row) = snap.by_symbol(&opt_ex, &symbol) else {
@@ -595,27 +655,7 @@ pub async fn option_symbol(ctx: &AppState, req: &Value) -> Reply {
         Ok(h) => h,
         Err(r) => return r,
     };
-    let s = |k: &str| {
-        req.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    let expiry = req.get("expiry_date").and_then(Value::as_str);
-    let strike_int = req.get("strike_int").and_then(Value::as_f64);
-    match resolve_option(
-        ctx,
-        &h,
-        &s("underlying"),
-        &s("exchange"),
-        expiry,
-        strike_int,
-        &s("offset"),
-        &s("option_type"),
-        None,
-    )
-    .await
-    {
+    match resolve_option(ctx, &h, &OptionPick::from_request(req)).await {
         Ok(r) => r.reply(),
         Err(r) => r,
     }
@@ -631,30 +671,13 @@ pub async fn synthetic_future_price(
     exchange: &str,
     expiry: &str,
 ) -> Result<(f64, f64, f64), Reply> {
-    let ce = resolve_option(
-        ctx,
-        h,
-        underlying,
-        exchange,
-        Some(expiry),
-        None,
-        "ATM",
-        "CE",
-        None,
-    )
-    .await?;
-    let pe = resolve_option(
-        ctx,
-        h,
-        underlying,
-        exchange,
-        Some(expiry),
-        None,
-        "ATM",
-        "PE",
-        Some(ce.underlying_ltp),
-    )
-    .await?;
+    let ce = OptionPick::atm(underlying, exchange, Some(expiry), "CE");
+    let ce = resolve_option(ctx, h, &ce).await?;
+    let pe = OptionPick {
+        known_ltp: Some(ce.underlying_ltp),
+        ..OptionPick::atm(underlying, exchange, Some(expiry), "PE")
+    };
+    let pe = resolve_option(ctx, h, &pe).await?;
     let keys = [
         QuoteKey::new(ce.exchange.clone(), ce.symbol.clone()),
         QuoteKey::new(pe.exchange.clone(), pe.symbol.clone()),
@@ -978,23 +1001,14 @@ mod tests {
     fn greeks_reply_shape() {
         let c = parse_option_symbol("NIFTY06OCT2622400CE").unwrap();
         let now = DateTime::<Utc>::from_timestamp(1791000272, 500_000_000).unwrap();
-        let r = calculate_greeks(
-            "NIFTY06OCT2622400CE",
-            "NFO",
-            &c,
-            22453.35,
-            156.95,
-            None,
-            None,
-            now,
-        );
+        let r = GreeksInput::new("NIFTY06OCT2622400CE", "NFO", &c, 22453.35, 156.95).calculate(now);
         assert!(r.is_success());
         assert_eq!(r.body["implied_volatility"], json!(15.23));
         assert_eq!(r.body["interest_rate"], json!(0));
         assert_eq!(r.body["expiry_date"], json!("06-Oct-2026"));
         assert_eq!(r.body["days_to_expiry"], json!(3.2468));
         assert_eq!(r.body["greeks"]["delta"], json!(0.5686));
-        let deep = calculate_greeks("X", "NFO", &c, 23000.0, 590.0, None, None, now);
+        let deep = GreeksInput::new("X", "NFO", &c, 23000.0, 590.0).calculate(now);
         assert_eq!(deep.body["implied_volatility"], json!(0));
         assert_eq!(deep.body["greeks"]["delta"], json!(1.0));
     }

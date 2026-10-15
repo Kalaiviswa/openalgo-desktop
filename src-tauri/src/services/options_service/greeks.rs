@@ -170,106 +170,141 @@ fn rate_json(rate: Option<f64>) -> Value {
     }
 }
 
-/// Web `calculate_greeks`.
-#[allow(clippy::too_many_arguments)]
-pub fn calculate_greeks(
-    symbol: &str,
-    exchange: &str,
-    c: &OptionContract,
-    forward: f64,
-    option_price: f64,
-    rate: Option<f64>,
-    expiry_time: Option<NaiveTime>,
-    now: DateTime<Utc>,
-) -> Reply {
-    let Some(exp) = expiry_datetime(&c.expiry, exchange, expiry_time) else {
-        return Reply::error(400, format!("Invalid expiry in {}", symbol));
-    };
-    let Some((days, t)) = time_to_expiry(exp, now) else {
-        return Reply::error(400, format!("Option has expired on {}", expiry_display(c)));
-    };
-    if forward <= 0.0 || option_price <= 0.0 {
-        return Reply::error(400, "Spot price and option price must be positive");
-    }
-    let k = c.strike;
-    if k <= 0.0 {
-        return Reply::error(400, "Strike price must be positive");
-    }
-    let call = c.option_type == "CE";
-    let flag = if call { Flag::Call } else { Flag::Put };
-    let r = rate.unwrap_or(0.0) / 100.0;
-    let intrinsic = if call {
-        (forward - k).max(0.0)
-    } else {
-        (k - forward).max(0.0)
-    };
-    let tv = option_price - intrinsic;
-    let mut base = json!({
-        "status": "success",
-        "symbol": symbol,
-        "exchange": exchange,
-        "underlying": c.base,
-        "strike": bs::py_round(k, 2),
-        "option_type": c.option_type,
-        "expiry_date": expiry_display(c),
-        "days_to_expiry": bs::py_round(days, 4),
-        "spot_price": bs::py_round(forward, 2),
-        "option_price": bs::py_round(option_price, 2),
-        "interest_rate": rate_json(rate),
-    });
-    let theoretical = |mut v: Value, note: &str| {
-        if let Some(m) = v.as_object_mut() {
-            m.insert("implied_volatility".into(), json!(0));
-            m.insert("intrinsic_value".into(), json!(bs::py_round(intrinsic, 2)));
-            m.insert("time_value".into(), json!(bs::py_round(tv.max(0.0), 2)));
-            m.insert("note".into(), json!(note));
-            m.insert(
-                "greeks".into(),
-                json!({"delta": if call { 1.0 } else { -1.0 }, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}),
-            );
+/// What [`GreeksInput::calculate`] prices.
+#[derive(Debug, Clone, Copy)]
+pub struct GreeksInput<'a> {
+    pub symbol: &'a str,
+    pub exchange: &'a str,
+    pub contract: &'a OptionContract,
+    /// The forward (or spot) the option is priced against.
+    pub forward: f64,
+    pub option_price: f64,
+    /// Percent a year; `None` prices at zero.
+    pub rate: Option<f64>,
+    /// `None` is the exchange's expiry time.
+    pub expiry_time: Option<NaiveTime>,
+}
+
+impl<'a> GreeksInput<'a> {
+    /// At a zero rate and the exchange's expiry time.
+    pub fn new(
+        symbol: &'a str,
+        exchange: &'a str,
+        contract: &'a OptionContract,
+        forward: f64,
+        option_price: f64,
+    ) -> Self {
+        Self {
+            symbol,
+            exchange,
+            contract,
+            forward,
+            option_price,
+            rate: None,
+            expiry_time: None,
         }
-        Reply::ok(v)
-    };
-    if tv <= 0.0 || (intrinsic > 0.0 && tv < 0.01) {
-        return theoretical(
-            base,
-            "Deep ITM option with no time value - theoretical Greeks returned",
-        );
     }
-    let iv = match bs::implied_volatility(option_price, forward, k, r, t, flag) {
-        Ok(iv) => iv,
-        Err(m) => {
-            let l = m.to_ascii_lowercase();
-            if l.contains("intrinsic") || l.contains("below") || l.contains("convergence") {
-                return theoretical(
-                    base,
-                    "IV calculation not possible - theoretical deep ITM Greeks returned",
+
+    /// Web `calculate_greeks`.
+    pub fn calculate(&self, now: DateTime<Utc>) -> Reply {
+        let Self {
+            symbol,
+            exchange,
+            contract: c,
+            forward,
+            option_price,
+            rate,
+            expiry_time,
+        } = *self;
+        let Some(exp) = expiry_datetime(&c.expiry, exchange, expiry_time) else {
+            return Reply::error(400, format!("Invalid expiry in {}", symbol));
+        };
+        let Some((days, t)) = time_to_expiry(exp, now) else {
+            return Reply::error(400, format!("Option has expired on {}", expiry_display(c)));
+        };
+        if forward <= 0.0 || option_price <= 0.0 {
+            return Reply::error(400, "Spot price and option price must be positive");
+        }
+        let k = c.strike;
+        if k <= 0.0 {
+            return Reply::error(400, "Strike price must be positive");
+        }
+        let call = c.option_type == "CE";
+        let flag = if call { Flag::Call } else { Flag::Put };
+        let r = rate.unwrap_or(0.0) / 100.0;
+        let intrinsic = if call {
+            (forward - k).max(0.0)
+        } else {
+            (k - forward).max(0.0)
+        };
+        let tv = option_price - intrinsic;
+        let mut base = json!({
+            "status": "success",
+            "symbol": symbol,
+            "exchange": exchange,
+            "underlying": c.base,
+            "strike": bs::py_round(k, 2),
+            "option_type": c.option_type,
+            "expiry_date": expiry_display(c),
+            "days_to_expiry": bs::py_round(days, 4),
+            "spot_price": bs::py_round(forward, 2),
+            "option_price": bs::py_round(option_price, 2),
+            "interest_rate": rate_json(rate),
+        });
+        let theoretical = |mut v: Value, note: &str| {
+            if let Some(m) = v.as_object_mut() {
+                m.insert("implied_volatility".into(), json!(0));
+                m.insert("intrinsic_value".into(), json!(bs::py_round(intrinsic, 2)));
+                m.insert("time_value".into(), json!(bs::py_round(tv.max(0.0), 2)));
+                m.insert("note".into(), json!(note));
+                m.insert(
+                    "greeks".into(),
+                    json!({"delta": if call { 1.0 } else { -1.0 }, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}),
                 );
             }
-            return Reply::error(
-                500,
-                format!("Failed to calculate Implied Volatility: {}", m),
+            Reply::ok(v)
+        };
+        if tv <= 0.0 || (intrinsic > 0.0 && tv < 0.01) {
+            return theoretical(
+                base,
+                "Deep ITM option with no time value - theoretical Greeks returned",
             );
         }
-    };
-    let g = bs::greeks(flag, forward, k, t, r, iv);
-    if let Some(m) = base.as_object_mut() {
-        m.insert(
-            "implied_volatility".into(),
-            json!(bs::py_round(iv * 100.0, 2)),
-        );
-        m.insert(
-            "greeks".into(),
-            json!({
-                "delta": bs::py_round(g.delta, 4),
-                "gamma": bs::py_round(g.gamma, 6),
-                "theta": bs::py_round(g.theta, 4),
-                "vega": bs::py_round(g.vega, 4),
-                "rho": bs::py_round(g.rho, 6),
-            }),
-        );
+        let iv = match bs::implied_volatility(option_price, forward, k, r, t, flag) {
+            Ok(iv) => iv,
+            Err(m) => {
+                let l = m.to_ascii_lowercase();
+                if l.contains("intrinsic") || l.contains("below") || l.contains("convergence") {
+                    return theoretical(
+                        base,
+                        "IV calculation not possible - theoretical deep ITM Greeks returned",
+                    );
+                }
+                return Reply::error(
+                    500,
+                    format!("Failed to calculate Implied Volatility: {}", m),
+                );
+            }
+        };
+        let g = bs::greeks(flag, forward, k, t, r, iv);
+        if let Some(m) = base.as_object_mut() {
+            m.insert(
+                "implied_volatility".into(),
+                json!(bs::py_round(iv * 100.0, 2)),
+            );
+            m.insert(
+                "greeks".into(),
+                json!({
+                    "delta": bs::py_round(g.delta, 4),
+                    "gamma": bs::py_round(g.gamma, 6),
+                    "theta": bs::py_round(g.theta, 4),
+                    "vega": bs::py_round(g.vega, 4),
+                    "rho": bs::py_round(g.rho, 6),
+                }),
+            );
+        }
+        Reply::ok(base)
     }
-    Reply::ok(base)
 }
 
 /// The forward for a contract: the synthetic future when the underlying is
@@ -316,9 +351,9 @@ pub async fn option_greeks(ctx: &AppState, req: &Value) -> Reply {
         Ok(c) => c,
         Err(m) => return Reply::error(500, format!("Failed to get option Greeks: {}", m)),
     };
-    let expiry_time = match s("expiry_time").map(|v| parse_expiry_time(&v)).transpose() {
+    let expiry_time = match requested_expiry_time(req) {
         Ok(t) => t,
-        Err(m) => return Reply::error(500, format!("Failed to get option Greeks: {}", m)),
+        Err(r) => return r,
     };
     let forward = match req
         .get("forward_price")
@@ -350,16 +385,21 @@ pub async fn option_greeks(ctx: &AppState, req: &Value) -> Reply {
             )
         }
     };
-    calculate_greeks(
-        &symbol,
-        &exchange,
-        &c,
-        forward,
-        option_price,
-        req.get("interest_rate").and_then(Value::as_f64),
+    GreeksInput {
+        rate: req.get("interest_rate").and_then(Value::as_f64),
         expiry_time,
-        ctx.now(),
-    )
+        ..GreeksInput::new(&symbol, &exchange, &c, forward, option_price)
+    }
+    .calculate(ctx.now())
+}
+
+/// The `expiry_time` a greeks request names, if any.
+fn requested_expiry_time(req: &Value) -> Result<Option<NaiveTime>, Reply> {
+    req.get("expiry_time")
+        .and_then(Value::as_str)
+        .map(parse_expiry_time)
+        .transpose()
+        .map_err(|m| Reply::error(500, format!("Failed to get option Greeks: {}", m)))
 }
 
 /// `multioptiongreeks`.
@@ -374,17 +414,43 @@ pub async fn multi_option_greeks(ctx: &AppState, req: &Value) -> Reply {
         .cloned()
         .unwrap_or_default();
     let rate = req.get("interest_rate").and_then(Value::as_f64);
-    let expiry_time = match req
-        .get("expiry_time")
-        .and_then(Value::as_str)
-        .map(parse_expiry_time)
-        .transpose()
-    {
+    let expiry_time = match requested_expiry_time(req) {
         Ok(t) => t,
-        Err(m) => return Reply::error(500, format!("Failed to get option Greeks: {}", m)),
+        Err(r) => return r,
     };
-    let now = ctx.now();
-    // Option prices in one call.
+    let mut batch = GreeksBatch {
+        ctx,
+        h: &h,
+        prices: option_prices(ctx, &h, &items).await,
+        forwards: HashMap::new(),
+        rate,
+        expiry_time,
+        now: ctx.now(),
+    };
+    let mut data = Vec::with_capacity(items.len());
+    let (mut ok, mut errors) = (0i64, Vec::new());
+    for item in &items {
+        match batch.item(item).await {
+            Ok(entry) => {
+                ok += 1;
+                data.push(entry);
+            }
+            Err((message, entry)) => {
+                errors.push(message);
+                data.push(entry);
+            }
+        }
+    }
+    batch_reply(data, ok, errors)
+}
+
+/// The option LTPs of `items` in one multiquote call, by (symbol,
+/// exchange). An item not in the master, or quoted at zero, has none.
+async fn option_prices(
+    ctx: &AppState,
+    h: &BrokerHandle,
+    items: &[Value],
+) -> HashMap<(String, String), f64> {
     let keys: Vec<QuoteKey> = items
         .iter()
         .filter_map(|i| {
@@ -403,106 +469,122 @@ pub async fn multi_option_greeks(ctx: &AppState, req: &Value) -> Reply {
             }
         }
     }
-    let mut forwards: HashMap<(String, String, String), Option<f64>> = HashMap::new();
-    let mut data = Vec::with_capacity(items.len());
-    let (mut ok, mut failed) = (0i64, 0i64);
-    let mut errors: Vec<String> = Vec::new();
-    for item in &items {
-        let sym = item
-            .get("symbol")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let ex = item
-            .get("exchange")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let err =
-            |m: String| json!({"status": "error", "symbol": sym, "exchange": ex, "message": m});
-        let c = match parse_option_symbol(&sym) {
-            Ok(c) => c,
-            Err(m) => {
-                let m = format!("Failed to parse option symbol: {}", m);
-                errors.push(m.clone());
-                data.push(err(m));
-                failed += 1;
-                continue;
-            }
+    prices
+}
+
+/// One `multioptiongreeks` request: what every item shares.
+struct GreeksBatch<'a> {
+    ctx: &'a AppState,
+    h: &'a BrokerHandle,
+    /// Option LTPs by (symbol, exchange).
+    prices: HashMap<(String, String), f64>,
+    /// Forwards by (underlying, its exchange, expiry), each fetched once.
+    forwards: HashMap<(String, String, String), Option<f64>>,
+    rate: Option<f64>,
+    expiry_time: Option<NaiveTime>,
+    now: DateTime<Utc>,
+}
+
+impl GreeksBatch<'_> {
+    /// The entry of one item, or why it failed and its entry.
+    async fn item(&mut self, item: &Value) -> Result<Value, (String, Value)> {
+        let text = |k: &str| item.get(k).and_then(Value::as_str);
+        let sym = text("symbol").unwrap_or_default().to_string();
+        let ex = text("exchange").unwrap_or_default().to_string();
+        let err = |m: String| {
+            let entry = json!({"status": "error", "symbol": sym, "exchange": ex, "message": m});
+            (m, entry)
         };
-        let us = item
-            .get("underlying_symbol")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let ux = item
-            .get("underlying_exchange")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let spot_ex = ux
-            .clone()
-            .unwrap_or_else(|| greeks_underlying_exchange(&c.base, &ex));
-        let fkey = (
-            us.clone().unwrap_or_else(|| c.base.clone()),
-            spot_ex,
-            c.expiry.clone(),
-        );
-        let forward = match forwards.get(&fkey) {
-            Some(f) => *f,
-            None => {
-                let f = forward_for(ctx, &h, &c, us.as_deref(), ux.as_deref(), &ex)
-                    .await
-                    .ok();
-                forwards.insert(fkey.clone(), f);
-                f
-            }
+        let c = parse_option_symbol(&sym)
+            .map_err(|m| err(format!("Failed to parse option symbol: {}", m)))?;
+        let forward = self
+            .forward(
+                &c,
+                text("underlying_symbol"),
+                text("underlying_exchange"),
+                &ex,
+            )
+            .await
+            .map_err(|u| err(format!("Failed to fetch underlying price for {}", u)))?;
+        let Some(price) = self.prices.get(&(sym.clone(), ex.clone())).copied() else {
+            return Err(err("Option LTP not available".to_string()));
         };
-        let Some(forward) = forward else {
-            let m = format!("Failed to fetch underlying price for {}", fkey.0);
-            errors.push(m.clone());
-            data.push(err(m));
-            failed += 1;
-            continue;
+        let input = GreeksInput {
+            rate: self.rate,
+            expiry_time: self.expiry_time,
+            ..GreeksInput::new(&sym, &ex, &c, forward, price)
         };
-        let Some(price) = prices.get(&(sym.clone(), ex.clone())).copied() else {
-            let m = "Option LTP not available".to_string();
-            errors.push(m.clone());
-            data.push(err(m));
-            failed += 1;
-            continue;
-        };
-        let r = calculate_greeks(&sym, &ex, &c, forward, price, rate, expiry_time, now);
+        let r = input.calculate(self.now);
         if r.is_success() {
-            ok += 1;
-            data.push(r.body);
-        } else if r
-            .message()
+            return Ok(r.body);
+        }
+        if r.message()
             .to_ascii_lowercase()
             .contains("option has expired")
         {
-            ok += 1;
-            data.push(json!({
-                "status": "success", "symbol": sym, "exchange": ex, "underlying": c.base,
-                "strike": bs::py_round(c.strike, 2), "option_type": c.option_type,
-                "expiry_date": expiry_display(&c), "days_to_expiry": 0,
-                "spot_price": bs::py_round(forward, 2), "option_price": bs::py_round(price, 2),
-                "intrinsic_value": bs::py_round(if c.option_type == "CE" { (forward - c.strike).max(0.0) } else { (c.strike - forward).max(0.0) }, 2),
-                "time_value": 0.0,
-                "interest_rate": bs::py_round(rate.unwrap_or(0.0), 2),
-                "implied_volatility": 0,
-                "greeks": {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0},
-                "note": "Option has expired - Greeks are no longer applicable",
-            }));
-        } else {
-            failed += 1;
-            errors.push(r.message());
-            let mut b = r.body;
-            if let Some(m) = b.as_object_mut() {
-                m.insert("symbol".into(), json!(sym));
-                m.insert("exchange".into(), json!(ex));
-            }
-            data.push(b);
+            return Ok(expired_entry(&input));
         }
+        let message = r.message();
+        let mut b = r.body;
+        if let Some(m) = b.as_object_mut() {
+            m.insert("symbol".into(), json!(sym));
+            m.insert("exchange".into(), json!(ex));
+        }
+        Err((message, b))
     }
+
+    /// The forward of `c`, fetched once per underlying and expiry; when it
+    /// cannot be had, the underlying it was asked for.
+    async fn forward(
+        &mut self,
+        c: &OptionContract,
+        us: Option<&str>,
+        ux: Option<&str>,
+        ex: &str,
+    ) -> Result<f64, String> {
+        let spot_ex = ux
+            .map(str::to_string)
+            .unwrap_or_else(|| greeks_underlying_exchange(&c.base, ex));
+        let fkey = (us.unwrap_or(&c.base).to_string(), spot_ex, c.expiry.clone());
+        let forward = match self.forwards.get(&fkey) {
+            Some(f) => *f,
+            None => {
+                let f = forward_for(self.ctx, self.h, c, us, ux, ex).await.ok();
+                self.forwards.insert(fkey.clone(), f);
+                f
+            }
+        };
+        forward.ok_or(fkey.0)
+    }
+}
+
+/// An option that has expired: a success with no greeks.
+fn expired_entry(g: &GreeksInput<'_>) -> Value {
+    let c = g.contract;
+    let intrinsic = if c.option_type == "CE" {
+        (g.forward - c.strike).max(0.0)
+    } else {
+        (c.strike - g.forward).max(0.0)
+    };
+    json!({
+        "status": "success", "symbol": g.symbol, "exchange": g.exchange, "underlying": c.base,
+        "strike": bs::py_round(c.strike, 2), "option_type": c.option_type,
+        "expiry_date": expiry_display(c), "days_to_expiry": 0,
+        "spot_price": bs::py_round(g.forward, 2), "option_price": bs::py_round(g.option_price, 2),
+        "intrinsic_value": bs::py_round(intrinsic, 2),
+        "time_value": 0.0,
+        "interest_rate": bs::py_round(g.rate.unwrap_or(0.0), 2),
+        "implied_volatility": 0,
+        "greeks": {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0},
+        "note": "Option has expired - Greeks are no longer applicable",
+    })
+}
+
+/// The `multioptiongreeks` reply: every entry, the counts, and the first
+/// three distinct failures.
+fn batch_reply(data: Vec<Value>, ok: i64, errors: Vec<String>) -> Reply {
+    let total = data.len();
+    let failed = errors.len() as i64;
     let status = if failed == 0 {
         "success"
     } else if ok > 0 {
@@ -513,7 +595,7 @@ pub async fn multi_option_greeks(ctx: &AppState, req: &Value) -> Reply {
     let mut body = json!({
         "status": status,
         "data": data,
-        "summary": {"total": items.len(), "success": ok, "failed": failed},
+        "summary": {"total": total, "success": ok, "failed": failed},
     });
     let mut uniq: Vec<String> = Vec::new();
     for e in errors {
