@@ -473,72 +473,101 @@ type Section<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 /// The downloadable report (web `_render_report`), capped at 1 MB.
 pub fn render_report(ctx: &AppState, payload: &Value, md: bool) -> Result<String> {
     let all = errors(ctx)?;
-    let (by_level, d1, h1) = summary(&all, ctx.now());
-    let h1s = if md { "# " } else { "" };
-    let h2 = if md { "## " } else { "" };
-    let bullet = if md { "- " } else { "  - " };
     let mut l: Vec<String> = Vec::new();
-    l.push(format!("{}OpenAlgo Desktop System Report", h1s));
+    l.push(format!(
+        "{}OpenAlgo Desktop System Report",
+        if md { "# " } else { "" }
+    ));
     l.push(String::new());
     l.push(kv(md, "Generated", &payload["time"]["ist_time"]));
     l.push(String::new());
-    let sections: &[Section] = &[
-        ("Trading Mode", "mode", &[("Mode", "label")]),
-        (
-            "Host",
-            "host",
-            &[
-                ("System", "system"),
-                ("Release", "release"),
-                ("Version", "version"),
-                ("Machine", "machine"),
-                ("Raspberry Pi", "rpi_model"),
-            ],
-        ),
-        (
-            "Runtime",
-            "runtime",
-            &[
-                ("Process uptime (s)", "process_uptime_seconds"),
-                ("Process threads", "active_threads"),
-                ("Background tasks", "background_tasks"),
-            ],
-        ),
-        (
-            "Hardware",
-            "hardware",
-            &[
-                ("CPU count", "cpu_count"),
-                ("CPU model", "cpu_model"),
-                ("Memory total (MB)", "memory_total_mb"),
-                ("Memory available (MB)", "memory_available_mb"),
-                ("Memory used (%)", "memory_percent"),
-            ],
-        ),
-        (
-            "Build",
-            "build",
-            &[("OpenAlgo Desktop", "openalgo_version")],
-        ),
-        (
-            "Brokers",
-            "brokers",
-            &[
-                ("Active broker", "active_broker"),
-                ("User logged in", "user_logged_in"),
-            ],
-        ),
-        (
-            "Time",
-            "time",
-            &[
-                ("Local time", "server_time"),
-                ("IST time", "ist_time"),
-                ("Local offset", "server_tz"),
-            ],
-        ),
-    ];
-    for (title, key, fields) in sections {
+    section_lines(&mut l, payload, md);
+    database_lines(&mut l, payload, md);
+    error_lines(&mut l, &all, ctx.now(), md);
+    Ok(capped(l.join("\n")))
+}
+
+/// The report's `##` heading prefix.
+fn h2(md: bool) -> &'static str {
+    if md {
+        "## "
+    } else {
+        ""
+    }
+}
+
+/// The report's list item prefix.
+fn bullet(md: bool) -> &'static str {
+    if md {
+        "- "
+    } else {
+        "  - "
+    }
+}
+
+/// Each section: its title, the payload key it reads and its fields.
+const REPORT_SECTIONS: &[Section<'static>] = &[
+    ("Trading Mode", "mode", &[("Mode", "label")]),
+    (
+        "Host",
+        "host",
+        &[
+            ("System", "system"),
+            ("Release", "release"),
+            ("Version", "version"),
+            ("Machine", "machine"),
+            ("Raspberry Pi", "rpi_model"),
+        ],
+    ),
+    (
+        "Runtime",
+        "runtime",
+        &[
+            ("Process uptime (s)", "process_uptime_seconds"),
+            ("Process threads", "active_threads"),
+            ("Background tasks", "background_tasks"),
+        ],
+    ),
+    (
+        "Hardware",
+        "hardware",
+        &[
+            ("CPU count", "cpu_count"),
+            ("CPU model", "cpu_model"),
+            ("Memory total (MB)", "memory_total_mb"),
+            ("Memory available (MB)", "memory_available_mb"),
+            ("Memory used (%)", "memory_percent"),
+        ],
+    ),
+    (
+        "Build",
+        "build",
+        &[("OpenAlgo Desktop", "openalgo_version")],
+    ),
+    (
+        "Brokers",
+        "brokers",
+        &[
+            ("Active broker", "active_broker"),
+            ("User logged in", "user_logged_in"),
+        ],
+    ),
+    (
+        "Time",
+        "time",
+        &[
+            ("Local time", "server_time"),
+            ("IST time", "ist_time"),
+            ("Local offset", "server_tz"),
+        ],
+    ),
+];
+
+/// The payload sections, with the runtime's listeners and the data
+/// folder's disk under theirs.
+fn section_lines(l: &mut Vec<String>, payload: &Value, md: bool) {
+    let (h2, bullet) = (h2(md), bullet(md));
+    for (title, key, fields) in REPORT_SECTIONS {
         l.push(format!("{}{}", h2, title));
         for (label, f) in *fields {
             l.push(kv(md, label, &payload[*key][*f]));
@@ -567,6 +596,11 @@ pub fn render_report(ctx: &AppState, payload: &Value, md: bool) -> Result<String
         }
         l.push(String::new());
     }
+}
+
+/// Each database file: its size and when it changed, or missing.
+fn database_lines(l: &mut Vec<String>, payload: &Value, md: bool) {
+    let (h2, bullet) = (h2(md), bullet(md));
     l.push(format!("{}Databases", h2));
     for db in payload["databases"].as_array().cloned().unwrap_or_default() {
         if db["exists"].as_bool().unwrap_or(false) {
@@ -586,6 +620,12 @@ pub fn render_report(ctx: &AppState, payload: &Value, md: bool) -> Result<String
         }
     }
     l.push(String::new());
+}
+
+/// The error counts by window and level, then the latest 50 errors.
+fn error_lines(l: &mut Vec<String>, all: &[ErrorEntry], now: DateTime<Utc>, md: bool) {
+    let (h2, bullet) = (h2(md), bullet(md));
+    let (by_level, d1, h1) = summary(all, now);
     l.push(format!("{}Errors summary", h2));
     l.push(kv(md, "Total in window", &json!(all.len())));
     l.push(kv(md, "Last 24h", &json!(d1)));
@@ -613,7 +653,10 @@ pub fn render_report(ctx: &AppState, payload: &Value, md: bool) -> Result<String
         }
         l.push(String::new());
     }
-    let mut body = l.join("\n");
+}
+
+/// The report cut at 1 MB, on a character boundary.
+fn capped(mut body: String) -> String {
     if body.len() > 1_000_000 {
         let mut end = 1_000_000;
         while !body.is_char_boundary(end) {
@@ -622,5 +665,5 @@ pub fn render_report(ctx: &AppState, payload: &Value, md: bool) -> Result<String
         body.truncate(end);
         body.push_str("\n\n...[report truncated]\n");
     }
-    Ok(body)
+    body
 }
