@@ -211,117 +211,133 @@ fn bad_format(col: &str) -> AppError {
     )
 }
 
+/// The columns of the `/all` CSV a master row is read from.
+struct Columns {
+    seg: usize,
+    und: usize,
+    sym: usize,
+    ts: usize,
+    full: usize,
+    opt: usize,
+    exp: usize,
+    strike: usize,
+    tick: usize,
+    lot: usize,
+    tok: usize,
+}
+
 /// Parse the `/all` CSV into master rows (`process_arrow_csv`).
 pub fn parse_instruments(csv: &str) -> Result<Vec<SymToken>> {
     let mut lines = csv.lines();
     let header = CsvHeader::parse(lines.next().ok_or_else(|| bad_format("ExchSeg"))?);
     let col = |n: &str| header.index(n).ok_or_else(|| bad_format(n));
-    let c_seg = col("ExchSeg")?;
-    let c_und = col("Underlying")?;
-    let c_sym = col("Symbol")?;
-    let c_ts = col("TradingSymbol")?;
-    let c_full = col("FullName")?;
-    let c_opt = col("OptionType")?;
-    let c_exp = col("Expiry")?;
-    let c_strike = col("StrikePrice")?;
-    let c_tick = col("TickSize")?;
-    let c_lot = col("LotSize")?;
-    let c_tok = col("Token")?;
+    let c = Columns {
+        seg: col("ExchSeg")?,
+        und: col("Underlying")?,
+        sym: col("Symbol")?,
+        ts: col("TradingSymbol")?,
+        full: col("FullName")?,
+        opt: col("OptionType")?,
+        exp: col("Expiry")?,
+        strike: col("StrikePrice")?,
+        tick: col("TickSize")?,
+        lot: col("LotSize")?,
+        tok: col("Token")?,
+    };
+    Ok(lines
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| parse_row(&c, line))
+        .collect())
+}
 
-    let mut out = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let f = crate::brokers::common::master_contract::split_csv_line(line);
-        let g = |i: usize| f.get(i).map(|s| s.trim()).unwrap_or("");
-        let seg = g(c_seg).to_ascii_uppercase();
-        let Some(exchange) = exchseg_to_oa(&seg) else {
-            continue;
-        };
-        let base = if g(c_und).is_empty() {
-            g(c_sym)
-        } else {
-            g(c_und)
-        }
-        .to_string();
-        let tradingsymbol = if g(c_ts).is_empty() {
-            g(c_sym)
-        } else {
-            g(c_ts)
-        }
-        .to_string();
-        let fullname = g(c_full).to_string();
-        let option_type = g(c_opt).to_ascii_uppercase();
-        let expiry = NaiveDate::parse_from_str(g(c_exp), "%d-%b-%Y")
-            .map(format_expiry)
-            .unwrap_or_default();
-        let currency = seg == "NSECD" || seg == "BSECD";
-        let mut strike: f64 = g(c_strike).parse().unwrap_or(0.0);
-        if !strike.is_finite() {
-            strike = 0.0;
-        }
-        if currency {
-            strike = round6(strike / 100_000.0);
-        }
-        // Futures carry -0.01 / 0 placeholders.
-        let strike = strike.max(0.0) + 0.0;
-        let mut tick: f64 = g(c_tick).parse().unwrap_or(0.0);
-        if currency {
-            tick = round6(tick / 100.0);
-        }
-        let lot = g(c_lot).parse::<f64>().map(|v| v as i32).unwrap_or(0);
-
-        let is_option = option_type == "CE" || option_type == "PE";
-        let is_future = !is_option
-            && (option_type == "XX"
-                || (!expiry.is_empty()
-                    && matches!(exchange, "NFO" | "BFO" | "MCX" | "CDS" | "BCD" | "NCO")));
-        let is_index = exchange.ends_with("_INDEX");
-
-        let (symbol, instrument_type) = if is_option {
-            (
-                option_symbol(&base, &expiry, strike, &option_type),
-                option_type.clone(),
-            )
-        } else if is_future {
-            (future_symbol(&base, &expiry), "FUT".to_string())
-        } else if is_index {
-            (
-                classify_index_symbol(&tradingsymbol, Some(exchange)).0,
-                "EQ".to_string(),
-            )
-        } else {
-            (
-                tradingsymbol
-                    .strip_suffix("-EQ")
-                    .unwrap_or(&tradingsymbol)
-                    .to_string(),
-                "EQ".to_string(),
-            )
-        };
-        let name = if (is_option || is_future) && !base.is_empty() {
-            base.clone()
-        } else if !fullname.is_empty() {
-            fullname
-        } else {
-            base.clone()
-        };
-        out.push(SymToken {
-            symbol,
-            brsymbol: tradingsymbol,
-            name,
-            exchange: exchange.to_string(),
-            brexchange: seg,
-            token: g(c_tok).to_string(),
-            expiry,
-            strike,
-            lot_size: lot,
-            instrument_type,
-            tick_size: tick,
-        });
+/// One CSV line as a master row; `None` for a segment OpenAlgo does not
+/// list.
+fn parse_row(c: &Columns, line: &str) -> Option<SymToken> {
+    let f = crate::brokers::common::master_contract::split_csv_line(line);
+    let g = |i: usize| f.get(i).map(|s| s.trim()).unwrap_or("");
+    let seg = g(c.seg).to_ascii_uppercase();
+    let exchange = exchseg_to_oa(&seg)?;
+    let base = if g(c.und).is_empty() {
+        g(c.sym)
+    } else {
+        g(c.und)
     }
-    Ok(out)
+    .to_string();
+    let tradingsymbol = if g(c.ts).is_empty() {
+        g(c.sym)
+    } else {
+        g(c.ts)
+    }
+    .to_string();
+    let fullname = g(c.full).to_string();
+    let option_type = g(c.opt).to_ascii_uppercase();
+    let expiry = NaiveDate::parse_from_str(g(c.exp), "%d-%b-%Y")
+        .map(format_expiry)
+        .unwrap_or_default();
+    let currency = seg == "NSECD" || seg == "BSECD";
+    let mut strike: f64 = g(c.strike).parse().unwrap_or(0.0);
+    if !strike.is_finite() {
+        strike = 0.0;
+    }
+    if currency {
+        strike = round6(strike / 100_000.0);
+    }
+    // Futures carry -0.01 / 0 placeholders.
+    let strike = strike.max(0.0) + 0.0;
+    let mut tick: f64 = g(c.tick).parse().unwrap_or(0.0);
+    if currency {
+        tick = round6(tick / 100.0);
+    }
+    let lot = g(c.lot).parse::<f64>().map(|v| v as i32).unwrap_or(0);
+
+    let is_option = option_type == "CE" || option_type == "PE";
+    let is_future = !is_option
+        && (option_type == "XX"
+            || (!expiry.is_empty()
+                && matches!(exchange, "NFO" | "BFO" | "MCX" | "CDS" | "BCD" | "NCO")));
+    let is_index = exchange.ends_with("_INDEX");
+
+    let (symbol, instrument_type) = if is_option {
+        (
+            option_symbol(&base, &expiry, strike, &option_type),
+            option_type.clone(),
+        )
+    } else if is_future {
+        (future_symbol(&base, &expiry), "FUT".to_string())
+    } else if is_index {
+        (
+            classify_index_symbol(&tradingsymbol, Some(exchange)).0,
+            "EQ".to_string(),
+        )
+    } else {
+        (
+            tradingsymbol
+                .strip_suffix("-EQ")
+                .unwrap_or(&tradingsymbol)
+                .to_string(),
+            "EQ".to_string(),
+        )
+    };
+    let name = if (is_option || is_future) && !base.is_empty() {
+        base.clone()
+    } else if !fullname.is_empty() {
+        fullname
+    } else {
+        base.clone()
+    };
+    Some(SymToken {
+        symbol,
+        brsymbol: tradingsymbol,
+        name,
+        exchange: exchange.to_string(),
+        brexchange: seg,
+        token: g(c.tok).to_string(),
+        expiry,
+        strike,
+        lot_size: lot,
+        instrument_type,
+        tick_size: tick,
+    })
 }
 
 /// Index rows from `/info/index-list` not already in the CSV (by token)
