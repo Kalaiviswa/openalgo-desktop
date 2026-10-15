@@ -559,19 +559,17 @@ async fn history_is_chunked_with_epoch_dates_and_oi_for_derivatives() {
     let q = &fake.requests("GET", "/data/history")[0].query;
     assert!(q.contains("resolution=1&") && q.ends_with("&oi_flag=1"));
 
-    // A failing chunk is retried three times then skipped (web).
+    // A range Fyers has no candles for is an empty answer, sent once.
     let fake = Fake::default();
-    for _ in 0..4 {
-        fake.once(
-            "GET",
-            "/data/history",
-            (
-                200,
-                vec![],
-                json!({"s": "error", "code": -300, "message": "no data"}).to_string(),
-            ),
-        );
-    }
+    fake.once(
+        "GET",
+        "/data/history",
+        (
+            200,
+            vec![],
+            json!({"s": "no_data", "code": 200, "candles": []}).to_string(),
+        ),
+    );
     let b = broker(&fake.serve().await);
     let req = HistoryRequest {
         key: QuoteKey::new("NSE", "SBIN"),
@@ -580,7 +578,7 @@ async fn history_is_chunked_with_epoch_dates_and_oi_for_derivatives() {
         end: NaiveDate::from_ymd_opt(2025, 10, 3).unwrap(),
     };
     assert!(b.get_history(&auth(), &req).await.unwrap().is_empty());
-    assert_eq!(fake.requests("GET", "/data/history").len(), 4);
+    assert_eq!(fake.requests("GET", "/data/history").len(), 1);
     let bad = HistoryRequest {
         interval: "W".into(),
         ..req
@@ -589,6 +587,212 @@ async fn history_is_chunked_with_epoch_dates_and_oi_for_derivatives() {
         b.get_history(&auth(), &bad).await.unwrap_err().code(),
         "VALIDATION_ERROR"
     );
+}
+
+fn history(interval: &str, start: (i32, u32, u32), end: (i32, u32, u32)) -> HistoryRequest {
+    HistoryRequest {
+        key: QuoteKey::new("NSE", "SBIN"),
+        interval: interval.into(),
+        start: NaiveDate::from_ymd_opt(start.0, start.1, start.2).unwrap(),
+        end: NaiveDate::from_ymd_opt(end.0, end.1, end.2).unwrap(),
+    }
+}
+
+/// BRL-04: a chunk that keeps failing is retried within the request's one
+/// budget (three retries in all, not three per send and three per chunk)
+/// and then fails the history: a chart never takes a gap for a quiet
+/// market. The web skips the chunk and answers with the rest.
+#[tokio::test]
+async fn a_history_chunk_that_keeps_failing_fails_the_history() {
+    let fake = Fake::default();
+    // Two daily chunks: the first reads, the second answers a server
+    // error every time.
+    fake.once(
+        "GET",
+        "/data/history",
+        (200, vec![], fx!("history_day.json").into()),
+    );
+    for _ in 0..10 {
+        fake.once(
+            "GET",
+            "/data/history",
+            (
+                502,
+                vec![],
+                json!({"s": "error", "code": 502, "message": "Bad gateway"}).to_string(),
+            ),
+        );
+    }
+    let b = broker(&fake.serve().await);
+    let e = b
+        .get_history(&auth(), &history("D", (2025, 1, 1), (2025, 12, 31)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.client_message(),
+        "Fyers did not return the history for 28 Oct 2025 to 31 Dec 2025 (Bad gateway). Nothing is shown rather than a history with a gap; try again shortly."
+    );
+    // One send for the first chunk, the second's first try and three
+    // retries: five, where the nested retries allowed up to sixteen per
+    // chunk.
+    assert_eq!(fake.requests("GET", "/data/history").len(), 5);
+
+    // An explicit refusal (an unknown symbol) is not retried at all.
+    let fake = Fake::default();
+    fake.on(
+        "GET",
+        "/data/history",
+        &json!({"s": "error", "code": -300, "message": "Invalid symbol"}).to_string(),
+    );
+    let b = broker(&fake.serve().await);
+    let e = b
+        .get_history(&auth(), &history("5m", (2025, 10, 1), (2025, 10, 3)))
+        .await
+        .unwrap_err();
+    assert!(
+        e.client_message().contains("(Invalid symbol)"),
+        "{}",
+        e.client_message()
+    );
+    assert_eq!(fake.requests("GET", "/data/history").len(), 1);
+}
+
+/// BRL-03: Fyers' Retry-After is honoured in full. A wait the request can
+/// hold is slept once and the request repeated; one that outlasts the
+/// request's deadline is refused at once, unretried, where the old code cut
+/// it to 10 s and sent again early.
+#[tokio::test]
+async fn a_retry_after_is_honoured_or_refused_never_shortened() {
+    let fake = Fake::default();
+    fake.once(
+        "GET",
+        "/api/v3/orders",
+        (429, vec![("retry-after", "60".into())], "{}".into()),
+    )
+    .on("GET", "/api/v3/orders", fx!("orders.json"));
+    let b = broker(&fake.serve().await);
+    let started = std::time::Instant::now();
+    let e = b.get_order_book(&auth()).await.unwrap_err();
+    assert_eq!(
+        e.client_message(),
+        "Fyers asked OpenAlgo to slow down for longer than this request can be held. It was not retried. Try again in a minute."
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "refused at once"
+    );
+    assert_eq!(fake.requests("GET", "/api/v3/orders").len(), 1);
+    // The pause holds the category: the next order-book read is refused
+    // before sending rather than sent into the throttle.
+    let e = b.get_order_book(&auth()).await.unwrap_err();
+    assert!(
+        e.client_message().contains("would have had to wait"),
+        "{}",
+        e.client_message()
+    );
+    assert_eq!(fake.requests("GET", "/api/v3/orders").len(), 1);
+    // Market data has its own budget and is not held by it.
+    fake.on("GET", "/data/depth", fx!("depth.json"));
+    b.get_quote(&auth(), &QuoteKey::new("NSE", "SBIN"))
+        .await
+        .unwrap();
+
+    // A throttle answer in the body (HTTP 200, code 429) is one too.
+    let fake = Fake::default();
+    fake.once(
+        "GET",
+        "/api/v3/orders",
+        (
+            200,
+            vec![("x-retry-after-ms", "20".into())],
+            json!({"s": "error", "code": 429, "message": "request limit reached"}).to_string(),
+        ),
+    )
+    .on("GET", "/api/v3/orders", fx!("orders.json"));
+    let b = broker(&fake.serve().await);
+    assert_eq!(b.get_order_book(&auth()).await.unwrap().len(), 7);
+    assert_eq!(fake.requests("GET", "/api/v3/orders").len(), 2);
+}
+
+/// BRL-01: each API category has its own budget with a daily cap. Once
+/// today's market-data cap is used, data requests are refused before
+/// anything is sent, and orders still go.
+#[tokio::test]
+async fn the_daily_data_cap_refuses_before_sending_and_spares_orders() {
+    use openalgo_desktop_lib::brokers::common::ratelimit::{Budget, Limits, Rolling};
+    use openalgo_desktop_lib::brokers::fyers::ratelimit::{app_ceiling, FyersLimiter};
+    let fake = Fake::default();
+    fake.on("GET", "/data/depth", fx!("depth.json")).on(
+        "GET",
+        "/api/v3/orders",
+        fx!("orders.json"),
+    );
+    let roomy = || {
+        Budget::new(Limits {
+            windows: vec![Rolling::per_second(100)],
+            per_day: None,
+        })
+    };
+    let data = Budget::new(Limits {
+        windows: vec![Rolling::per_second(100)],
+        per_day: Some(2),
+    });
+    let b = broker(&fake.serve().await).with_limiter(FyersLimiter::with_limits(
+        data,
+        roomy(),
+        roomy(),
+        Budget::new(app_ceiling()),
+    ));
+    let key = QuoteKey::new("NSE", "SBIN");
+    b.get_quote(&auth(), &key).await.unwrap();
+    b.get_quote(&auth(), &key).await.unwrap();
+    let e = b.get_quote(&auth(), &key).await.unwrap_err();
+    assert_eq!(
+        e.client_message(),
+        "Fyers' daily limit of 2 market data requests on the Standard plan is used up for today, so OpenAlgo has stopped sending them. It resets at midnight."
+    );
+    assert_eq!(fake.requests("GET", "/data/depth").len(), 2);
+    assert_eq!(b.get_order_book(&auth()).await.unwrap().len(), 7);
+}
+
+/// A throttled order placement is repeated only after Fyers' explicit 429
+/// (the order was not taken); a pause it cannot wait for refuses the
+/// placement as not sent, never as uncertain.
+#[tokio::test]
+async fn a_throttled_placement_is_retried_or_refused_never_uncertain() {
+    use openalgo_desktop_lib::brokers::common::outcome::{classify, placing, PlaceOutcome};
+    let fake = Fake::default();
+    fake.once(
+        "POST",
+        "/api/v3/orders/sync",
+        (429, vec![("x-retry-after-ms", "10".into())], "{}".into()),
+    )
+    .on(
+        "POST",
+        "/api/v3/orders/sync",
+        &json!({"s": "ok", "code": 1101, "message": "Order submitted", "id": "26100300000011"})
+            .to_string(),
+    );
+    let b = broker(&fake.serve().await);
+    let o = order("SBIN", "NSE", "LIMIT");
+    let r = placing(b.place_order(&auth(), &o)).await.unwrap();
+    assert_eq!(r.order_id, "26100300000011");
+    assert_eq!(fake.requests("POST", "/api/v3/orders/sync").len(), 2);
+
+    let fake = Fake::default();
+    fake.once(
+        "POST",
+        "/api/v3/orders/sync",
+        (429, vec![("retry-after", "120".into())], "{}".into()),
+    );
+    let b = broker(&fake.serve().await);
+    let r = placing(b.place_order(&auth(), &o)).await;
+    assert!(
+        matches!(classify(&r), PlaceOutcome::Refused { .. }),
+        "{:?}",
+        r
+    );
+    assert_eq!(fake.requests("POST", "/api/v3/orders/sync").len(), 1);
 }
 
 #[tokio::test]

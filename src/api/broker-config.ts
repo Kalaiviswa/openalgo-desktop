@@ -35,6 +35,17 @@ export interface BrokerKeyField {
   saved: string | null
 }
 
+/**
+ * An API plan a broker sells with different request limits (Fyers Standard
+ * or Prime). OpenAlgo paces the broker's requests for the chosen one.
+ */
+export interface RatePlanOption {
+  id: string
+  label: string
+  /** The limits the plan allows, for the trader. */
+  hint: string
+}
+
 /** One broker as the Select Broker and Broker Configuration pages show it. */
 export interface BrokerEntry {
   id: string
@@ -56,6 +67,10 @@ export interface BrokerEntry {
   redirect_url_is_default: boolean
   /** What to do with the redirect URL at the broker (redirect brokers only). */
   redirect_hint: string | null
+  /** The broker's API plans, the default first; empty for most brokers. */
+  rate_plans?: RatePlanOption[]
+  /** The plan requests are paced for now (brokers with plans only). */
+  rate_plan?: string | null
 }
 
 export interface BrokerList {
@@ -150,6 +165,19 @@ export const brokerConfigApi = {
       update
     )
     return { message: body.message ?? 'Saved.', signed_out: body.signed_out === true }
+  },
+
+  /**
+   * Pace the broker's requests for one of its API plans. Applies at once;
+   * the session is not touched. Returns the server's sentence.
+   */
+  async setRatePlan(id: string, plan: string): Promise<string> {
+    const body = await write<{ message?: string }>(
+      `/api/broker/rate-plan/${encodeURIComponent(id)}`,
+      'PUT',
+      { plan }
+    )
+    return body.message ?? 'Saved.'
   },
 
   /**

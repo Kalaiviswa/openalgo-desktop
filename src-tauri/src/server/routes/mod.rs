@@ -813,6 +813,7 @@ pub fn table() -> Vec<RouteSpec> {
         r!(GET, "/whatsapp/stats", User, whatsapp::stats),
     ];
     t.extend(historify::table());
+    t.extend(broker_config::table());
     // The /trading terminal (web custom_indicators.py, openscript.py,
     // openscript_runner.py).
     t.extend(custom_indicators::table());

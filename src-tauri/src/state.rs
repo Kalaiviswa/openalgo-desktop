@@ -352,6 +352,7 @@ impl AppState {
         ctx.reconciler.watch_feed(ctx.websocket.watch_status());
         crate::services::order_reconciler::register(&ctx.bus, &ctx.reconciler);
         ctx.reconciler.start();
+        crate::services::broker_config_service::BrokerConfigService::apply_rate_plans(&ctx);
         // Analyzer mode survives restarts: resume the sandbox engine.
         if ctx.sqlite.get_analyze_mode().unwrap_or(false) {
             crate::services::analyzer_service::AnalyzerService::spawn_engine_transition(&ctx, true);

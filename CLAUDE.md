@@ -793,6 +793,22 @@ and add each new one here.
 
 ### Broker request limits
 
+- **A broker's quota is per category and per window.** Fyers counts market
+  data, orders and account calls separately, each per second, per minute
+  and per day, by plan (`brokers::fyers::ratelimit`; Standard until the
+  trader picks Prime on Broker Configuration, saved in
+  `broker_rate_plans`). Every Fyers send claims its category's
+  `common::ratelimit::Budget` at the moment it goes, so a caller that waits
+  and gives up books nothing, and waits at most until its request's
+  deadline. A throttle answer (HTTP 429, or code 429 in the body) pauses
+  the whole category for the full Retry-After; a pause that outlasts the
+  deadline is refused unretried, never shortened and sent early. Only a
+  throttle answer is repeated, also for an order (it was not taken); a
+  timeout or a dropped send never is. One request (a history in chunks)
+  has one deadline and one retry budget, and a chunk that still fails
+  fails the history instead of leaving a gap. Daily counts are kept in
+  memory, so a restart starts the day's count again. The web paces one
+  8-a-second lane: a recorded deviation.
 - **A broker request waits at most ten seconds for its turn.**
   `common::ratelimit::Pacer::acquire` (and the Upstox and AliceBlue
   window limiters, now on `common::ratelimit::Budget`) refuse a request

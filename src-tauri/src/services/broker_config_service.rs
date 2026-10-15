@@ -132,6 +132,49 @@ impl BrokerConfigService {
         Ok(saved.unwrap_or_else(|| state.server_config().redirect_url_for(broker)))
     }
 
+    /// Apply every saved API plan to its broker (at startup). A row that
+    /// cannot be read leaves the default plan, which is the stricter one.
+    pub fn apply_rate_plans(state: &AppState) {
+        let saved = state
+            .sqlite
+            .conn()
+            .and_then(|c| crate::db::sqlite::rate_plan::all(&c));
+        match saved {
+            Ok(rows) => {
+                for (broker, plan) in rows {
+                    if let Some(b) = state.brokers.get(&broker) {
+                        b.set_rate_plan(&plan);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Saved broker API plans could not be read: {}", e),
+        }
+    }
+
+    /// Save the API plan `broker`'s requests are paced for, and apply it
+    /// at once. Only a plan the broker offers is accepted.
+    pub fn set_rate_plan(state: &AppState, broker: &str, plan: &str) -> Result<&'static str> {
+        valid_broker(broker)?;
+        let adapter = state
+            .brokers
+            .get(broker)
+            .ok_or_else(|| AppError::Validation(format!("Unknown broker: {}", broker)))?;
+        let Some(p) = adapter.rate_plans().iter().find(|p| p.id == plan.trim()) else {
+            return Err(AppError::Validation(format!(
+                "{} has no API plan called {}.",
+                setup_guide::display_name(broker),
+                plan.trim()
+            )));
+        };
+        {
+            let conn = state.sqlite.conn()?;
+            crate::db::sqlite::rate_plan::set(&conn, broker, p.id)?;
+        }
+        adapter.set_rate_plan(p.id);
+        tracing::info!("{} requests are now paced for the {} plan", broker, p.label);
+        Ok(p.label)
+    }
+
     /// Every broker, as the broker pages show it.
     pub fn list(state: &AppState) -> Result<Value> {
         let cfg = state.server_config();
@@ -185,7 +228,20 @@ impl BrokerConfigService {
                 .get(id)
                 .map(|a| a.supported_exchanges().iter().map(|e| e.as_str()).collect())
                 .unwrap_or_default();
+            let adapter = state.brokers.get(id);
+            let plans: Vec<Value> = adapter
+                .as_ref()
+                .map(|a| {
+                    a.rate_plans()
+                        .iter()
+                        .map(|p| json!({"id": p.id, "label": p.label, "hint": p.hint}))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let plan = adapter.as_ref().and_then(|a| a.rate_plan());
             brokers.push(json!({
+                "rate_plans": plans,
+                "rate_plan": plan,
                 "id": id,
                 "name": setup_guide::display_name(id),
                 "configured": configured,

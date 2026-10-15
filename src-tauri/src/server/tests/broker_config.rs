@@ -90,6 +90,7 @@ async fn every_route_needs_the_signed_in_user() {
         get("/api/broker/list"),
         put_json("/api/broker/credentials/zerodha", json!({"api_key": "k"})),
         delete("/api/broker/credentials/zerodha"),
+        put_json("/api/broker/rate-plan/fyers", json!({"plan": "prime"})),
     ] {
         let (s, _) = h.json(with_session(req, &anon, Some(&anon_csrf))).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -1138,4 +1139,100 @@ async fn one_unreadable_broker_does_not_hide_the_list() {
         .unwrap()
         .contains("cannot be read"));
     assert_eq!(field(entry(&data, "zerodha"), "api_key")["saved"], "***");
+}
+
+fn fyers_harness() -> (H, String, String, Arc<crate::brokers::fyers::FyersBroker>) {
+    let mock = Arc::new(MockBroker::new("zerodha"));
+    let fyers = Arc::new(crate::brokers::fyers::FyersBroker::new(
+        crate::brokers::common::symbols::SymbolResolver::new(),
+    ));
+    let t = build(
+        BrokerRegistry::with(vec![
+            mock.clone() as Arc<dyn crate::brokers::Broker>,
+            fyers.clone() as Arc<dyn crate::brokers::Broker>,
+        ]),
+        ist(2026, 10, 5, 10, 0),
+    );
+    t.ctx.limiter.freeze(Some(std::time::Instant::now()));
+    let h = H { t, mock };
+    h.setup();
+    let (cookie, csrf) = h.session(true);
+    (h, cookie, csrf, fyers)
+}
+
+async fn set_plan(
+    h: &H,
+    cookie: &str,
+    csrf: Option<&str>,
+    broker: &str,
+    plan: &str,
+) -> (StatusCode, Value) {
+    h.json(with_session(
+        put_json(
+            &format!("/api/broker/rate-plan/{}", broker),
+            json!({"plan": plan}),
+        ),
+        cookie,
+        csrf,
+    ))
+    .await
+}
+
+/// BRL-01: the Fyers API plan is listed with what each allows, saved and
+/// applied at once (the market-data budget becomes Prime's), restored at
+/// the next start, and only a plan the broker offers is accepted.
+#[tokio::test]
+async fn the_fyers_api_plan_is_listed_saved_applied_and_restored() {
+    use crate::brokers::fyers::ratelimit::Category;
+    use crate::brokers::Broker;
+    let (h, cookie, csrf, fyers) = fyers_harness();
+    let data = list(&h, &cookie).await;
+    let f = entry(&data, "fyers");
+    assert_eq!(f["rate_plan"], "standard");
+    let ids: Vec<&str> = f["rate_plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["standard", "prime"]);
+    assert!(f["rate_plans"][0]["hint"]
+        .as_str()
+        .unwrap()
+        .starts_with("Market data: 5 requests a second, 50 a minute, 5,000 a day."));
+    assert_eq!(entry(&data, "zerodha")["rate_plans"], json!([]));
+    assert_eq!(entry(&data, "zerodha")["rate_plan"], Value::Null);
+
+    // Refused without the CSRF token, for a plan Fyers does not sell and
+    // for a broker without plans; nothing changes.
+    let (s, _) = set_plan(&h, &cookie, None, "fyers", "prime").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, v) = set_plan(&h, &cookie, Some(&csrf), "fyers", "gold").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(v["message"], "Fyers has no API plan called gold.");
+    let (s, _) = set_plan(&h, &cookie, Some(&csrf), "zerodha", "prime").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(fyers.rate_plan(), Some("standard"));
+
+    let (s, v) = set_plan(&h, &cookie, Some(&csrf), "fyers", "prime").await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(
+        v["message"],
+        "Fyers requests are now paced for the Prime plan."
+    );
+    assert_eq!(fyers.rate_plan(), Some("prime"));
+    assert_eq!(
+        fyers.limiter().budget(Category::Data).limits().per_day,
+        Some(500_000)
+    );
+    assert_eq!(
+        entry(&list(&h, &cookie).await, "fyers")["rate_plan"],
+        "prime"
+    );
+
+    // A restart builds the adapter with the default plan; the saved one is
+    // applied again.
+    fyers.set_rate_plan("standard");
+    BrokerConfigService::apply_rate_plans(h.ctx());
+    assert_eq!(fyers.rate_plan(), Some("prime"));
 }

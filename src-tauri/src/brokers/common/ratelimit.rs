@@ -231,6 +231,12 @@ impl Budget {
         self
     }
 
+    /// Change the limits, keeping what was already sent (a plan change
+    /// does not forget today's count).
+    pub fn set_limits(&self, limits: Limits) {
+        *self.limits.lock() = limits;
+    }
+
     pub fn limits(&self) -> Limits {
         self.limits.lock().clone()
     }

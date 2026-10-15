@@ -2,10 +2,10 @@
 //!
 //! The session token is `app_id:access_token`, sent verbatim as
 //! `Authorization` on every REST call (web `f"{BROKER_API_KEY}:{AUTH_TOKEN}"`).
-//! Fyers caps every endpoint together at 10 requests per second per app, so
-//! one pacer spaces all calls 125 ms apart (web `api/rate_limiter.py`) and a
-//! 429 is retried up to three times, honouring `X-Retry-After-Ms` /
-//! `Retry-After`.
+//! Every call passes its API category's budget for the trader's plan
+//! (`ratelimit`: per second, per minute and per day), waiting at most until
+//! its deadline; a throttle answer pauses the category for the wait Fyers
+//! names and is retried within the same deadline, or refused unretried.
 //!
 //! Streaming: the HSM market-data socket (`streaming::HsmFeed`, no
 //! `Authorization` header, `hsm_key` from the JWT), the 50-level TBT depth
@@ -19,22 +19,23 @@ mod gtt;
 pub mod mapping;
 pub mod master_contract;
 mod orders;
+pub mod ratelimit;
 pub mod streaming;
 #[cfg(test)]
 mod tests;
 
 use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, Product};
-use crate::brokers::common::ratelimit::Pacer;
 use crate::brokers::common::streaming::{BrokerFeed, OrderFeed};
 use crate::brokers::common::symbols::{SymToken, SymbolResolver};
 use crate::brokers::types::*;
 use crate::brokers::{AuthResponse, Broker, BrokerCredentials};
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
+use ratelimit::{Category, FyersLimiter, FyersPlan, Op};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub use auth::{app_id_hash, decode_jwt_claims, JwtClaims};
 
@@ -76,13 +77,6 @@ pub const TIMEFRAME_MAP: &[(&str, &str)] = &[
     ("D", "1D"),
 ];
 
-/// web `rate_limiter.MIN_INTERVAL` (8 requests per second, under the cap).
-pub const MIN_INTERVAL: Duration = Duration::from_millis(125);
-/// web `rate_limiter.MAX_RETRIES` for HTTP 429.
-pub const MAX_RETRIES: u32 = 3;
-/// Longest broker-requested 429 wait we honour before giving up.
-const MAX_RETRY_WAIT: Duration = Duration::from_secs(10);
-
 /// Endpoints, overridable so tests can run against a local fake Fyers.
 #[derive(Debug, Clone)]
 pub struct FyersUrls {
@@ -109,9 +103,9 @@ pub struct FyersBroker {
     http: reqwest::Client,
     urls: FyersUrls,
     symbols: SymbolResolver,
-    /// One budget for every endpoint (Fyers counts them together).
-    pacer: Pacer,
-    /// Base of the 429 and history-chunk retry backoff (web 1 s / 2 s).
+    /// Request budgets per API category for the trader's plan.
+    limiter: FyersLimiter,
+    /// Base of the throttle and history-chunk retry backoff (web 1 s / 2 s).
     retry_base: Duration,
     funds_cache: funds::FundsCache,
 }
@@ -127,7 +121,7 @@ impl FyersBroker {
             http: http::client(),
             urls,
             symbols,
-            pacer: Pacer::with_interval(MIN_INTERVAL),
+            limiter: FyersLimiter::new(FyersPlan::Standard),
             retry_base: Duration::from_secs(1),
             funds_cache: funds::FundsCache::default(),
         }
@@ -137,6 +131,16 @@ impl FyersBroker {
     pub fn with_retry_base(mut self, base: Duration) -> Self {
         self.retry_base = base;
         self
+    }
+
+    /// Other request budgets (tests).
+    pub fn with_limiter(mut self, limiter: FyersLimiter) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    pub fn limiter(&self) -> &FyersLimiter {
+        &self.limiter
     }
 
     pub(crate) fn resolver(&self) -> &SymbolResolver {
@@ -165,8 +169,7 @@ impl FyersBroker {
         }
     }
 
-    /// One paced Fyers call with the web's 429 retry. Returns the HTTP status
-    /// and the JSON body whatever `s` says.
+    /// One Fyers call as its own logical request ([`Op::single`]).
     pub(crate) async fn raw(
         &self,
         method: Method,
@@ -174,11 +177,37 @@ impl FyersBroker {
         auth: &AuthToken,
         body: Option<&Value>,
     ) -> Result<(StatusCode, Value)> {
+        self.raw_in(&mut Op::single(), method, path_and_query, auth, body)
+            .await
+    }
+
+    /// One budgeted Fyers send within the logical request `op`. Returns
+    /// the HTTP status and the JSON body whatever `s` says.
+    ///
+    /// The send waits for its category's budget until `op`'s deadline, or
+    /// is refused before sending. A throttle answer (HTTP 429, or a body
+    /// with code 429) pauses the category for the wait Fyers names, in
+    /// full; the send is repeated after it when the pause ends before the
+    /// deadline and `op` has retries left, refused unretried when the pause
+    /// would outlast the deadline, and handed back as answered when the
+    /// retries are spent. Only a throttle answer is repeated: it means the
+    /// request was not taken. A send that fails or times out is never
+    /// repeated here.
+    pub(crate) async fn raw_in(
+        &self,
+        op: &mut Op,
+        method: Method,
+        path_and_query: &str,
+        auth: &AuthToken,
+        body: Option<&Value>,
+    ) -> Result<(StatusCode, Value)> {
         let header = Self::auth_header(auth)?;
         let url = format!("{}{}", self.urls.api, path_and_query);
-        let mut attempt = 0;
+        let category = Category::of(&method, path_and_query);
+        let endpoint = path_and_query.split('?').next().unwrap_or("");
+        let mut attempt = 0u32;
         loop {
-            self.pacer.acquire().await?;
+            self.limiter.acquire(category, op).await?;
             let mut req = self
                 .http
                 .request(method.clone(), &url)
@@ -188,20 +217,48 @@ impl FyersBroker {
                 req = req.json(b);
             }
             let resp = req.send().await?;
-            if resp.status() == StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
-                let delay = retry_delay(resp.headers(), attempt, self.retry_base);
-                tracing::warn!(
-                    "Fyers rate limited {}; retrying in {:?} (attempt {}/{})",
-                    path_and_query.split('?').next().unwrap_or(""),
-                    delay,
-                    attempt + 1,
-                    MAX_RETRIES
-                );
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-                continue;
+            let headers = resp.headers().clone();
+            let (status, v) = if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                // A throttle notice need not be JSON; its status says it.
+                let bytes = resp.bytes().await.unwrap_or_default();
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+                )
+            } else {
+                http::read_json("fyers", resp).await?
+            };
+            if status != StatusCode::TOO_MANY_REQUESTS && !is_throttle_body(&v) {
+                return Ok((status, v));
             }
-            return http::read_json("fyers", resp).await;
+            let delay =
+                ratelimit::retry_delay(&headers, attempt, self.retry_base, SystemTime::now());
+            let until = tokio::time::Instant::now().checked_add(delay);
+            if let Some(u) = until {
+                self.limiter.cool_down(category, u);
+            }
+            if op.retries_left == 0 {
+                tracing::warn!("Fyers is still limiting {} after the retries", endpoint);
+                return Ok((status, v));
+            }
+            if until.is_none_or(|u| u > op.deadline) {
+                tracing::warn!(
+                    "Fyers asked to wait {:?} before retrying {}; past this request's deadline, not retried",
+                    delay,
+                    endpoint
+                );
+                return Err(crate::brokers::common::outcome::refusal(
+                    ratelimit::SLOW_DOWN_MESSAGE,
+                ));
+            }
+            op.retries_left -= 1;
+            attempt += 1;
+            tracing::warn!(
+                "Fyers rate limited {}; retrying in {:?} ({} retries left)",
+                endpoint,
+                delay,
+                op.retries_left
+            );
         }
     }
 
@@ -214,7 +271,20 @@ impl FyersBroker {
         auth: &AuthToken,
         body: Option<&Value>,
     ) -> Result<Value> {
-        let (status, v) = self.raw(method, path_and_query, auth, body).await?;
+        self.call_in(&mut Op::single(), method, path_and_query, auth, body)
+            .await
+    }
+
+    /// [`call`](Self::call) within the logical request `op`.
+    pub(crate) async fn call_in(
+        &self,
+        op: &mut Op,
+        method: Method,
+        path_and_query: &str,
+        auth: &AuthToken,
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        let (status, v) = self.raw_in(op, method, path_and_query, auth, body).await?;
         if is_ok(&v) {
             return Ok(v);
         }
@@ -265,28 +335,9 @@ pub(crate) fn code_message(v: &Value) -> (i64, String) {
     (code, message)
 }
 
-/// web `retry_delay_from_headers`: `X-Retry-After-Ms`, then `Retry-After`,
-/// then `base * 2^attempt`; capped.
-pub(crate) fn retry_delay(
-    headers: &reqwest::header::HeaderMap,
-    attempt: u32,
-    base: Duration,
-) -> Duration {
-    let read = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0)
-    };
-    let d = if let Some(ms) = read("x-retry-after-ms") {
-        Duration::from_secs_f64((ms / 1000.0).max(0.05))
-    } else if let Some(s) = read("retry-after") {
-        Duration::from_secs_f64(s.max(0.05))
-    } else {
-        base.saturating_mul(1u32 << attempt.min(8))
-    };
-    d.min(MAX_RETRY_WAIT)
+/// A body that says Fyers is throttling (code 429 without success).
+pub(crate) fn is_throttle_body(v: &Value) -> bool {
+    !is_ok(v) && code_message(v).0 == 429
 }
 
 pub(crate) fn session_expired() -> AppError {
@@ -353,6 +404,18 @@ impl Broker for FyersBroker {
 
     fn symbols(&self) -> Option<&SymbolResolver> {
         Some(&self.symbols)
+    }
+
+    fn rate_plans(&self) -> &'static [crate::brokers::RatePlan] {
+        ratelimit::PLANS
+    }
+
+    fn set_rate_plan(&self, plan: &str) {
+        self.limiter.set_plan(FyersPlan::parse(plan));
+    }
+
+    fn rate_plan(&self) -> Option<&'static str> {
+        Some(self.limiter.plan().id())
     }
 
     async fn authenticate(&self, credentials: BrokerCredentials) -> Result<AuthResponse> {
