@@ -763,10 +763,18 @@ async fn gex_smile_and_gamma_density() {
         keys(row),
         vec!["ce_gamma", "ce_gex", "ce_oi", "net_gex", "pe_gamma", "pe_gex", "pe_oi", "strike"]
     );
-    let g = row["ce_gamma"].as_f64().unwrap();
-    assert!(g > 0.0);
-    let want = (g * 3000.0 * 75.0 * 100.0).round() / 100.0;
-    assert!((row["ce_gex"].as_f64().unwrap() - want).abs() < 0.011);
+    // Worked outside the kernel under test (TOOLS-16): the 25000 call at
+    // 130 against the spot 25010, 25.2292 days to 30 Oct 15:30 IST, r = 0,
+    // inverts (bisection on the Black-76 price) to an IV of 4.7638% and a
+    // gamma of 0.00127270, 0.001273 at six places; GEX = 0.001273 x 3000 OI
+    // x 75 lot = 286.425.
+    assert_eq!(row["strike"].as_f64(), Some(25_000.0));
+    assert_eq!(row["ce_gamma"], json!(0.001273), "{}", row);
+    assert!(
+        (row["ce_gex"].as_f64().unwrap() - 286.425).abs() <= 0.005 + 1e-9,
+        "{}",
+        row
+    );
 
     let (s, v) = h.post("/ivsmile/api/iv-smile-data", nifty()).await;
     assert_eq!(s, StatusCode::OK, "{}", v);
