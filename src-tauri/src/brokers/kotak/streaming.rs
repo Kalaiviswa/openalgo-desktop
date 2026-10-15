@@ -187,6 +187,66 @@ fn decode_string(raw: &[u8]) -> String {
     String::from_utf8_lossy(&raw[..end]).trim().to_string()
 }
 
+/// A scrip packet (levels 2, 4, 8, 16): the trade fields and the depth
+/// rows the packet carries (one a side at level 4), within its length.
+fn scrip_packet(
+    p: &[u8],
+    exchange: String,
+    level: u8,
+    div: f64,
+    message_length: usize,
+) -> Option<Sfeed> {
+    if p.len() < MP_FIXED_END {
+        return None;
+    }
+    let b = HEADER_SIZE;
+    let price = |o: usize| f64::from(u32le(p, b + o)) / div;
+    let (buy_n, sell_n) = if level == 4 {
+        (1usize, 1usize)
+    } else {
+        (u32le(p, b + 80) as usize, u32le(p, b + 84) as usize)
+    };
+    let limit = message_length.min(p.len());
+    let mut buy = Vec::new();
+    let mut sell = Vec::new();
+    let mut off = MP_FIXED_END;
+    for i in 0..buy_n.saturating_add(sell_n) {
+        if off + 16 > limit {
+            break;
+        }
+        let row = SfeedRow {
+            quantity: i64le(p, off),
+            price: f64::from(i32le(p, off + 8)) / div,
+            orders: i64::from(i32le(p, off + 12)),
+        };
+        if i < buy_n {
+            buy.push(row);
+        } else {
+            sell.push(row);
+        }
+        off += 16;
+    }
+    Some(Sfeed::Scrip {
+        exchange,
+        token: u32le(p, b).to_string(),
+        level,
+        total_buy: i64le(p, b + 4),
+        total_sell: i64le(p, b + 12),
+        volume: i64le(p, b + 20),
+        last_trade_time: i64le(p, b + 28),
+        open: price(44),
+        close: price(48),
+        high: price(52),
+        low: price(56),
+        ltp: price(60),
+        last_trade_qty: i64le(p, b + 64),
+        average_price: price(72),
+        oi: i64::from(u32le(p, b + 94)),
+        buy,
+        sell,
+    })
+}
+
 /// Decode one packet with the auth response's dividers (exchange id ->
 /// divider).
 pub fn decode_packet(p: &[u8], dividers: &HashMap<i8, f64>) -> Option<Sfeed> {
@@ -270,56 +330,7 @@ pub fn decode_packet(p: &[u8], dividers: &HashMap<i8, f64>) -> Option<Sfeed> {
                 close: f64::from(u32le(p, b + 24)) / div,
             })
         }
-        2 | 4 | 8 | 16 => {
-            if p.len() < MP_FIXED_END {
-                return None;
-            }
-            let price = |o: usize| f64::from(u32le(p, b + o)) / div;
-            let (buy_n, sell_n) = if level == 4 {
-                (1usize, 1usize)
-            } else {
-                (u32le(p, b + 80) as usize, u32le(p, b + 84) as usize)
-            };
-            let limit = message_length.min(p.len());
-            let mut buy = Vec::new();
-            let mut sell = Vec::new();
-            let mut off = MP_FIXED_END;
-            for i in 0..buy_n.saturating_add(sell_n) {
-                if off + 16 > limit {
-                    break;
-                }
-                let row = SfeedRow {
-                    quantity: i64le(p, off),
-                    price: f64::from(i32le(p, off + 8)) / div,
-                    orders: i64::from(i32le(p, off + 12)),
-                };
-                if i < buy_n {
-                    buy.push(row);
-                } else {
-                    sell.push(row);
-                }
-                off += 16;
-            }
-            Some(Sfeed::Scrip {
-                exchange,
-                token: u32le(p, b).to_string(),
-                level,
-                total_buy: i64le(p, b + 4),
-                total_sell: i64le(p, b + 12),
-                volume: i64le(p, b + 20),
-                last_trade_time: i64le(p, b + 28),
-                open: price(44),
-                close: price(48),
-                high: price(52),
-                low: price(56),
-                ltp: price(60),
-                last_trade_qty: i64le(p, b + 64),
-                average_price: price(72),
-                oi: i64::from(u32le(p, b + 94)),
-                buy,
-                sell,
-            })
-        }
+        2 | 4 | 8 | 16 => scrip_packet(p, exchange, level, div, message_length),
         _ => None,
     }
 }
