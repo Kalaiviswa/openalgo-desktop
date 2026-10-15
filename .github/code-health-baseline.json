@@ -38,7 +38,6 @@
     "src-tauri/src/brokers/nubra/proto.rs::clippy::derive_partial_eq_without_eq": 1,
     "src-tauri/src/brokers/upstox/proto.rs::clippy::derive_partial_eq_without_eq": 1,
     "src-tauri/src/commands/mod.rs::deprecated": 1,
-    "src-tauri/src/db/sqlite/monitor/bans.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/mcp/stdio.rs::clippy::print_stderr": 1,
     "src-tauri/src/sandbox/positions.rs::clippy::too_many_arguments": 1,
     "src-tauri/src/server/api_v1/strategy.rs::clippy::result_large_err": 1,

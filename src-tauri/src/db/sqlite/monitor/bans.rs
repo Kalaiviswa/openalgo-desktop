@@ -2,7 +2,7 @@
 //! caps and the addresses that are never banned.
 
 use super::health::{raise_alert, AlertRow};
-use super::{cap_text, count, ts};
+use super::{cap_text, ts};
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -37,19 +37,33 @@ pub fn never_banned(ip: &str) -> bool {
         )
 }
 
+/// A ban to record ([`ban_ip`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Ban<'a> {
+    pub ip: &'a str,
+    pub reason: &'a str,
+    /// How long it lasts; `None` (or `permanent`) never expires.
+    pub duration_hours: Option<i64>,
+    pub permanent: bool,
+    /// Who banned it: "manual", "host_ban", "system".
+    pub created_by: &'a str,
+}
+
 /// Ban (or re-ban) an address. A fifth ban, or `repeat_limit` bans, makes it
 /// permanent as on the web. Loopback is never banned.
-#[allow(clippy::too_many_arguments)]
 pub fn ban_ip(
     conn: &Connection,
-    ip: &str,
-    reason: &str,
-    duration_hours: Option<i64>,
-    permanent: bool,
-    created_by: &str,
+    ban: Ban<'_>,
     now: DateTime<Utc>,
     repeat_limit: i64,
 ) -> Result<bool> {
+    let Ban {
+        ip,
+        reason,
+        duration_hours,
+        permanent,
+        created_by,
+    } = ban;
     // Stored in the one spelling every check looks up: `::ffff:1.2.3.4`
     // is `1.2.3.4`, IPv6 in its compressed lower-case form.
     let Some(ip) = crate::server::addr::canonical_text(ip) else {
@@ -175,16 +189,14 @@ pub fn auto_ban(
         }
     }
     let hours = duration_hours.unwrap_or(AUTO_BAN_DEFAULT_HOURS).max(1);
-    let banned = ban_ip(
-        conn,
-        &text,
+    let ban = Ban {
+        ip: &text,
         reason,
-        Some(hours),
-        false,
-        "system",
-        now,
-        i64::MAX,
-    )?;
+        duration_hours: Some(hours),
+        permanent: false,
+        created_by: "system",
+    };
+    let banned = ban_ip(conn, ban, now, i64::MAX)?;
     if banned {
         if let Some(net) = crate::server::addr::aggregate_key(addr) {
             alert_on_banned_network(conn, net, now)?;

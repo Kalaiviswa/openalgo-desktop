@@ -1,6 +1,6 @@
 //! Server warnings and errors and browser error reports (the Diagnostics error log).
 
-use super::{cap_text, ts};
+use super::cap_text;
 use crate::error::Result;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};

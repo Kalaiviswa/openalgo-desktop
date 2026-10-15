@@ -1,7 +1,7 @@
 //! The 404 and invalid API key trackers (web `traffic_db.Error404Tracker`,
 //! `InvalidAPIKeyTracker`).
 
-use super::{cap_text, count, parse_ts, strip_query, ts};
+use super::{cap_text, parse_ts, strip_query, ts};
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
