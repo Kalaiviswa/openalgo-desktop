@@ -1,9 +1,18 @@
 //! Injected clock. Session expiry, OAuth state expiry and anything else that
 //! depends on wall time reads it from here so tests are deterministic.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Offset, Utc};
 use parking_lot::RwLock;
 use std::sync::Arc;
+
+/// India Standard Time is UTC+05:30 all year (no daylight saving), so this
+/// one offset converts every exchange time: the app's single copy of it.
+pub const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
+
+/// India Standard Time as a chrono offset.
+pub fn ist_offset() -> FixedOffset {
+    FixedOffset::east_opt(IST_OFFSET_SECS as i32).unwrap_or(Utc.fix())
+}
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;

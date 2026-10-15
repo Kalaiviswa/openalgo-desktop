@@ -11,8 +11,9 @@
 
 use super::mapping::{self, body_rows, num, text};
 use super::{session, FivepaisaBroker, Session};
-use crate::brokers::common::history::{chunks, sort_dedupe, IST_OFFSET_SECS};
+use crate::brokers::common::history::{chunks, sort_dedupe};
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::{json, Value};

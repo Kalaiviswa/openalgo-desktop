@@ -24,10 +24,6 @@ pub fn chunks(start: NaiveDate, end: NaiveDate, max_days: i64) -> Vec<(NaiveDate
     out
 }
 
-/// Seconds to add to a UTC-midnight daily candle so it lands on the IST
-/// session date (the web's `+ pd.Timedelta(hours=5, minutes=30)` for `D`).
-pub const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
-
 /// Sort by timestamp and drop duplicate timestamps (first wins), as the
 /// web's `sort_values("timestamp").drop_duplicates(subset=["timestamp"])`.
 pub fn sort_dedupe(mut candles: Vec<Candle>) -> Vec<Candle> {

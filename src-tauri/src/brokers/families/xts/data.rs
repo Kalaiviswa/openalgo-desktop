@@ -7,6 +7,7 @@ use crate::brokers::common::mapping::Exchange;
 use crate::brokers::common::streaming::round2;
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use chrono::{NaiveDate, Utc};
 use reqwest::Method;
@@ -22,8 +23,6 @@ pub const QUOTE_BATCH_GAP: Duration = Duration::from_millis(100);
 pub const HISTORY_CHUNK_DAYS: i64 = 6;
 /// The ohlc call's `startTime`/`endTime` format, IST wall clock.
 pub const OHLC_TIME_FORMAT: &str = "%b %d %Y";
-
-const IST_SECS: i64 = 5 * 3600 + 30 * 60;
 
 fn resolve(b: &XtsBroker, key: &QuoteKey) -> Result<(Exchange, SymToken, i64)> {
     let ex: Exchange =
@@ -308,7 +307,7 @@ pub fn normalise_candles(candles: Vec<Candle>, compression: &str) -> Vec<Candle>
     } else {
         let step = compression.parse::<i64>().unwrap_or(0) / 60 * 60;
         for c in &mut out {
-            c.timestamp -= IST_SECS;
+            c.timestamp -= IST_OFFSET_SECS;
             if step > 0 {
                 c.timestamp -= c.timestamp.rem_euclid(step);
             }
@@ -326,7 +325,7 @@ pub fn ohlc_window(start: NaiveDate, end: NaiveDate) -> (String, String) {
 }
 
 fn today_ist() -> NaiveDate {
-    (Utc::now() + chrono::Duration::seconds(IST_SECS)).date_naive()
+    (Utc::now() + chrono::Duration::seconds(IST_OFFSET_SECS)).date_naive()
 }
 
 pub(crate) async fn get_history(

@@ -13,10 +13,11 @@
 
 use super::mapping::{history_exchange, is_index, quote_exchange, quote_unsupported};
 use super::{envelope, ArrowBroker, Category, TIMEFRAME_MAP};
-use crate::brokers::common::history::{chunks, parse_iso_epoch, sort_dedupe, IST_OFFSET_SECS};
+use crate::brokers::common::history::{chunks, parse_iso_epoch, sort_dedupe};
 use crate::brokers::common::streaming::round2;
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};

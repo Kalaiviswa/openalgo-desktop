@@ -3,9 +3,10 @@
 use super::mapping::{instrument_token, kite_quote_exchange};
 use super::{Body, Category, ZerodhaBroker, TIMEFRAME_MAP};
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
-use crate::brokers::common::history::{chunks, parse_iso_epoch, sort_dedupe, IST_OFFSET_SECS};
+use crate::brokers::common::history::{chunks, parse_iso_epoch, sort_dedupe};
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use reqwest::Method;
 use serde::Deserialize;

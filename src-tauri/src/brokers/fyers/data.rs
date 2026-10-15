@@ -469,7 +469,7 @@ fn chunk_error(from: NaiveDate, to: NaiveDate, e: AppError) -> AppError {
 
 /// Today in IST (Fyers dates are exchange dates).
 fn today_ist() -> NaiveDate {
-    (chrono::Utc::now() + chrono::Duration::minutes(330)).date_naive()
+    (chrono::Utc::now() + chrono::Duration::seconds(crate::clock::IST_OFFSET_SECS)).date_naive()
 }
 
 pub async fn get_history(

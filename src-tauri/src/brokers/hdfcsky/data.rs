@@ -10,10 +10,11 @@
 use super::mapping::{self, is_index_exchange, s, series_type, to_ltp_exchange, to_rest_exchange};
 use super::streaming::{decode_frame, feed_request, subscribe_messages, RawTick};
 use super::{broker_error, message_of, HdfcSkyBroker, TIMEFRAME_MAP};
-use crate::brokers::common::history::{chunks, sort_dedupe, IST_OFFSET_SECS};
+use crate::brokers::common::history::{chunks, sort_dedupe};
 use crate::brokers::common::streaming::round2;
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime};
 use futures_util::{SinkExt, StreamExt};

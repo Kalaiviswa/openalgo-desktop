@@ -13,10 +13,10 @@
 
 use super::mapping::data_segment;
 use super::{Category, DhanBroker, DhanSession, TIMEFRAME_MAP};
-use crate::brokers::common::history::IST_OFFSET_SECS;
 use crate::brokers::common::streaming::round2;
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
+use crate::clock::IST_OFFSET_SECS;
 use crate::error::{AppError, Result};
 use chrono::{Datelike, Duration as Days, NaiveDate, Weekday};
 use reqwest::Method;

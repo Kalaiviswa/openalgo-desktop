@@ -213,7 +213,7 @@ impl std::fmt::Debug for Budget {
 /// Today in IST, the calendar the Indian brokers count their daily caps
 /// in.
 pub fn today_ist() -> NaiveDate {
-    (chrono::Utc::now() + chrono::Duration::minutes(330)).date_naive()
+    (chrono::Utc::now() + chrono::Duration::seconds(crate::clock::IST_OFFSET_SECS)).date_naive()
 }
 
 impl Budget {

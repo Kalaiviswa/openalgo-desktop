@@ -2,12 +2,11 @@
 //! `blueprints/chart_test.py`): the latest N trading days of 1m, 5m or 15m
 //! bars, times shifted so a chart rendering UTC shows IST wall-clock.
 
+use crate::clock::IST_OFFSET_SECS;
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-
-pub const IST_OFFSET_SECONDS: i64 = 19_800;
 
 /// Supported interval -> trading days kept (anything else is 1m).
 pub fn interval_days(interval: &str) -> (&'static str, usize) {
@@ -89,7 +88,7 @@ pub fn candles(symbol: &str, exchange: &str, interval: &str, rows: &[Value], kee
         .iter()
         .filter_map(|(ts, r)| {
             Some(json!({
-                "time": (ts + IST_OFFSET_SECONDS).div_euclid(60) * 60,
+                "time": (ts + IST_OFFSET_SECS).div_euclid(60) * 60,
                 "open": f(r.get("open"))?,
                 "high": f(r.get("high"))?,
                 "low": f(r.get("low"))?,
@@ -121,7 +120,7 @@ mod tests {
         let v = candles("SBIN", "NSE", "1m", &rows, 1);
         assert_eq!(v["date"], "2026-10-05");
         assert_eq!(v["candles"].as_array().unwrap().len(), 1);
-        assert_eq!(v["candles"][0]["time"], day(5, 9) + IST_OFFSET_SECONDS);
+        assert_eq!(v["candles"][0]["time"], day(5, 9) + IST_OFFSET_SECS);
         assert_eq!(v["candles"][0]["volume"], 0.0);
         assert_eq!(v["candles"][0]["open"], 1.0);
         assert!(is_date("2026-10-05") && !is_date("2026-1-05"));

@@ -770,7 +770,7 @@ pub fn resample(candles: &[Candle], minutes: i64) -> Vec<Candle> {
     let width = minutes * 60;
     let mut out: Vec<Candle> = Vec::new();
     for c in candles {
-        let bucket = c.timestamp - (c.timestamp + 19_800).rem_euclid(width);
+        let bucket = c.timestamp - (c.timestamp + crate::clock::IST_OFFSET_SECS).rem_euclid(width);
         match out.last_mut() {
             Some(last) if last.timestamp == bucket => {
                 last.high = last.high.max(c.high);
