@@ -3,7 +3,206 @@
 
 use super::{exit_fill_quantities, FillOpts, StrategyModule};
 use crate::strategy::risk_adapter;
+use crate::strategy::state::{LegState, RunState};
 use futures_util::future::BoxFuture;
+
+/// Whether an exit fill settles the leg's flip-outgoing (superseded)
+/// position: it names that position, or that position's exit order, or
+/// nothing while the live position has no exit in flight.
+fn settles_superseded(leg: &LegState, opts: &FillOpts, is_entry: bool) -> bool {
+    !is_entry
+        && leg.superseded.as_ref().is_some_and(|sup| {
+            (opts.position_ref.is_some() && sup.position_ref == opts.position_ref)
+                || (opts.position_ref.is_none()
+                    && opts.order_row_id.is_some()
+                    && sup.exit_order_id == opts.order_row_id)
+                || (opts.position_ref.is_none()
+                    && opts.order_row_id.is_none()
+                    && leg.exit_order_id.is_none())
+        })
+}
+
+/// Settles the outgoing position from its own entry and size; the live
+/// position is untouched. The position is cleared once its terminal exit
+/// fully filled.
+fn settle_superseded(leg: &mut LegState, opts: &FillOpts, price: Option<f64>) {
+    let mut realized_add = 0.0;
+    let mut clear = false;
+    if let Some(sup) = leg.superseded.as_mut() {
+        let entry = sup.entry_avg;
+        let (applied, remaining) = exit_fill_quantities(opts.filled_qty, sup.qty);
+        let sign = if sup.position == "B" { 1.0 } else { -1.0 };
+        if entry > 0.0 {
+            if let Some(p) = price {
+                realized_add = (p - entry) * applied as f64 * sign;
+            }
+        }
+        let owns = opts.order_row_id.is_none() || sup.exit_order_id == opts.order_row_id;
+        let release = opts.order_terminal && owns;
+        if remaining > 0 || !release {
+            sup.qty = remaining;
+            if release {
+                sup.exit_order_id = None;
+                sup.exit_claim_token = None;
+                sup.exit_kind = None;
+            }
+        } else {
+            clear = true;
+        }
+    }
+    if clear {
+        leg.superseded = None;
+    }
+    leg.realized_pnl += realized_add;
+}
+
+/// Why a fill does not belong to the live position: another position, an
+/// order this leg is not waiting on (an incarnation already replaced), or
+/// an exit fill with no exit in flight. `None` when it belongs.
+fn stale_fill(leg: &LegState, leg_id: i64, opts: &FillOpts, is_entry: bool) -> Option<String> {
+    if opts.position_ref.is_some() && leg.position_ref != opts.position_ref {
+        return Some(format!(
+            "Ignoring a fill for position {:?} on leg {}: the live position is {:?}",
+            opts.position_ref, leg_id, leg.position_ref
+        ));
+    }
+    // A fill naming an order this leg is not waiting on
+    // belongs to an incarnation already replaced.
+    if let Some(row) = opts.order_row_id {
+        let expected = if is_entry {
+            leg.entry_order_id
+        } else {
+            leg.exit_order_id
+        };
+        if let Some(exp) = expected {
+            if exp != row && !opts.allow_prior_order_correction {
+                return Some(format!(
+                    "Ignoring a fill for order {} on leg {}: the leg is waiting on {}",
+                    row, leg_id, exp
+                ));
+            }
+        }
+        if !is_entry
+            && leg.exit_kind.is_none()
+            && leg.exit_order_id.is_none()
+            && !opts.allow_prior_order_correction
+        {
+            return Some(format!(
+                "Ignoring exit fill for order {} on leg {}: it has no exit in flight",
+                row, leg_id
+            ));
+        }
+    }
+    None
+}
+
+/// An entry fill: the entry price, the filled size managed, and the
+/// entry's status. True when the entry order is complete.
+fn apply_entry_fill(
+    leg: &mut LegState,
+    opts: &FillOpts,
+    price: Option<f64>,
+    (leg_id, run_id): (i64, i64),
+    warnings: &mut Vec<String>,
+) -> bool {
+    match price {
+        Some(p) => leg.entry_avg = p,
+        None => warnings.push(format!(
+            "Leg {} on run {} filled without a usable average price; managing its quantity with valuation unavailable",
+            leg_id, run_id
+        )),
+    }
+    let managed = opts.cumulative_filled_qty.or(opts.filled_qty);
+    if let Some(q) = managed {
+        if q != leg.qty {
+            warnings.push(format!(
+                "Leg {} on run {} filled {} of {}; managing the filled size",
+                leg_id, run_id, q, leg.qty
+            ));
+            leg.qty = q;
+        }
+    }
+    if let Some(c) = opts.cumulative_filled_qty {
+        leg.entry_filled_qty = c;
+    }
+    leg.entry_status = if opts.order_terminal {
+        "complete".into()
+    } else {
+        "open".into()
+    };
+    leg.status = "open".into();
+    opts.order_terminal
+}
+
+/// An exit fill: the realized P&L on the quantity it closed, the quantity
+/// left (closed at zero), and the exit claim released once its own order
+/// is terminal.
+fn apply_exit_fill(
+    leg: &mut LegState,
+    opts: &FillOpts,
+    price: Option<f64>,
+    (leg_id, run_id): (i64, i64),
+    warnings: &mut Vec<String>,
+) {
+    if let Some(p) = price {
+        leg.exit_avg = Some(p);
+    }
+    let entry = leg.entry_avg;
+    let (applied, remaining) = exit_fill_quantities(opts.filled_qty, leg.qty);
+    let sign = if leg.position == "B" { 1.0 } else { -1.0 };
+    if applied > 0 {
+        match price {
+            Some(p) if entry > 0.0 => {
+                leg.realized_pnl += (p - entry) * applied as f64 * sign;
+            }
+            _ => warnings.push(format!(
+                "Leg {} on run {} exited without complete fill pricing; booking no realized P&L for that quantity",
+                leg_id, run_id
+            )),
+        }
+    }
+    let owns = opts.order_row_id.is_none() || leg.exit_order_id == opts.order_row_id;
+    let release = opts.order_terminal && owns;
+    if remaining > 0 {
+        leg.qty = remaining;
+        leg.status = "open".into();
+    } else {
+        leg.qty = 0;
+        leg.status = "closed".into();
+        leg.mtm = 0.0;
+    }
+    if release {
+        leg.exit_order_id = None;
+        leg.exit_claim_token = None;
+        leg.exit_kind = None;
+    }
+}
+
+/// The run's realized, unrealized and total P&L, with its peak and trough.
+fn refresh_run_pnl(run: &mut RunState) {
+    if let Ok((realized, unrealized)) = risk_adapter::run_pnl(run) {
+        run.pnl_realized = realized;
+        run.pnl_unrealized = unrealized;
+        run.pnl_total = realized + unrealized;
+        if run.pnl_total > run.pnl_peak {
+            run.pnl_peak = run.pnl_total;
+        }
+        if run.pnl_total < run.pnl_trough {
+            run.pnl_trough = run.pnl_total;
+        }
+    }
+}
+
+/// What a fill did to the run's live state.
+enum Outcome {
+    NoState,
+    Ignored,
+    Applied {
+        went_flat: bool,
+        entry_applied: bool,
+        strategy_id: i64,
+    },
+}
 
 impl StrategyModule {
     /// Record a fill against the exact position it belongs to. Returns
@@ -31,15 +230,6 @@ impl StrategyModule {
         opts: FillOpts,
     ) -> bool {
         let mut warnings: Vec<String> = Vec::new();
-        enum Outcome {
-            NoState,
-            Ignored,
-            Applied {
-                went_flat: bool,
-                entry_applied: bool,
-                strategy_id: i64,
-            },
-        }
         let price = avg_price.filter(|p| p.is_finite() && *p > 0.0);
         let outcome = self
             .state
@@ -49,160 +239,24 @@ impl StrategyModule {
                     return Outcome::Ignored;
                 };
                 let mut entry_applied = false;
-                let settles_superseded = !is_entry
-                    && leg.superseded.as_ref().is_some_and(|sup| {
-                        (opts.position_ref.is_some() && sup.position_ref == opts.position_ref)
-                            || (opts.position_ref.is_none()
-                                && opts.order_row_id.is_some()
-                                && sup.exit_order_id == opts.order_row_id)
-                            || (opts.position_ref.is_none()
-                                && opts.order_row_id.is_none()
-                                && leg.exit_order_id.is_none())
-                    });
-                if settles_superseded {
+                if settles_superseded(leg, &opts, is_entry) {
                     // Settle the outgoing position from its own entry and
                     // size; the live position is untouched.
-                    let mut realized_add = 0.0;
-                    let mut clear = false;
-                    if let Some(sup) = leg.superseded.as_mut() {
-                        let entry = sup.entry_avg;
-                        let (applied, remaining) = exit_fill_quantities(opts.filled_qty, sup.qty);
-                        let sign = if sup.position == "B" { 1.0 } else { -1.0 };
-                        if entry > 0.0 {
-                            if let Some(p) = price {
-                                realized_add = (p - entry) * applied as f64 * sign;
-                            }
-                        }
-                        let owns =
-                            opts.order_row_id.is_none() || sup.exit_order_id == opts.order_row_id;
-                        let release = opts.order_terminal && owns;
-                        if remaining > 0 || !release {
-                            sup.qty = remaining;
-                            if release {
-                                sup.exit_order_id = None;
-                                sup.exit_claim_token = None;
-                                sup.exit_kind = None;
-                            }
-                        } else {
-                            clear = true;
-                        }
-                    }
-                    if clear {
-                        leg.superseded = None;
-                    }
-                    leg.realized_pnl += realized_add;
+                    settle_superseded(leg, &opts, price);
                 } else {
-                    if opts.position_ref.is_some() && leg.position_ref != opts.position_ref {
-                        warnings.push(format!(
-                            "Ignoring a fill for position {:?} on leg {}: the live position is {:?}",
-                            opts.position_ref, leg_id, leg.position_ref
-                        ));
+                    if let Some(w) = stale_fill(leg, leg_id, &opts, is_entry) {
+                        warnings.push(w);
                         return Outcome::Ignored;
                     }
-                    // A fill naming an order this leg is not waiting on
-                    // belongs to an incarnation already replaced.
-                    if let Some(row) = opts.order_row_id {
-                        let expected = if is_entry {
-                            leg.entry_order_id
-                        } else {
-                            leg.exit_order_id
-                        };
-                        if let Some(exp) = expected {
-                            if exp != row && !opts.allow_prior_order_correction {
-                                warnings.push(format!(
-                                    "Ignoring a fill for order {} on leg {}: the leg is waiting on {}",
-                                    row, leg_id, exp
-                                ));
-                                return Outcome::Ignored;
-                            }
-                        }
-                        if !is_entry
-                            && leg.exit_kind.is_none()
-                            && leg.exit_order_id.is_none()
-                            && !opts.allow_prior_order_correction
-                        {
-                            warnings.push(format!(
-                                "Ignoring exit fill for order {} on leg {}: it has no exit in flight",
-                                row, leg_id
-                            ));
-                            return Outcome::Ignored;
-                        }
-                    }
                     if is_entry {
-                        match price {
-                            Some(p) => leg.entry_avg = p,
-                            None => warnings.push(format!(
-                                "Leg {} on run {} filled without a usable average price; managing its quantity with valuation unavailable",
-                                leg_id, run_id
-                            )),
-                        }
-                        let managed = opts.cumulative_filled_qty.or(opts.filled_qty);
-                        if let Some(q) = managed {
-                            if q != leg.qty {
-                                warnings.push(format!(
-                                    "Leg {} on run {} filled {} of {}; managing the filled size",
-                                    leg_id, run_id, q, leg.qty
-                                ));
-                                leg.qty = q;
-                            }
-                        }
-                        if let Some(c) = opts.cumulative_filled_qty {
-                            leg.entry_filled_qty = c;
-                        }
-                        leg.entry_status = if opts.order_terminal {
-                            "complete".into()
-                        } else {
-                            "open".into()
-                        };
-                        leg.status = "open".into();
-                        entry_applied = opts.order_terminal;
+                        entry_applied =
+                            apply_entry_fill(leg, &opts, price, (leg_id, run_id), &mut warnings);
                     } else {
-                        if let Some(p) = price {
-                            leg.exit_avg = Some(p);
-                        }
-                        let entry = leg.entry_avg;
-                        let (applied, remaining) = exit_fill_quantities(opts.filled_qty, leg.qty);
-                        let sign = if leg.position == "B" { 1.0 } else { -1.0 };
-                        if applied > 0 {
-                            match price {
-                                Some(p) if entry > 0.0 => {
-                                    leg.realized_pnl += (p - entry) * applied as f64 * sign;
-                                }
-                                _ => warnings.push(format!(
-                                    "Leg {} on run {} exited without complete fill pricing; booking no realized P&L for that quantity",
-                                    leg_id, run_id
-                                )),
-                            }
-                        }
-                        let owns = opts.order_row_id.is_none() || leg.exit_order_id == opts.order_row_id;
-                        let release = opts.order_terminal && owns;
-                        if remaining > 0 {
-                            leg.qty = remaining;
-                            leg.status = "open".into();
-                        } else {
-                            leg.qty = 0;
-                            leg.status = "closed".into();
-                            leg.mtm = 0.0;
-                        }
-                        if release {
-                            leg.exit_order_id = None;
-                            leg.exit_claim_token = None;
-                            leg.exit_kind = None;
-                        }
+                        apply_exit_fill(leg, &opts, price, (leg_id, run_id), &mut warnings);
                     }
                 }
                 // Recompute the run totals while the lock is held.
-                if let Ok((realized, unrealized)) = risk_adapter::run_pnl(run) {
-                    run.pnl_realized = realized;
-                    run.pnl_unrealized = unrealized;
-                    run.pnl_total = realized + unrealized;
-                    if run.pnl_total > run.pnl_peak {
-                        run.pnl_peak = run.pnl_total;
-                    }
-                    if run.pnl_total < run.pnl_trough {
-                        run.pnl_trough = run.pnl_total;
-                    }
-                }
+                refresh_run_pnl(run);
                 Outcome::Applied {
                     went_flat: !run.requires_management(),
                     entry_applied,
@@ -239,6 +293,13 @@ impl StrategyModule {
         if !went_flat {
             return false;
         }
+        self.finish_if_done(run_id, strategy_id).await
+    }
+
+    /// A run that went flat: finished, unless it already was or it is a
+    /// signal run with no stop requested (a signal run is a trading day: a
+    /// leg exiting does not end it). True when the run is done.
+    async fn finish_if_done(&self, run_id: i64, strategy_id: i64) -> bool {
         let Ok(Some(run_row)) = self.store.get_run(run_id) else {
             return true;
         };
