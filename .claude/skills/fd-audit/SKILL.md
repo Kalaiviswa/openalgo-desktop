@@ -13,7 +13,7 @@ no restart point. Audit **the change you made**, not the whole repo.
 | | Symptom | Ceiling |
 | --- | --- | --- |
 | Descriptors | `Too many open files`, refused database connections, a feed that stops reconnecting | `ulimit -n` (often 256 for a macOS app) |
-| Memory | rising RSS, a slow UI, OOM | host RAM (a Raspberry Pi has little) |
+| Memory | rising RSS, a slow UI, OOM | host RAM (a low-memory laptop or small VM has little) |
 | Tasks | CPU and memory creep, work continuing after logout | none until the others hit theirs |
 
 ## Step 1: scope
