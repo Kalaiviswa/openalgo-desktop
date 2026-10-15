@@ -433,9 +433,11 @@ impl SymbolResolver {
         master: crate::brokers::types::MasterContract,
         cleared: u64,
     ) -> Option<usize> {
-        // Built outside the lock, so readers are never held up by it.
+        // Built outside the lock, so readers are never held up by it; with
+        // the exact lot sizes, as `load_master` (MC-04: Delta's 0.0001).
         let mut generation =
-            SymbolGeneration::build_with_contract_values(master.rows, &master.contract_values, 0);
+            SymbolGeneration::build_with_contract_values(master.rows, &master.contract_values, 0)
+                .with_lot_sizes(&master.lot_sizes);
         let mut current = self.current.write();
         if self.clear_generation() != cleared {
             tracing::info!("Symbol master not loaded: the broker session ended while it was read");
