@@ -96,9 +96,11 @@ never a release marked as a pre-release. So:
   pre-release or delete its `latest.json` asset: the address then answers
   from the previous published release (an older version, which no copy
   installs over a newer one), or not at all. Then publish a fixed release.
-- A release published before in-app updates existed has no `latest.json`;
-  copies that check then say they could not read the update information,
-  and nothing else happens.
+- Until a release with `latest.json` is published (and while the newest
+  release is one published before in-app updates existed), the address
+  answers 404. Copies that check then report that they are up to date and
+  log one info line, not an error; nothing else happens. Any other failing
+  answer is still reported as a failed check.
 
 ## The signing key
 

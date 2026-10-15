@@ -10,6 +10,11 @@
 //! (`requireSignedVersion`), so an answer from the update address cannot
 //! pair a new version number with an older signed release. Pages get none
 //! of the plugin's commands: no capability names `updater:*`.
+//!
+//! Before the plugin is asked, the backend reads the status of the update
+//! address itself ([`PluginBackend::release_published`]): a 404 there means
+//! no release is published yet, which is not a failure, and the plugin
+//! cannot tell it from one.
 
 use crate::services::update::{
     is_newer, Offer, Package, ProgressFn, UpdateBackend, UpdateFailure, CHECK_TIMEOUT,
@@ -104,6 +109,9 @@ pub fn failure(e: tauri_plugin_updater::Error) -> UpdateFailure {
 pub struct PluginBackend<R: Runtime> {
     app: AppHandle<R>,
     package: Package,
+    /// The app's outbound client (`AppState::http`), for reading the status
+    /// of the update address.
+    http: reqwest::Client,
     /// Overrides the configured update address (tests).
     endpoint: Option<url::Url>,
     offered: Mutex<Option<Update>>,
@@ -111,10 +119,11 @@ pub struct PluginBackend<R: Runtime> {
 }
 
 impl<R: Runtime> PluginBackend<R> {
-    pub fn new(app: AppHandle<R>, package: Package) -> Self {
+    pub fn new(app: AppHandle<R>, package: Package, http: reqwest::Client) -> Self {
         Self {
             app,
             package,
+            http,
             endpoint: None,
             offered: Mutex::new(None),
             downloaded: Mutex::new(None),
@@ -122,11 +131,57 @@ impl<R: Runtime> PluginBackend<R> {
     }
 
     /// The same backend asking `endpoint` instead of the configured address.
-    pub fn with_endpoint(app: AppHandle<R>, package: Package, endpoint: url::Url) -> Self {
+    pub fn with_endpoint(
+        app: AppHandle<R>,
+        package: Package,
+        http: reqwest::Client,
+        endpoint: url::Url,
+    ) -> Self {
         Self {
             endpoint: Some(endpoint),
-            ..Self::new(app, package)
+            ..Self::new(app, package, http)
         }
+    }
+
+    /// The update address the plugin asks: the override, else the first
+    /// configured one (the shipped config has exactly one, pinned by a
+    /// test).
+    fn address(&self) -> Option<url::Url> {
+        if let Some(e) = &self.endpoint {
+            return Some(e.clone());
+        }
+        let config = self.app.config();
+        let first = config.plugins.0.get("updater")?.get("endpoints")?.get(0)?;
+        url::Url::parse(first.as_str()?).ok()
+    }
+
+    /// Whether the update address has a release to read. GitHub answers 404
+    /// for `releases/latest/download/latest.json` until a final release
+    /// carrying it is published (and after its `latest.json` is withdrawn):
+    /// that is no update, not a failure. The plugin answers any status that
+    /// is not a success with an ERROR in the log and `ReleaseNotFound`, so
+    /// it is asked only once the address answers with one. Any other
+    /// answer is a failure, as before.
+    async fn release_published(&self, address: url::Url) -> Result<bool, UpdateFailure> {
+        let status = self
+            .http
+            .get(address)
+            .timeout(CHECK_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| UpdateFailure::Network(e.to_string()))?
+            .status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            tracing::info!("Update: no release is published at the update address yet (HTTP 404)");
+            return Ok(false);
+        }
+        if !status.is_success() {
+            return Err(UpdateFailure::Manifest(format!(
+                "the update address answered HTTP {}",
+                status
+            )));
+        }
+        Ok(true)
     }
 
     /// Whether a downloaded, verified update is waiting.
@@ -157,6 +212,11 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
     }
 
     async fn check(&self) -> Result<Option<Offer>, UpdateFailure> {
+        if let Some(address) = self.address() {
+            if !self.release_published(address).await? {
+                return Ok(None);
+            }
+        }
         let mut builder = self
             .app
             .updater_builder()
@@ -235,7 +295,11 @@ pub fn start(app: &tauri::App, ctx: &Arc<AppState>) {
         runs_as_appimage(app.handle()),
         std::env::current_exe().ok().as_deref(),
     );
-    let backend = Arc::new(PluginBackend::new(app.handle().clone(), package));
+    let backend = Arc::new(PluginBackend::new(
+        app.handle().clone(),
+        package,
+        ctx.http.clone(),
+    ));
     ctx.updates.set_backend(backend.clone());
     app.manage(backend);
     if cfg!(debug_assertions) {
@@ -419,6 +483,7 @@ mod plugin_tests {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 
@@ -484,16 +549,29 @@ mod plugin_tests {
     }
 
     /// A fake update address on an ephemeral loopback port: serves
-    /// `/latest.json` and `/artifact`, or 404 for an empty manifest.
+    /// `/latest.json` (or answers it with a status) and `/artifact`, and
+    /// counts the requests for `/latest.json`.
     struct FakeServer {
         url: String,
+        address: Arc<Address>,
         task: tokio::task::JoinHandle<()>,
     }
 
-    #[derive(Clone)]
     struct Served {
-        manifest: Option<Value>,
+        manifest: Result<Value, StatusCode>,
         artifact: Vec<u8>,
+    }
+
+    struct Address {
+        served: Served,
+        asked: AtomicUsize,
+    }
+
+    impl FakeServer {
+        /// How many times `/latest.json` was requested.
+        fn asked(&self) -> usize {
+            self.address.asked.load(Ordering::SeqCst)
+        }
     }
 
     impl Drop for FakeServer {
@@ -505,24 +583,28 @@ mod plugin_tests {
     async fn serve(make: impl FnOnce(&str) -> Served) -> FakeServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let served = Arc::new(make(&url));
-        async fn manifest(State(s): State<Arc<Served>>) -> axum::response::Response {
-            match &s.manifest {
-                Some(m) => axum::Json(m.clone()).into_response(),
-                None => StatusCode::NOT_FOUND.into_response(),
+        let address = Arc::new(Address {
+            served: make(&url),
+            asked: AtomicUsize::new(0),
+        });
+        async fn manifest(State(a): State<Arc<Address>>) -> axum::response::Response {
+            a.asked.fetch_add(1, Ordering::SeqCst);
+            match &a.served.manifest {
+                Ok(m) => axum::Json(m.clone()).into_response(),
+                Err(status) => status.into_response(),
             }
         }
-        async fn artifact(State(s): State<Arc<Served>>) -> Vec<u8> {
-            s.artifact.clone()
+        async fn artifact(State(a): State<Arc<Address>>) -> Vec<u8> {
+            a.served.artifact.clone()
         }
         let app = Router::new()
             .route("/latest.json", get(manifest))
             .route("/artifact", get(artifact))
-            .with_state(served);
+            .with_state(address.clone());
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        FakeServer { url, task }
+        FakeServer { url, address, task }
     }
 
     fn target() -> String {
@@ -560,6 +642,7 @@ mod plugin_tests {
         PluginBackend::with_endpoint(
             app.handle().clone(),
             Package::MacApp,
+            reqwest::Client::new(),
             url::Url::parse(&format!("{}/latest.json", server.url)).unwrap(),
         )
     }
@@ -574,7 +657,7 @@ mod plugin_tests {
         let artifact = b"the new OpenAlgo Desktop".to_vec();
         let sig = key.sign(&artifact, "0.2.0");
         let server = serve(|url| Served {
-            manifest: Some(manifest(url, "0.2.0", &sig)),
+            manifest: Ok(manifest(url, "0.2.0", &sig)),
             artifact: artifact.clone(),
         })
         .await;
@@ -609,7 +692,7 @@ mod plugin_tests {
         let key = TestKey::generate();
         let sig = key.sign(b"the real update", "0.2.0");
         let server = serve(|url| Served {
-            manifest: Some(manifest(url, "0.2.0", &sig)),
+            manifest: Ok(manifest(url, "0.2.0", &sig)),
             artifact: b"something else".to_vec(),
         })
         .await;
@@ -628,7 +711,7 @@ mod plugin_tests {
         let artifact = b"an update signed by someone else".to_vec();
         let sig = theirs.sign(&artifact, "0.2.0");
         let server = serve(|url| Served {
-            manifest: Some(manifest(url, "0.2.0", &sig)),
+            manifest: Ok(manifest(url, "0.2.0", &sig)),
             artifact: artifact.clone(),
         })
         .await;
@@ -647,7 +730,7 @@ mod plugin_tests {
         let old_release = b"genuine but older".to_vec();
         let sig = key.sign(&old_release, "0.1.5");
         let server = serve(|url| Served {
-            manifest: Some(manifest(url, "0.2.0", &sig)),
+            manifest: Ok(manifest(url, "0.2.0", &sig)),
             artifact: old_release.clone(),
         })
         .await;
@@ -667,7 +750,7 @@ mod plugin_tests {
         let artifact = b"signed without a version".to_vec();
         let sig = key.sign_with_comment(&artifact, "timestamp:1760500000\tfile:old.app.tar.gz");
         let server = serve(|url| Served {
-            manifest: Some(manifest(url, "0.2.0", &sig)),
+            manifest: Ok(manifest(url, "0.2.0", &sig)),
             artifact: artifact.clone(),
         })
         .await;
@@ -686,7 +769,7 @@ mod plugin_tests {
         for version in ["0.1.0", "0.0.9", "0.2.0-beta.1", "v0.1.0"] {
             let sig = key.sign(b"x", version.trim_start_matches('v'));
             let server = serve(|url| Served {
-                manifest: Some(manifest(url, version, &sig)),
+                manifest: Ok(manifest(url, version, &sig)),
                 artifact: b"x".to_vec(),
             })
             .await;
@@ -700,7 +783,7 @@ mod plugin_tests {
     async fn a_release_without_this_computer_is_reported() {
         let key = TestKey::generate();
         let server = serve(|url| Served {
-            manifest: Some(json!({
+            manifest: Ok(json!({
                 "version": "0.2.0",
                 "platforms": {"plan9-mips": {"url": format!("{}/artifact", url), "signature": "x"}}
             })),
@@ -716,21 +799,45 @@ mod plugin_tests {
         );
     }
 
+    /// Until a release is published (and after its `latest.json` is
+    /// withdrawn) the address answers 404: no update, not a failure. The
+    /// plugin is not asked, since it logs any answer that is not a success
+    /// as an ERROR, which the Diagnostics page then showed on every start.
     #[tokio::test]
-    async fn a_missing_or_unreachable_update_address_is_reported() {
+    async fn no_release_published_yet_is_no_update_and_the_plugin_is_not_asked() {
         let key = TestKey::generate();
         let app = app_trusting(&key.pubkey());
-        // The latest release has no latest.json.
         let server = serve(|_| Served {
-            manifest: None,
+            manifest: Err(StatusCode::NOT_FOUND),
             artifact: Vec::new(),
         })
         .await;
         let got = backend(&app, &server).check().await;
-        assert!(matches!(got, Err(UpdateFailure::Manifest(_))), "{:?}", got);
+        assert_eq!(got, Ok(None));
+        assert_eq!(server.asked(), 1, "the update address is read once");
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_unreachable_update_address_is_reported() {
+        let key = TestKey::generate();
+        let app = app_trusting(&key.pubkey());
+        // The address fails: the status is named, and the plugin is not
+        // asked again.
+        let server = serve(|_| Served {
+            manifest: Err(StatusCode::SERVICE_UNAVAILABLE),
+            artifact: Vec::new(),
+        })
+        .await;
+        let got = backend(&app, &server).check().await;
+        assert!(
+            matches!(&got, Err(UpdateFailure::Manifest(d)) if d.contains("HTTP 503")),
+            "{:?}",
+            got
+        );
+        assert_eq!(server.asked(), 1);
         // Not JSON the updater understands.
         let server = serve(|_| Served {
-            manifest: Some(json!({"hello": "world"})),
+            manifest: Ok(json!({"hello": "world"})),
             artifact: Vec::new(),
         })
         .await;
@@ -744,6 +851,7 @@ mod plugin_tests {
         let b = PluginBackend::with_endpoint(
             app.handle().clone(),
             Package::MacApp,
+            reqwest::Client::new(),
             url::Url::parse(&format!("http://{}/latest.json", closed)).unwrap(),
         );
         let got = b.check().await;
