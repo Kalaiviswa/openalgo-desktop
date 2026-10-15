@@ -19,7 +19,7 @@
 //!   the admin page; loopback clients always are.
 
 use super::store::{self, AuditEntry, TokenRow};
-use super::{schema, tools, Scope};
+use super::{schema, tools, Scope, ToolDef};
 use crate::server::envelope::EarlyReply;
 use crate::server::middleware::ClientIp;
 use crate::state::AppState;
@@ -644,43 +644,8 @@ async fn call_tool(
         hash: params_hash(&Value::Object(args.clone())),
         ip,
     };
-    if !scopes.contains(&tool.scope) {
-        call.audit("insufficient_scope", 0);
-        return rpc_error(
-            id,
-            -32000,
-            "insufficient_scope",
-            Some(json!({"required_scope": needed})),
-        );
-    }
-    if tool.scope == Scope::WriteOrders {
-        let writes_on = ctx
-            .sqlite
-            .conn()
-            .and_then(|c| store::settings(&c))
-            .map(|s| s.write_scope_enabled)
-            .unwrap_or(false);
-        if !writes_on {
-            call.audit("writes_disabled", 0);
-            return unauthorized(ctx, "insufficient_scope", WRITES_DISABLED_MESSAGE);
-        }
-    }
-    let (limit, window, spec) = if tool.scope == Scope::WriteOrders {
-        WRITE_LIMIT
-    } else {
-        READ_LIMIT
-    };
-    if !ctx
-        .mcp
-        .hit(&format!("{}|{}", tok.jti(), needed), limit, window)
-    {
-        call.audit("rate_limited", 0);
-        return rpc_error(
-            id,
-            -32000,
-            "rate_limited",
-            Some(json!({"scope": needed, "limit": spec})),
-        );
+    if let Err(r) = admit(&call, tool, scopes, id) {
+        return *r;
     }
     let bound = match schema::bind(tool.params, &args) {
         Ok(b) => b,
@@ -711,6 +676,57 @@ async fn call_tool(
         id,
         json!({"content": [{"type": "text", "text": text}], "isError": false}),
     )
+}
+
+/// Whether this token may call `tool` now: its scope, the write switch for
+/// order tools, and the scope's rate limit. Each refusal is audited.
+fn admit(call: &Call<'_>, tool: &ToolDef, scopes: &[Scope], id: &Value) -> Result<(), EarlyReply> {
+    let needed = call.scope;
+    if !scopes.contains(&tool.scope) {
+        call.audit("insufficient_scope", 0);
+        return Err(Box::new(rpc_error(
+            id,
+            -32000,
+            "insufficient_scope",
+            Some(json!({"required_scope": needed})),
+        )));
+    }
+    if tool.scope == Scope::WriteOrders {
+        let writes_on = call
+            .ctx
+            .sqlite
+            .conn()
+            .and_then(|c| store::settings(&c))
+            .map(|s| s.write_scope_enabled)
+            .unwrap_or(false);
+        if !writes_on {
+            call.audit("writes_disabled", 0);
+            return Err(Box::new(unauthorized(
+                call.ctx,
+                "insufficient_scope",
+                WRITES_DISABLED_MESSAGE,
+            )));
+        }
+    }
+    let (limit, window, spec) = if tool.scope == Scope::WriteOrders {
+        WRITE_LIMIT
+    } else {
+        READ_LIMIT
+    };
+    if !call
+        .ctx
+        .mcp
+        .hit(&format!("{}|{}", call.token.jti(), needed), limit, window)
+    {
+        call.audit("rate_limited", 0);
+        return Err(Box::new(rpc_error(
+            id,
+            -32000,
+            "rate_limited",
+            Some(json!({"scope": needed, "limit": spec})),
+        )));
+    }
+    Ok(())
 }
 
 /// GET /mcp: keepalive-only event stream.
