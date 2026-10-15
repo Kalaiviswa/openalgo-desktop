@@ -69,6 +69,7 @@ mod chartink;
 mod data_upgrade;
 mod feed_app;
 mod feed_behaviour;
+mod feed_budget;
 mod feed_bridge;
 mod feed_conformance;
 mod feed_hygiene;
