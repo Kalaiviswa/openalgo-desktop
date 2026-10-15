@@ -374,6 +374,18 @@ impl Runner {
         if working.is_empty() {
             return Ok(());
         }
+        self.wait_settled(entry, deadline, look).await
+    }
+
+    /// Wait until no order of this run is working (each cancel asked for
+    /// has ended), or the deadline.
+    async fn wait_settled(
+        &self,
+        entry: &RunEntry,
+        deadline: Instant,
+        look: Duration,
+    ) -> Result<(), CloseFailure> {
+        let info = &entry.info;
         loop {
             self.refresh_orders(entry).await;
             let still: Vec<String> = self
