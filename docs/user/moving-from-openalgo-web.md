@@ -117,6 +117,18 @@ differently, it is on purpose:
   signed out, switched brokers or made a new API key is closed (code
   4401) and connects and authenticates again. The web keeps it
   connected.
+- **Field names.** Quote and Depth data carry the names OpenAlgo web
+  sends with Zerodha (`last_quantity`, `average_price`, `price_change`,
+  `price_change_percent`) for every broker, and next to them, with the
+  same values, the names your broker's web adapter uses:
+  `last_trade_quantity` (Angel, Fyers, Upstox, 5paisa, mstock, Paytm,
+  Pocketful, Samco), `ltq` (Definedge, Motilal), `avg_trade_price`
+  (Fyers), `change` (Fyers, Arrow, HDFC, Tradejini, Samco),
+  `change_absolute` (Paytm), `change_percent` (Fyers, AliceBlue, Arrow,
+  HDFC, Definedge, Paytm, Tradejini), `percent_change` (Shoonya,
+  Flattrade, Zebu, TradeSmart), `change_percentage` (Samco). A script
+  written for either name works. The change fields come with indices
+  only, as recorded from the web.
 - **A message budget.** A connection that sends thousands of messages a
   second, or megabytes of them, is closed (code 1008) before they are
   read. Subscribing every instrument in one message, or one per message
