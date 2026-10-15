@@ -149,12 +149,13 @@ pub fn entry_action(position: &str) -> &'static str {
 /// What one placement attempt produced. `ok` is whether the order reached
 /// the broker or the sandbox and was acknowledged, not whether it filled.
 ///
-/// Three outcomes, never two (LOG-08): accepted (`ok`), refused
-/// ([`DispatchResult::is_refused`]) and uncertain (`uncertain`: the order
-/// may be at the broker although no acknowledgement came back). An
-/// uncertain placement keeps its claim; it is never placed again until the
-/// order reconciler has found it in the broker's order book, or confirmed
-/// by repeated reads that it is not there.
+/// Three outcomes, never two (LOG-08): accepted (`ok`), refused (neither
+/// `ok` nor `uncertain`: safe to release its claim and decide again) and
+/// uncertain (`uncertain`: the order may be at the broker although no
+/// acknowledgement came back). An uncertain placement keeps its claim; it
+/// is never placed again until the order reconciler has found it in the
+/// broker's order book, or confirmed by repeated reads that it is not
+/// there.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DispatchResult {
     pub ok: bool,
@@ -174,11 +175,6 @@ impl DispatchResult {
             error: Some(message.into()),
             ..Default::default()
         }
-    }
-
-    /// The order was not placed: safe to release its claim and decide again.
-    pub fn is_refused(&self) -> bool {
-        !self.ok && !self.uncertain
     }
 
     /// The dispatch result for a service reply, carrying its placement
