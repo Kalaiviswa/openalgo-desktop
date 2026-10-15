@@ -304,3 +304,39 @@ fn timestamps_render_with_an_explicit_utc_offset() {
             .to_dict(true);
     assert!(d["created_at"].as_str().unwrap().ends_with("+00:00"));
 }
+
+/// DB-01: an audit event a tick records (a trail moved, a limit breached)
+/// is written off the async workers. While another writer holds the
+/// database for 400 ms, the runtime is not held, and the event is written
+/// once the database is free.
+#[tokio::test]
+async fn a_tick_event_write_never_holds_the_runtime() {
+    let t = t();
+    let sid = t.default_strategy();
+    let writer = t.db.conn().unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        writer.execute_batch("COMMIT").unwrap();
+    });
+    let fields = openalgo_desktop_lib::strategy::store::EventFields::default();
+    let ((), stall) =
+        crate::runtime_stall(t.m.emit(sid, USER, "trail_moved", "Trail moved", fields)).await;
+    release.join().unwrap();
+    assert!(
+        stall < std::time::Duration::from_millis(150),
+        "the runtime was held {:?}",
+        stall
+    );
+    let n: i64 = t
+        .db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sm_strategy_event WHERE strategy_id = ?1 AND kind = 'trail_moved'",
+            [sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}

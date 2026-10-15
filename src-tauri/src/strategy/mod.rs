@@ -183,10 +183,21 @@ impl StrategyModule {
         message: &str,
         fields: store::EventFields,
     ) {
-        match self
-            .store
-            .record_event(strategy_id, user_id, kind, message, &fields)
-        {
+        // Off the async workers (DB-01): a tick that moves a trail or
+        // breaches a limit records one, and a write waits for any other
+        // writer of the database.
+        let (store, user, what, text) = (
+            self.store.clone(),
+            user_id.to_string(),
+            kind.to_string(),
+            message.to_string(),
+        );
+        let recorded = tokio::task::spawn_blocking(move || {
+            store.record_event(strategy_id, &user, &what, &text, &fields)
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("event task failed: {}", e)));
+        match recorded.and_then(|r| r) {
             Ok(row) => {
                 self.broadcast.push_event(strategy_id, row.to_dict()).await;
             }
