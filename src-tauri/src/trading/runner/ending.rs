@@ -145,8 +145,24 @@ impl Runner {
             .exit_sizes(info, &held, deadline, look)
             .await
             .map_err(CloseFailure::resume)?;
+        let exits = self.send_exits(entry, &sizes).await?;
+        if exits.is_empty() {
+            return Ok(());
+        }
+        self.watch_exits(entry, &exits, deadline, look).await
+    }
+
+    /// Send the exit of each holding, in turn. A refusal before any exit
+    /// went out resumes the run; after one, or with an exit whose outcome
+    /// is unknown, the close stays pending.
+    async fn send_exits(
+        &self,
+        entry: &Arc<RunEntry>,
+        sizes: &[(&store::Holding, i64)],
+    ) -> Result<Vec<i64>, CloseFailure> {
+        let info = &entry.info;
         let mut exits = Vec::new();
-        for (h, units) in sizes {
+        for &(h, units) in sizes {
             let placement = orders::Placement {
                 intent_id: -1,
                 tag: "close".into(),
@@ -210,12 +226,20 @@ impl Runner {
             }
             exits.push(id);
         }
-        if exits.is_empty() {
-            return Ok(());
-        }
-        // Watched to a fill, not sent and forgotten: an exit accepted here
-        // and rejected at the destination leaves the very position Stop was
-        // pressed to be rid of.
+        Ok(exits)
+    }
+
+    /// Watch the exits to a fill, not sent and forgotten: an exit accepted
+    /// here and rejected at the destination leaves the very position Stop
+    /// was pressed to be rid of.
+    async fn watch_exits(
+        &self,
+        entry: &Arc<RunEntry>,
+        exits: &[i64],
+        deadline: Instant,
+        look: Duration,
+    ) -> Result<(), CloseFailure> {
+        let info = &entry.info;
         loop {
             self.refresh_orders(entry).await;
             let rows = self
