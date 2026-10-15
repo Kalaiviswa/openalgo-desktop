@@ -16,7 +16,48 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use whatsapp_rust::bot::BotHandle;
 use whatsapp_rust::Client;
+
+/// Waits out a pairing: the QR and pair codes go to the page as they
+/// come, and it ends paired, failed (timed out, or closed by WhatsApp) or
+/// cancelled (`None`).
+async fn await_pairing(
+    ctx: &Weak<AppState>,
+    handle: &mut BotHandle,
+    store: &SnapshotStore,
+    rx: &mut mpsc::Receiver<Raw>,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Option<PairEvent> {
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break None,
+            _ = &mut deadline => break Some(PairEvent::Failed(PAIR_TIMEOUT_MESSAGE.into())),
+            _ = &mut *handle => break Some(PairEvent::Failed(
+                "WhatsApp closed the pairing connection. Try again.".into())),
+            ev = rx.recv() => {
+                let Some(ev) = ev else { continue };
+                let Some(c) = ctx.upgrade() else { break None };
+                match ev {
+                    Raw::Qr(code) => c.messaging.whatsapp.pair_event(&c, PairEvent::Qr(code)).await,
+                    Raw::Code(code) => c.messaging.whatsapp.pair_event(&c, PairEvent::Code(code)).await,
+                    Raw::Connected => {
+                        let client = handle.client();
+                        if client.is_logged_in() || store.has_paired_device() {
+                            let own_jid = client.get_pn().map(|j| j.to_non_ad_string());
+                            let own_phone = own_jid.as_deref().map(jid_to_phone).filter(|p| !p.is_empty());
+                            break Some(PairEvent::Paired { own_jid, own_phone });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
 pub(super) async fn pair_task(
     ctx: Weak<AppState>,
@@ -44,33 +85,7 @@ pub(super) async fn pair_task(
     let timeout = svc.settings.read().pair_timeout;
     drop(c);
     let mut handle = bot.spawn();
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    let outcome: Option<PairEvent> = loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break None,
-            _ = &mut deadline => break Some(PairEvent::Failed(PAIR_TIMEOUT_MESSAGE.into())),
-            _ = &mut handle => break Some(PairEvent::Failed(
-                "WhatsApp closed the pairing connection. Try again.".into())),
-            ev = rx.recv() => {
-                let Some(ev) = ev else { continue };
-                let Some(c) = ctx.upgrade() else { break None };
-                match ev {
-                    Raw::Qr(code) => c.messaging.whatsapp.pair_event(&c, PairEvent::Qr(code)).await,
-                    Raw::Code(code) => c.messaging.whatsapp.pair_event(&c, PairEvent::Code(code)).await,
-                    Raw::Connected => {
-                        let client = handle.client();
-                        if client.is_logged_in() || store.has_paired_device() {
-                            let own_jid = client.get_pn().map(|j| j.to_non_ad_string());
-                            let own_phone = own_jid.as_deref().map(jid_to_phone).filter(|p| !p.is_empty());
-                            break Some(PairEvent::Paired { own_jid, own_phone });
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    };
+    let outcome = await_pairing(&ctx, &mut handle, &store, &mut rx, timeout, &cancel).await;
     // Close the pairing client (flushes its device state into the store).
     if tokio::time::timeout(STOP_JOIN, handle.client().disconnect())
         .await

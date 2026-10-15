@@ -68,7 +68,6 @@
     "src-tauri/src/historify/import.rs::read_file": 194,
     "src-tauri/src/historify/jobs/processor.rs::run": 214,
     "src-tauri/src/messaging/whatsapp/tasks.rs::bot_task": 203,
-    "src-tauri/src/messaging/whatsapp/tasks.rs::pair_task": 109,
     "src-tauri/src/risk/aggregate.rs::evaluate_aggregate": 137,
     "src-tauri/src/risk/position.rs::evaluate_position": 165,
     "src-tauri/src/sandbox/gtt.rs::fire": 181,
