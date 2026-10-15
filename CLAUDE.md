@@ -554,9 +554,12 @@ Whatever was over a limit when the gate started is listed in
   `python3 scripts/ci/code_health.py --update` and commit the lowered
   baseline in the same change. CI fails until you do, so an improvement
   cannot be undone.
-- **Until the code-health pass, a listed item that grows is a warning;
-  after it, a failure.** Even now, put new code in a new submodule or helper
-  instead of growing a listed file or function.
+- **A listed item may only shrink.** The code-health pass is done
+  (2026-10-16): what stays listed is generated code, an allow kept on purpose
+  with its reason, or a frontend file carried over from the web (exempt, so it
+  can follow the web). A pull request that cannot avoid growing a listed item
+  needs the maintainer's `code-health-exception` label. Put new code in a new
+  submodule or helper instead of growing a listed file or function.
 - **Only the maintainer adds or raises an entry**, with the
   `code-health-exception` label on the pull request; CI refuses it
   otherwise. Edit the baseline by hand only to move an entry whose file or
