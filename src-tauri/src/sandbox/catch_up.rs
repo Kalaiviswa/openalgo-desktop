@@ -17,7 +17,7 @@
 //! 6. GTT legs stranded mid-fire are reclaimed, expired GTTs released, and
 //!    every active leg evaluated against one batch of quotes.
 
-use super::clock::{parse_ts, ts};
+use super::clock::ts;
 use super::config::SandboxConfig;
 use super::core::{blocking, Core};
 use super::events::Outbox;
@@ -240,16 +240,4 @@ pub(crate) async fn run(core: &Arc<Core>) -> SbResult<Option<CatchUpReport>> {
     report.gtt_fired = gtt::poll_active(core).await?;
     tracing::info!("Sandbox catch-up done: {:?}", report);
     Ok(Some(report))
-}
-
-/// Whether a stored timestamp lies before the current session (helper for
-/// callers and tests).
-pub fn before_session(
-    core_now: chrono::NaiveDateTime,
-    expiry: chrono::NaiveTime,
-    stored: &str,
-) -> bool {
-    parse_ts(stored)
-        .map(|t| t < session::last_session_expiry(core_now, expiry))
-        .unwrap_or(false)
 }

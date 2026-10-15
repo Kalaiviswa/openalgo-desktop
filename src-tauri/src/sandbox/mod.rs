@@ -990,14 +990,6 @@ impl Sandbox {
         })
         .await
     }
-
-    /// Symbols the engine would watch right now.
-    pub async fn watched_symbols(&self) -> SbResult<std::collections::HashSet<SymbolKey>> {
-        blocking(self.core(), |c| {
-            Ok(c.db.with_conn(engine::needed_symbols)?)
-        })
-        .await
-    }
 }
 
 pub use types::{Action, OrderStatus, PriceType, Product};

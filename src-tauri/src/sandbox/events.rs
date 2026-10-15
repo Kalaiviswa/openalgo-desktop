@@ -48,11 +48,6 @@ impl Outbox {
             }
         }
     }
-
-    /// The collected events (tests).
-    pub fn into_events(self) -> Vec<Event> {
-        self.events
-    }
 }
 
 fn meta(api_type: &str, request: Value, response: Value) -> OrderMeta {

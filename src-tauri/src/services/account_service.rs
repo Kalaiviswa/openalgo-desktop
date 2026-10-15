@@ -127,10 +127,6 @@ pub fn holding_row(h: &Holding) -> Value {
     })
 }
 
-pub fn holdings_statistics(h: &[Holding]) -> Value {
-    statistics_json(&crate::brokers::types::PortfolioStats::from_holdings(h))
-}
-
 /// The `statistics` object from portfolio totals (the broker's own when it
 /// reports them, else computed from the rows).
 pub fn statistics_json(stats: &crate::brokers::types::PortfolioStats) -> Value {

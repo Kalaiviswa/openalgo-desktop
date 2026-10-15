@@ -1,11 +1,6 @@
 {
   "_doc": "Code-health ratchet: what was over a limit when the gate started, with its size then. Entries may only go down; `python3 scripts/ci/code_health.py --update` lowers them after an improvement. Adding or raising one needs the maintainer (the code-health-exception label). See CLAUDE.md, Code health.",
   "dead_public_functions": [
-    "src-tauri/src/sandbox/catch_up.rs::before_session",
-    "src-tauri/src/sandbox/clock.rs::now_ist_aware",
-    "src-tauri/src/sandbox/events.rs::into_events",
-    "src-tauri/src/sandbox/mod.rs::watched_symbols",
-    "src-tauri/src/services/account_service.rs::holdings_statistics",
     "src-tauri/src/strategy/dispatch.rs::is_refused"
   ],
   "frontend_files": {
@@ -51,7 +46,6 @@
   },
   "rust_files": {
     "src-tauri/src/sandbox/gtt.rs": 1183,
-    "src-tauri/src/sandbox/mod.rs": 1003,
     "src-tauri/src/sandbox/orders.rs": 1017,
     "src-tauri/src/sandbox/positions.rs": 1017,
     "src-tauri/src/strategy/engine.rs": 2181,

@@ -23,11 +23,6 @@ pub fn now_ist(clock: &dyn Clock) -> NaiveDateTime {
     clock.now().with_timezone(&IST).naive_local()
 }
 
-/// Aware IST time.
-pub fn now_ist_aware(clock: &dyn Clock) -> DateTime<Tz> {
-    clock.now().with_timezone(&IST)
-}
-
 /// Stored text of an IST timestamp.
 pub fn ts(dt: NaiveDateTime) -> String {
     dt.format(TS_FORMAT).to_string()
