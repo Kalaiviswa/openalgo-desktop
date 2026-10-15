@@ -142,6 +142,133 @@ fn is_na(cell: &str) -> bool {
     )
 }
 
+/// The text fields of one master line.
+struct RowText {
+    tsym: String,
+    name: String,
+    instrument: String,
+    expiry: String,
+    option: String,
+    strike: String,
+}
+
+/// An NSE row: an index (named as the broker names them) or an equity.
+/// A row without a name is skipped where the file has a name column.
+fn nse_row(cfg: &NorenConfig, t: &RowText, name_col: bool, base: SymToken) -> Option<SymToken> {
+    if t.name.is_empty() && name_col && cfg.tick_rule != TickRule::Fixed {
+        return None;
+    }
+    Some(if t.instrument == "INDEX" {
+        SymToken {
+            symbol: nse_index_symbol(cfg.index_naming, &t.tsym),
+            exchange: "NSE_INDEX".into(),
+            brexchange: cfg.nse_index_brexchange.into(),
+            instrument_type: cfg.index_instrument_type.into(),
+            ..base
+        }
+    } else {
+        SymToken {
+            symbol: t.tsym.replace("-EQ", "").replace("-BE", ""),
+            instrument_type: if matches!(t.instrument.as_str(), "EQ" | "BE" | "") {
+                "EQ".into()
+            } else {
+                t.instrument.clone()
+            },
+            ..base
+        }
+    })
+}
+
+/// A BSE row: an index from the master where the broker lists them there,
+/// else an equity.
+fn bse_row(cfg: &NorenConfig, t: &RowText, base: SymToken) -> SymToken {
+    if cfg.bse_indices == BseIndices::FromMaster && t.instrument == "UNDIND" {
+        let s = strip_upper(&t.tsym);
+        SymToken {
+            symbol: lookup(BSE_INDEX_OVERRIDES, &s)
+                .map(str::to_string)
+                .unwrap_or(s),
+            exchange: "BSE_INDEX".into(),
+            brexchange: "BSE".into(),
+            instrument_type: cfg.index_instrument_type.into(),
+            ..base
+        }
+    } else {
+        SymToken {
+            symbol: t.tsym.clone(),
+            instrument_type: "EQ".into(),
+            ..base
+        }
+    }
+}
+
+/// A derivative row: its type from the option column (or, for BFO where
+/// the broker says so, from the trading symbol), and its OpenAlgo symbol.
+/// CDS tokens up to 100 are skipped where the broker's rule says so.
+fn derivative_row(
+    cfg: &NorenConfig,
+    exchange: &str,
+    t: &RowText,
+    base: SymToken,
+) -> Option<SymToken> {
+    if exchange == "CDS"
+        && cfg.tick_rule != TickRule::Fixed
+        && base.token.parse::<i64>().map(|t| t <= 100).unwrap_or(false)
+    {
+        return None;
+    }
+    let exp = expiry(&t.expiry);
+    let opt = &t.option;
+    let tsym = &t.tsym;
+    let from_tsym = exchange == "BFO" && cfg.bfo_from_tsym;
+    let itype = if from_tsym {
+        if tsym.ends_with("FUT") {
+            "FUT".to_string()
+        } else if tsym.ends_with("CE") {
+            "CE".into()
+        } else if tsym.ends_with("PE") {
+            "PE".into()
+        } else {
+            "UNKNOWN".into()
+        }
+    } else if opt == "XX" {
+        "FUT".into()
+    } else if opt == "CE" || opt == "PE" {
+        opt.clone()
+    } else {
+        t.instrument.clone()
+    };
+    let underlying = if from_tsym {
+        tsym.chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect::<String>()
+    } else {
+        t.name.clone()
+    };
+    let strike = t.strike.parse::<f64>().unwrap_or(-1.0);
+    let symbol = if itype == "FUT" {
+        future_symbol(&underlying, &exp)
+    } else if itype == "CE" || itype == "PE" {
+        option_symbol(&underlying, &exp, strike, &itype)
+    } else {
+        format!(
+            "{}{}{}{}",
+            underlying,
+            exp.replace('-', ""),
+            format_strike(strike),
+            itype
+        )
+    };
+    Some(SymToken {
+        symbol,
+        name: underlying,
+        expiry: exp,
+        strike,
+        instrument_type: itype,
+        ..base
+    })
+}
+
 /// Parse one exchange file into SymToken rows.
 pub fn parse_file(cfg: &NorenConfig, exchange: &str, text: &str) -> Vec<SymToken> {
     let mut lines = text.lines();
@@ -169,9 +296,15 @@ pub fn parse_file(cfg: &NorenConfig, exchange: &str, text: &str) -> Vec<SymToken
                 .unwrap_or_default()
         };
         let token = get(c.token);
-        let tsym = get(c.tsym);
-        let name = get(c.name);
-        if token.is_empty() || tsym.is_empty() {
+        let t = RowText {
+            tsym: get(c.tsym),
+            name: get(c.name),
+            instrument: get(c.instrument),
+            expiry: get(c.expiry),
+            option: get(c.option),
+            strike: get(c.strike),
+        };
+        if token.is_empty() || t.tsym.is_empty() {
             continue;
         }
         if drop_stale && c.exchange.is_some() && is_na(&get(c.exchange)) {
@@ -187,11 +320,10 @@ pub fn parse_file(cfg: &NorenConfig, exchange: &str, text: &str) -> Vec<SymToken
             },
         );
         let tick = tick_size(cfg.tick_rule, exchange, &get(c.tick));
-        let instrument = get(c.instrument);
         let base = SymToken {
             symbol: String::new(),
-            brsymbol: tsym.clone(),
-            name: name.clone(),
+            brsymbol: t.tsym.clone(),
+            name: t.name.clone(),
             exchange: exchange.to_string(),
             brexchange: exchange.to_string(),
             token,
@@ -201,111 +333,12 @@ pub fn parse_file(cfg: &NorenConfig, exchange: &str, text: &str) -> Vec<SymToken
             instrument_type: String::new(),
             tick_size: tick,
         };
-        match exchange {
-            "NSE" => {
-                if name.is_empty() && c.name.is_some() && cfg.tick_rule != TickRule::Fixed {
-                    continue;
-                }
-                let index = instrument == "INDEX";
-                let row = if index {
-                    SymToken {
-                        symbol: nse_index_symbol(cfg.index_naming, &tsym),
-                        exchange: "NSE_INDEX".into(),
-                        brexchange: cfg.nse_index_brexchange.into(),
-                        instrument_type: cfg.index_instrument_type.into(),
-                        ..base
-                    }
-                } else {
-                    SymToken {
-                        symbol: tsym.replace("-EQ", "").replace("-BE", ""),
-                        instrument_type: if matches!(instrument.as_str(), "EQ" | "BE" | "") {
-                            "EQ".into()
-                        } else {
-                            instrument.clone()
-                        },
-                        ..base
-                    }
-                };
-                out.push(row);
-            }
-            "BSE" => {
-                if cfg.bse_indices == BseIndices::FromMaster && instrument == "UNDIND" {
-                    let s = strip_upper(&tsym);
-                    out.push(SymToken {
-                        symbol: lookup(BSE_INDEX_OVERRIDES, &s)
-                            .map(str::to_string)
-                            .unwrap_or(s),
-                        exchange: "BSE_INDEX".into(),
-                        brexchange: "BSE".into(),
-                        instrument_type: cfg.index_instrument_type.into(),
-                        ..base
-                    });
-                } else {
-                    out.push(SymToken {
-                        symbol: tsym.clone(),
-                        instrument_type: "EQ".into(),
-                        ..base
-                    });
-                }
-            }
-            _ => {
-                if exchange == "CDS"
-                    && cfg.tick_rule != TickRule::Fixed
-                    && base.token.parse::<i64>().map(|t| t <= 100).unwrap_or(false)
-                {
-                    continue;
-                }
-                let exp = expiry(&get(c.expiry));
-                let opt = get(c.option);
-                let from_tsym = exchange == "BFO" && cfg.bfo_from_tsym;
-                let itype = if from_tsym {
-                    if tsym.ends_with("FUT") {
-                        "FUT".to_string()
-                    } else if tsym.ends_with("CE") {
-                        "CE".into()
-                    } else if tsym.ends_with("PE") {
-                        "PE".into()
-                    } else {
-                        "UNKNOWN".into()
-                    }
-                } else if opt == "XX" {
-                    "FUT".into()
-                } else if opt == "CE" || opt == "PE" {
-                    opt.clone()
-                } else {
-                    instrument.clone()
-                };
-                let underlying = if from_tsym {
-                    tsym.chars()
-                        .take_while(|c| c.is_ascii_alphabetic())
-                        .collect::<String>()
-                } else {
-                    name.clone()
-                };
-                let strike = get(c.strike).parse::<f64>().unwrap_or(-1.0);
-                let symbol = if itype == "FUT" {
-                    future_symbol(&underlying, &exp)
-                } else if itype == "CE" || itype == "PE" {
-                    option_symbol(&underlying, &exp, strike, &itype)
-                } else {
-                    format!(
-                        "{}{}{}{}",
-                        underlying,
-                        exp.replace('-', ""),
-                        format_strike(strike),
-                        itype
-                    )
-                };
-                out.push(SymToken {
-                    symbol,
-                    name: underlying,
-                    expiry: exp,
-                    strike,
-                    instrument_type: itype,
-                    ..base
-                });
-            }
-        }
+        let row = match exchange {
+            "NSE" => nse_row(cfg, &t, c.name.is_some(), base),
+            "BSE" => Some(bse_row(cfg, &t, base)),
+            _ => derivative_row(cfg, exchange, &t, base),
+        };
+        out.extend(row);
     }
     if exchange == "BSE" && cfg.bse_indices == BseIndices::Manual {
         for (sym, token) in [("SENSEX", "1"), ("BANKEX", "12")] {
