@@ -930,7 +930,7 @@ mod tests {
         let n = download(ctx, &broker, &AuthToken::new("t")).await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(ctx.symbols.contract_value("BTCUSD", "CRYPTO"), Some(0.001));
-        let stored = ctx.sqlite.load_master().unwrap();
+        let stored = symbol::load_master(&ctx.sqlite.conn().unwrap()).unwrap();
         assert_eq!(stored.contract_values.get("27"), Some(&0.001));
         ctx.clear_symbol_cache();
         assert_eq!(ctx.symbols.contract_value("BTCUSD", "CRYPTO"), None);

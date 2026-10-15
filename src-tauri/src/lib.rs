@@ -45,7 +45,6 @@ pub mod state;
 pub mod strategy;
 pub mod trading;
 pub mod updater;
-pub mod webhook;
 pub mod websocket;
 
 use commands::ShellState;
