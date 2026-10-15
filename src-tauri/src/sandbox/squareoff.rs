@@ -43,83 +43,92 @@ pub struct SweepReport {
     pub failed_closures: usize,
 }
 
-/// One square-off sweep.
-pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
-    let _one = core.sweep_lock.lock().await;
-    let mut report = SweepReport::default();
-
-    // Steps 1, 1b, 1c in one transaction.
-    let (cancelled, settled, to_close) = blocking(core, |c| {
-        let mut outbox = Outbox::new();
-        let r = c.db.with_tx(|tx| {
-            let cfg = SandboxConfig::load(tx)?;
-            let now = c.now();
-            let t = now.time();
-            let mut cancelled = 0usize;
-            for o in orders::pending(tx, None)? {
-                let mis_due = o.product == Product::Mis
-                    && cfg
-                        .square_off_time(&o.exchange)
-                        .map(|sq| t >= sq)
-                        .unwrap_or(false);
-                let expired = expiry::is_contract_expired_now(
-                    expiry::contract_expiry(c, &o.symbol, &o.exchange),
-                    &o.exchange,
-                    now,
-                    &cfg,
+/// Cancels the pending orders that are due: MIS orders past their
+/// square-off time and orders on expired contracts, each in its own
+/// savepoint. A square-off close still waiting for a price is the
+/// square-off itself and is kept, unless its contract expired.
+fn cancel_due_orders(
+    conn: &Connection,
+    c: &Core,
+    cfg: &SandboxConfig,
+    now: NaiveDateTime,
+    outbox: &mut Outbox,
+) -> SbResult<usize> {
+    let t = now.time();
+    let mut cancelled = 0usize;
+    for o in orders::pending(conn, None)? {
+        let mis_due = o.product == Product::Mis
+            && cfg
+                .square_off_time(&o.exchange)
+                .map(|sq| t >= sq)
+                .unwrap_or(false);
+        let expired = expiry::is_contract_expired_now(
+            expiry::contract_expiry(c, &o.symbol, &o.exchange),
+            &o.exchange,
+            now,
+            cfg,
+        );
+        if !(mis_due || expired) {
+            continue;
+        }
+        // A square-off close still waiting for a price is the
+        // square-off itself: the backup sweep keeps it rather than
+        // cancelling it and placing another.
+        let own_close =
+            o.strategy.as_deref() == Some("AUTO_SQUARE_OFF") && o.price_type == PriceType::Market;
+        if own_close && !expired {
+            continue;
+        }
+        conn.execute_batch("SAVEPOINT sq_cancel")?;
+        match orders::cancel_in_tx(conn, c, &o, outbox) {
+            Ok(()) => {
+                conn.execute_batch("RELEASE sq_cancel")?;
+                cancelled += 1;
+                tracing::info!("Auto-cancelled sandbox order {} ({})", o.orderid, o.symbol);
+            }
+            Err(e) => {
+                conn.execute_batch("ROLLBACK TO sq_cancel; RELEASE sq_cancel")?;
+                tracing::warn!(
+                    "Could not auto-cancel sandbox order {}: {}",
+                    o.orderid,
+                    e.message
                 );
-                if !(mis_due || expired) {
-                    continue;
-                }
-                // A square-off close still waiting for a price is the
-                // square-off itself: the backup sweep keeps it rather than
-                // cancelling it and placing another.
-                let own_close = o.strategy.as_deref() == Some("AUTO_SQUARE_OFF")
-                    && o.price_type == PriceType::Market;
-                if own_close && !expired {
-                    continue;
-                }
-                tx.execute_batch("SAVEPOINT sq_cancel")?;
-                match orders::cancel_in_tx(tx, c, &o, &mut outbox) {
-                    Ok(()) => {
-                        tx.execute_batch("RELEASE sq_cancel")?;
-                        cancelled += 1;
-                        tracing::info!("Auto-cancelled sandbox order {} ({})", o.orderid, o.symbol);
-                    }
-                    Err(e) => {
-                        tx.execute_batch("ROLLBACK TO sq_cancel; RELEASE sq_cancel")?;
-                        tracing::warn!(
-                            "Could not auto-cancel sandbox order {}: {}",
-                            o.orderid,
-                            e.message
-                        );
-                    }
-                }
             }
-            let settled = expiry::cleanup_expired_contracts(tx, c, &cfg, now)?;
-            let mut to_close = Vec::new();
-            for p in positions::list_open(tx, Some(Product::Mis))? {
-                if p.user_id != c.user() {
-                    continue;
-                }
-                if let Some(sq) = cfg.square_off_time(&p.exchange) {
-                    if t >= sq {
-                        to_close.push((p.symbol.clone(), p.exchange.clone()));
-                    }
-                }
-            }
-            Ok::<_, SandboxError>((cancelled, settled, to_close))
-        })?;
-        c.publish(outbox);
-        Ok(r)
-    })
-    .await?;
-    report.cancelled_orders = cancelled;
-    report.settled_expired = settled;
+        }
+    }
+    Ok(cancelled)
+}
 
-    // Step 2: close MIS positions past their time, each under its lock. A
-    // close that is already waiting for a price is not placed again by the
-    // backup sweep; only a filled close counts as closed.
+/// The MIS positions past their exchange's square-off time.
+fn mis_positions_due(
+    conn: &Connection,
+    c: &Core,
+    cfg: &SandboxConfig,
+    t: NaiveTime,
+) -> SbResult<Vec<(String, String)>> {
+    let mut to_close = Vec::new();
+    for p in positions::list_open(conn, Some(Product::Mis))? {
+        if p.user_id != c.user() {
+            continue;
+        }
+        if let Some(sq) = cfg.square_off_time(&p.exchange) {
+            if t >= sq {
+                to_close.push((p.symbol.clone(), p.exchange.clone()));
+            }
+        }
+    }
+    Ok(to_close)
+}
+
+/// Closes the MIS positions past their time, each under its lock. A
+/// close already waiting for a price is not placed again by the backup
+/// sweep; only a filled close counts as closed. True when an order was
+/// placed.
+async fn close_due_positions(
+    core: &Arc<Core>,
+    to_close: Vec<(String, String)>,
+    report: &mut SweepReport,
+) -> bool {
     let mut placed = false;
     for (symbol, exchange) in to_close {
         match positions::close_position_outcome(core, &symbol, &exchange, "MIS").await {
@@ -167,6 +176,35 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
             }
         }
     }
+    placed
+}
+
+/// One square-off sweep.
+pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
+    let _one = core.sweep_lock.lock().await;
+    let mut report = SweepReport::default();
+
+    // Steps 1, 1b, 1c in one transaction.
+    let (cancelled, settled, to_close) = blocking(core, |c| {
+        let mut outbox = Outbox::new();
+        let r = c.db.with_tx(|tx| {
+            let cfg = SandboxConfig::load(tx)?;
+            let now = c.now();
+            let t = now.time();
+            let cancelled = cancel_due_orders(tx, c, &cfg, now, &mut outbox)?;
+            let settled = expiry::cleanup_expired_contracts(tx, c, &cfg, now)?;
+            let to_close = mis_positions_due(tx, c, &cfg, t)?;
+            Ok::<_, SandboxError>((cancelled, settled, to_close))
+        })?;
+        c.publish(outbox);
+        Ok(r)
+    })
+    .await?;
+    report.cancelled_orders = cancelled;
+    report.settled_expired = settled;
+
+    // Step 2: close MIS positions past their time.
+    let placed = close_due_positions(core, to_close, &mut report).await;
     if report.cancelled_orders > 0 || report.closed_positions > 0 || placed {
         let mut outbox = Outbox::new();
         outbox.push(auto_squareoff(
