@@ -528,6 +528,8 @@ impl AppState {
         self.runtime.teardown(self).await;
         self.sandbox.shutdown().await;
         self.bus.shutdown(Duration::from_secs(2)).await;
+        // The monitor's writer saves what was queued when shutdown began.
+        self.monitor.stop(Duration::from_secs(3)).await;
         let mut tasks = std::mem::take(&mut *self.tasks.lock());
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}

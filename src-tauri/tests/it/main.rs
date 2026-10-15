@@ -110,5 +110,6 @@ mod webui2;
 mod webui_admin;
 mod webui_market;
 mod webui_monitoring;
+mod webui_record_loss;
 mod webui_settings;
 mod webui_update;
