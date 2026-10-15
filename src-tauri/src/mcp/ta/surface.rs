@@ -510,9 +510,26 @@ fn period(x: f64) -> i64 {
 }
 
 fn compute(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Out> {
+    if let Some(out) = compute_averages(name, s, sc, len)? {
+        return Ok(out);
+    }
+    if let Some(out) = compute_oscillators(name, s, sc, len)? {
+        return Ok(out);
+    }
+    if let Some(out) = compute_bands(name, s, sc, len)? {
+        return Ok(out);
+    }
+    if let Some(out) = compute_levels(name, s, sc, len)? {
+        return Ok(out);
+    }
+    Err(PyErr::value(format!("unknown indicator '{}'", name)))
+}
+
+/// Moving averages, RSI, MACD, Supertrend and Ichimoku. `None` for an indicator of another group.
+fn compute_averages(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Option<Out>> {
     let p0 = period(sc.first().copied().unwrap_or(0.0));
     let up = |p: i64| p as usize;
-    Ok(match name {
+    Ok(Some(match name {
         "sma" => {
             validate_period(p0, len)?;
             Out::One(sma_k(s[0], up(p0)))
@@ -585,6 +602,16 @@ fn compute(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Out> {
                 period(sc[3]),
             ))
         }
+        _ => return Ok(None),
+    }))
+}
+
+/// Stochastic, CCI, Williams %R, ATR, NATR and true range. `None` for an
+/// indicator of another group.
+fn compute_oscillators(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Option<Out>> {
+    let p0 = period(sc.first().copied().unwrap_or(0.0));
+    let up = |p: i64| p as usize;
+    Ok(Some(match name {
         "stochastic" => {
             validate_period(p0, len)?;
             if sc[2] <= 0.0 {
@@ -632,6 +659,16 @@ fn compute(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Out> {
             )
         }
         "true_range" => Out::One(true_range_k(s[0], s[1], s[2])),
+        _ => return Ok(None),
+    }))
+}
+
+/// Bollinger, Keltner and Donchian channels, and historical volatility. `None`
+/// for an indicator of another group.
+fn compute_bands(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Option<Out>> {
+    let p0 = period(sc.first().copied().unwrap_or(0.0));
+    let up = |p: i64| p as usize;
+    Ok(Some(match name {
         "bbands" => {
             validate_period(p0, len)?;
             if sc[1] <= 0.0 {
@@ -712,6 +749,16 @@ fn compute(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Out> {
             }
             Out::One(hv_k(s[0], up(p0), sc[1], sc[2]))
         }
+        _ => return Ok(None),
+    }))
+}
+
+/// ADX, pivots, highest and lowest, regression slope, correlation and beta.
+/// `None` for an indicator of another group.
+fn compute_levels(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Option<Out>> {
+    let p0 = period(sc.first().copied().unwrap_or(0.0));
+    let up = |p: i64| p as usize;
+    Ok(Some(match name {
         "adx" => {
             validate_period(p0, len)?;
             let (a, b, c) = adx_k(s[0], s[1], s[2], up(p0));
@@ -738,8 +785,8 @@ fn compute(name: &str, s: &[&[f64]], sc: &[f64], len: usize) -> R<Out> {
             validate_period(p0 + 1, len)?;
             Out::One(beta_k(s[0], s[1], up(p0)))
         }
-        other => return Err(PyErr::value(format!("unknown indicator '{}'", other))),
-    })
+        _ => return Ok(None),
+    }))
 }
 
 /// `_backend.py:241` `bbands`: SMA middle, population stdev bands.
