@@ -117,6 +117,16 @@ differently, it is on purpose:
   signed out, switched brokers or made a new API key is closed (code
   4401) and connects and authenticates again. The web keeps it
   connected.
+- **Depth answers.** A Depth subscribe is answered as the web answers it
+  for your broker (maintainer decision 2026-10-16: echo like the web).
+  Where the web's adapter repeats the depth asked for (Zerodha, Fyers,
+  Upstox, Kotak and others), so does the desktop, although Zerodha
+  streams 5 levels when 20 or 50 are asked for; where it reports the level
+  it falls back to (Angel, Arrow, Dhan, the XTS brokers and others), so
+  does the desktop; Arrow and HDFC answer an LTP or Quote subscribe with
+  `"depth": null` and IIFL Capital always with 5, as on the web. The answer
+  can therefore name more levels than are streamed: read the depth from
+  the frames, not from the answer.
 - **Field names.** Quote and Depth data carry the names OpenAlgo web
   sends with Zerodha (`last_quantity`, `average_price`, `price_change`,
   `price_change_percent`) for every broker, and next to them, with the

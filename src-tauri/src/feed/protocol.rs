@@ -275,7 +275,9 @@ pub enum SubscribeItem {
         exchange: Value,
         status: &'static str,
         mode: &'static str,
-        depth: i64,
+        /// `null` where the broker's web adapter names none (Arrow, HDFC
+        /// outside Depth mode).
+        depth: Option<i64>,
         broker: String,
     },
     Err {
