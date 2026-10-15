@@ -154,6 +154,36 @@ fn parse_expiry(s: &str) -> Option<NaiveDate> {
         .filter(|d| d.year() > 1900)
 }
 
+/// The underlying of a derivative's trading symbol: the symbol without the
+/// broker's expiry and strike suffix (`<YY><MON><tail>`, or the weekly
+/// `<YY><month digit or O/N/D><DD><tail>`). `None` when no suffix matches.
+fn underlying_of(ts: &str, d: NaiveDate, expiry: &str, tail: String) -> Option<String> {
+    let yy = &expiry[7..9];
+    let mon = MONTHS[d.month0() as usize];
+    let day = &expiry[0..2];
+    let digit = if d.month() <= 9 {
+        d.month().to_string()
+    } else {
+        String::new()
+    };
+    let letter = match d.month() {
+        10 => "O",
+        11 => "N",
+        12 => "D",
+        _ => "",
+    };
+    let mut suffixes = vec![format!("{}{}{}", yy, mon, tail)];
+    if !digit.is_empty() {
+        suffixes.push(format!("{}{}{}{}", yy, digit, day, tail));
+    }
+    if !letter.is_empty() {
+        suffixes.push(format!("{}{}{}{}", yy, letter, day, tail));
+    }
+    suffixes
+        .iter()
+        .find_map(|suf| ts.strip_suffix(suf.as_str()).map(str::to_string))
+}
+
 /// One `CompactScrip.csv` row, as the file has it.
 #[derive(Clone, Copy)]
 struct RawRow<'a> {
@@ -167,6 +197,20 @@ struct RawRow<'a> {
     option_type: &'a str,
     segment: &'a str,
     exchange: &'a str,
+}
+
+/// A cash row's symbol: the trading symbol without NSE's `-EQ` or BSE's
+/// `-<segment>` series suffix.
+fn cash_symbol(ts: &str, brex: &str, seg: &str) -> String {
+    let suffix = match brex {
+        "NSE" => Some("-EQ".to_string()),
+        "BSE" if seg != "IDX" && !seg.is_empty() => Some(format!("-{}", seg)),
+        _ => None,
+    };
+    suffix
+        .and_then(|s| ts.strip_suffix(s.as_str()))
+        .unwrap_or(ts)
+        .to_string()
 }
 
 fn parse_row(raw: RawRow<'_>) -> Option<SymToken> {
@@ -202,59 +246,20 @@ fn parse_row(raw: RawRow<'_>) -> Option<SymToken> {
     let is_future = !is_option && !expiry.is_empty() && ts.ends_with("FUT");
     let is_deriv = is_option || is_future;
 
-    // Underlying: strip the broker's expiry/strike suffix.
-    let mut underlying = String::new();
-    if is_deriv {
-        if let Some(d) = expiry_date {
-            let yy = &expiry[7..9];
-            let mon = MONTHS[d.month0() as usize];
-            let day = &expiry[0..2];
-            let tail = if is_future {
-                "FUT".to_string()
-            } else {
-                format!("{}{}", strike_str, opt)
-            };
-            let digit = if d.month() <= 9 {
-                d.month().to_string()
-            } else {
-                String::new()
-            };
-            let letter = match d.month() {
-                10 => "O",
-                11 => "N",
-                12 => "D",
-                _ => "",
-            };
-            let mut suffixes = vec![format!("{}{}{}", yy, mon, tail)];
-            if !digit.is_empty() {
-                suffixes.push(format!("{}{}{}{}", yy, digit, day, tail));
-            }
-            if !letter.is_empty() {
-                suffixes.push(format!("{}{}{}{}", yy, letter, day, tail));
-            }
-            for suf in suffixes {
-                if let Some(base) = ts.strip_suffix(suf.as_str()) {
-                    underlying = base.to_string();
-                    break;
-                }
-            }
-        }
-    }
-    if underlying.is_empty() {
-        underlying = company.to_string();
-    }
+    // Underlying: the symbol without the broker's expiry/strike suffix,
+    // else the company name.
+    let tail = if is_future {
+        "FUT".to_string()
+    } else {
+        format!("{}{}", strike_str, opt)
+    };
+    let underlying = expiry_date
+        .filter(|_| is_deriv)
+        .and_then(|d| underlying_of(ts, d, &expiry, tail))
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| company.to_string());
 
-    let mut symbol = ts.to_string();
-    if brex == "NSE" {
-        if let Some(b) = ts.strip_suffix("-EQ") {
-            symbol = b.to_string();
-        }
-    }
-    if brex == "BSE" && seg != "IDX" && !seg.is_empty() {
-        if let Some(b) = ts.strip_suffix(&format!("-{}", seg)) {
-            symbol = b.to_string();
-        }
-    }
+    let mut symbol = cash_symbol(ts, &brex, seg);
     if is_future {
         symbol = format!("{}{}FUT", underlying, compact);
     } else if is_option {
