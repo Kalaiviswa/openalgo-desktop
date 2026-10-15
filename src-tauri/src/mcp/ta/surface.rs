@@ -388,6 +388,37 @@ fn names_list(names: &[&str]) -> String {
     }
 }
 
+/// A keyword argument's number for scalar parameter `sc`, as Python would
+/// take it: an integer where the parameter is one, within MAX_PARAM.
+fn scalar_value(k: &str, v: &Value, sc: &Sc) -> R<f64> {
+    let num = match v {
+        Value::Number(n) if sc.int && !(n.is_i64() || n.is_u64()) => {
+            return Err(PyErr::type_err(format!(
+                "Period must be an integer, got <class '{}'>",
+                py_type(v)
+            )))
+        }
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::Bool(b) if !sc.int => f64::from(u8::from(*b)),
+        _ => {
+            return Err(PyErr::type_err(format!(
+                "'{}' must be a number, got <class '{}'>",
+                k,
+                py_type(v)
+            )))
+        }
+    };
+    // No window, multiplier or shift needs more; larger values would
+    // only overflow the index arithmetic.
+    if !num.is_finite() || num.abs() > MAX_PARAM {
+        return Err(PyErr::value(format!(
+            "'{}' must be a number between -{} and {}",
+            k, MAX_PARAM, MAX_PARAM
+        )));
+    }
+    Ok(num)
+}
+
 /// `ta.<name>(*series, **params)` as the web's tools call it.
 pub fn call(name: &str, series: &[&[f64]], params: &Map<String, Value>) -> R<Out> {
     let sig = SIGS
@@ -432,33 +463,8 @@ pub fn call(name: &str, series: &[&[f64]], params: &Map<String, Value>) -> R<Out
                 py_type(v)
             )));
         }
-        let sc = sig.scalars[pos - sig.series.len()];
-        let num = match v {
-            Value::Number(n) if sc.int && !(n.is_i64() || n.is_u64()) => {
-                return Err(PyErr::type_err(format!(
-                    "Period must be an integer, got <class '{}'>",
-                    py_type(v)
-                )))
-            }
-            Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
-            Value::Bool(b) if !sc.int => f64::from(u8::from(*b)),
-            _ => {
-                return Err(PyErr::type_err(format!(
-                    "'{}' must be a number, got <class '{}'>",
-                    k,
-                    py_type(v)
-                )))
-            }
-        };
-        // No window, multiplier or shift needs more; larger values would
-        // only overflow the index arithmetic.
-        if !num.is_finite() || num.abs() > MAX_PARAM {
-            return Err(PyErr::value(format!(
-                "'{}' must be a number between -{} and {}",
-                k, MAX_PARAM, MAX_PARAM
-            )));
-        }
-        bound[pos] = Some(Arg::Num(num));
+        let sc = &sig.scalars[pos - sig.series.len()];
+        bound[pos] = Some(Arg::Num(scalar_value(k, v, sc)?));
     }
     let missing: Vec<&str> = all
         .iter()
