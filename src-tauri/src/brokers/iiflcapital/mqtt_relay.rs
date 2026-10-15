@@ -30,9 +30,10 @@
 use crate::brokers::common::relay::READY;
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use rumqttc::{
-    AsyncClient, ConnectReturnCode, ConnectionError, Event, MqttOptions, Packet, QoS,
+    AsyncClient, ConnectReturnCode, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
     SubscribeFilter, SubscribeReasonCode, TlsConfiguration, Transport,
 };
 use std::sync::Arc;
@@ -41,6 +42,7 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 /// web `MAX_TOKENS_PER_SUBSCRIBE`.
 pub const MAX_TOPICS_PER_PACKET: usize = 100;
@@ -360,8 +362,12 @@ fn refused_login(e: &ConnectionError) -> bool {
     )
 }
 
-async fn serve(tcp: TcpStream, path: String, upstream: Arc<dyn MqttUpstream>) {
-    let broker = upstream.broker();
+type Down = SplitSink<WebSocketStream<TcpStream>, Message>;
+type Events = tokio::sync::mpsc::Receiver<std::result::Result<Event, ConnectionError>>;
+
+/// The downstream WebSocket, accepted on the relay's own path only and
+/// within the handshake timeout.
+async fn accept_downstream(tcp: TcpStream, path: String) -> Option<WebSocketStream<TcpStream>> {
     let check =
         move |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
             if req.uri().path() == path {
@@ -372,14 +378,96 @@ async fn serve(tcp: TcpStream, path: String, upstream: Arc<dyn MqttUpstream>) {
                 Err(r)
             }
         };
-    let down = match tokio::time::timeout(
+    match tokio::time::timeout(
         DOWNSTREAM_HANDSHAKE,
         tokio_tungstenite::accept_hdr_async(tcp, check),
     )
     .await
     {
-        Ok(Ok(ws)) => ws,
-        _ => return,
+        Ok(Ok(ws)) => Some(ws),
+        _ => None,
+    }
+}
+
+/// The MQTT event loop, pumped into a channel. The event loop owns the
+/// broker socket; the guard aborts it (closing the socket) whenever the
+/// session ends or is aborted.
+fn pump(mut eventloop: EventLoop) -> (AbortOnDrop, Events) {
+    let (tx, events) =
+        tokio::sync::mpsc::channel::<std::result::Result<Event, ConnectionError>>(EVENT_CAPACITY);
+    let guard = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            let ev = eventloop.poll().await;
+            let stop = ev.is_err();
+            if tx.send(ev).await.is_err() || stop {
+                break;
+            }
+        }
+    }));
+    (guard, events)
+}
+
+/// Waits for the CONNACK. A refused login sends the downstream the
+/// auth-failed frame; on any failure the caller closes the downstream.
+async fn connack(broker: &'static str, events: &mut Events, dw: &mut Down) -> bool {
+    let connack = tokio::time::timeout(OPEN_TIMEOUT, async {
+        while let Some(ev) = events.recv().await {
+            match ev {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => return Ok(()),
+                Ok(_) => continue,
+                Err(e) => return Err(Some(e)),
+            }
+        }
+        Err(None)
+    })
+    .await;
+    match connack {
+        Ok(Ok(())) => true,
+        Ok(Err(Some(e))) if refused_login(&e) => {
+            tracing::warn!(
+                broker,
+                "IIFL Capital MQTT bridge refused the login: {}",
+                mqtt_error_kind(&e)
+            );
+            let _ = tokio::time::timeout(
+                CLOSE_TIMEOUT,
+                dw.send(auth_failed_frame(
+                    "IIFL Capital refused the live data session. Log in to IIFL Capital again.",
+                )),
+            )
+            .await;
+            false
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                broker,
+                "IIFL Capital MQTT connect failed: {}",
+                e.as_ref().map(mqtt_error_kind).unwrap_or("closed")
+            );
+            false
+        }
+        Err(_) => {
+            tracing::debug!(broker, "IIFL Capital MQTT connect timed out");
+            false
+        }
+    }
+}
+
+/// A SUBACK's refused topics, logged.
+fn log_refused_topics(broker: &'static str, codes: &[SubscribeReasonCode]) {
+    let refused = codes
+        .iter()
+        .filter(|c| matches!(c, SubscribeReasonCode::Failure))
+        .count();
+    if refused > 0 {
+        tracing::warn!(broker, "IIFL Capital refused {} feed topic(s)", refused);
+    }
+}
+
+async fn serve(tcp: TcpStream, path: String, upstream: Arc<dyn MqttUpstream>) {
+    let broker = upstream.broker();
+    let Some(down) = accept_downstream(tcp, path).await else {
+        return;
     };
     let (mut dw, mut dr) = down.split();
     let close_down = |mut dw: futures_util::stream::SplitSink<_, Message>| async move {
@@ -406,65 +494,11 @@ async fn serve(tcp: TcpStream, path: String, upstream: Arc<dyn MqttUpstream>) {
             return;
         }
     };
-    let (client, mut eventloop) = AsyncClient::new(opts, REQUEST_CAPACITY);
-    let (tx, mut events) =
-        tokio::sync::mpsc::channel::<std::result::Result<Event, ConnectionError>>(EVENT_CAPACITY);
-    // The event loop owns the broker socket; the guard aborts it (closing the
-    // socket) whenever this session ends or is aborted.
-    let _pump = AbortOnDrop(tokio::spawn(async move {
-        loop {
-            let ev = eventloop.poll().await;
-            let stop = ev.is_err();
-            if tx.send(ev).await.is_err() || stop {
-                break;
-            }
-        }
-    }));
-
-    // Wait for the CONNACK.
-    let connack = tokio::time::timeout(OPEN_TIMEOUT, async {
-        while let Some(ev) = events.recv().await {
-            match ev {
-                Ok(Event::Incoming(Packet::ConnAck(_))) => return Ok(()),
-                Ok(_) => continue,
-                Err(e) => return Err(Some(e)),
-            }
-        }
-        Err(None)
-    })
-    .await;
-    match connack {
-        Ok(Ok(())) => {}
-        Ok(Err(Some(e))) if refused_login(&e) => {
-            tracing::warn!(
-                broker,
-                "IIFL Capital MQTT bridge refused the login: {}",
-                mqtt_error_kind(&e)
-            );
-            let _ = tokio::time::timeout(
-                CLOSE_TIMEOUT,
-                dw.send(auth_failed_frame(
-                    "IIFL Capital refused the live data session. Log in to IIFL Capital again.",
-                )),
-            )
-            .await;
-            close_down(dw).await;
-            return;
-        }
-        Ok(Err(e)) => {
-            tracing::debug!(
-                broker,
-                "IIFL Capital MQTT connect failed: {}",
-                e.as_ref().map(mqtt_error_kind).unwrap_or("closed")
-            );
-            close_down(dw).await;
-            return;
-        }
-        Err(_) => {
-            tracing::debug!(broker, "IIFL Capital MQTT connect timed out");
-            close_down(dw).await;
-            return;
-        }
+    let (client, eventloop) = AsyncClient::new(opts, REQUEST_CAPACITY);
+    let (_pump, mut events) = pump(eventloop);
+    if !connack(broker, &mut events, &mut dw).await {
+        close_down(dw).await;
+        return;
     }
 
     let mut ok = subscribe(&client, &prepared.topics);
@@ -490,14 +524,7 @@ async fn serve(tcp: TcpStream, path: String, upstream: Arc<dyn MqttUpstream>) {
                     }
                 }
                 Some(Ok(Event::Incoming(Packet::SubAck(ack)))) => {
-                    let refused = ack
-                        .return_codes
-                        .iter()
-                        .filter(|c| matches!(c, SubscribeReasonCode::Failure))
-                        .count();
-                    if refused > 0 {
-                        tracing::warn!(broker, "IIFL Capital refused {} feed topic(s)", refused);
-                    }
+                    log_refused_topics(broker, &ack.return_codes);
                 }
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
