@@ -381,7 +381,12 @@ pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
         .strategy
         .store
         .list_orders_for_strategy(row.id, data["run_id"].as_i64())
-        .map(|rows| rows.iter().map(|o| o.to_dict()).collect::<Vec<Value>>());
+        // The web's order shape, without the run mode the Detail page reads.
+        .map(|rows| {
+            rows.iter()
+                .map(|o| o.order.to_dict())
+                .collect::<Vec<Value>>()
+        });
     history("orders", row.id, rows)
 }
 

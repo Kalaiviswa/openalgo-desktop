@@ -46,6 +46,7 @@ import {
 } from '@/api/strategy_module'
 import type { Order, Run, Strategy } from '@/types/strategy_module'
 import StrategyDetail, { OrdersTab, PositionsTab, TradesTab } from './Detail'
+import type { StrategyWithTotals } from './runModes'
 
 function client() {
   return new QueryClient({
@@ -529,7 +530,9 @@ describe('strategy Positions broker truth', () => {
       status: 'stopped',
       current_run_id: null,
       updated_at: '2026-08-31T04:15:29.517782+00:00',
-    } satisfies Strategy
+      // Desktop (SM-05): the server sums every finalised run per mode.
+      realized_by_mode: { live: 0, sandbox: -616.5 },
+    } satisfies StrategyWithTotals
     const lastRun = {
       id: 12,
       strategy_id: 7,

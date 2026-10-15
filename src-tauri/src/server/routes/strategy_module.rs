@@ -231,10 +231,15 @@ pub async fn create(State(ctx): Ctx, User(u): User, body: Bytes) -> Response {
 
 /// GET /strategy/api/strategies/{sid}
 pub async fn detail(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Response {
-    match resolve(&ctx, &u.username, &sid) {
-        Ok(row) => ok200(json!({"data": row.to_dict(true)})),
-        Err(r) => r,
-    }
+    let row = match resolve(&ctx, &u.username, &sid) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let detail = ctx.strategy.strategy_detail(&row);
+    data_or_failed(
+        format_args!("the realized P&L of strategy {}", row.id),
+        detail,
+    )
 }
 
 /// PATCH /strategy/api/strategies/{sid}

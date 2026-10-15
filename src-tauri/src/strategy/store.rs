@@ -25,7 +25,9 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+mod by_mode;
 mod management;
+pub use by_mode::ModedOrder;
 pub use management::{
     migrate_revision, ClaimOutcome, StartClaim, ALREADY_RUNNING, CHANGED_WHILE_EDITING,
     CHANGED_WHILE_STARTING, LIVE_NOT_ENABLED, WEBHOOK_LOCKED,
@@ -1294,29 +1296,6 @@ impl Store {
         ))?;
         let rows = stmt
             .query_map([run_id], order_from)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    pub fn list_orders_for_strategy(
-        &self,
-        strategy_id: i64,
-        run_id: Option<i64>,
-    ) -> Result<Vec<OrderRow>> {
-        let conn = self.conn()?;
-        let cols = ORDER_COLS
-            .split(", ")
-            .map(|c| format!("o.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM sm_strategy_order o JOIN sm_strategy_run r ON o.run_id = r.id \
-             WHERE r.strategy_id = ?1 AND (?2 IS NULL OR o.run_id = ?2) \
-             ORDER BY o.placed_at ASC, o.id ASC",
-            cols
-        ))?;
-        let rows = stmt
-            .query_map(params![strategy_id, run_id], order_from)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

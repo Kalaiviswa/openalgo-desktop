@@ -118,7 +118,7 @@
     "src-tauri/src/services/options_service.rs": 1344,
     "src-tauri/src/services/order_reconciler.rs": 1225,
     "src-tauri/src/strategy/engine.rs": 2181,
-    "src-tauri/src/strategy/store.rs": 1805,
+    "src-tauri/src/strategy/store.rs": 1784,
     "src-tauri/src/trading/runner/mod.rs": 2071
   },
   "rust_functions": {

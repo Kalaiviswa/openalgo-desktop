@@ -7,14 +7,21 @@
 //! same table components render it; only aggregates are recounted.
 //!
 //! The book comes from the RUN's mode, not the analyzer toggle: a sandbox run
-//! reads the sandbox books, a live run the broker's.
+//! reads the sandbox books, a live run the broker's. Only orders placed in
+//! that mode are attributed to it (SM-03): a residual left by a run of the
+//! other mode is not in this book, so it neither stamps a row with its run
+//! nor enters the totals. The web matched owners of every mode by contract;
+//! the Detail page shows the other mode's residuals apart.
+//!
+//! The strategy record the page reads also carries its realized P&L per
+//! mode over every finalised run (`strategy_detail`, SM-05).
 //!
 //! Positions carry a weaker guarantee: a position row is per contract, so a
 //! contract also held from elsewhere is shared and cannot be divided. A
 //! strategy's P&L comes from its own fills, never from these rows.
 
 use super::dispatch::{Book, RunMode};
-use super::store::OrderRow;
+use super::store::{OrderRow, StrategyRow};
 use super::StrategyModule;
 use crate::error::AppError;
 use serde_json::{json, Map, Value};
@@ -298,10 +305,22 @@ impl StrategyModule {
             .ok_or_else(|| Refusal::Message(format!("Unknown run mode: '{}'", mode)))
     }
 
-    /// The strategy's order rows. A failed read is an error: an empty set
-    /// would filter every broker row out and show a book that looks flat.
-    fn order_rows(&self, strategy_id: i64, run_id: Option<i64>) -> Result<Vec<OrderRow>, AppError> {
-        self.store.list_orders_for_strategy(strategy_id, run_id)
+    /// The strategy's order rows placed in `mode` (SM-03). A failed read is
+    /// an error: an empty set would filter every broker row out and show a
+    /// book that looks flat.
+    fn order_rows(
+        &self,
+        strategy_id: i64,
+        run_id: Option<i64>,
+        mode: RunMode,
+    ) -> Result<Vec<OrderRow>, AppError> {
+        Ok(self
+            .store
+            .list_orders_for_strategy(strategy_id, run_id)?
+            .into_iter()
+            .filter(|o| o.mode == mode.as_str())
+            .map(|o| o.order)
+            .collect())
     }
 
     /// The book's mode, or the answer to give instead: `Ok(Err(envelope))`
@@ -318,6 +337,16 @@ impl StrategyModule {
             Err(Refusal::Message(m)) => Err(err(m)),
             Err(Refusal::Read(e)) => return Err(e),
         })
+    }
+
+    /// The strategy as the Detail page reads it: its record and, under
+    /// `realized_by_mode`, the realized P&L of every finalised run summed per
+    /// mode over its whole history (SM-05). The page used to add up the at
+    /// most 100 runs it had loaded, Live and Sandbox together.
+    pub fn strategy_detail(&self, strategy: &StrategyRow) -> Result<Value, AppError> {
+        let mut detail = strategy.to_dict(true);
+        detail["realized_by_mode"] = self.store.realized_by_mode(strategy.id)?;
+        Ok(detail)
     }
 
     fn as_error(response: Value, fallback: &str) -> Value {
@@ -346,7 +375,7 @@ impl StrategyModule {
             Err(answer) => return Ok(answer),
         };
         let ids: HashSet<String> = self
-            .order_rows(strategy_id, run_id)?
+            .order_rows(strategy_id, run_id, mode)?
             .into_iter()
             .filter_map(|r| r.broker_order_id.filter(|b| !b.trim().is_empty()))
             .collect();
@@ -381,7 +410,7 @@ impl StrategyModule {
             Err(answer) => return Ok(answer),
         };
         let ids: HashSet<String> = self
-            .order_rows(strategy_id, run_id)?
+            .order_rows(strategy_id, run_id, mode)?
             .into_iter()
             .filter_map(|r| r.broker_order_id.filter(|b| !b.trim().is_empty()))
             .collect();
@@ -418,8 +447,8 @@ impl StrategyModule {
             .get_strategy_unscoped(strategy_id)?
             .map(|s| s.product.to_ascii_uppercase())
             .unwrap_or_default();
-        // Lifetime owners: a prior run can still own a position.
-        let owners = residual_owners(&self.order_rows(strategy_id, None)?, &product);
+        // Lifetime owners of this mode: a prior run can still own a position.
+        let owners = residual_owners(&self.order_rows(strategy_id, None, mode)?, &product);
         let mut payload = match self.gateway.book(mode, Book::Positions).await {
             Ok(p) => p,
             Err(e) => return Ok(Self::as_error(e, "Could not read the positions")),

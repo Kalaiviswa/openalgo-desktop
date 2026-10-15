@@ -148,6 +148,8 @@ pub struct FakeGateway {
     pub delay_ms: AtomicU64,
     /// When set, every price request waits here.
     pub ltp_gate: Mutex<Option<Arc<Gate>>>,
+    /// The rows of the position book, whichever mode is read.
+    pub position_rows: Mutex<Vec<Value>>,
     n: AtomicU64,
 }
 
@@ -251,8 +253,13 @@ impl OrderGateway for FakeGateway {
         }
     }
 
-    async fn book(&self, _mode: RunMode, _book: Book) -> Result<Value, Value> {
-        Ok(json!({"status": "success", "data": []}))
+    async fn book(&self, _mode: RunMode, book: Book) -> Result<Value, Value> {
+        Ok(match book {
+            Book::Positions => {
+                json!({"status": "success", "data": *self.position_rows.lock(), "total_pnl": 0})
+            }
+            _ => json!({"status": "success", "data": []}),
+        })
     }
 
     async fn ltp(&self, symbol: &str, exchange: &str) -> Result<f64, String> {

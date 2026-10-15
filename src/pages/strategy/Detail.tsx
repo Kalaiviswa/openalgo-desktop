@@ -85,7 +85,9 @@ import {
   universeTabLabel,
 } from '@/types/strategy_module'
 import { showToast } from '@/utils/toast'
+import { OtherModePositions } from './OtherModePositions'
 import { RecordsUnavailable } from './RecordsUnavailable'
+import { finalisedRealized, modeLabel, ordersOfMode, runModeIndex } from './runModes'
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -841,9 +843,17 @@ export function PositionsTab({
   // stranded by an earlier run and the realized-lifetime column. Runtime legs
   // are different—they are a mark frame owned by one exact run, so a stale
   // frame must never value the authoritative run's local fallback.
+  // Desktop (SM-03): only the orders of this book's mode are its positions;
+  // the other mode's residuals are listed apart (OtherModePositions).
+  const modes = useMemo(() => runModeIndex(runs, orders), [runs, orders])
+  const viewMode = runId === null ? null : (modes.get(runId) ?? null)
+  const bookOrders = useMemo(
+    () => (viewMode === null ? orders : ordersOfMode(orders, modes, viewMode)),
+    [orders, modes, viewMode]
+  )
   const derived = useMemo(
-    () => derivePositions(orders, strategy.product, live.runId === runId ? live.legs : []),
-    [orders, strategy.product, live.runId, live.legs, runId]
+    () => derivePositions(bookOrders, strategy.product, live.runId === runId ? live.legs : []),
+    [bookOrders, strategy.product, live.runId, live.legs, runId]
   )
   const broker = useBrokerBook(
     strategy.id,
@@ -909,19 +919,21 @@ export function PositionsTab({
   }, [broker.rows, derived])
 
   const checkpoint = strategy.status === 'running' && live.runId === runId ? live.checkpoint : null
-  // Lifetime realized is the sum of every finalised run. The current run's
-  // in-flight realized comes from the checkpoint, because its run row is not
-  // written until the run ends.
-  const historicalRealized = runs
-    .filter((run) => run.id !== runId)
-    .reduce((sum, run) => sum + run.pnl_realized, 0)
+  // Lifetime realized is the sum of every finalised run of this book's mode,
+  // summed by the server over the whole history (desktop, SM-05: the runs list
+  // holds at most 100 and mixes modes). The current run's in-flight realized
+  // comes from the checkpoint, because its run row is not written until the
+  // run ends.
+  const finalisedTotal = finalisedRealized(strategy, viewMode)
   const runRealized = stoppedRun?.pnl_realized ?? checkpoint?.pnl_realized ?? null
   const runUnrealized = stoppedRun ? 0 : (checkpoint?.pnl_unrealized ?? null)
   const runTotal = stoppedRun?.pnl_realized ?? checkpoint?.pnl_total ?? null
   // Historical runs are known, but the lifetime total is not: an active run
   // with no checkpoint may already have realized P&L. Never add an invented
   // zero contribution just to keep the tile numeric.
-  const cumulativeRealized = runRealized === null ? null : historicalRealized + runRealized
+  const inFlightRealized = stoppedRun ? 0 : (checkpoint?.pnl_realized ?? null)
+  const cumulativeRealized =
+    finalisedTotal === null || inFlightRealized === null ? null : finalisedTotal + inFlightRealized
   const formatCurrentPnl = stoppedRun ? formatPnl : formatLivePnl
 
   return (
@@ -968,7 +980,9 @@ export function PositionsTab({
               <div className={cn('font-mono text-xl font-bold', pnlToneClass(cumulativeRealized))}>
                 {formatLivePnl(cumulativeRealized)}
               </div>
-              <div className="text-[10px] text-muted-foreground">Lifetime across all runs</div>
+              <div className="text-[10px] text-muted-foreground">
+                Lifetime across all {viewMode === null ? '' : `${modeLabel(viewMode)} `}runs
+              </div>
             </div>
           </div>
 
@@ -1066,6 +1080,12 @@ export function PositionsTab({
           )}
         </CardContent>
       </Card>
+      <OtherModePositions
+        orders={orders}
+        modes={modes}
+        viewMode={viewMode}
+        product={strategy.product}
+      />
     </div>
   )
 }
@@ -1862,18 +1882,17 @@ function HistoryTab({ runs, orders }: { runs: Run[]; orders: Order[] }) {
 
   const allTrips = useMemo(() => buildRoundTrips(orders), [orders])
 
-  const runModeById = useMemo(() => {
-    const map = new Map<number, string>()
-    for (const run of runs) map.set(run.id, run.mode)
-    return map
-  }, [runs])
+  // Desktop (SM-05): by the mode stamped on each order, not only the at most
+  // 100 runs loaded; a trip of an unknown run is in neither mode, never Sandbox.
+  const runModeById = useMemo(() => runModeIndex(runs, orders), [runs, orders])
 
   const tripsByMode = useMemo(() => {
     const live: RoundTrip[] = []
     const sandbox: RoundTrip[] = []
     for (const trip of allTrips) {
-      if (runModeById.get(trip.run_id) === 'live') live.push(trip)
-      else sandbox.push(trip)
+      const mode = runModeById.get(trip.run_id)
+      if (mode === 'live') live.push(trip)
+      else if (mode === 'sandbox') sandbox.push(trip)
     }
     return { live, sandbox }
   }, [allTrips, runModeById])
@@ -1899,7 +1918,7 @@ function HistoryTab({ runs, orders }: { runs: Run[]; orders: Order[] }) {
       } else {
         byRun.set(trip.run_id, {
           run_id: trip.run_id,
-          mode: runModeById.get(trip.run_id) ?? 'sandbox',
+          mode: runModeById.get(trip.run_id) ?? 'unknown',
           entry_time: trip.entry_time,
           exit_time: trip.exit_time,
           num_legs: 1,

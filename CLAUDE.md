@@ -793,6 +793,14 @@ Every flaky test found so far was a race, not a slow machine:
   "not found" (SM-04). The web's store turns it into an empty success; the
   desktop's `/api/v1/strategy` runs, orders and events answer the web's
   500 "An unexpected error occurred" instead.
+- A strategy order is Live or Sandbox by the run that placed it
+  (`strategy/store/by_mode.rs`, SM-03, SM-05). A book of one mode is
+  attributed only to that mode's orders, and the Detail page lists the
+  other mode's residuals apart; a run whose mode the page does not know is
+  unknown, never Sandbox; lifetime realized comes per mode from the server
+  (`realized_by_mode` on the strategy). The web matches owners of every mode
+  by contract and sums the at most 100 runs it loaded. `/api/v1/strategy/orders`
+  keeps the web's order dict, without `mode`.
 
 ### Sandbox deviations from the web
 

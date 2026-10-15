@@ -36,5 +36,6 @@ mod strategy_module_state;
 mod strategy_module_validation;
 mod strategy_module_webhook;
 mod strategy_restx_api;
+mod strategy_views;
 mod unconfirmed_orders;
 mod webhook_security;

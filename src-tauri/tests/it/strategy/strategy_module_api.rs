@@ -440,3 +440,41 @@ async fn an_unreadable_strategy_is_an_error_not_not_found() {
     assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", b);
     assert_ne!(b["message"], "Strategy not found");
 }
+
+// ------------------------------------------------- SM-03, SM-05
+
+#[tokio::test]
+async fn the_page_reads_orders_with_their_run_mode_and_the_api_keeps_the_web_shape() {
+    let a = app();
+    let (_, b) = a.post("/strategy/api/strategies", create_body()).await;
+    let sid = b["data"]["id"].as_i64().unwrap();
+    let (s, b) = a
+        .post(
+            &format!("/strategy/api/strategies/{}/start", sid),
+            json!({"mode": "sandbox"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    let (s, b) = a
+        .get(&format!("/strategy/api/strategies/{}/orders", sid))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    let rows = b["data"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{}", b);
+    assert!(rows.iter().all(|o| o["mode"] == "sandbox"), "{}", b);
+    // /api/v1 answers the web's order dict, field for field.
+    let (s, b) = a
+        .api("/api/v1/strategy/orders", json!({"strategy_id": sid}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    let rows = b["data"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{}", b);
+    assert!(rows.iter().all(|o| o.get("mode").is_none()), "{}", b);
+    // The page's lifetime totals come per mode from the server.
+    let (s, b) = a.get(&format!("/strategy/api/strategies/{}", sid)).await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    assert_eq!(
+        b["data"]["realized_by_mode"],
+        json!({"live": 0.0, "sandbox": 0.0})
+    );
+}
