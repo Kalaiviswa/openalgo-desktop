@@ -3952,6 +3952,7 @@ dependencies = [
  "flate2",
  "font8x8",
  "futures-util",
+ "h2",
  "hex",
  "hmac 0.12.1",
  "http-body-util",
