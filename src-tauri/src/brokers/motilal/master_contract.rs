@@ -233,123 +233,138 @@ pub fn parse_scrip_csv(text: &str, file_exchange: &str) -> Vec<SymToken> {
         option: h.index("optiontype"),
     };
     // (row, cash series rank) in file order.
-    let mut rows: Vec<(SymToken, Option<bool>)> = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let f = split_csv_line(line);
-        let get = |i: Option<usize>| -> &str {
-            i.and_then(|i| f.get(i)).map(String::as_str).unwrap_or("")
-        };
-        let get_na = |i: Option<usize>| -> Option<&str> {
-            let v = get(i);
-            (!is_na(v)).then_some(v)
-        };
-        let raw_token = get(Some(c.token));
-        if is_na(raw_token) {
-            continue;
-        }
-        let brsymbol = get_na(Some(c.scripname)).unwrap_or("").to_string();
-        let mut name = get_na(c.short).unwrap_or("").to_string();
-        let brexchange = get_na(c.brexchange).unwrap_or(file_exchange).to_string();
-        let mut exchange = exchange_map(&brexchange);
-        let expiry = expiry_from_scripname(&brsymbol);
-        let mut strike = get_na(c.strike).and_then(num).unwrap_or(0.0);
-        let lot_size = get_na(c.lot).and_then(num).map(|v| v as i32).unwrap_or(1);
-        let tick_size = get_na(c.tick)
-            .and_then(num)
-            .filter(|t| *t > 0.0)
-            .unwrap_or(0.05);
-        let option = match c.option {
-            Some(_) => get_na(c.option).unwrap_or("XX").to_string(),
-            None => "XX".to_string(),
-        };
-        let mut itype = get_na(c.itype).unwrap_or("").trim().to_ascii_uppercase();
-        if itype.contains("FUT") && option == "XX" {
-            itype = "FUT".into();
-        }
-        if option == "CE" || option == "PE" {
-            itype = option.clone();
-        }
-        if itype.contains("IDX") {
-            match exchange.as_str() {
-                "NSE" => exchange = "NSE_INDEX".into(),
-                "BSE" => exchange = "BSE_INDEX".into(),
-                "MCX" => exchange = "MCX_INDEX".into(),
-                _ => {}
-            }
-        }
-        if (exchange == "NSE" || exchange == "BSE") && itype.is_empty() {
-            itype = "EQ".into();
-        }
-        if itype != "CE" && itype != "PE" {
-            strike = 0.0;
-        }
-        if exchange == "BFO" {
-            if let Some(a) = lookup(BFO_UNDERLYING_ALIASES, &name) {
-                name = a.to_string();
-            }
-        }
-        let deriv = matches!(itype.as_str(), "FUT" | "CE" | "PE");
-        let compact = expiry.replace('-', "");
-        let mut symbol = brsymbol.clone();
-        let mut cash_rank = None;
-        if deriv && !expiry.is_empty() {
-            symbol = if itype == "FUT" {
-                format!("{}{}FUT", name, compact)
-            } else {
-                format!("{}{}{}{}", name, compact, format_strike(strike), itype)
-            };
-        } else if deriv {
-            tracing::debug!(
-                "Motilal Oswal derivative {} has no expiry in its name",
-                brsymbol
-            );
-        }
-        if (exchange == "NSE" || exchange == "BSE") && !deriv {
-            let series = option.trim();
-            let bare = name.trim();
-            let stripped = if !series.is_empty()
-                && series != "XX"
-                && brsymbol.ends_with(&format!(" {}", series))
-            {
-                brsymbol[..brsymbol.len() - series.len() - 1]
-                    .trim()
-                    .to_string()
-            } else {
-                brsymbol.trim().to_string()
-            };
-            symbol = if bare.is_empty() {
-                stripped
-            } else {
-                bare.to_string()
-            };
-            cash_rank = Some(series != "EQ");
-        }
-        if exchange == "NSE_INDEX" {
-            symbol = normalize_nse_index(&symbol);
-        } else if exchange == "BSE_INDEX" {
-            symbol = normalize_bse_index(&symbol);
-        }
-        rows.push((
-            SymToken {
-                symbol,
-                brsymbol,
-                name,
-                exchange,
-                brexchange,
-                token: token_str(raw_token),
-                expiry,
-                strike,
-                lot_size,
-                instrument_type: itype,
-                tick_size,
-            },
-            cash_rank,
-        ));
+    let rows: Vec<(SymToken, Option<bool>)> = lines
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| parse_row(&c, line, file_exchange))
+        .collect();
+    keep_eq_series(rows)
+}
+
+/// One scrip-master line as a master row, and for a cash row whether its
+/// series is other than EQ; `None` for a row without a scrip code.
+fn parse_row(c: &Cols, line: &str, file_exchange: &str) -> Option<(SymToken, Option<bool>)> {
+    let f = split_csv_line(line);
+    let get =
+        |i: Option<usize>| -> &str { i.and_then(|i| f.get(i)).map(String::as_str).unwrap_or("") };
+    let get_na = |i: Option<usize>| -> Option<&str> {
+        let v = get(i);
+        (!is_na(v)).then_some(v)
+    };
+    let raw_token = get(Some(c.token));
+    if is_na(raw_token) {
+        return None;
     }
-    // Cash rows: the EQ series wins its (symbol, exchange) (stable).
+    let brsymbol = get_na(Some(c.scripname)).unwrap_or("").to_string();
+    let mut name = get_na(c.short).unwrap_or("").to_string();
+    let brexchange = get_na(c.brexchange).unwrap_or(file_exchange).to_string();
+    let expiry = expiry_from_scripname(&brsymbol);
+    let mut strike = get_na(c.strike).and_then(num).unwrap_or(0.0);
+    let lot_size = get_na(c.lot).and_then(num).map(|v| v as i32).unwrap_or(1);
+    let tick_size = get_na(c.tick)
+        .and_then(num)
+        .filter(|t| *t > 0.0)
+        .unwrap_or(0.05);
+    let option = match c.option {
+        Some(_) => get_na(c.option).unwrap_or("XX").to_string(),
+        None => "XX".to_string(),
+    };
+    let raw_itype = get_na(c.itype).unwrap_or("").trim().to_ascii_uppercase();
+    let (itype, exchange) = kind_and_exchange(raw_itype, &option, exchange_map(&brexchange));
+    if itype != "CE" && itype != "PE" {
+        strike = 0.0;
+    }
+    if exchange == "BFO" {
+        if let Some(a) = lookup(BFO_UNDERLYING_ALIASES, &name) {
+            name = a.to_string();
+        }
+    }
+    let deriv = matches!(itype.as_str(), "FUT" | "CE" | "PE");
+    let compact = expiry.replace('-', "");
+    let mut symbol = brsymbol.clone();
+    let mut cash_rank = None;
+    if deriv && !expiry.is_empty() {
+        symbol = if itype == "FUT" {
+            format!("{}{}FUT", name, compact)
+        } else {
+            format!("{}{}{}{}", name, compact, format_strike(strike), itype)
+        };
+    } else if deriv {
+        tracing::debug!(
+            "Motilal Oswal derivative {} has no expiry in its name",
+            brsymbol
+        );
+    }
+    if (exchange == "NSE" || exchange == "BSE") && !deriv {
+        symbol = cash_symbol(&brsymbol, &name, &option);
+        cash_rank = Some(option.trim() != "EQ");
+    }
+    if exchange == "NSE_INDEX" {
+        symbol = normalize_nse_index(&symbol);
+    } else if exchange == "BSE_INDEX" {
+        symbol = normalize_bse_index(&symbol);
+    }
+    Some((
+        SymToken {
+            symbol,
+            brsymbol,
+            name,
+            exchange,
+            brexchange,
+            token: token_str(raw_token),
+            expiry,
+            strike,
+            lot_size,
+            instrument_type: itype,
+            tick_size,
+        },
+        cash_rank,
+    ))
+}
+
+/// The OpenAlgo instrument type and exchange: a future without an option
+/// type is FUT, an option takes its type, an index moves to its exchange's
+/// index, and a cash row without a type is EQ.
+fn kind_and_exchange(mut itype: String, option: &str, mut exchange: String) -> (String, String) {
+    if itype.contains("FUT") && option == "XX" {
+        itype = "FUT".into();
+    }
+    if option == "CE" || option == "PE" {
+        itype = option.to_string();
+    }
+    if itype.contains("IDX") {
+        match exchange.as_str() {
+            "NSE" => exchange = "NSE_INDEX".into(),
+            "BSE" => exchange = "BSE_INDEX".into(),
+            "MCX" => exchange = "MCX_INDEX".into(),
+            _ => {}
+        }
+    }
+    if (exchange == "NSE" || exchange == "BSE") && itype.is_empty() {
+        itype = "EQ".into();
+    }
+    (itype, exchange)
+}
+
+/// A cash row's symbol: the short name, else the scrip name without its
+/// series suffix.
+fn cash_symbol(brsymbol: &str, name: &str, option: &str) -> String {
+    let series = option.trim();
+    let bare = name.trim();
+    if !bare.is_empty() {
+        return bare.to_string();
+    }
+    if !series.is_empty() && series != "XX" && brsymbol.ends_with(&format!(" {}", series)) {
+        brsymbol[..brsymbol.len() - series.len() - 1]
+            .trim()
+            .to_string()
+    } else {
+        brsymbol.trim().to_string()
+    }
+}
+
+/// Cash rows: the EQ series wins its (symbol, exchange); the rest keep
+/// their order.
+fn keep_eq_series(rows: Vec<(SymToken, Option<bool>)>) -> Vec<SymToken> {
     let mut cash: Vec<usize> = (0..rows.len()).filter(|i| rows[*i].1.is_some()).collect();
     cash.sort_by_key(|i| rows[*i].1.unwrap_or(true));
     let mut seen: HashSet<(String, String)> = HashSet::new();
