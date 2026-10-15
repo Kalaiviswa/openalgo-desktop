@@ -46,13 +46,14 @@ import {
   getHeldOrders,
   getMetricsHistory,
   type HealthAlert,
-  type HealthLevel,
   type HealthStats,
   type HeldOrder,
   type HistoricalMetric,
   hasHealthSamples,
-  markHeldOrderNotPlaced,
 } from '@/api/health'
+import { NoHealthSamples } from '@/components/desktop/health/NoHealthSamples'
+import { formatAge, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
+import { UnconfirmedOrders } from '@/components/desktop/health/UnconfirmedOrders'
 // Alert components removed - using custom styled divs for theme compatibility
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -149,23 +150,6 @@ function formatIstTime(timestamp: string): string {
   return formatIstDateTime(timestamp, { year: undefined, month: undefined, day: undefined })
 }
 
-/** A sample older than two sampling periods no longer describes the app. */
-const SAMPLE_STALE_AFTER_S = 120
-
-/** The sample's age as the server reports it, else from its timestamp. */
-function sampleAgeSeconds(metrics: CurrentMetrics): number | null {
-  if (typeof metrics.sample_age_s === 'number') return metrics.sample_age_s
-  const taken = Date.parse(metrics.timestamp)
-  if (Number.isNaN(taken)) return null
-  return Math.max(0, Math.round((Date.now() - taken) / 1000))
-}
-
-function formatAge(seconds: number): string {
-  if (seconds < 120) return `${seconds} s ago`
-  if (seconds < 7200) return `${Math.floor(seconds / 60)} min ago`
-  return `${Math.floor(seconds / 3600)} h ago`
-}
-
 // Check if dark mode is active
 function isDarkMode(): boolean {
   return document.documentElement.classList.contains('dark')
@@ -177,7 +161,6 @@ export default function HealthMonitor() {
   const [stats, setStats] = useState<HealthStats | EmptyHealthStats | null>(null)
   const [alerts, setAlerts] = useState<HealthAlert[]>([])
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([])
-  const [confirmingHeld, setConfirmingHeld] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -438,22 +421,6 @@ export default function HealthMonitor() {
     }
   }
 
-  const heldKey = (order: HeldOrder) => `${order.owner}:${order.id}`
-
-  const handleNotPlaced = async (order: HeldOrder) => {
-    try {
-      await markHeldOrderNotPlaced(order.owner, order.id)
-      showToast.success('Marked as not placed. The position is managed again.', 'monitoring')
-      setConfirmingHeld(null)
-      fetchData()
-    } catch (_error) {
-      showToast.error(
-        'Could not mark the order as not placed. Refresh the page and try again.',
-        'monitoring'
-      )
-    }
-  }
-
   const handleExport = () => {
     window.open(exportMetricsCSV(24), '_blank')
     showToast.success('Exporting metrics to CSV', 'monitoring')
@@ -467,21 +434,8 @@ export default function HealthMonitor() {
     )
   }
 
-  // Desktop: a missing or stale sample is UNKNOWN, never the PASS it last
-  // showed; the readings stay on screen, in neutral colours.
-  const sampleAge = currentMetrics ? sampleAgeSeconds(currentMetrics) : null
-  const stale =
-    currentMetrics !== null &&
-    (currentMetrics.overall_status === 'unknown' ||
-      sampleAge === null ||
-      sampleAge > SAMPLE_STALE_AFTER_S)
-  const overallStatus = stale ? 'unknown' : (currentMetrics?.overall_status ?? 'unknown')
-  const staleReason = stale
-    ? (currentMetrics?.reason ??
-      `No health sample${sampleAge === null ? '' : ` for ${formatAge(sampleAge).replace(' ago', '')}`}. Health sampling may have stopped; restart OpenAlgo if this continues.`)
-    : null
-  const cardStatus = (status: HealthLevel | undefined): HealthLevel =>
-    stale ? 'unknown' : status || 'unknown'
+  // Desktop: a missing or stale sample is UNKNOWN, never the PASS it last showed.
+  const { overallStatus, sampleAge, staleReason, cardStatus } = sampleFreshness(currentMetrics)
 
   return (
     <div className="container mx-auto p-6 space-y-6">
@@ -627,15 +581,7 @@ export default function HealthMonitor() {
         </Card>
       </div>
 
-      {/* An empty window has no figures to show (the groups come back empty). */}
-      {stats && !hasHealthSamples(stats) && (
-        <Card>
-          <CardContent className="p-4 text-sm text-muted-foreground">
-            No health samples in the last {stats.time_period_hours} hours yet. OpenAlgo records one
-            every minute while it runs; check back shortly.
-          </CardContent>
-        </Card>
-      )}
+      <NoHealthSamples stats={stats} />
 
       {/* Statistics - 2x2 grid for balanced layout */}
       {stats && hasHealthSamples(stats) && (
@@ -860,61 +806,7 @@ export default function HealthMonitor() {
         </CardContent>
       </Card>
 
-      {/* Unconfirmed live orders held for the trader */}
-      {heldOrders.length > 0 && (
-        <Card className="border-destructive/50">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-destructive">
-              Unconfirmed Orders ({heldOrders.length})
-            </CardTitle>
-            <CardDescription>
-              The broker did not confirm these orders and does not show them. They are not sent
-              again. Check the broker's order book and trade book; if an order is not there, mark it
-              as not placed to resume.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {heldOrders.map((order) => (
-                <div
-                  key={heldKey(order)}
-                  className="rounded-lg border border-red-500/50 bg-red-500/10 p-3 flex items-start justify-between gap-4"
-                >
-                  <div>
-                    <p className="font-medium">
-                      {order.action} {order.quantity} {order.symbol} ({order.exchange})
-                    </p>
-                    <p className="text-sm text-muted-foreground">{order.message}</p>
-                    <p className="text-xs text-muted-foreground">Since {order.since}</p>
-                  </div>
-                  {confirmingHeld === heldKey(order) ? (
-                    <div className="flex gap-2">
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => handleNotPlaced(order)}
-                      >
-                        Confirm not placed
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => setConfirmingHeld(null)}>
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setConfirmingHeld(heldKey(order))}
-                    >
-                      Not placed
-                    </Button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <UnconfirmedOrders orders={heldOrders} onResolved={() => fetchData()} />
 
       {/* Active Alerts */}
       {alerts.length > 0 && (

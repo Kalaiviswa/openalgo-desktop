@@ -17,7 +17,6 @@
     "src/lib/strategyMath.ts": "web",
     "src/lib/trading/chartProfiles.ts": "web",
     "src/lib/trading/terminal.ts": "web",
-    "src/pages/HealthMonitor.tsx": 1019,
     "src/pages/Historify.tsx": "web",
     "src/pages/OptionChain.tsx": "web",
     "src/pages/Playground.tsx": "web",
