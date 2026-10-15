@@ -79,6 +79,7 @@ mod feed_budget;
 mod feed_conformance;
 mod feed_hygiene;
 mod feed_soak;
+mod freeze_limits;
 mod historify;
 mod mcp_caps;
 mod mcp_contract;
