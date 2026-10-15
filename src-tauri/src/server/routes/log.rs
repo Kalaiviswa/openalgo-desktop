@@ -2,9 +2,10 @@
 //! `logs.db` `order_logs`), paged as JSON and exported as CSV. Request
 //! bodies were stored without the API key; it is removed again here.
 
-use crate::db::sqlite::monitor::{self as store, OrderLogRow};
+use crate::db::sqlite::monitor::OrderLogRow;
 use crate::server::envelope::error;
 use crate::server::routes::webui::{csv_row, download, failed, ok};
+use crate::services::order_log_service::{self, PER_PAGE};
 use crate::state::AppState;
 use axum::{
     extract::{Query, State},
@@ -20,8 +21,6 @@ use std::sync::Arc;
 type Ctx = State<Arc<AppState>>;
 type Q = Query<HashMap<String, String>>;
 
-const PER_PAGE: i64 = 20;
-
 fn utc_iso_of_ist_midnight(d: NaiveDate) -> String {
     Kolkata
         .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap_or_default())
@@ -34,15 +33,18 @@ fn utc_iso_of_ist_midnight(d: NaiveDate) -> String {
         .unwrap_or_default()
 }
 
+/// The answer to a date that is not `YYYY-MM-DD`.
+fn bad_date() -> Response {
+    error(StatusCode::BAD_REQUEST, "Choose dates as YYYY-MM-DD.")
+}
+
 /// UTC bounds for an IST date range; today in IST when neither is given.
-#[allow(clippy::result_large_err)]
-fn range(ctx: &AppState, q: &HashMap<String, String>) -> Result<(String, String), Response> {
-    let parse = |k: &str| -> Result<Option<NaiveDate>, Response> {
+/// `None`: a date is not `YYYY-MM-DD`.
+fn range(ctx: &AppState, q: &HashMap<String, String>) -> Option<(String, String)> {
+    let parse = |k: &str| -> Option<Option<NaiveDate>> {
         match q.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            None => Ok(None),
-            Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .map(Some)
-                .map_err(|_| error(StatusCode::BAD_REQUEST, "Choose dates as YYYY-MM-DD.")),
+            None => Some(None),
+            Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().map(Some),
         }
     };
     let start = parse("start_date")?;
@@ -60,7 +62,7 @@ fn range(ctx: &AppState, q: &HashMap<String, String>) -> Result<(String, String)
     let to = to
         .map(|d| utc_iso_of_ist_midnight(d + Duration::days(1)))
         .unwrap_or_else(|| "9999".into());
-    Ok((from, to))
+    Some((from, to))
 }
 
 fn sanitize(v: Value) -> Value {
@@ -97,9 +99,8 @@ fn entry(row: &OrderLogRow) -> Value {
 
 /// GET /logs (JSON request): `{logs, total_pages, current_page}`.
 pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
-    let (from, to) = match range(&ctx, &q) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some((from, to)) = range(&ctx, &q) else {
+        return bad_date();
     };
     let page = q
         .get("page")
@@ -110,16 +111,7 @@ pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
         .get("search")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let r = ctx.logs.conn().and_then(|c| {
-        store::order_logs_page(
-            &c,
-            &from,
-            &to,
-            search.as_deref(),
-            Some(((page - 1) * PER_PAGE, PER_PAGE)),
-        )
-    });
-    match r {
+    match order_log_service::page(&ctx, &from, &to, search.as_deref(), page) {
         Ok((rows, total)) => {
             let total_pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
             ok(json!({
@@ -138,20 +130,15 @@ pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
 
 /// GET /logs/export: every matching entry as CSV (web column set).
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
-    let (from, to) = match range(&ctx, &q) {
-        Ok(r) => r,
-        Err(r) => return r,
+    let Some((from, to)) = range(&ctx, &q) else {
+        return bad_date();
     };
     let search = q
         .get("search")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let r = ctx
-        .logs
-        .conn()
-        .and_then(|c| store::order_logs_page(&c, &from, &to, search.as_deref(), None));
-    let rows = match r {
-        Ok((rows, _)) => rows,
+    let rows = match order_log_service::all(&ctx, &from, &to, search.as_deref()) {
+        Ok(rows) => rows,
         Err(e) => {
             return failed(
                 "Exporting order logs",
@@ -160,6 +147,13 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
             )
         }
     };
+    let out = export_csv(&rows);
+    let stamp = ctx.now().with_timezone(&Kolkata).format("%Y%m%d_%H%M%S");
+    download(out, "text/csv", &format!("openalgo_logs_{}.csv", stamp))
+}
+
+/// The web's CSV columns for the order log, one line per entry.
+fn export_csv(rows: &[OrderLogRow]) -> String {
     let mut out = csv_row(
         &[
             "ID",
@@ -181,7 +175,7 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
         ]
         .map(String::from),
     );
-    for row in &rows {
+    for row in rows {
         let e = entry(row);
         let rq = &e["request_data"];
         let f = |k: &str| match rq.get(k) {
@@ -208,6 +202,5 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
             e["response_data"].to_string(),
         ]));
     }
-    let stamp = ctx.now().with_timezone(&Kolkata).format("%Y%m%d_%H%M%S");
-    download(out, "text/csv", &format!("openalgo_logs_{}.csv", stamp))
+    out
 }

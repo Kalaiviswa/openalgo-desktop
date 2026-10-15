@@ -183,6 +183,107 @@ pub fn active_sessions(ctx: &AppState, current_session_id: &str) -> Value {
     })
 }
 
+/// Block `ip` by the trader's hand (`created_by` "manual"), for `hours`
+/// unless `permanent`. The monitor's ban cache is reloaded when it was
+/// stored. `false`: the store refused it.
+pub fn ban_address(
+    ctx: &AppState,
+    ip: &str,
+    reason: &str,
+    hours: Option<i64>,
+    permanent: bool,
+) -> Result<bool> {
+    let now = ctx.now();
+    let limit = ctx.monitor.security_settings(ctx).repeat_offender_limit;
+    let banned = {
+        let c = ctx.logs.conn()?;
+        store::ban_ip(&c, ip, reason, hours, permanent, "manual", now, limit)?
+    };
+    if banned {
+        ctx.monitor.reload_bans(ctx);
+    }
+    Ok(banned)
+}
+
+/// Block every address seen in the request log with `host`
+/// (`created_by` "host_ban"), except the shared tunnel identity. Answers
+/// how many addresses the log has for the host and how many were blocked;
+/// the ban cache is reloaded when there were any.
+pub fn ban_host_addresses(
+    ctx: &AppState,
+    host: &str,
+    reason: &str,
+    hours: Option<i64>,
+    permanent: bool,
+) -> Result<(usize, usize)> {
+    let now = ctx.now();
+    let limit = ctx.monitor.security_settings(ctx).repeat_offender_limit;
+    ctx.monitor.drain_now(ctx);
+    let (found, banned) = {
+        let c = ctx.logs.conn()?;
+        let ips = store::traffic_ips_for_host(&c, host)?;
+        let mut n = 0;
+        for ip in &ips {
+            if !store::never_banned(ip)
+                && store::ban_ip(
+                    &c,
+                    ip,
+                    &format!("Host ban: {} - {}", host, reason),
+                    hours,
+                    permanent,
+                    "host_ban",
+                    now,
+                    limit,
+                )?
+            {
+                n += 1;
+            }
+        }
+        (ips.len(), n)
+    };
+    if found > 0 {
+        ctx.monitor.reload_bans(ctx);
+    }
+    Ok((found, banned))
+}
+
+/// Unblock `ip`; the ban cache is reloaded when it was blocked. `false`:
+/// it was not on the list.
+pub fn unban_address(ctx: &AppState, ip: &str) -> Result<bool> {
+    let unbanned = {
+        let c = ctx.logs.conn()?;
+        store::unban_ip(&c, ip)?
+    };
+    if unbanned {
+        ctx.monitor.reload_bans(ctx);
+    }
+    Ok(unbanned)
+}
+
+/// Clear the 404 tracker of `ip`. `false`: it had none.
+pub fn clear_404(ctx: &AppState, ip: &str) -> Result<bool> {
+    ctx.monitor.drain_now(ctx);
+    let c = ctx.logs.conn()?;
+    store::clear_404(&c, ip)
+}
+
+/// Save the thresholds; the monitor reads them again on its next check.
+pub fn save_settings(ctx: &AppState, s: &webui::SecuritySettings) -> Result<()> {
+    {
+        let c = ctx.sqlite.conn()?;
+        webui::set_security_settings(&c, s)?;
+    }
+    ctx.monitor.invalidate_settings();
+    Ok(())
+}
+
+/// Forget every recorded sign-in attempt.
+pub fn clear_login_activity(ctx: &AppState) -> Result<()> {
+    let c = ctx.logs.conn()?;
+    store::clear_login_attempts(&c)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
