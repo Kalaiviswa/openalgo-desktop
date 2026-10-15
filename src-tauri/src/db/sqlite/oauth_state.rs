@@ -50,17 +50,33 @@ impl Pending {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A browser sign-in that has started and waits for its callback.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingSignIn<'a> {
+    /// The OAuth `state` sent with it (stored hashed).
+    pub state: &'a str,
+    pub broker: &'a str,
+    pub redirect_uri: Option<&'a str>,
+    /// The browser session that started it (stored hashed).
+    pub session_id: Option<&'a str>,
+    /// The broker's own binding value, when it has one (stored hashed).
+    pub binding: Option<&'a str>,
+}
+
+/// Record a sign-in in progress, valid for `ttl` from `now`.
 pub fn insert(
     conn: &Connection,
-    state: &str,
-    broker: &str,
-    redirect_uri: Option<&str>,
-    session_id: Option<&str>,
-    binding: Option<&str>,
+    pending: PendingSignIn<'_>,
     now: DateTime<Utc>,
     ttl: Duration,
 ) -> Result<()> {
+    let PendingSignIn {
+        state,
+        broker,
+        redirect_uri,
+        session_id,
+        binding,
+    } = pending;
     conn.execute(
         "DELETE FROM pending_oauth WHERE expires_at <= ?1",
         [now.to_rfc3339()],
@@ -246,11 +262,13 @@ mod tests {
             let state = format!("s{}", trial);
             insert(
                 &db.conn().unwrap(),
-                &state,
-                "zerodha",
-                None,
-                None,
-                None,
+                PendingSignIn {
+                    state: &state,
+                    broker: "zerodha",
+                    redirect_uri: None,
+                    session_id: None,
+                    binding: None,
+                },
                 now,
                 Duration::minutes(10),
             )
@@ -299,11 +317,13 @@ mod tests {
         // New sign-ins carry their redirect address to the code exchange.
         insert(
             &c,
-            "s1",
-            "upstox",
-            Some("http://127.0.0.1:5500/upstox/callback"),
-            None,
-            None,
+            PendingSignIn {
+                state: "s1",
+                broker: "upstox",
+                redirect_uri: Some("http://127.0.0.1:5500/upstox/callback"),
+                session_id: None,
+                binding: None,
+            },
             now,
             Duration::minutes(10),
         )
@@ -328,25 +348,41 @@ mod tests {
         assert_eq!(consume_latest(&c, "dhan", "sess", now, w).unwrap(), None);
         let ttl = Duration::minutes(10);
         let sec = Duration::seconds;
-        insert(&c, "d1", "dhan", Some("r1"), Some("sess"), None, now, ttl).unwrap();
         insert(
             &c,
-            "d2",
-            "dhan",
-            Some("r2"),
-            Some("sess"),
-            Some("cid"),
+            PendingSignIn {
+                state: "d1",
+                broker: "dhan",
+                redirect_uri: Some("r1"),
+                session_id: Some("sess"),
+                binding: None,
+            },
+            now,
+            ttl,
+        )
+        .unwrap();
+        insert(
+            &c,
+            PendingSignIn {
+                state: "d2",
+                broker: "dhan",
+                redirect_uri: Some("r2"),
+                session_id: Some("sess"),
+                binding: Some("cid"),
+            },
             now + sec(1),
             ttl,
         )
         .unwrap();
         insert(
             &c,
-            "d3",
-            "dhan",
-            Some("r3"),
-            Some("other"),
-            None,
+            PendingSignIn {
+                state: "d3",
+                broker: "dhan",
+                redirect_uri: Some("r3"),
+                session_id: Some("other"),
+                binding: None,
+            },
             now + sec(1),
             ttl,
         )
@@ -372,18 +408,54 @@ mod tests {
             None
         );
         // A pasted address completes only the sign-in its own session started.
-        insert(&c, "p1", "dhan", None, Some("sess"), None, now, ttl).unwrap();
+        insert(
+            &c,
+            PendingSignIn {
+                state: "p1",
+                broker: "dhan",
+                redirect_uri: None,
+                session_id: Some("sess"),
+                binding: None,
+            },
+            now,
+            ttl,
+        )
+        .unwrap();
         assert_eq!(
             consume_for_session(&c, "p1", "dhan", "other", now).unwrap(),
             None
         );
         assert_eq!(consume(&c, "p1", "dhan", now).unwrap(), None, "used up");
-        insert(&c, "p2", "dhan", None, Some("sess"), None, now, ttl).unwrap();
+        insert(
+            &c,
+            PendingSignIn {
+                state: "p2",
+                broker: "dhan",
+                redirect_uri: None,
+                session_id: Some("sess"),
+                binding: None,
+            },
+            now,
+            ttl,
+        )
+        .unwrap();
         assert!(consume_for_session(&c, "p2", "dhan", "sess", now)
             .unwrap()
             .is_some());
         // A row with state still completes by state within the general expiry.
-        insert(&c, "d4", "dhan", None, Some("sess"), None, now, ttl).unwrap();
+        insert(
+            &c,
+            PendingSignIn {
+                state: "d4",
+                broker: "dhan",
+                redirect_uri: None,
+                session_id: Some("sess"),
+                binding: None,
+            },
+            now,
+            ttl,
+        )
+        .unwrap();
         assert!(consume(&c, "d4", "dhan", now + Duration::minutes(5))
             .unwrap()
             .is_some());

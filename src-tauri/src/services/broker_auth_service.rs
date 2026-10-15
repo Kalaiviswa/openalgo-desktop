@@ -228,11 +228,13 @@ impl BrokerAuthService {
             let conn = state.sqlite.conn()?;
             oauth_state::insert(
                 &conn,
-                &st,
-                broker,
-                Some(&redirect),
-                session_id,
-                binding.as_deref(),
+                oauth_state::PendingSignIn {
+                    state: &st,
+                    broker,
+                    redirect_uri: Some(&redirect),
+                    session_id,
+                    binding: binding.as_deref(),
+                },
                 state.now(),
                 chrono::Duration::minutes(OAUTH_STATE_TTL_MINUTES),
             )?;
