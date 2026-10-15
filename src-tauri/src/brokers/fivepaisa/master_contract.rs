@@ -129,6 +129,79 @@ pub fn index_symbol(raw: &str) -> String {
 /// (symbol, exchange).
 type RowKey = (String, String);
 
+/// The scrip master's columns a row is read from.
+struct Columns {
+    exch: usize,
+    kind: usize,
+    code: usize,
+    name: usize,
+    exp: usize,
+    stype: usize,
+    strike: usize,
+    root: usize,
+    series: usize,
+    lot: usize,
+    tick: usize,
+}
+
+/// One scrip master line as a master row, with its ScripCode and whether
+/// it is an index; `None` for a row OpenAlgo does not list.
+fn parse_row(c: &Columns, line: &str) -> Option<(SymToken, i64, bool)> {
+    let f = split_csv_line(line);
+    let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
+    let code: i64 = get(c.code).trim().parse::<f64>().ok()? as i64;
+    let exchange = row_exchange(get(c.exch).trim(), get(c.kind).trim(), code)?;
+    let raw_series = get(c.series);
+    if !matches!(raw_series, "EQ" | "BE" | "XX" | "  ") {
+        return None;
+    }
+    let series = if matches!(raw_series, "XX" | "  ") {
+        get(c.stype).trim().to_string()
+    } else {
+        raw_series.to_string()
+    };
+    let expiry = parse_broker_expiry(get(c.exp))
+        .map(format_expiry)
+        .unwrap_or_default();
+    let compact = expiry.replace('-', "");
+    let strike: f64 = get(c.strike).trim().parse().unwrap_or(0.0);
+    let root = get(c.root).trim().to_string();
+    let mut symbol = match series.as_str() {
+        "EQ" | "BE" => root.clone(),
+        "XX" => format!("{}{}FUT", root, compact),
+        "CE" | "PE" => format!("{}{}{}{}", root, compact, format_strike(strike), series),
+        _ => root.clone(),
+    };
+    let is_index = exchange.ends_with("_INDEX");
+    if is_index {
+        symbol = index_symbol(&symbol);
+    }
+    let instrument_type = match series.as_str() {
+        "XX" => "FUT".to_string(),
+        "BE" => "EQ".to_string(),
+        _ => series.clone(),
+    };
+    let name = if matches!(instrument_type.as_str(), "CE" | "PE" | "FUT") && !root.is_empty() {
+        root.clone()
+    } else {
+        symbol.clone()
+    };
+    let row = SymToken {
+        symbol,
+        brsymbol: get(c.name).to_ascii_uppercase().trim_end().to_string(),
+        name,
+        exchange: exchange.to_string(),
+        brexchange: exchange.to_string(),
+        token: code.to_string(),
+        expiry,
+        strike,
+        lot_size: get(c.lot).trim().parse::<f64>().unwrap_or(0.0) as i32,
+        instrument_type,
+        tick_size: get(c.tick).trim().parse().unwrap_or(0.0),
+    };
+    Some((row, code, is_index))
+}
+
 /// Parse the whole CSV.
 pub fn parse_csv(text: &str) -> Vec<SymToken> {
     let mut lines = text.lines();
@@ -138,17 +211,17 @@ pub fn parse_csv(text: &str) -> Vec<SymToken> {
     let h = CsvHeader::parse(head);
     let col = |n: &str| h.index(n);
     let (
-        Some(i_exch),
-        Some(i_type),
-        Some(i_code),
-        Some(i_name),
-        Some(i_exp),
-        Some(i_stype),
-        Some(i_strike),
-        Some(i_root),
-        Some(i_series),
-        Some(i_lot),
-        Some(i_tick),
+        Some(exch),
+        Some(kind),
+        Some(code),
+        Some(name),
+        Some(exp),
+        Some(stype),
+        Some(strike),
+        Some(root),
+        Some(series),
+        Some(lot),
+        Some(tick),
     ) = (
         col("Exch"),
         col("ExchType"),
@@ -169,6 +242,19 @@ pub fn parse_csv(text: &str) -> Vec<SymToken> {
         );
         return Vec::new();
     };
+    let c = Columns {
+        exch,
+        kind,
+        code,
+        name,
+        exp,
+        stype,
+        strike,
+        root,
+        series,
+        lot,
+        tick,
+    };
     let mut rows: Vec<SymToken> = Vec::new();
     // (symbol, exchange) -> (position in `rows`, ScripCode kept there).
     let mut kept: HashMap<RowKey, (usize, i64)> = HashMap::new();
@@ -179,62 +265,8 @@ pub fn parse_csv(text: &str) -> Vec<SymToken> {
         if line.trim().is_empty() {
             continue;
         }
-        let f = split_csv_line(line);
-        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
-        let code: i64 = match get(i_code).trim().parse::<f64>() {
-            Ok(c) => c as i64,
-            Err(_) => continue,
-        };
-        let Some(exchange) = row_exchange(get(i_exch).trim(), get(i_type).trim(), code) else {
+        let Some((row, code, is_index)) = parse_row(&c, line) else {
             continue;
-        };
-        let raw_series = get(i_series);
-        if !matches!(raw_series, "EQ" | "BE" | "XX" | "  ") {
-            continue;
-        }
-        let series = if matches!(raw_series, "XX" | "  ") {
-            get(i_stype).trim().to_string()
-        } else {
-            raw_series.to_string()
-        };
-        let expiry = parse_broker_expiry(get(i_exp))
-            .map(format_expiry)
-            .unwrap_or_default();
-        let compact = expiry.replace('-', "");
-        let strike: f64 = get(i_strike).trim().parse().unwrap_or(0.0);
-        let root = get(i_root).trim().to_string();
-        let mut symbol = match series.as_str() {
-            "EQ" | "BE" => root.clone(),
-            "XX" => format!("{}{}FUT", root, compact),
-            "CE" | "PE" => format!("{}{}{}{}", root, compact, format_strike(strike), series),
-            _ => root.clone(),
-        };
-        let is_index = exchange.ends_with("_INDEX");
-        if is_index {
-            symbol = index_symbol(&symbol);
-        }
-        let instrument_type = match series.as_str() {
-            "XX" => "FUT".to_string(),
-            "BE" => "EQ".to_string(),
-            _ => series.clone(),
-        };
-        let name = if matches!(instrument_type.as_str(), "CE" | "PE" | "FUT") && !root.is_empty() {
-            root.clone()
-        } else {
-            symbol.clone()
-        };
-        let row = SymToken {
-            symbol,
-            brsymbol: get(i_name).to_ascii_uppercase().trim_end().to_string(),
-            name,
-            exchange: exchange.to_string(),
-            brexchange: exchange.to_string(),
-            token: code.to_string(),
-            expiry,
-            strike,
-            lot_size: get(i_lot).trim().parse::<f64>().unwrap_or(0.0) as i32,
-            instrument_type,
-            tick_size: get(i_tick).trim().parse().unwrap_or(0.0),
         };
         if is_index {
             if seen_index.insert((row.symbol.clone(), row.exchange.clone())) {

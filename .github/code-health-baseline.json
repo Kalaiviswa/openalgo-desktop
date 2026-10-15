@@ -65,7 +65,6 @@
     "src-tauri/src/brokers/families/noren/auth.rs::authenticate": 101,
     "src-tauri/src/brokers/families/noren/data.rs::get_history": 129,
     "src-tauri/src/brokers/families/noren/master_contract.rs::parse_file": 190,
-    "src-tauri/src/brokers/fivepaisa/master_contract.rs::parse_csv": 137,
     "src-tauri/src/brokers/groww/data.rs::ohlc_batch": 101,
     "src-tauri/src/brokers/groww/streaming.rs::on_msg": 105,
     "src-tauri/src/brokers/hdfcsecurities/master_contract.rs::parse_security_master": 179,
