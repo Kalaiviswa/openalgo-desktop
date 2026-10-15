@@ -244,73 +244,56 @@ impl StrategyModule {
         self.signal_exit(strategy, run_id, &leg, lid, side).await
     }
 
-    /// The run this signal belongs to, opening one if the session has none.
-    /// Serialised per strategy so two alerts on one bar join one run.
-    async fn day_run(&self, strategy: &StrategyRow) -> Result<i64, String> {
-        let lock = self.day_run_lock(strategy.id);
-        let _held = lock.lock().await;
-        let current = self
-            .store
-            .get_strategy_unscoped(strategy.id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| strategy.clone());
-        if let Some(run_id) = current.current_run_id {
-            if let Ok(Some(run)) = self.store.get_run(run_id) {
-                if run.stopped_at.is_none() {
-                    let started = super::store::parse_utc(&run.started_at);
-                    let stale = started
-                        .map(|s| {
-                            super::session::started_before_today(
-                                s,
-                                self.clock.now(),
-                                self.session.0,
-                                self.session.1,
-                            )
-                        })
-                        .unwrap_or(false);
-                    if !stale {
-                        return Ok(run_id);
-                    }
-                    // A signal run IS a trading day: roll a stale one through
-                    // the durable stop, and only confirmed flatness opens a
-                    // replacement.
-                    tracing::info!("Rolling signal run {} through end-of-day stop", run_id);
-                    let r = self.stop_run(run_id, &current.user_id, "eod").await;
-                    if !r.ok || r.stop_pending {
-                        return Ok(run_id);
-                    }
-                    self.emit(
-                        strategy.id,
-                        &current.user_id,
-                        "eod_squareoff",
-                        "Previous day's run closed on the first signal of a new day",
-                        EventFields {
-                            run_id: Some(run_id),
-                            severity: Some("warn"),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                }
-            }
-        }
-        // Mode is the strategy's own opt-in: live only if enabled.
-        let mode = if current.live_enabled {
-            RunMode::Live
-        } else {
-            RunMode::Sandbox
+    /// The strategy's open run, kept while it started this session. A
+    /// signal run IS a trading day: a stale one is rolled through the
+    /// durable end-of-day stop, and only confirmed flatness lets a
+    /// replacement open (`None`).
+    async fn todays_open_run(&self, strategy: &StrategyRow, current: &StrategyRow) -> Option<i64> {
+        let run_id = current.current_run_id?;
+        let Ok(Some(run)) = self.store.get_run(run_id) else {
+            return None;
         };
-        // The claim re-checks the revision this mode was decided from and
-        // the webhook lock (SM-01).
-        if let Err(refusal) = self.claim_start(&current, mode, "webhook") {
-            if let Ok(Some(r)) = self.store.get_strategy_unscoped(strategy.id) {
-                if let Some(id) = r.current_run_id {
-                    return Ok(id);
-                }
-            }
-            return Err(refusal);
+        if run.stopped_at.is_some() {
+            return None;
         }
+        let started = super::store::parse_utc(&run.started_at);
+        let stale = started
+            .map(|s| {
+                super::session::started_before_today(
+                    s,
+                    self.clock.now(),
+                    self.session.0,
+                    self.session.1,
+                )
+            })
+            .unwrap_or(false);
+        if !stale {
+            return Some(run_id);
+        }
+        tracing::info!("Rolling signal run {} through end-of-day stop", run_id);
+        let r = self.stop_run(run_id, &current.user_id, "eod").await;
+        if !r.ok || r.stop_pending {
+            return Some(run_id);
+        }
+        self.emit(
+            strategy.id,
+            &current.user_id,
+            "eod_squareoff",
+            "Previous day's run closed on the first signal of a new day",
+            EventFields {
+                run_id: Some(run_id),
+                severity: Some("warn"),
+                ..Default::default()
+            },
+        )
+        .await;
+        None
+    }
+
+    /// Opens a signal run in `mode`: the run row, its live state, then the
+    /// strategy's link to it. A run that cannot be linked is finished and
+    /// the claim released; no order is placed.
+    fn open_signal_run(&self, strategy: &StrategyRow, mode: RunMode) -> Result<i64, String> {
         let broker = {
             let b = self.gateway.broker_name(mode);
             if b.is_empty() {
@@ -350,6 +333,40 @@ impl StrategyModule {
                 .finish_unlinked_run_and_release_claim(run_id, strategy.id, "error");
             return Err("Could not link the new signal run; no order was placed".into());
         }
+        Ok(run_id)
+    }
+
+    /// The run this signal belongs to, opening one if the session has none.
+    /// Serialised per strategy so two alerts on one bar join one run.
+    async fn day_run(&self, strategy: &StrategyRow) -> Result<i64, String> {
+        let lock = self.day_run_lock(strategy.id);
+        let _held = lock.lock().await;
+        let current = self
+            .store
+            .get_strategy_unscoped(strategy.id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| strategy.clone());
+        if let Some(run_id) = self.todays_open_run(strategy, &current).await {
+            return Ok(run_id);
+        }
+        // Mode is the strategy's own opt-in: live only if enabled.
+        let mode = if current.live_enabled {
+            RunMode::Live
+        } else {
+            RunMode::Sandbox
+        };
+        // The claim re-checks the revision this mode was decided from and
+        // the webhook lock (SM-01).
+        if let Err(refusal) = self.claim_start(&current, mode, "webhook") {
+            if let Ok(Some(r)) = self.store.get_strategy_unscoped(strategy.id) {
+                if let Some(id) = r.current_run_id {
+                    return Ok(id);
+                }
+            }
+            return Err(refusal);
+        }
+        let run_id = self.open_signal_run(strategy, mode)?;
         self.emit(
             strategy.id,
             &current.user_id,

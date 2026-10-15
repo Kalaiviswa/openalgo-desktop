@@ -46,7 +46,6 @@
     "src-tauri/src/strategy/reconcile.rs::reconcile_book": 132,
     "src-tauri/src/strategy/recovery.rs::rebuild_position": 148,
     "src-tauri/src/strategy/recovery.rs::recover_inner": 126,
-    "src-tauri/src/strategy/signals.rs::day_run": 117,
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338
   }
 }
