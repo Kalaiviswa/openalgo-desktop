@@ -467,6 +467,12 @@ impl AuthService {
         }
     }
 
+    /// Save the two-factor choices of the account `user_id`.
+    pub fn set_two_factor(state: &AppState, user_id: i64, f: user::TwoFactorFlags) -> Result<()> {
+        let conn = state.sqlite.conn()?;
+        user::set_two_factor(&conn, user_id, f)
+    }
+
     /// Forgotten password with no authenticator: remove the account and
     /// everything tied to it, and replace the keys so nothing written before
     /// can be decrypted. Every credential that reaches this machine from

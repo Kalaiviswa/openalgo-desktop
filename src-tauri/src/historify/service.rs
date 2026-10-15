@@ -8,7 +8,7 @@ use super::interval;
 use super::time::{day_start, ist_date, ist_naive, parse_date};
 use super::{Historify, SUPPORTED_EXCHANGES};
 use crate::brokers::common::symbols::{SymToken, SymbolResolver};
-use crate::db::duckdb::STORE_UNAVAILABLE;
+pub use crate::db::duckdb::STORE_UNAVAILABLE;
 use crate::error::AppError;
 use crate::services::core::Reply;
 use crate::services::market_data_service::candle_json;

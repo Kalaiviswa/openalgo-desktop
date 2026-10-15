@@ -2,7 +2,6 @@
 //! `blueprints/master_contract_status.py`), same paths and shapes.
 
 use crate::brokers::types::AuthToken;
-use crate::db::sqlite::master_contract_status as mcs;
 use crate::error::AppError;
 use crate::server::envelope::json_response;
 use crate::services::master_contract_service::{self, BUSY_MESSAGE};
@@ -20,20 +19,19 @@ fn no_broker() -> Response {
     )
 }
 
-#[allow(clippy::result_large_err)]
-fn status_value(ctx: &AppState, broker: &str) -> Result<Value, Response> {
-    let row = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| mcs::get(&c, broker, ctx.now()))
-        .map_err(|e| {
-            tracing::error!("Reading the master contract status failed: {}", e);
-            json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"status": "error", "message": "Failed to get master contract status"}),
-            )
-        })?;
-    Ok(mcs::status_json(row.as_ref(), broker))
+/// The broker's master contract status in the web's shape; a failed read
+/// is logged.
+fn read_status(ctx: &AppState, broker: &str) -> Option<Value> {
+    master_contract_service::status(ctx, broker)
+        .map_err(|e| tracing::error!("Reading the master contract status failed: {}", e))
+        .ok()
+}
+
+fn status_unreadable() -> Response {
+    json_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"status": "error", "message": "Failed to get master contract status"}),
+    )
 }
 
 /// GET /api/master-contract/status
@@ -41,9 +39,9 @@ pub async fn status(State(ctx): Ctx) -> Response {
     let Some(s) = ctx.get_broker_session() else {
         return no_broker();
     };
-    match status_value(&ctx, &s.broker_id) {
-        Ok(v) => json_response(StatusCode::OK, v),
-        Err(r) => r,
+    match read_status(&ctx, &s.broker_id) {
+        Some(v) => json_response(StatusCode::OK, v),
+        None => status_unreadable(),
     }
 }
 
@@ -55,8 +53,7 @@ pub async fn ready(State(ctx): Ctx) -> Response {
             json!({"ready": false, "message": "No broker session found"}),
         );
     };
-    let ready = status_value(&ctx, &s.broker_id)
-        .ok()
+    let ready = read_status(&ctx, &s.broker_id)
         .and_then(|v| v["is_ready"].as_bool())
         .unwrap_or(false);
     json_response(
@@ -73,9 +70,8 @@ pub async fn smart_status(State(ctx): Ctx) -> Response {
     let Some(s) = ctx.get_broker_session() else {
         return no_broker();
     };
-    let mut v = match status_value(&ctx, &s.broker_id) {
-        Ok(v) => v,
-        Err(r) => return r,
+    let Some(mut v) = read_status(&ctx, &s.broker_id) else {
+        return status_unreadable();
     };
     let (should, reason) = master_contract_service::should_download(&ctx, &s.broker_id)
         .unwrap_or((true, "No previous download found".into()));

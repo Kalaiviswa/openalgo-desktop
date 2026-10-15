@@ -241,15 +241,13 @@ pub async fn retry_server(
         return Err(AppError::Validation("OpenAlgo is already running.".into()));
     }
     if let Some(p) = port {
-        let conn = shell.ctx.sqlite.conn()?;
-        crate::config::save(
-            &conn,
+        crate::services::settings_service::save_server(
+            &shell.ctx,
             &crate::config::ServerConfigUpdate {
                 http_port: Some(p),
                 ..Default::default()
             },
         )?;
-        drop(conn);
         shell.ctx.reload_config()?;
     }
     match server::start(shell.ctx.clone()).await {

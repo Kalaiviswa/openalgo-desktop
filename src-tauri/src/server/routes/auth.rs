@@ -786,24 +786,13 @@ pub async fn two_factor_configure(
             return e.into_response();
         }
     }
-    let flag = |k: &str| matches!(form.get(k), Some("true") | Some("1") | Some("on"));
-    let enabled = flag("totp_enabled");
-    let f = crate::db::sqlite::user::TwoFactorFlags {
-        enabled,
-        login: enabled && flag("totp_required_for_login"),
-        password_reset: enabled && flag("totp_required_for_password_reset"),
-        mcp: enabled && flag("totp_required_for_mcp"),
-    };
+    let f = two_factor_flags(&form);
     let row = match AuthService::profile(&ctx, &u.username) {
         Ok(Some((r, _))) => r,
         Ok(None) => return error(StatusCode::NOT_FOUND, "User not found."),
         Err(e) => return e.into_response(),
     };
-    let saved = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| crate::db::sqlite::user::set_two_factor(&c, row.id, f));
-    if let Err(e) = saved {
+    if let Err(e) = AuthService::set_two_factor(&ctx, row.id, f) {
         return e.into_response();
     }
     if let Some(s) = sess {
@@ -816,6 +805,18 @@ pub async fn two_factor_configure(
         "totp_required_for_login": f.login, "totp_required_for_mcp": f.mcp,
         "totp_required_for_password_reset": f.password_reset,
     }))
+}
+
+/// The two-factor choices the form asks for; each requirement needs 2FA on.
+fn two_factor_flags(form: &FormData) -> crate::db::sqlite::user::TwoFactorFlags {
+    let flag = |k: &str| matches!(form.get(k), Some("true") | Some("1") | Some("on"));
+    let enabled = flag("totp_enabled");
+    crate::db::sqlite::user::TwoFactorFlags {
+        enabled,
+        login: enabled && flag("totp_required_for_login"),
+        password_reset: enabled && flag("totp_required_for_password_reset"),
+        mcp: enabled && flag("totp_required_for_mcp"),
+    }
 }
 
 /// GET /auth/active-sessions
