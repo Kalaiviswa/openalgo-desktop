@@ -2651,7 +2651,7 @@ async fn cache_reload_and_skip_check_the_stored_master() {
     assert_eq!(
         v,
         json!({"status": "error",
-               "message": "The stored master contract is for angel. Download the master contract for Mock."})
+               "message": "The stored master contract is for Angel One. Download the master contract for Zerodha."})
     );
     assert_eq!(h.ctx().symbol_count(), 0);
 

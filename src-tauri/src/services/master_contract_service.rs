@@ -15,6 +15,7 @@
 //! * The downloaded list is written to SQLite on a blocking thread and
 //!   handed to the resolver; nothing else keeps it.
 
+use crate::brokers::setup_guide::display_name;
 use crate::brokers::types::{AuthToken, SymbolData};
 use crate::brokers::Broker;
 use crate::db::sqlite::{master_contract_status as mcs, symbol};
@@ -166,20 +167,13 @@ pub fn skip_reason(ctx: &AppState, broker: &str) -> Option<String> {
     (owner.broker == broker && owner.rows > 0 && ctx.symbol_count() > 0).then_some(reason)
 }
 
-fn display_name(ctx: &AppState, broker: &str) -> String {
-    ctx.brokers
-        .get(broker)
-        .map(|b| b.name().to_string())
-        .unwrap_or_else(|| broker.to_string())
-}
-
 /// Trader-facing refusal to load a stored master that is not `broker`'s.
-fn not_owner_message(ctx: &AppState, owner: Option<&str>, broker: &str) -> String {
-    let want = display_name(ctx, broker);
+fn not_owner_message(owner: Option<&str>, broker: &str) -> String {
+    let want = display_name(broker);
     match owner {
         Some(o) => format!(
             "The stored master contract is for {}. Download the master contract for {}.",
-            display_name(ctx, o),
+            display_name(o),
             want
         ),
         None => format!(
@@ -200,7 +194,7 @@ pub fn report_unavailable(ctx: &AppState, broker: &str) {
     let now = ctx.now();
     let message = format!(
         "The {} master contract could not be loaded, so symbols cannot be used for orders or live prices. Download it from the Master Contract page.",
-        display_name(ctx, broker)
+        display_name(broker)
     );
     let res = ctx.logs.conn().and_then(|c| {
         crate::db::sqlite::monitor::raise_alert(
@@ -289,7 +283,6 @@ pub async fn load_cached(ctx: &Arc<AppState>, broker: &str) -> Result<usize> {
                 broker
             );
             return Err(AppError::Validation(not_owner_message(
-                ctx,
                 owner.as_deref(),
                 broker,
             )));
@@ -597,7 +590,7 @@ pub fn cache_health(ctx: &AppState) -> Value {
         "Cache is not loaded. Run master contract download.".to_string()
     } else if !valid {
         match active.as_deref() {
-            Some(a) => not_owner_message(ctx, owner.as_ref().map(|o| o.broker.as_str()), a),
+            Some(a) => not_owner_message(owner.as_ref().map(|o| o.broker.as_str()), a),
             None => "The stored master contract does not say which broker it belongs to. Sign in to your broker to reload it.".to_string(),
         }
     } else {
@@ -757,10 +750,9 @@ mod tests {
         ctx.clear_symbol_cache();
         let e = load_cached(ctx, "angel").await.unwrap_err();
         assert!(matches!(e, AppError::Validation(_)), "{:?}", e);
-        // The mocks are both named "Mock".
         assert_eq!(
             e.client_message(),
-            "The stored master contract is for Mock. Download the master contract for Mock."
+            "The stored master contract is for Zerodha. Download the master contract for Angel One."
         );
         assert_eq!(ctx.symbol_count(), 0);
         assert_eq!(load_cached(ctx, "zerodha").await.unwrap(), 1);
@@ -853,7 +845,7 @@ mod tests {
         assert_eq!(h["owner"], "angel");
         assert_eq!(
             h["recommendations"][0],
-            "The stored master contract is for Mock. Download the master contract for Mock."
+            "The stored master contract is for Angel One. Download the master contract for Zerodha."
         );
     }
 
