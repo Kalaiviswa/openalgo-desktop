@@ -59,7 +59,6 @@
     "src-tauri/src/sandbox/mod.rs": 1003,
     "src-tauri/src/sandbox/orders.rs": 1017,
     "src-tauri/src/sandbox/positions.rs": 1017,
-    "src-tauri/src/scalping/service.rs": 1033,
     "src-tauri/src/server/routes/historify.rs": 1076,
     "src-tauri/src/strategy/engine.rs": 2181,
     "src-tauri/src/strategy/store.rs": 1784,
