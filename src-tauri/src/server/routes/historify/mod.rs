@@ -1,23 +1,20 @@
 //! Web `blueprints/historify.py`: the Historify page's JSON routes under
 //! `/historify/api/`. Every route needs the signed-in user (declared in
 //! [`table`]); writes carry the session's CSRF token like every other page
-//! route.
+//! route. The upload and schedule routes are in `upload` and `schedules`.
 
 use super::{Access, RouteSpec};
-use crate::historify::db::ScheduleUpdate;
-use crate::historify::import::FileKind;
-use crate::historify::scheduler::{parse_hhmm, AddSchedule};
 use crate::historify::service::{self as svc, ChainQuery};
 use crate::historify::{export, jobs::CreateJob, time::parse_date};
 use crate::server::api_v1::send;
-use crate::server::envelope::{error, json_response, EarlyReply};
+use crate::server::envelope::{error, EarlyReply};
 use crate::server::middleware::User;
 use crate::server::routes::webui::JsonBody;
 use crate::services::core::Reply;
 use crate::state::AppState;
 use axum::{
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderValue, Method, StatusCode},
     response::Response,
     routing::{delete, get, post, put, MethodRouter},
@@ -26,6 +23,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+mod schedules;
+mod upload;
+
+pub use schedules::*;
+pub use upload::upload;
 
 type Ctx = State<Arc<AppState>>;
 type Q = Query<HashMap<String, String>>;
@@ -520,174 +523,6 @@ pub async fn delete_bulk(State(ctx): Ctx, body: JsonBody) -> Response {
     send(ctx.historify.bulk_delete(items).await)
 }
 
-// ----------------------------------------------------------------- upload
-
-/// Removes the saved upload on every path.
-struct UploadFile(PathBuf);
-
-impl Drop for UploadFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn unreadable_upload() -> Response {
-    error(
-        StatusCode::BAD_REQUEST,
-        "The upload could not be read. Try again.",
-    )
-}
-
-/// POST /historify/api/upload (multipart: file, symbol, exchange, interval)
-pub async fn upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
-    use tokio::io::AsyncWriteExt;
-    let mut saved: Option<(UploadFile, FileKind)> = None;
-    let mut fields: HashMap<String, String> = HashMap::new();
-    let mut file_seen = false;
-    let mut bad_name: Option<Response> = None;
-    loop {
-        let mut field = match mp.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => {
-                if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                    return too_large();
-                }
-                return unreadable_upload();
-            }
-        };
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "file" && !file_seen {
-            file_seen = true;
-            let filename = field.file_name().unwrap_or_default().to_lowercase();
-            let kind = if filename.is_empty() {
-                bad_name = Some(error(StatusCode::BAD_REQUEST, "No file selected"));
-                None
-            } else if filename.ends_with(".csv") {
-                Some(FileKind::Csv)
-            } else if filename.ends_with(".parquet") {
-                Some(FileKind::Parquet)
-            } else {
-                bad_name = Some(error(
-                    StatusCode::BAD_REQUEST,
-                    "File must be CSV or Parquet",
-                ));
-                None
-            };
-            let Some(kind) = kind else { continue };
-            let dir = match ctx.historify.work_dir() {
-                Ok(d) => d.to_path_buf(),
-                Err(e) => {
-                    tracing::error!("Could not create the Historify work folder: {}", e);
-                    return error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Could not save the upload. Check free disk space.",
-                    );
-                }
-            };
-            let ext = if kind == FileKind::Csv {
-                "csv"
-            } else {
-                "parquet"
-            };
-            let path = dir.join(format!(
-                "historify_upload_{}.{}",
-                uuid::Uuid::new_v4().simple(),
-                ext
-            ));
-            let guard = UploadFile(path.clone());
-            let mut out = match tokio::fs::File::create(&path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::error!("Could not save an upload: {}", e);
-                    return error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Could not save the upload. Check free disk space.",
-                    );
-                }
-            };
-            let mut size = 0usize;
-            loop {
-                match field.chunk().await {
-                    Ok(Some(chunk)) => {
-                        size += chunk.len();
-                        if size > MAX_UPLOAD_BYTES {
-                            return too_large();
-                        }
-                        if out.write_all(&chunk).await.is_err() {
-                            return error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Could not save the upload. Check free disk space.",
-                            );
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                            return too_large();
-                        }
-                        return unreadable_upload();
-                    }
-                }
-            }
-            if out.flush().await.is_err() {
-                return unreadable_upload();
-            }
-            drop(out);
-            saved = Some((guard, kind));
-        } else if !name.is_empty() {
-            match field.text().await {
-                Ok(t) => {
-                    fields.insert(name, t);
-                }
-                Err(_) => return unreadable_upload(),
-            }
-        }
-    }
-    if !file_seen {
-        return error(StatusCode::BAD_REQUEST, "No file provided");
-    }
-    if let Some(r) = bad_name {
-        return r;
-    }
-    let Some((file, kind)) = saved else {
-        return error(StatusCode::BAD_REQUEST, "No file provided");
-    };
-    let f = |k: &str| {
-        fields
-            .get(k)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
-    };
-    let (symbol, exchange, interval) = (
-        f("symbol").to_uppercase(),
-        f("exchange").to_uppercase(),
-        f("interval"),
-    );
-    if symbol.is_empty() || exchange.is_empty() || interval.is_empty() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Symbol, exchange, and interval are required",
-        );
-    }
-    let r = ctx
-        .historify
-        .upload(&file.0, kind, &symbol, &exchange, &interval)
-        .await;
-    drop(file);
-    send(r)
-}
-
-fn too_large() -> Response {
-    error(
-        StatusCode::BAD_REQUEST,
-        format!(
-            "File too large. Maximum size is {} MB",
-            MAX_UPLOAD_BYTES / (1024 * 1024)
-        ),
-    )
-}
-
 // -------------------------------------------------------------------- F&O
 
 /// GET /historify/api/fno/underlyings
@@ -849,228 +684,4 @@ pub async fn job_retry(State(ctx): Ctx, Path(id): Path<String>) -> Response {
 pub async fn metadata_enrich(State(ctx): Ctx, body: JsonBody) -> Response {
     let items = svc::parse_symbol_reqs(body.0.get("symbols"));
     send(ctx.historify.enrich_metadata(&ctx.symbols, items).await)
-}
-
-// -------------------------------------------------------------- schedules
-
-fn store_error(e: crate::error::AppError) -> Response {
-    tracing::error!("Reading Historify schedules failed: {}", e);
-    error(StatusCode::INTERNAL_SERVER_ERROR, svc::STORE_UNAVAILABLE)
-}
-
-/// GET /historify/api/schedules
-pub async fn schedules_list(State(ctx): Ctx) -> Response {
-    match ctx.historify.scheduler.all().await {
-        Ok(s) => send(Reply::ok(
-            json!({"status": "success", "count": s.len(), "data": s}),
-        )),
-        Err(e) => store_error(e),
-    }
-}
-
-/// A JSON integer (not a bool, not a float).
-fn int_field(body: &JsonBody, k: &str) -> Result<Option<i64>, ()> {
-    match body.0.get(k) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => n.as_i64().map(Some).ok_or(()),
-        Some(_) => Err(()),
-    }
-}
-
-fn lookback(body: &JsonBody, default: Option<i64>) -> Result<Option<i64>, EarlyReply> {
-    let bad = || {
-        error(
-            StatusCode::BAD_REQUEST,
-            "lookback_days must be between 1 and 365",
-        )
-    };
-    match int_field(body, "lookback_days") {
-        Ok(Some(v)) if (1..=365).contains(&v) => Ok(Some(v)),
-        Ok(None) => Ok(default),
-        _ => Err(bad().into()),
-    }
-}
-
-/// POST /historify/api/schedules
-pub async fn schedule_create(State(ctx): Ctx, body: JsonBody) -> Response {
-    let name = body.str("name").unwrap_or_default();
-    if name.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "Schedule name is required");
-    }
-    let schedule_type = body.str("schedule_type").unwrap_or_default();
-    if schedule_type != "interval" && schedule_type != "daily" {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid schedule type. Must be \"interval\" or \"daily\"",
-        );
-    }
-    let data_interval = body.str("data_interval").unwrap_or_else(|| "D".into());
-    if data_interval != "1m" && data_interval != "D" {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid data interval. Must be \"1m\" or \"D\"",
-        );
-    }
-    let interval_value = int_field(&body, "interval_value");
-    let interval_unit = body
-        .str("interval_unit")
-        .unwrap_or_else(|| "minutes".into());
-    let time_of_day = body.str("time_of_day").unwrap_or_else(|| "09:15".into());
-    if schedule_type == "interval" {
-        if !matches!(interval_value, Ok(Some(v)) if v >= 1) {
-            return error(StatusCode::BAD_REQUEST, "Invalid interval value");
-        }
-        if interval_unit != "minutes" && interval_unit != "hours" {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "Invalid interval unit. Must be \"minutes\" or \"hours\"",
-            );
-        }
-    } else if parse_hhmm(&time_of_day).is_none() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid time format. Use HH:MM (e.g., 09:15)",
-        );
-    }
-    let lookback_days = match lookback(&body, Some(1)) {
-        Ok(v) => v.unwrap_or(1),
-        Err(r) => return *r,
-    };
-    let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    let add = AddSchedule {
-        name,
-        schedule_type,
-        data_interval,
-        interval_value: interval_value.ok().flatten(),
-        interval_unit: Some(interval_unit),
-        time_of_day: Some(time_of_day),
-        lookback_days,
-        description: body.str("description"),
-    };
-    match ctx.historify.scheduler.add(&id, add).await {
-        Ok(m) => json_response(
-            StatusCode::CREATED,
-            json!({"status": "success", "message": m, "schedule_id": id}),
-        ),
-        Err(m) => error(StatusCode::BAD_REQUEST, m),
-    }
-}
-
-/// GET /historify/api/schedules/{id}
-pub async fn schedule_get(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    match ctx.historify.scheduler.schedule(&id).await {
-        Ok(Some(s)) => send(Reply::ok(json!({"status": "success", "data": s}))),
-        Ok(None) => error(StatusCode::NOT_FOUND, "Schedule not found"),
-        Err(e) => store_error(e),
-    }
-}
-
-/// PUT /historify/api/schedules/{id}
-pub async fn schedule_update(State(ctx): Ctx, Path(id): Path<String>, body: JsonBody) -> Response {
-    let existing = match ctx.historify.scheduler.schedule(&id).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "Schedule not found"),
-        Err(e) => return store_error(e),
-    };
-    let schedule_type = body
-        .str("schedule_type")
-        .or_else(|| existing["schedule_type"].as_str().map(str::to_string))
-        .unwrap_or_default();
-    let interval_value = match int_field(&body, "interval_value") {
-        Ok(v) => v,
-        Err(()) => return error(StatusCode::BAD_REQUEST, "Invalid interval value"),
-    };
-    if schedule_type == "interval" {
-        if interval_value.is_some_and(|v| v < 1) {
-            return error(StatusCode::BAD_REQUEST, "Invalid interval value");
-        }
-        let unit = body
-            .str("interval_unit")
-            .or_else(|| existing["interval_unit"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "minutes".into());
-        if unit != "minutes" && unit != "hours" {
-            return error(StatusCode::BAD_REQUEST, "Invalid interval unit");
-        }
-    } else if schedule_type == "daily" {
-        let t = body
-            .str("time_of_day")
-            .or_else(|| existing["time_of_day"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "09:15".into());
-        if parse_hhmm(&t).is_none() {
-            return error(StatusCode::BAD_REQUEST, "Invalid time format. Use HH:MM");
-        }
-    }
-    if let Some(di) = body.str("data_interval") {
-        if di != "1m" && di != "D" {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "Invalid data interval. Must be \"1m\" or \"D\"",
-            );
-        }
-    }
-    let lookback_days = match lookback(&body, None) {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
-    let u = ScheduleUpdate {
-        name: body.str("name").filter(|s| !s.is_empty()),
-        description: body.str("description"),
-        schedule_type: body.str("schedule_type"),
-        interval_value,
-        interval_unit: body.str("interval_unit"),
-        time_of_day: body.str("time_of_day"),
-        data_interval: body.str("data_interval"),
-        lookback_days,
-        ..Default::default()
-    };
-    ok_or_400(ctx.historify.scheduler.update(&id, u).await)
-}
-
-/// DELETE /historify/api/schedules/{id}
-pub async fn schedule_delete(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.delete(&id).await)
-}
-
-/// POST /historify/api/schedules/{id}/enable
-pub async fn schedule_enable(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.enable(&id).await)
-}
-
-/// POST /historify/api/schedules/{id}/disable
-pub async fn schedule_disable(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.disable(&id).await)
-}
-
-/// POST /historify/api/schedules/{id}/pause
-pub async fn schedule_pause(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.pause(&id).await)
-}
-
-/// POST /historify/api/schedules/{id}/resume
-pub async fn schedule_resume(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.resume(&id).await)
-}
-
-/// POST /historify/api/schedules/{id}/trigger
-pub async fn schedule_trigger(State(ctx): Ctx, Path(id): Path<String>) -> Response {
-    ok_or_400(ctx.historify.scheduler.trigger(&id).await)
-}
-
-/// GET /historify/api/schedules/{id}/executions (limit?, at most 100)
-pub async fn schedule_executions(State(ctx): Ctx, Path(id): Path<String>, Query(q): Q) -> Response {
-    let limit = arg(&q, "limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(20)
-        .min(100);
-    match ctx
-        .historify
-        .db
-        .run(move |c| crate::historify::db::executions(c, &id, limit))
-        .await
-    {
-        Ok(rows) => send(Reply::ok(
-            json!({"status": "success", "count": rows.len(), "data": rows}),
-        )),
-        Err(e) => store_error(e),
-    }
 }
