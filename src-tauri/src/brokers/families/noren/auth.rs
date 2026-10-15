@@ -65,6 +65,29 @@ pub fn exchange_request(
     }
 }
 
+/// A ready access token (web tradesmart manual fallback): used as is, with
+/// the user id from the callback or the stored key.
+fn ready_token(name: &str, creds: &BrokerCredentials, token: &str) -> Result<AuthResponse> {
+    let (uid, _) = split_api_key(&creds.api_key, creds.client_id.as_deref());
+    let uid = creds
+        .client_id
+        .clone()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or(uid);
+    if uid.is_empty() {
+        return Err(AppError::Validation(format!(
+            "Add your {} trading user id: on the Broker Configuration page, enter the key as userid:::key.",
+            name
+        )));
+    }
+    Ok(AuthResponse {
+        auth_token: format!("{}:::{}", uid, token.trim()),
+        feed_token: None,
+        user_id: uid,
+        user_name: None,
+    })
+}
+
 pub async fn authenticate(b: &NorenBroker, creds: BrokerCredentials) -> Result<AuthResponse> {
     let name = b.cfg.name;
     let has_code = creds
@@ -76,26 +99,7 @@ pub async fn authenticate(b: &NorenBroker, creds: BrokerCredentials) -> Result<A
         has_code,
         creds.password.as_deref().filter(|t| !t.is_empty()),
     ) {
-        // A ready access token (web tradesmart manual fallback): used as
-        // is, with the user id from the callback or the stored key.
-        let (uid, _) = split_api_key(&creds.api_key, creds.client_id.as_deref());
-        let uid = creds
-            .client_id
-            .clone()
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or(uid);
-        if uid.is_empty() {
-            return Err(AppError::Validation(format!(
-                "Add your {} trading user id: on the Broker Configuration page, enter the key as userid:::key.",
-                name
-            )));
-        }
-        return Ok(AuthResponse {
-            auth_token: format!("{}:::{}", uid, token.trim()),
-            feed_token: None,
-            user_id: uid,
-            user_name: None,
-        });
+        return ready_token(name, &creds, token);
     }
     let code = creds
         .request_token
