@@ -254,8 +254,8 @@ pub struct FillEffect {
 /// * full close: the position margin and the order margin are released;
 /// * reversal: the old margin is released; the new position keeps the
 ///   order margin that covers the excess quantity (at the order's margin
-///   price) and the rest is released. The web halved this margin and relied
-///   on reconciliation to notice.
+///   price) and the rest is released. The web scales that excess-only margin
+///   by the excess share again, so its reversed position holds too little.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_fill(
     conn: &Connection,

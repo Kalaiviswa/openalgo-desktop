@@ -542,7 +542,14 @@ enum Allow {
 /// replay starts from the web's two earlier entries; evaluation F, TOOLS-16).
 const WEB_DEFECT_2_LOGS: &str = "web defect 2: the failed GTT modifies were not logged";
 
-const OPEN_MARGIN: &str = "open: margin blocked after session 2's activity";
+/// Web defects 4 and 5 (INDEX.md): after session 2 the web's funds hold
+/// 3,030.45 less than its own books. Its post-fill reconciliation dropped
+/// the 2,903.24 five resting orders held (`sandbox/fund_manager.py`
+/// `_reconcile_once` counts positions and GTTs only), and the SBIN MIS
+/// reversal kept a third of its 190.82 (`execution_engine.py` scales the
+/// excess-only order margin by the excess share again): 127.21. The desktop
+/// keeps both (`sandbox::funds::reconcile`, `sandbox::positions::apply_fill`).
+const WEB_MARGIN: &str = "web defects 4 and 5: resting-order and reversal margin dropped";
 
 /// Fields of successful replies that are not compared by value (TOOLS-16).
 /// Everything else in a success must equal the recording: identities, list
@@ -802,27 +809,25 @@ const VARIABLE: &[(&str, &str, Allow, &str)] = &[
         Allow::Pair("2", "88"),
         "recorded in session 1, before session 2's entries",
     ),
-    // Open: with the same positions and orders, the desktop blocks
-    // 3,030.45 more margin than the web at this point of session 2; not
-    // traced yet (evaluation F, TOOLS-16). The values are pinned so any
-    // change shows.
+    // The same positions and orders: the desktop holds the margin the web's
+    // books say is held, the web 3,030.45 less.
     (
         "funds/after_activity.json",
         ".data.availablecash",
         Allow::Pair("9666628.79", "9663598.34"),
-        OPEN_MARGIN,
+        WEB_MARGIN,
     ),
     (
         "funds/after_activity.json",
         ".data.grossexposure",
         Allow::Pair("333371.21", "336401.66"),
-        OPEN_MARGIN,
+        WEB_MARGIN,
     ),
     (
         "funds/after_activity.json",
         ".data.utiliseddebits",
         Allow::Pair("333371.21", "336401.66"),
-        OPEN_MARGIN,
+        WEB_MARGIN,
     ),
     // `closeposition` does not answer the ids of the orders it places, so
     // they cannot be mapped onto the recording.
