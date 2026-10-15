@@ -51,7 +51,6 @@
   },
   "rust_files": {
     "src-tauri/src/feed/server.rs": 1425,
-    "src-tauri/src/messaging/telegram/bot.rs": 1473,
     "src-tauri/src/messaging/whatsapp/mod.rs": 1192,
     "src-tauri/src/sandbox/gtt.rs": 1183,
     "src-tauri/src/sandbox/mod.rs": 1003,
@@ -111,9 +110,9 @@
     "src-tauri/src/mcp/tools.rs::run": 488,
     "src-tauri/src/messaging/alerts.rs::format_order_details": 303,
     "src-tauri/src/messaging/telegram/bot.rs::cmd_chart": 108,
-    "src-tauri/src/messaging/telegram/bot.rs::format_short": 146,
     "src-tauri/src/messaging/telegram/bot.rs::on_callback": 174,
     "src-tauri/src/messaging/telegram/bot.rs::on_command": 104,
+    "src-tauri/src/messaging/telegram/texts.rs::format_short": 146,
     "src-tauri/src/messaging/whatsapp/mod.rs::bot_task": 203,
     "src-tauri/src/messaging/whatsapp/mod.rs::pair_task": 109,
     "src-tauri/src/risk/aggregate.rs::evaluate_aggregate": 137,

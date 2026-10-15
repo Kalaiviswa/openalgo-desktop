@@ -18,6 +18,7 @@ pub mod bot;
 pub mod chart;
 pub mod db;
 pub mod page;
+mod texts;
 
 use crate::events::OrderMeta;
 use crate::messaging::alerts::{self, Channel};
