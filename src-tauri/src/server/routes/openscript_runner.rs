@@ -243,13 +243,7 @@ fn log_dir(ctx: &AppState) -> Value {
 pub async fn status_all(State(ctx): Ctx) -> Response {
     let runner = &ctx.trading.runner;
     let running: Vec<Value> = runner.running().iter().map(|r| r.answer()).collect();
-    let (scheduled, settings) = match ctx.sqlite.conn() {
-        Ok(conn) => (
-            store::all_schedules(&conn).unwrap_or_default(),
-            store::all_deployments(&conn).unwrap_or_default(),
-        ),
-        Err(_) => Default::default(),
-    };
+    let (scheduled, settings) = runner.saved_overview();
     ok(json!({
         "status": "success",
         "running": running,
@@ -270,15 +264,7 @@ pub async fn status_one(State(ctx): Ctx, Path(name): Path<String>) -> Response {
         .into_iter()
         .find(|r| r.script == name || r.run_id == run_id)
         .map(|r| r.answer());
-    let (schedule, saved) = match ctx.sqlite.conn() {
-        Ok(conn) => (
-            store::all_schedules(&conn)
-                .ok()
-                .and_then(|mut s| s.remove(&name)),
-            store::read(&conn, &name).ok().flatten(),
-        ),
-        Err(_) => (None, None),
-    };
+    let (schedule, saved) = runner.saved_of(&name);
     ok(json!({
         "status": "success",
         "file": name,
@@ -294,12 +280,7 @@ pub async fn status_one(State(ctx): Ctx, Path(name): Path<String>) -> Response {
 // ------------------------------------------------------------ settings
 
 pub async fn list_settings(State(ctx): Ctx) -> Response {
-    let all = ctx
-        .sqlite
-        .conn()
-        .ok()
-        .and_then(|c| store::all_deployments(&c).ok())
-        .unwrap_or_default();
+    let all = ctx.trading.runner.saved_settings();
     let mut settings: Vec<Value> = all.iter().map(|(n, d)| d.answer(n)).collect();
     settings.sort_by(|a, b| {
         let key = |v: &Value| {
@@ -318,23 +299,62 @@ pub async fn get_settings(State(ctx): Ctx, Path(name): Path<String>) -> Response
     if !names_something(&name) {
         return refusal(&name);
     }
-    let Ok(conn) = ctx.sqlite.conn() else {
-        return err(500, "The run settings could not be read just now.");
-    };
-    match store::read(&conn, &name) {
-        Ok(Some(d)) => ok(json!({
+    match ctx.trading.runner.settings_of(&name) {
+        Ok(d) => ok(json!({
             "status": "success",
             "settings": d.answer(&name),
             "products": store::PRODUCTS,
         })),
-        _ => {
-            let why = match store::require(&conn, &name) {
-                Ok(Err(w)) => w,
-                _ => format!("{} has no run settings saved.", name),
-            };
-            err(404, why)
+        Err(r) => refused(r),
+    }
+}
+
+/// The run settings a `PUT` body asks for, checked; `Err` is the 400
+/// message.
+fn settings_input(
+    body: &Map<String, Value>,
+    username: String,
+) -> Result<store::SettingsInput, String> {
+    let mut unknown: Vec<&str> = body
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !SETTINGS_FIELDS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        return Err(format!(
+            "Run settings are the instrument, the exchange, the interval, the product and the script's own parameters. This one also carried {}. Where a strategy's orders go is the platform's own setting and is not chosen here.",
+            unknown.join(", ")
+        ));
+    }
+    for field in SETTINGS_FIELDS.iter().filter(|f| **f != "inputs") {
+        if let Some(v) = body.get(*field) {
+            if !v.is_null() && !v.is_string() {
+                return Err(format!("Give the {} as text, or leave it out.", field));
+            }
         }
     }
+    let inputs = body.get("inputs").cloned().unwrap_or(Value::Null);
+    if !inputs.is_null() && !inputs.is_object() {
+        return Err(
+            "Give the strategy parameters as a set of named values, or leave them out.".into(),
+        );
+    }
+    let text = |k: &str| {
+        body.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(store::SettingsInput {
+        symbol: text("symbol"),
+        exchange: text("exchange"),
+        interval: text("interval"),
+        product: text("product"),
+        user_id: Some(username),
+        inputs,
+        deployment: text("deployment"),
+    })
 }
 
 pub async fn set_settings(
@@ -352,67 +372,17 @@ pub async fn set_settings(
             "Send the instrument, the exchange and the interval to run this on.",
         );
     };
-    let mut unknown: Vec<&str> = body
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !SETTINGS_FIELDS.contains(k))
-        .collect();
-    if !unknown.is_empty() {
-        unknown.sort();
-        return err(
-            400,
-            format!(
-                "Run settings are the instrument, the exchange, the interval, the product and the script's own parameters. This one also carried {}. Where a strategy's orders go is the platform's own setting and is not chosen here.",
-                unknown.join(", ")
-            ),
-        );
-    }
-    for field in SETTINGS_FIELDS.iter().filter(|f| **f != "inputs") {
-        if let Some(v) = body.get(*field) {
-            if !v.is_null() && !v.is_string() {
-                return err(400, format!("Give the {} as text, or leave it out.", field));
-            }
-        }
-    }
-    let inputs = body.get("inputs").cloned().unwrap_or(Value::Null);
-    if !inputs.is_null() && !inputs.is_object() {
-        return err(
-            400,
-            "Give the strategy parameters as a set of named values, or leave them out.",
-        );
-    }
-    let text = |k: &str| {
-        body.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
+    let input = match settings_input(&body, user.username) {
+        Ok(i) => i,
+        Err(m) => return err(400, m),
     };
-    let input = store::SettingsInput {
-        symbol: text("symbol"),
-        exchange: text("exchange"),
-        interval: text("interval"),
-        product: text("product"),
-        user_id: Some(user.username),
-        inputs,
-        deployment: text("deployment"),
-    };
-    let Ok(mut conn) = ctx.sqlite.conn() else {
-        return err(500, "These run settings could not be saved on this server");
-    };
-    match store::write(&mut conn, &name, input, ctx.now()) {
-        Ok(Ok((key, message))) => {
-            let saved = store::read(&conn, &key).ok().flatten();
-            ok(json!({
-                "status": "success",
-                "settings": saved.map(|d| d.answer(&key)),
-                "message": message,
-            }))
-        }
-        Ok(Err(why)) => err(400, why),
-        Err(e) => {
-            tracing::error!("Could not save OpenScript run settings: {}", e);
-            err(400, "These run settings could not be saved on this server")
-        }
+    match ctx.trading.runner.save_settings(&name, input) {
+        Ok((key, message, saved)) => ok(json!({
+            "status": "success",
+            "settings": saved.map(|d| d.answer(&key)),
+            "message": message,
+        })),
+        Err(r) => refused(r),
     }
 }
 
@@ -439,11 +409,7 @@ pub async fn set_schedule(State(ctx): Ctx, Path(name): Path<String>, body: Bytes
         Ok(s) => s,
         Err(why) => return err(400, why),
     };
-    let stored =
-        ctx.sqlite.conn().map_err(|e| e.to_string()).and_then(|c| {
-            store::set_schedule(&c, &name, &entry, ctx.now()).map_err(|e| e.to_string())
-        });
-    if let Err(e) = stored {
+    if let Err(e) = ctx.trading.runner.store_schedule(&name, &entry) {
         tracing::error!("Could not store the schedule for {}: {}", name, e);
         return err(
             500,
@@ -466,12 +432,7 @@ pub async fn clear_schedule(State(ctx): Ctx, Path(name): Path<String>) -> Respon
     if !names_something(&name) {
         return refusal(&name);
     }
-    let removed = ctx
-        .sqlite
-        .conn()
-        .map_err(|e| e.to_string())
-        .and_then(|c| store::delete_schedule(&c, &name).map_err(|e| e.to_string()));
-    if let Err(e) = removed {
+    if let Err(e) = ctx.trading.runner.remove_schedule(&name) {
         tracing::error!("Could not remove the schedule for {}: {}", name, e);
         return err(500, "The schedule could not be removed. Try again.");
     }
