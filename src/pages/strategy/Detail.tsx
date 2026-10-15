@@ -85,6 +85,7 @@ import {
   universeTabLabel,
 } from '@/types/strategy_module'
 import { showToast } from '@/utils/toast'
+import { RecordsUnavailable } from './RecordsUnavailable'
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -2829,6 +2830,10 @@ export default function StrategyDetail() {
           </span>
         ) : null}
       </div>
+
+      <RecordsUnavailable
+        failed={ordersQuery.isError || runsQuery.isError || eventsQuery.isError}
+      />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex flex-wrap gap-1 bg-transparent">
