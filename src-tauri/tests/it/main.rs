@@ -42,6 +42,7 @@ mod mcp_support;
 mod sandbox_support;
 mod webui_support;
 
+mod analyzer_mode;
 mod api_v1_contract;
 mod api_v1_events;
 mod broker_angel_http;
