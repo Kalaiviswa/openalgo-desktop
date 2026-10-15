@@ -1,7 +1,7 @@
 //! Request middleware: Host check, browser session + CSRF, the signed-in
 //! user guard, and the `/api/v1` rate limit.
 
-use crate::server::envelope::{error, json_response, not_authenticated};
+use crate::server::envelope::{error, json_response, not_authenticated, EarlyReply};
 use crate::server::form::{csrf_rejected, tokens_match, FormData};
 use crate::server::ratelimit::{Admission, Bucket, Claim, SignInSource};
 use crate::session::web::{WebSession, COOKIE_NAME};
@@ -920,8 +920,7 @@ impl SignInAttempt<'_> {
 /// the account's.
 /// The wait check and the count are one step under one lock, so parallel
 /// requests cannot all slip through. Call [`sign_in_refused`] first.
-#[allow(clippy::result_large_err)]
-pub fn claim_sign_in(ctx: &AppState, source: Source) -> Result<SignInAttempt<'_>, Response> {
+pub fn claim_sign_in(ctx: &AppState, source: Source) -> Result<SignInAttempt<'_>, EarlyReply> {
     match ctx
         .limiter
         .backoff
@@ -934,7 +933,8 @@ pub fn claim_sign_in(ctx: &AppState, source: Source) -> Result<SignInAttempt<'_>
                 "Too many failed sign-in attempts. Wait {} seconds and try again.",
                 wait.as_millis().div_ceil(1000).max(1)
             ),
-        )),
+        )
+        .into()),
     }
 }
 

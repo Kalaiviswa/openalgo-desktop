@@ -26,7 +26,7 @@ pub async fn placegttorder(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request
     let style = Style::PyGtt("placegttorder", GttKind::Failed);
     match check(&ctx, ip, &body, schemas::place_gtt(), style, Auth::Broker) {
         Ok(v) => send(gtt::place_gtt(&ctx, &v).await),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -40,7 +40,7 @@ pub async fn modifygttorder(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Reques
     let style = Style::PyGtt("modifygttorder", GttKind::ModifyFailed);
     match check(&ctx, ip, &body, schemas::modify_gtt(), style, Auth::Broker) {
         Ok(v) => send(gtt::modify_gtt(&ctx, &v).await),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 

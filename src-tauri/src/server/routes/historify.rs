@@ -10,7 +10,7 @@ use crate::historify::scheduler::{parse_hhmm, AddSchedule};
 use crate::historify::service::{self as svc, ChainQuery};
 use crate::historify::{export, jobs::CreateJob, time::parse_date};
 use crate::server::api_v1::send;
-use crate::server::envelope::{error, json_response};
+use crate::server::envelope::{error, json_response, EarlyReply};
 use crate::server::middleware::User;
 use crate::server::routes::webui::JsonBody;
 use crate::services::core::Reply;
@@ -161,13 +161,12 @@ fn ok_or_400(r: Result<String, String>) -> Response {
 }
 
 /// The connected broker is needed to download.
-#[allow(clippy::result_large_err)]
-fn broker_ready(ctx: &AppState) -> Result<(), Response> {
+fn broker_ready(ctx: &AppState) -> Result<(), EarlyReply> {
     ctx.historify
         .jobs
         .source()
         .ready()
-        .map_err(|m| error(StatusCode::BAD_REQUEST, m))
+        .map_err(|m| error(StatusCode::BAD_REQUEST, m).into())
 }
 
 // --------------------------------------------------------------- watchlist
@@ -222,8 +221,7 @@ pub async fn watchlist_bulk_add(State(ctx): Ctx, body: JsonBody) -> Response {
 
 // --------------------------------------------------------------- download
 
-#[allow(clippy::result_large_err)]
-fn date_pair(body: &JsonBody) -> Result<(String, String), Response> {
+fn date_pair(body: &JsonBody) -> Result<(String, String), EarlyReply> {
     let (s, e) = (body.str("start_date"), body.str("end_date"));
     match (
         s.as_deref().and_then(parse_date),
@@ -236,20 +234,21 @@ fn date_pair(body: &JsonBody) -> Result<(String, String), Response> {
         _ => Err(error(
             StatusCode::BAD_REQUEST,
             "Choose a start and end date in YYYY-MM-DD format.",
-        )),
+        )
+        .into()),
     }
 }
 
 /// POST /historify/api/download: one symbol, now (web `download_data`).
 pub async fn download(State(ctx): Ctx, body: JsonBody) -> Response {
     if let Err(r) = broker_ready(&ctx) {
-        return r;
+        return *r;
     }
     let (symbol, exchange) = (upper(&body, "symbol"), upper(&body, "exchange"));
     let interval = body.non_empty("interval").unwrap_or_else(|| "D".into());
     let (start, end) = match date_pair(&body) {
         Ok(d) => d,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let (Some(s), Some(e)) = (parse_date(&start), parse_date(&end)) else {
         return error(StatusCode::BAD_REQUEST, "Choose valid dates.");
@@ -275,11 +274,11 @@ pub async fn download(State(ctx): Ctx, body: JsonBody) -> Response {
 /// POST /historify/api/download/watchlist: a job over the whole watchlist.
 pub async fn download_watchlist(State(ctx): Ctx, body: JsonBody) -> Response {
     if let Err(r) = broker_ready(&ctx) {
-        return r;
+        return *r;
     }
     let (start, end) = match date_pair(&body) {
         Ok(d) => d,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let symbols = match ctx
         .historify
@@ -789,11 +788,11 @@ pub async fn jobs_create(State(ctx): Ctx, body: JsonBody) -> Response {
         _ => return error(StatusCode::BAD_REQUEST, "No symbols provided"),
     };
     if let Err(r) = broker_ready(&ctx) {
-        return r;
+        return *r;
     }
     let (start, end) = match date_pair(&body) {
         Ok(d) => d,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     send(
         ctx.historify
@@ -841,7 +840,7 @@ pub async fn job_resume(State(ctx): Ctx, Path(id): Path<String>) -> Response {
 /// POST /historify/api/jobs/{id}/retry
 pub async fn job_retry(State(ctx): Ctx, Path(id): Path<String>) -> Response {
     if let Err(r) = broker_ready(&ctx) {
-        return r;
+        return *r;
     }
     send(ctx.historify.jobs.retry(&id).await)
 }
@@ -878,8 +877,7 @@ fn int_field(body: &JsonBody, k: &str) -> Result<Option<i64>, ()> {
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn lookback(body: &JsonBody, default: Option<i64>) -> Result<Option<i64>, Response> {
+fn lookback(body: &JsonBody, default: Option<i64>) -> Result<Option<i64>, EarlyReply> {
     let bad = || {
         error(
             StatusCode::BAD_REQUEST,
@@ -889,7 +887,7 @@ fn lookback(body: &JsonBody, default: Option<i64>) -> Result<Option<i64>, Respon
     match int_field(body, "lookback_days") {
         Ok(Some(v)) if (1..=365).contains(&v) => Ok(Some(v)),
         Ok(None) => Ok(default),
-        _ => Err(bad()),
+        _ => Err(bad().into()),
     }
 }
 
@@ -936,7 +934,7 @@ pub async fn schedule_create(State(ctx): Ctx, body: JsonBody) -> Response {
     }
     let lookback_days = match lookback(&body, Some(1)) {
         Ok(v) => v.unwrap_or(1),
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let add = AddSchedule {
@@ -1012,7 +1010,7 @@ pub async fn schedule_update(State(ctx): Ctx, Path(id): Path<String>, body: Json
     }
     let lookback_days = match lookback(&body, None) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let u = ScheduleUpdate {
         name: body.str("name").filter(|s| !s.is_empty()),

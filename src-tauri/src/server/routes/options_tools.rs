@@ -5,7 +5,7 @@
 //! prerequisites, validate like the web and call one service.
 
 use crate::server::api_v1::send;
-use crate::server::envelope::error;
+use crate::server::envelope::{error, EarlyReply};
 use crate::server::routes::webui::{ok, JsonBody};
 use crate::services::apikey_service::ApiKeyService;
 use crate::services::chain_tools_service as chain;
@@ -56,11 +56,10 @@ fn text(b: &JsonBody, k: &str, max: usize) -> String {
 }
 
 /// `int(data.get(k, default))`.
-#[allow(clippy::result_large_err)]
-fn int(b: &JsonBody, k: &str, default: i64) -> Result<i64, Response> {
+fn int(b: &JsonBody, k: &str, default: i64) -> Result<i64, EarlyReply> {
     match b.int(k) {
         Ok(v) => Ok(v.unwrap_or(default)),
-        Err(_) => Err(error(StatusCode::BAD_REQUEST, BAD_DAYS)),
+        Err(_) => Err(error(StatusCode::BAD_REQUEST, BAD_DAYS).into()),
     }
 }
 
@@ -86,17 +85,15 @@ pub const BAD_EXPIRY: &str = "Invalid expiry_date format. Expected DDMMMYY";
 /// A history tool's expiry, checked before any master or broker lookup
 /// (the web passes it on unchecked; a multibyte one split a character in
 /// the strike lookup). Upper-cased like the chain tools'.
-#[allow(clippy::result_large_err)]
-fn history_expiry(raw: &str) -> Result<String, Response> {
+fn history_expiry(raw: &str) -> Result<String, EarlyReply> {
     Expiry::parse(raw)
         .map(|e| e.compact().to_string())
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, BAD_EXPIRY))
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, BAD_EXPIRY).into())
 }
 
 /// The chain tools' shared request: underlying (20), exchange (20) and a
 /// `DDMMMYY` expiry (10), all required and upper case.
-#[allow(clippy::result_large_err)]
-fn chain_request(b: &JsonBody) -> Result<(String, String, String), Response> {
+fn chain_request(b: &JsonBody) -> Result<(String, String, String), EarlyReply> {
     let (u, e, x) = (
         text(b, "underlying", 20),
         text(b, "exchange", 20),
@@ -106,26 +103,26 @@ fn chain_request(b: &JsonBody) -> Result<(String, String, String), Response> {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "underlying, exchange, and expiry_date are required",
-        ));
+        )
+        .into());
     }
     if !upper_alnum(&u, false) || !upper_alnum(&e, true) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid input format"));
+        return Err(error(StatusCode::BAD_REQUEST, "Invalid input format").into());
     }
     if !is_ddmmmyy(&x) {
-        return Err(error(StatusCode::BAD_REQUEST, BAD_EXPIRY));
+        return Err(error(StatusCode::BAD_REQUEST, BAD_EXPIRY).into());
     }
     Ok((u, e, x))
 }
 
 /// Key, request and broker checks of a chain tool, in the web's order.
-#[allow(clippy::result_large_err)]
-fn chain_prologue(ctx: &AppState, b: &JsonBody) -> Result<(String, String, String), Response> {
+fn chain_prologue(ctx: &AppState, b: &JsonBody) -> Result<(String, String, String), EarlyReply> {
     if let Some(r) = need_key(ctx, NO_KEY) {
-        return Err(r);
+        return Err(r.into());
     }
     let req = chain_request(b)?;
     if let Some(r) = need_broker(ctx) {
-        return Err(r);
+        return Err(r.into());
     }
     Ok(req)
 }
@@ -135,7 +132,7 @@ macro_rules! chain_route {
         pub async fn $name(State(ctx): Ctx, body: JsonBody) -> Response {
             match chain_prologue(&ctx, &body) {
                 Ok((u, e, x)) => send($svc(&ctx, &u, &e, &x).await),
-                Err(r) => r,
+                Err(r) => *r,
             }
         }
     };
@@ -158,11 +155,11 @@ pub async fn profile_data(State(ctx): Ctx, body: JsonBody) -> Response {
     }
     let days = match int(&body, "days", 5) {
         Ok(d) => d.min(30),
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let (u, e, x) = match chain_request(&body) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if !["1m", "5m", "15m"].contains(&interval.as_str()) {
         return error(
@@ -177,19 +174,18 @@ pub async fn profile_data(State(ctx): Ctx, body: JsonBody) -> Response {
 }
 
 /// The broker's intervals, or the refusal.
-#[allow(clippy::result_large_err)]
-fn intervals_of(ctx: &AppState, key_msg: &str) -> Result<Value, Response> {
+fn intervals_of(ctx: &AppState, key_msg: &str) -> Result<Value, EarlyReply> {
     if let Some(r) = need_key(ctx, key_msg) {
-        return Err(r);
+        return Err(r.into());
     }
     if let Some(r) = need_broker(ctx) {
-        return Err(r);
+        return Err(r.into());
     }
     let r = market_data_service::intervals(ctx);
     if r.is_success() {
         Ok(r.body)
     } else {
-        Err(send(r))
+        Err(send(r).into())
     }
 }
 
@@ -211,7 +207,7 @@ pub async fn oiprofile_intervals(State(ctx): Ctx) -> Response {
                 .collect();
             ok(json!({"status": "success", "data": {"intervals": keep}}))
         }
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -223,7 +219,7 @@ pub async fn ivchart_intervals(State(ctx): Ctx) -> Response {
             "minutes": bucket(&v, "minutes"),
             "hours": bucket(&v, "hours"),
         }})),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -232,19 +228,18 @@ pub async fn ivchart_intervals(State(ctx): Ctx) -> Response {
 pub async fn all_intervals(State(ctx): Ctx) -> Response {
     match intervals_of(&ctx, NO_KEY_SHORT) {
         Ok(v) => ok(v),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
 /// Underlying, exchange, expiry of the history tools; the expiry must be a
 /// real `DDMMMYY` day.
-#[allow(clippy::result_large_err)]
-fn history_prologue(ctx: &AppState, b: &JsonBody) -> Result<(String, String, String), Response> {
+fn history_prologue(ctx: &AppState, b: &JsonBody) -> Result<(String, String, String), EarlyReply> {
     if let Some(r) = need_broker(ctx) {
-        return Err(r);
+        return Err(r.into());
     }
     if let Some(r) = need_key(ctx, NO_KEY) {
-        return Err(r);
+        return Err(r.into());
     }
     let (u, e, x) = (
         text(b, "underlying", 64),
@@ -255,7 +250,8 @@ fn history_prologue(ctx: &AppState, b: &JsonBody) -> Result<(String, String, Str
         return Err(error(
             StatusCode::BAD_REQUEST,
             "underlying, exchange, and expiry_date are required",
-        ));
+        )
+        .into());
     }
     Ok((u, e, history_expiry(&x)?))
 }
@@ -277,11 +273,11 @@ fn clamp_days(d: i64) -> i64 {
 pub async fn iv_data(State(ctx): Ctx, body: JsonBody) -> Response {
     let (u, e, x) = match history_prologue(&ctx, &body) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let days = match int(&body, "days", 1) {
         Ok(d) => clamp_days(d),
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let interval = interval_or(&body, "5m");
     send(hist::iv_chart(&ctx, &u, &e, &x, &interval, days).await)
@@ -305,7 +301,7 @@ pub async fn default_symbols(State(ctx): Ctx, body: JsonBody) -> Response {
     }
     let x = match history_expiry(&x) {
         Ok(x) => x,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if let Some(r) = need_broker(&ctx) {
         return r;
@@ -317,11 +313,11 @@ pub async fn default_symbols(State(ctx): Ctx, body: JsonBody) -> Response {
 pub async fn straddle_data(State(ctx): Ctx, body: JsonBody) -> Response {
     let (u, e, x) = match history_prologue(&ctx, &body) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let days = match int(&body, "days", 5) {
         Ok(d) => clamp_days(d),
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let interval = interval_or(&body, "1m");
     send(hist::straddle_chart(&ctx, &u, &e, &x, &interval, days).await)
@@ -331,7 +327,7 @@ pub async fn straddle_data(State(ctx): Ctx, body: JsonBody) -> Response {
 pub async fn simulate(State(ctx): Ctx, body: JsonBody) -> Response {
     let (u, e, x) = match history_prologue(&ctx, &body) {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let num = |k: &str, d: i64| int(&body, k, d);
     let (days, adj, lot, lots) = match (
@@ -419,10 +415,10 @@ pub async fn surface_data(State(ctx): Ctx, body: JsonBody) -> Response {
     let expiries = match expiries
         .iter()
         .map(|x| history_expiry(x))
-        .collect::<Result<Vec<String>, Response>>()
+        .collect::<Result<Vec<String>, EarlyReply>>()
     {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     send(hist::vol_surface(&ctx, &u, &e, &expiries, strike_count).await)
 }
@@ -456,13 +452,12 @@ pub async fn arbitrage_universe(
 }
 
 /// The Strategy Builder chart body (web `strategy_chart.py`).
-#[allow(clippy::result_large_err)]
-fn chart_request(ctx: &AppState, b: &JsonBody) -> Result<ChartRequest, Response> {
+fn chart_request(ctx: &AppState, b: &JsonBody) -> Result<ChartRequest, EarlyReply> {
     if let Some(r) = need_broker(ctx) {
-        return Err(r);
+        return Err(r.into());
     }
     if let Some(r) = need_key(ctx, NO_KEY) {
-        return Err(r);
+        return Err(r.into());
     }
     let opt = |k: &str| Some(text(b, k, 64)).filter(|s| !s.is_empty());
     let underlying = text(b, "underlying", 64);
@@ -473,23 +468,18 @@ fn chart_request(ctx: &AppState, b: &JsonBody) -> Result<ChartRequest, Response>
         Some(Value::Array(a)) => a.clone(),
         None | Some(Value::Null) => Vec::new(),
         Some(_) => {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "At least one leg is required",
-            ))
+            return Err(error(StatusCode::BAD_REQUEST, "At least one leg is required").into())
         }
     };
     if underlying.is_empty() || exchange.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "underlying and exchange are required",
-        ));
+        )
+        .into());
     }
     if legs.is_empty() {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "At least one leg is required",
-        ));
+        return Err(error(StatusCode::BAD_REQUEST, "At least one leg is required").into());
     }
     Ok(ChartRequest {
         underlying,
@@ -508,7 +498,7 @@ fn chart_request(ctx: &AppState, b: &JsonBody) -> Result<ChartRequest, Response>
 pub async fn strategy_chart(State(ctx): Ctx, body: JsonBody) -> Response {
     match chart_request(&ctx, &body) {
         Ok(req) => send(hist::strategy_chart(&ctx, &req).await),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 
@@ -516,7 +506,7 @@ pub async fn strategy_chart(State(ctx): Ctx, body: JsonBody) -> Response {
 pub async fn multi_strike_oi(State(ctx): Ctx, body: JsonBody) -> Response {
     match chart_request(&ctx, &body) {
         Ok(req) => send(hist::multi_strike_oi(&ctx, &req).await),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 

@@ -20,6 +20,7 @@
 
 use super::store::{self, AuditEntry, TokenRow};
 use super::{schema, tools, Scope};
+use crate::server::envelope::EarlyReply;
 use crate::server::middleware::ClientIp;
 use crate::state::AppState;
 use axum::{
@@ -395,24 +396,23 @@ fn bad_origin() -> Response {
 /// shared with bad API keys; once that is spent, further bad tokens from
 /// the caller are refused at once (security review S-02). A valid token is
 /// never refused because of it.
-#[allow(clippy::result_large_err)]
 fn token(
     ctx: &AppState,
     ip: IpAddr,
     deferred: bool,
     headers: &HeaderMap,
-) -> Result<TokenRow, Response> {
+) -> Result<TokenRow, EarlyReply> {
     use crate::server::middleware::{count_failure, failures_exhausted};
     use crate::server::ratelimit::Bucket;
     let Some(t) = bearer(headers) else {
-        return Err(unauthorized(ctx, "invalid_token", "Missing Bearer token."));
+        return Err(unauthorized(ctx, "invalid_token", "Missing Bearer token.").into());
     };
     let found = ctx.sqlite.conn().and_then(|c| store::find_token(&c, &t));
     if !matches!(found, Ok(Some(_))) {
         // Spent budget, or a caller in the full shared overflow window:
         // refused at once.
         if deferred || failures_exhausted(ctx, ip, Bucket::ApiKeyFail) {
-            return Err(too_many());
+            return Err(too_many().into());
         }
         count_failure(ctx, ip, Bucket::ApiKeyFail);
     }
@@ -423,10 +423,10 @@ fn token(
             }
             Ok(row)
         }
-        Ok(None) => Err(unauthorized(ctx, "invalid_token", "")),
+        Ok(None) => Err(unauthorized(ctx, "invalid_token", "").into()),
         Err(e) => {
             tracing::error!("MCP token check failed: {}", e);
-            Err(unauthorized(ctx, "invalid_token", ""))
+            Err(unauthorized(ctx, "invalid_token", "").into())
         }
     }
 }
@@ -546,7 +546,7 @@ pub async fn post(
     }
     let tok = match token(&ctx, ip, deferred, &headers) {
         Ok(t) => t,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     // The token is checked first (a digest lookup that needs no key), so
     // only a client holding a valid token learns that OpenAlgo is locked.
@@ -728,7 +728,7 @@ pub async fn sse(
     }
     let tok = match token(&ctx, ip, deferred, &headers) {
         Ok(t) => t,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if !ctx.security.is_unlocked() {
         return locked();
