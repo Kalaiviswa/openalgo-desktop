@@ -259,7 +259,7 @@ pub async fn login(
     // while its wait runs, and parallel requests cannot all pass.
     let attempt = match claim_sign_in(&ctx, source) {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     // KEY-01 security review: only the app window moves keys and hears why
     // they could not be opened (`LoginOutcome::refusal`).
@@ -370,7 +370,7 @@ pub async fn login_totp(
     // spends, claimed before the code is checked.
     let attempt = match claim_sign_in(&ctx, source) {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match AuthService::verify_totp_with(&ctx, &user, &code, &keys) {
         Ok(true) => {
@@ -598,7 +598,7 @@ async fn change_password_common(
     // handler has already refused a request from another site.)
     let attempt = match claim_sign_in(ctx, source) {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let (c2, u, o, n, cf) = (
         ctx.clone(),
@@ -773,7 +773,7 @@ pub async fn two_factor_configure(
     // source's budget like a sign-in.
     let attempt = match claim_sign_in(&ctx, source) {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match AuthService::verify_totp_for(&ctx, &u.username, &code) {
         Ok(true) => attempt.released(),

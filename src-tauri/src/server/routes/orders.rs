@@ -5,7 +5,7 @@
 use crate::server::api_v1::send;
 use crate::server::envelope::{json_response, not_found};
 use crate::server::middleware::User;
-use crate::server::routes::webui::JsonBody;
+use crate::server::routes::webui::{int_id, JsonBody};
 use crate::services::{action_center_service as ac, ui_order_service as ui};
 use crate::state::AppState;
 use axum::{
@@ -70,21 +70,10 @@ pub async fn cancel_gtt_order(State(ctx): Ctx, body: JsonBody) -> Response {
 
 // ------------------------------------------------------------------ Action Center
 
-/// `<int:order_id>`: anything else is not a route (404), as in Flask.
-#[allow(clippy::result_large_err)]
-fn order_id(raw: &str, path: &str) -> Result<i64, Response> {
-    if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) {
-        raw.parse::<i64>().map_err(|_| not_found(path))
-    } else {
-        Err(not_found(path))
-    }
-}
-
 /// POST /action-center/approve/{id}
 pub async fn approve(State(ctx): Ctx, User(u): User, Path(id): Path<String>) -> Response {
-    let id = match order_id(&id, "/action-center/approve") {
-        Ok(i) => i,
-        Err(r) => return r,
+    let Some(id) = int_id(&id) else {
+        return not_found("/action-center/approve");
     };
     send(ac::approve(&ctx, id, &u.username).await)
 }
@@ -96,9 +85,8 @@ pub async fn reject(
     Path(id): Path<String>,
     body: JsonBody,
 ) -> Response {
-    let id = match order_id(&id, "/action-center/reject") {
-        Ok(i) => i,
-        Err(r) => return r,
+    let Some(id) = int_id(&id) else {
+        return not_found("/action-center/reject");
     };
     let reason = match body.0.get("reason") {
         Some(Value::String(s)) => s.clone(),
@@ -110,9 +98,8 @@ pub async fn reject(
 
 /// DELETE /action-center/delete/{id}
 pub async fn delete(State(ctx): Ctx, User(u): User, Path(id): Path<String>) -> Response {
-    let id = match order_id(&id, "/action-center/delete") {
-        Ok(i) => i,
-        Err(r) => return r,
+    let Some(id) = int_id(&id) else {
+        return not_found("/action-center/delete");
     };
     send(ac::delete(&ctx, id, &u.username))
 }

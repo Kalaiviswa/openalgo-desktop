@@ -28,6 +28,12 @@ pub const BAD_REQUEST_MSG: &str =
     "The browser (or proxy) sent a request that this server could not understand.";
 pub const UNEXPECTED: &str = "An unexpected error occurred";
 
+/// The reply a request helper gives back when the request ends there (a
+/// refusal or an error) instead of a value; the handler sends it as is
+/// (`Err(r) => return *r`). Boxed: a `Response` is too large to travel in
+/// every `Result` (clippy `result_large_err`), and `?` boxes one on the way.
+pub type EarlyReply = Box<Response>;
+
 pub fn json_response(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }

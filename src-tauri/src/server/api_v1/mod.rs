@@ -28,7 +28,7 @@ mod orders;
 mod strategy;
 
 use crate::events::{Event, GttKind, Mode};
-use crate::server::envelope::{json_response, not_found, read_json_object};
+use crate::server::envelope::{json_response, not_found, read_json_object, EarlyReply};
 use crate::services::apikey_service::{ApiKeyService, KeyCheck};
 use crate::services::core::{is_analyze, meta, safe_request, Reply, INVALID_API_KEY};
 use crate::services::schema::{FieldErrors, Schema};
@@ -215,7 +215,6 @@ fn auth_failure(auth: Auth) -> Response {
 }
 
 /// Validate a body already read and check its key.
-#[allow(clippy::result_large_err)]
 pub fn check(
     ctx: &AppState,
     ip: IpAddr,
@@ -223,7 +222,7 @@ pub fn check(
     schema: &Schema,
     style: Style,
     auth: Auth,
-) -> Result<Value, Response> {
+) -> Result<Value, EarlyReply> {
     let loaded = schema
         .load(body)
         .map_err(|e| schema_error(ctx, style, body, &e))?;
@@ -233,7 +232,7 @@ pub fn check(
         .unwrap_or_default()
         .to_string();
     if !authorize(ctx, &key, ip, auth) {
-        return Err(auth_failure(auth));
+        return Err(auth_failure(auth).into());
     }
     Ok(Value::Object(loaded))
 }
@@ -248,7 +247,7 @@ pub async fn load(
     auth: Auth,
 ) -> Result<Value, Response> {
     let body = read_json_object(req, &()).await?;
-    check(ctx, ip, &body, schema, style, auth)
+    check(ctx, ip, &body, schema, style, auth).map_err(|r| *r)
 }
 
 /// 404 JSON for unknown `/api/v1` paths and wrong methods (web contract:

@@ -242,7 +242,7 @@ pub async fn ticker(
             };
             return plain(status, msg);
         }
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let interval = s(&v, "interval");
     match market::ticker_candles(
