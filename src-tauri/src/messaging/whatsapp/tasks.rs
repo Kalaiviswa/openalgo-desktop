@@ -5,8 +5,8 @@
 use super::store::SnapshotStore;
 use super::{commands, db};
 use super::{
-    jid_to_phone, route_command, PairEvent, Raw, WaRoute, LOGGED_OUT_MESSAGE, PAIR_TIMEOUT_MESSAGE,
-    STOP_JOIN,
+    jid_to_phone, route_command, ConnSettings, PairEvent, Raw, WaRoute, LOGGED_OUT_MESSAGE,
+    PAIR_TIMEOUT_MESSAGE, STOP_JOIN,
 };
 use crate::messaging::format::redact_phone;
 use crate::state::AppState;
@@ -157,6 +157,17 @@ struct Saver {
 }
 
 impl Saver {
+    /// A saver for the session restored from `stored` (the sealed copy in
+    /// the database), which each save replaces.
+    fn new(store: Arc<SnapshotStore>, stored: String) -> Self {
+        Saver {
+            version: store.version(),
+            store,
+            stored,
+            refused: false,
+        }
+    }
+
     /// Write the live session back when it changed (web `_save_session`).
     async fn save(&mut self, ctx: &AppState, require_login: bool, client: &Client) {
         if self.refused || self.store.version() == self.version {
@@ -206,23 +217,11 @@ pub(super) async fn bot_task(
     ready: oneshot::Sender<bool>,
 ) {
     let mut ready = Some(ready);
-    let store = match SnapshotStore::import(&snapshot) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::error!("The stored WhatsApp session could not be read: {}", e);
-            if let Some(r) = ready.take() {
-                let _ = r.send(false);
-            }
-            return;
-        }
+    let Some(store) = import_store(&snapshot, &mut ready) else {
+        return;
     };
     drop(snapshot);
-    let mut saver = Saver {
-        version: store.version(),
-        store: store.clone(),
-        stored,
-        refused: false,
-    };
+    let mut saver = Saver::new(store.clone(), stored);
     let base = ctx
         .upgrade()
         .map(|c| c.messaging.whatsapp.settings.read().clone())
@@ -250,95 +249,28 @@ pub(super) async fn bot_task(
         };
         let mut handle = bot.spawn();
         let client = handle.client();
-        *svc.client.write() = Some(client.clone());
-        svc.running.store(true, Ordering::SeqCst);
-        svc.logged_out.store(false, Ordering::SeqCst);
-        let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, true));
-        svc.emit_status(&c).await;
+        mark_running(&c, &client).await;
         if let Some(r) = ready.take() {
             let _ = r.send(true);
         }
         tracing::info!("WhatsApp bot connecting");
 
-        // Slash commands run one at a time on a worker owned by this run.
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<(String, String, String)>(32);
-        let wctx = ctx.clone();
-        let worker: JoinHandle<()> = tokio::spawn(async move {
-            while let Some((chat, sender, text)) = cmd_rx.recv().await {
-                let Some(c) = wctx.upgrade() else { return };
-                commands::dispatch(&c, &chat, &sender, &text).await;
-            }
-        });
+        let (cmd_tx, worker) = command_worker(&ctx);
         drop(c);
 
-        let s = base.clone();
-        let mut next_save = tokio::time::Instant::now() + s.first_save;
-        let end = loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break RunEnd::Stop,
-                _ = &mut handle => break RunEnd::Dropped,
-                ev = rx.recv() => {
-                    let Some(ev) = ev else { continue };
-                    let Some(c) = ctx.upgrade() else { break RunEnd::Stop };
-                    match ev {
-                        Raw::Connected => {
-                            backoff = s.reconnect_base;
-                            next_save = next_save.min(tokio::time::Instant::now() + s.first_save);
-                            if let Some(own) = client.get_pn() {
-                                let jid = own.to_non_ad_string();
-                                let _ = c.sqlite.conn().and_then(|cn| {
-                                    db::persist_owner_identity(&cn, &jid, &jid_to_phone(&jid))
-                                });
-                            }
-                            let restored = !c.messaging.whatsapp.running.swap(true, Ordering::SeqCst);
-                            if restored {
-                                let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, true));
-                                tracing::info!("WhatsApp connection is back");
-                                c.messaging.whatsapp.emit_status(&c).await;
-                            }
-                        }
-                        Raw::LoggedOut => break RunEnd::LoggedOut,
-                        Raw::Message { is_from_me, is_group, sender, chat, text } => {
-                            let text = text.trim().to_string();
-                            if !text.starts_with('/') {
-                                continue;
-                            }
-                            let own: Vec<String> = [client.get_pn(), client.get_lid()]
-                                .into_iter()
-                                .flatten()
-                                .map(|j| j.to_non_ad_string())
-                                .collect();
-                            match route_command(is_from_me, is_group, &chat, &own, &c.messaging.whatsapp_replies, c.now()) {
-                                WaRoute::Dispatch => {}
-                                WaRoute::Drop => continue,
-                                WaRoute::Reply(m) => {
-                                    tracing::debug!("WhatsApp command from someone other than the owner refused");
-                                    let to = vec![chat.clone()];
-                                    let text = m.to_string();
-                                    let weak = ctx.clone();
-                                    c.spawn(async move {
-                                        if let Some(c) = weak.upgrade() {
-                                            c.messaging.whatsapp.send(&c, &to, &text).await;
-                                        }
-                                    });
-                                    continue;
-                                }
-                            }
-                            if cmd_tx.try_send((chat, sender, text)).is_err() {
-                                tracing::warn!("WhatsApp command dropped: too many waiting");
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ = tokio::time::sleep_until(next_save) => {
-                    if let Some(c) = ctx.upgrade() {
-                        saver.save(&c, true, &client).await;
-                    }
-                    next_save = tokio::time::Instant::now() + s.save_interval;
-                }
-            }
-        };
+        let (end, connected) = until_end(
+            &ctx,
+            &cancel,
+            &mut handle,
+            &mut rx,
+            &cmd_tx,
+            &mut saver,
+            &base,
+        )
+        .await;
+        if connected {
+            backoff = base.reconnect_base;
+        }
         drop(cmd_tx);
         worker.abort();
         let _ = worker.await;
@@ -350,38 +282,11 @@ pub(super) async fn bot_task(
         *svc.client.write() = None;
         match end {
             RunEnd::Stop => {
-                // Save while connected, then close (which flushes the device
-                // state), then save what the close flushed.
-                saver.save(&c, true, &client).await;
-                if tokio::time::timeout(STOP_JOIN, client.disconnect())
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!("WhatsApp client did not close in time");
-                }
-                handle.abort();
-                saver.save(&c, false, &client).await;
-                svc.running.store(false, Ordering::SeqCst);
-                let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, false));
-                svc.emit_status(&c).await;
+                stop_run(&c, &mut saver, &client, &handle).await;
                 return;
             }
             RunEnd::LoggedOut => {
-                handle.abort();
-                svc.running.store(false, Ordering::SeqCst);
-                let cleared = c
-                    .sqlite
-                    .conn()
-                    .and_then(|cn| db::clear_rejected(&cn, &saver.stored))
-                    .unwrap_or(false);
-                if cleared || !saver.refused {
-                    svc.logged_out.store(true, Ordering::SeqCst);
-                    tracing::warn!("{}", LOGGED_OUT_MESSAGE);
-                } else {
-                    tracing::info!("WhatsApp logged out a session that a new pairing has replaced");
-                }
-                let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, false));
-                svc.emit_status(&c).await;
+                logged_out_run(&c, &saver, &handle).await;
                 return;
             }
             RunEnd::Dropped => {
@@ -400,6 +305,206 @@ pub(super) async fn bot_task(
             }
         }
     }
+}
+
+/// The stored session read into a store; when it cannot be, the starter
+/// is told the bot did not come up.
+fn import_store(
+    snapshot: &[u8],
+    ready: &mut Option<oneshot::Sender<bool>>,
+) -> Option<Arc<SnapshotStore>> {
+    match SnapshotStore::import(snapshot) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            tracing::error!("The stored WhatsApp session could not be read: {}", e);
+            if let Some(r) = ready.take() {
+                let _ = r.send(false);
+            }
+            None
+        }
+    }
+}
+
+/// A run's client published, and the bot shown running and active.
+async fn mark_running(c: &AppState, client: &Arc<Client>) {
+    let svc = &c.messaging.whatsapp;
+    *svc.client.write() = Some(client.clone());
+    svc.running.store(true, Ordering::SeqCst);
+    svc.logged_out.store(false, Ordering::SeqCst);
+    let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, true));
+    svc.emit_status(c).await;
+}
+
+type Command = (String, String, String);
+
+/// Slash commands run one at a time on a worker owned by this run.
+fn command_worker(ctx: &Weak<AppState>) -> (mpsc::Sender<Command>, JoinHandle<()>) {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
+    let wctx = ctx.clone();
+    let worker: JoinHandle<()> = tokio::spawn(async move {
+        while let Some((chat, sender, text)) = cmd_rx.recv().await {
+            let Some(c) = wctx.upgrade() else { return };
+            commands::dispatch(&c, &chat, &sender, &text).await;
+        }
+    });
+    (cmd_tx, worker)
+}
+
+/// One connection, run until it is stopped, logged out or dropped, with
+/// the session saved on a timer. The flag says whether the connection came
+/// up (the caller then starts its backoff over).
+async fn until_end(
+    ctx: &Weak<AppState>,
+    cancel: &CancellationToken,
+    handle: &mut BotHandle,
+    rx: &mut mpsc::Receiver<Raw>,
+    cmd_tx: &mpsc::Sender<Command>,
+    saver: &mut Saver,
+    s: &ConnSettings,
+) -> (RunEnd, bool) {
+    let client = handle.client();
+    let mut connected = false;
+    let mut next_save = tokio::time::Instant::now() + s.first_save;
+    let end = loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break RunEnd::Stop,
+            _ = &mut *handle => break RunEnd::Dropped,
+            ev = rx.recv() => {
+                let Some(ev) = ev else { continue };
+                let Some(c) = ctx.upgrade() else { break RunEnd::Stop };
+                match ev {
+                    Raw::Connected => {
+                        connected = true;
+                        next_save = next_save.min(tokio::time::Instant::now() + s.first_save);
+                        mark_connected(&c, &client).await;
+                    }
+                    Raw::LoggedOut => break RunEnd::LoggedOut,
+                    ev @ Raw::Message { .. } => on_message(ctx, &c, &client, cmd_tx, ev),
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep_until(next_save) => {
+                if let Some(c) = ctx.upgrade() {
+                    saver.save(&c, true, &client).await;
+                }
+                next_save = tokio::time::Instant::now() + s.save_interval;
+            }
+        }
+    };
+    (end, connected)
+}
+
+/// The connection came up: the owner's identity recorded, and a connection
+/// that had dropped reported back.
+async fn mark_connected(c: &AppState, client: &Client) {
+    if let Some(own) = client.get_pn() {
+        let jid = own.to_non_ad_string();
+        let _ = c
+            .sqlite
+            .conn()
+            .and_then(|cn| db::persist_owner_identity(&cn, &jid, &jid_to_phone(&jid)));
+    }
+    let restored = !c.messaging.whatsapp.running.swap(true, Ordering::SeqCst);
+    if restored {
+        let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, true));
+        tracing::info!("WhatsApp connection is back");
+        c.messaging.whatsapp.emit_status(c).await;
+    }
+}
+
+/// A message: a slash command `route_command` lets through goes to the
+/// command worker, and one it refuses is answered.
+fn on_message(
+    ctx: &Weak<AppState>,
+    c: &AppState,
+    client: &Client,
+    cmd_tx: &mpsc::Sender<Command>,
+    ev: Raw,
+) {
+    let Raw::Message {
+        is_from_me,
+        is_group,
+        sender,
+        chat,
+        text,
+    } = ev
+    else {
+        return;
+    };
+    let text = text.trim().to_string();
+    if !text.starts_with('/') {
+        return;
+    }
+    let own: Vec<String> = [client.get_pn(), client.get_lid()]
+        .into_iter()
+        .flatten()
+        .map(|j| j.to_non_ad_string())
+        .collect();
+    match route_command(
+        is_from_me,
+        is_group,
+        &chat,
+        &own,
+        &c.messaging.whatsapp_replies,
+        c.now(),
+    ) {
+        WaRoute::Dispatch => {}
+        WaRoute::Drop => return,
+        WaRoute::Reply(m) => {
+            tracing::debug!("WhatsApp command from someone other than the owner refused");
+            let to = vec![chat.clone()];
+            let text = m.to_string();
+            let weak = ctx.clone();
+            c.spawn(async move {
+                if let Some(c) = weak.upgrade() {
+                    c.messaging.whatsapp.send(&c, &to, &text).await;
+                }
+            });
+            return;
+        }
+    }
+    if cmd_tx.try_send((chat, sender, text)).is_err() {
+        tracing::warn!("WhatsApp command dropped: too many waiting");
+    }
+}
+
+/// A stopped run: saved while connected, then closed (which flushes the
+/// device state), then saved with what the close flushed.
+async fn stop_run(c: &AppState, saver: &mut Saver, client: &Arc<Client>, handle: &BotHandle) {
+    let svc = &c.messaging.whatsapp;
+    saver.save(c, true, client).await;
+    if tokio::time::timeout(STOP_JOIN, client.disconnect())
+        .await
+        .is_err()
+    {
+        tracing::warn!("WhatsApp client did not close in time");
+    }
+    handle.abort();
+    saver.save(c, false, client).await;
+    svc.running.store(false, Ordering::SeqCst);
+    let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, false));
+    svc.emit_status(c).await;
+}
+
+/// A logged-out run: the trader is told unless a new pairing has replaced
+/// the session that was logged out.
+async fn logged_out_run(c: &AppState, saver: &Saver, handle: &BotHandle) {
+    let svc = &c.messaging.whatsapp;
+    handle.abort();
+    svc.running.store(false, Ordering::SeqCst);
+    let cleared = c
+        .sqlite
+        .conn()
+        .and_then(|cn| db::clear_rejected(&cn, &saver.stored))
+        .unwrap_or(false);
+    if cleared || !saver.refused {
+        svc.logged_out.store(true, Ordering::SeqCst);
+        tracing::warn!("{}", LOGGED_OUT_MESSAGE);
+    } else {
+        tracing::info!("WhatsApp logged out a session that a new pairing has replaced");
+    }
+    let _ = c.sqlite.conn().and_then(|cn| db::set_active(&cn, false));
+    svc.emit_status(c).await;
 }
 
 async fn sleep_or_stop(cancel: &CancellationToken, d: Duration) -> bool {
