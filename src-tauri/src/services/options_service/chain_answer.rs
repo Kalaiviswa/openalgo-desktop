@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::brokers::types::{ChainQuoteRequest, ChainQuotes};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// An option chain with what the broker could not supply: legs that came
 /// back without a quote, and legs whose open interest did not come back.
