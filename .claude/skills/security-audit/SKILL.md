@@ -115,7 +115,21 @@ arithmetic, and one shared budget reserved before any work starts.
     keychain) runs only from the desktop window and leaves no value
     encrypted under the old key;
   - every new encrypted column is listed in `key_vault::drop_encrypted_values`
-    and `key_vault::witness`.
+    and `key_vault::witness`;
+  - a sign-in that did not prove its password tells nobody but the app
+    window anything: every failure is the same 401 "Invalid credentials"
+    to a browser, a local program, another device or a tunnel, after the
+    same Argon2 work (`hashing::pad_argon2_runs`); only a sign-in carrying
+    the window proof (`security::window`, `middleware::from_app_window`)
+    reads an earlier build's keychain, moves keys or hears why keys could
+    not be opened; the key state is read before the name and the password
+    (`nobody_but_the_app_window_can_tell_a_right_password_from_a_wrong_one`,
+    `the_ways_out_need_the_password_and_the_app_window`,
+    `every_sign_in_costs_the_same_work_whatever_it_finds`);
+  - what the keychain says reaches neither an answer nor a WARN or ERROR
+    line (the error log the Diagnostics page serves:
+    `the_error_log_never_carries_what_the_keychain_said`), and key material
+    travels as `Secret`/`SecretBytes` only.
   Never a hard-coded or obfuscated key.
 - **Caches.** Every cache is bounded with a TTL and follows the web's
   `LockedTTLCache` rules through `crate::cache::TtlCache`: readers fill

@@ -88,7 +88,7 @@ webhook addresses are SHA-256 digests and need no key.
 | Moment | Keys in memory | What happens |
 | --- | --- | --- |
 | App start | no | No keychain call, no decryption. The database is opened and migrated; the vault row is not opened. |
-| Sign-in, password step | staged, not installed | The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code; the session poll drops them once the 5 minutes are over. |
+| Sign-in, password step | staged, not installed | The install's key state is read first, without the name or the password (see "What a sign-in tells"). The vault is unwrapped with the typed password and the stored hash is checked with the pepper it carries. A failure installs nothing, and every way out costs the same two Argon2 runs. With TOTP required the unwrapped keys wait in the pending sign-in (a 5-minute browser session) and are used only to check the code; the session poll drops them once the 5 minutes are over. |
 | Sign-in completes (session issued) | yes | Installed in the same step that issues the signed-in session (`issue_if_current`, so a password change racing the sign-in voids both). Then the stored broker session resumes, and Telegram and WhatsApp start if they were on. |
 | Account setup | no | New keys, the vault, the account and its API key in one transaction, then the keys leave memory: the setup page sends the trader to sign in, and the keys come back with that session like every other time. (Only the test harness, which opens unlocked, keeps its own.) |
 | Second device signs in | yes (unchanged) | The password still unwraps the vault; the keys in memory are the same. |
@@ -134,18 +134,25 @@ the keychain:
                                                      FromLegacyFile  FromKeychain
 ```
 
-Each `From*` state becomes `Vault` at the first sign-in that succeeds:
+Each `From*` state becomes `Vault` at the first sign-in in the OpenAlgo
+Desktop window that succeeds. A sign-in from anywhere else (a browser or a
+program on this computer, another device, a tunnel) moves nothing and reads
+no keychain: it gets one fixed answer, "Sign in once in the OpenAlgo Desktop
+window...", whatever name and password it sent.
 
-1. **Read the old keys.** `FromVaultFile`: open `vault.json` with the typed
-   password (then `vault.next.json`, a password change an older build left
-   half done). `FromLegacyFile`: decode `secrets.dat`. `FromKeychain`: only
-   for the account's own user name, read `data-key` and `api-key-pepper`
-   from the keychain: the one last prompt.
-2. **Prove them.** The stored password hash must verify with the pepper,
-   and the first encrypted row (the TOTP secret, else the API key, else
-   broker keys, else a broker session) must decrypt with the data key.
-   A wrong password installs nothing. Keys that open no row are another
-   install's keys (see failures).
+1. **Read the old keys.** `FromVaultFile`: check `vault.json` (then
+   `vault.next.json`, a password change an older build left half done)
+   without a password, then open them with the typed password.
+   `FromLegacyFile`: decode `secrets.dat`. `FromKeychain`: read `data-key`
+   and `api-key-pepper` from the keychain: the one last prompt. It is read
+   at every such sign-in in the window whatever name was typed, so whether
+   the prompt appears tells nothing about the name.
+2. **Prove them.** Keys from `secrets.dat` or the keychain must open the
+   first encrypted row (the TOTP secret, else the API key, else broker
+   keys, else a broker session) before any password is looked at: keys that
+   open no row are another install's (see failures), the same for every
+   name and password. Then the stored password hash must verify with the
+   pepper. A wrong password installs nothing.
 3. **Copy into the database.** One `BEGIN IMMEDIATE` transaction inserts the
    vault row (wrapped with the typed password; `source` says where from;
    for the keychain `keychain_cleanup = 'pending'`), reads it back inside
@@ -180,6 +187,7 @@ verified. The keychain is never read once a row exists.
 | Keychain locked or access refused (`FromKeychain`) | "OpenAlgo needs to read your keys from the system keychain one last time to move them into its own database, and the keychain refused or is locked." | **Allow the keychain once and retry** (signs in again with what was typed; choose Allow when the system asks). **Start fresh**. |
 | Keychain has no entries, or entries that open no row (a folder from another computer, a reset) | "The keys for this account are not in this computer's keychain." | **Start fresh** (or restore the folder on the computer it came from). |
 | Wrong password | "Invalid credentials", as before | - |
+| Any of these, from anywhere but the OpenAlgo Desktop window | "Invalid credentials" (the fixed "Sign in once in the OpenAlgo Desktop window" while keys still have to move): the same for every name and password | Sign in in the desktop window |
 | Damaged vault row or unreadable `vault.json` | "OpenAlgo could not read the keys saved with your account." | **Start fresh** |
 | A write fails during a move | The sign-in fails with "try again"; the source is untouched | retry |
 | Forgotten password | Forgot password page | **Set a new password** (same operation as Start fresh) or Reset account |
@@ -206,6 +214,48 @@ is unwrapped and the new TOTP secret decrypted (verification), and old
 The TOTP reset of the web cannot work here: the TOTP secret is encrypted
 with the data key, which is locked while nobody is signed in. The
 `/auth/reset-password` route is retired with the web page it served.
+
+## What a sign-in tells (security review)
+
+A background review of the first Phase B push found that a sign-in could
+tell a right password from a wrong one. Every failure is now built so that
+it cannot:
+
+- **The app window.** The local server cannot tell the OpenAlgo Desktop
+  window from a browser tab or a program on the same computer: all are
+  loopback, with the same host and origin. Each start makes a random proof
+  (`security::window`); the shell command `window_proof` gives it to the
+  main window on the app's own page only, and its sign-in page sends it in
+  the `X-OpenAlgo-Window` header. `middleware::from_app_window` accepts it
+  only from this computer.
+- **One answer for everyone else.** `Opened::Unreadable` (keys that cannot
+  be read, whatever was typed) and `Opened::FailedAfterProof` (the password
+  was proven, then a write or a check failed) reach the app window with the
+  ways out. Anyone else gets the 401 "Invalid credentials" a wrong password
+  gets, spending the same budget; while keys still have to move, the one
+  fixed `SIGN_IN_IN_APP_WINDOW_FIRST`.
+- **No answer depends on what was typed before the proof.** `key_state`
+  reads the account's hash, the vault row (checked without a password by
+  `key_vault::check`), the vault files, `secrets.dat` or the keychain, and
+  proves earlier keys on the data, before it looks at the name or the
+  password. So a damaged vault, a locked keychain or another install's keys
+  answer the same for every name and password, also in the app window.
+  Recovery choices that need the password (a move that failed after the
+  proof) appear only for the right password. The keychain-unreadable and
+  damaged-vault choices cannot wait for a proof (the pepper the hash needs
+  is in the keychain or the vault), so the app window gets them for any
+  input; they say nothing about the input.
+- **The same work on every path.** `hashing::pad_argon2_runs` ends every
+  sign-in with stand-in Argon2 runs up to `SIGN_IN_ARGON2_RUNS` (two: open
+  the vault, check the hash; two per vault file in that state), so no early
+  return before Argon2 shows in the timing.
+- **No system text in answers or in the error log.** Answers carry fixed
+  sentences (`AppError::client_message`). WARN and ERROR lines land in the
+  error log the Diagnostics page serves, so what the keychain says (its item
+  names, file paths, the system's own text) is logged at INFO only.
+- **Key material never prints.** Keychain reads come back as `Secret`
+  (redacted, zeroed); the peppered password and a vault file's bytes are
+  zeroed after use.
 
 ## Caches against the web
 
@@ -241,6 +291,9 @@ mode memo (written under the reader's lock), the monitor's ban list.
 | Keychain move: copied, verified, entries deleted, rows readable, never read again | `server::tests::key_vault::keychain_keys_move_once_and_the_keychain_is_never_read_again` |
 | A stop at every step recovers | `server::tests::key_vault::a_stop_at_every_step_of_the_move_recovers` |
 | Unreadable keychain: retry and start fresh | `server::tests::key_vault::an_unreadable_keychain_offers_retry_and_start_fresh` |
+| No caller but the app window can tell a right password from a wrong one | `server::tests::key_vault::nobody_but_the_app_window_can_tell_a_right_password_from_a_wrong_one`, `server::tests::key_vault::the_ways_out_need_the_password_and_the_app_window` |
+| Every sign-in costs the same work | `security::tests::every_sign_in_costs_the_same_work_whatever_it_finds` |
+| No system text in answers or the error log; no key prints | `server::tests::key_vault::the_error_log_never_carries_what_the_keychain_said`, `error::tests::key_and_os_errors_never_reach_an_answer`, `security::keystore::tests::a_keychain_read_never_prints_the_key`, `security::window::tests::a_proof_matches_itself_only_and_never_prints` |
 | `vault.json` move | `server::tests::key_vault::a_password_mode_vault_file_moves_into_the_database_once` |
 | Locked before sign-in and after logout | `server::tests::key_vault::locked_before_sign_in_and_after_logout_every_surface_refuses` |
 | Password change: one transaction, fault test | `server::tests::key_vault::a_password_change_writes_hash_and_vault_together` |

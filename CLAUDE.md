@@ -170,7 +170,8 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
 - **The frontend talks HTTP and Socket.IO to the local server**, like the web
   frontend talks to Flask. Tauri `invoke` is reserved for things only the shell
   can do (window control, opening the browser, the account reset and the
-  fresh start confirmed in a native dialog). This is
+  fresh start confirmed in a native dialog, the window proof a sign-in in
+  the app window carries). This is
   what lets the web frontend be carried over with minimal edits, and what lets a
   browser open the same dashboard.
 - **Event driven, like the web.** Every order operation publishes an event on
@@ -311,7 +312,18 @@ anything that is not the signed-in user.
   desktop window only: new keys; the account, settings and history stay;
   broker keys, the API key and TOTP are set up again. Installs from earlier
   builds move their keys (keychain, `vault.json`, `secrets.dat`) into the
-  vault once, at the first sign-in, and the keychain is not touched again.
+  vault once, at the first sign-in in the desktop window (read, wrap,
+  verify, delete), and the keychain is not touched again.
+- **A sign-in that did not prove its password tells nothing.** To anyone
+  but the desktop window (a browser or program on this computer, another
+  device, a tunnel) every failure is the same 401 "Invalid credentials",
+  after the same Argon2 work and spending the same budget, whether the name,
+  the password or the keys were the problem; while an earlier build's keys
+  still have to move, one fixed "sign in in the desktop window" answer. Only
+  the desktop window, which shows a per-start proof only the shell hands it
+  (`security::window`, the `X-OpenAlgo-Window` header), moves keys and is
+  told why keys could not be opened, with the ways out (retry the keychain,
+  start fresh).
 - Broker credentials and tokens are AES-256-GCM encrypted with associated data
   binding each ciphertext to its row and column.
 - **Secrets never leave Rust**, with two exceptions shared with the web. No
@@ -958,10 +970,26 @@ and add each new one here.
   the stored hash, read again under the lock a password change holds
   (`SecurityManager::open_for_sign_in`); a password that matches neither
   installs nothing.
+- **A sign-in is an oracle unless every failure looks alike** (KEY-01
+  review). An error raised after the password opened the vault (a failed
+  write, keys that open none of the data) told a right password from a
+  wrong one; an early return before Argon2 (a damaged vault, a keychain
+  error, an unknown name costing one run where a known one cost two) told it
+  by timing. The rules: read the install's key state before the name or the
+  password (`key_state`), so a broken state answers the same whatever was
+  typed; end every path with `hashing::pad_argon2_runs` (two runs, two per
+  vault file); answer `Unreadable` and `FailedAfterProof` with "Invalid
+  credentials" to anyone but the app window (`from_app_window`). Loopback
+  is not the app window: a browser tab and any local program are loopback
+  too. What the keychain says (item names, paths, the system's text) goes to
+  the process log at INFO only, never into a WARN or ERROR: those land in
+  the error log the Diagnostics page serves over HTTP. Key material read
+  from anywhere travels as `Secret`/`SecretBytes`, never as `String`.
 - **The keys live in openalgo.db, locked with the password (KEY-01).** No
   code calls the OS keychain except the one-time move of an earlier build's
-  keys at sign-in (`SecurityManager::open_for_sign_in`): only for the
-  account's own name, only while no vault row exists, and the entries are
+  keys at sign-in (`SecurityManager::open_for_sign_in`): only for a sign-in
+  in the desktop window (whatever name is typed, so the prompt tells nothing
+  about the name), only while no vault row exists, and the entries are
   deleted only after the copy is committed with `synchronous = FULL` and
   verified. A new install makes zero keychain calls (a test counts them).
   `KeyringStore` has no write code at all (`KeyStore::set` refuses), and

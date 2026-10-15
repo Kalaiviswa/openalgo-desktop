@@ -214,9 +214,9 @@ OpenAlgo password. Nothing is kept in your computer's keychain.
   Your AI client tokens, webhook addresses and Chartink addresses keep
   working.
 - **First sign-in after upgrading from an earlier build.** Earlier builds kept
-  the keys in your computer's keychain. The first sign-in reads them from
-  there one last time, moves them into OpenAlgo's own database, checks them
-  and deletes the keychain entries. On a Mac, choose **Allow** (or **Always
+  the keys in your computer's keychain. The first sign-in in the OpenAlgo
+  Desktop window reads them from there one last time, moves them into
+  OpenAlgo's own database, checks them and deletes the keychain entries. On a Mac, choose **Allow** (or **Always
   Allow**) when macOS asks; on Linux and Raspberry Pi, unlock your keyring if
   asked; on Windows, the Credential Manager does not usually ask. After this
   OpenAlgo never uses the keychain again.
@@ -227,6 +227,16 @@ OpenAlgo password. Nothing is kept in your computer's keychain.
 - **"The keys for this account are not in this computer's keychain".** The
   data folder came from another computer, or from before an account reset.
   Restore the folder on the computer it came from, or choose **Start fresh**.
+- **"Sign in once in the OpenAlgo Desktop window".** You signed in from a
+  browser, another device or a tunnel before the keys of an earlier build
+  were moved. Sign in once in the OpenAlgo Desktop window on the computer
+  where it is installed; after that you can sign in from anywhere again.
+- **"Invalid credentials" in a browser although the password is right.**
+  Outside the OpenAlgo Desktop window every failed sign-in reads "Invalid
+  credentials", so a failed sign-in never tells anyone whether a password was
+  right. If the saved keys cannot be opened, sign in in the OpenAlgo Desktop
+  window: it says what is wrong and offers the ways out. Do not choose
+  **Forgot password?** until you have tried there.
 - **Old keychain entries.** If OpenAlgo could not delete them after the move
   (or you started fresh because the keychain could not be read), they are left
   unused. You can remove them yourself: on a Mac, open **Keychain Access** and

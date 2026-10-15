@@ -369,12 +369,20 @@ again. Backups made before a reset still open with the password you had then.
 **Upgrading from an earlier build** that kept the keys in the system keychain
 (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux and
 Raspberry Pi):
-the first time you sign in, OpenAlgo reads them from the keychain one last
-time (allow it when your computer asks), moves them into `openalgo.db`, checks
-them, and deletes the keychain entries. After that it never asks again. If the
-keychain cannot be read, the sign-in page offers to try again or to start
-fresh. An earlier build's `vault.json` is moved into `openalgo.db` the same
-way and then deleted.
+the first time you sign in in the OpenAlgo Desktop window, OpenAlgo reads them
+from the keychain one last time (allow it when your computer asks), moves them
+into `openalgo.db`, checks them, and deletes the keychain entries. After that
+it never asks again. If the keychain cannot be read, the sign-in page offers to
+try again or to start fresh. An earlier build's `vault.json` is moved into
+`openalgo.db` the same way and then deleted. A sign-in from a browser, another
+device or a tunnel does not move anything: it asks you to sign in once in the
+desktop window first.
+
+**What a failed sign-in tells.** Only the OpenAlgo Desktop window is told why
+the saved keys could not be opened, with the ways out. A browser, a program,
+another device or a tunnel gets "Invalid credentials" for every failure, after
+the same amount of work, so nobody can learn from a failed sign-in whether a
+name or a password was right.
 
 ## Supported brokers
 
