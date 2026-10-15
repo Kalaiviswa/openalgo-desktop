@@ -9,8 +9,10 @@
 //! and GTT ids the desktop generates are mapped onto the recorded ones.
 //! Session 1 (read-only) follows.
 //!
-//! Errors are compared exactly (status and body); successes by status and
-//! shape (keys and value types). Fixtures that record a web defect are
+//! Errors are compared exactly (status and body); successes by status,
+//! shape (keys and value types of every list element) and content: every
+//! value equals the recording except the fields declared in `VARIABLE`,
+//! each with its reason (TOOLS-16). Fixtures that record a web defect are
 //! asserted against the desktop's corrected behaviour (see `DIVERGENT`).
 
 use crate::api_v1_support;
@@ -20,7 +22,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use chrono::{NaiveDateTime, TimeZone};
 use chrono_tz::Asia::Kolkata;
-use openalgo_desktop_lib::brokers::types::{Candle, MarginResult};
+use openalgo_desktop_lib::brokers::types::{Candle, DepthLevel, MarginResult, MarketDepth};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -308,6 +310,38 @@ fn candle_of(v: &Value) -> Candle {
     }
 }
 
+fn depth_of(req: &Value, d: &Value) -> MarketDepth {
+    let f = |k: &str| d.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let levels = |side: &str| -> Vec<DepthLevel> {
+        d[side]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| DepthLevel {
+                price: l["price"].as_f64().unwrap_or(0.0),
+                quantity: l["quantity"].as_f64().unwrap_or(0.0) as i64,
+                orders: 0,
+            })
+            .collect()
+    };
+    MarketDepth {
+        symbol: req["symbol"].as_str().unwrap_or_default().to_string(),
+        exchange: req["exchange"].as_str().unwrap_or_default().to_string(),
+        bids: levels("bids"),
+        asks: levels("asks"),
+        ltp: f("ltp"),
+        ltq: f("ltq") as i64,
+        open: f("open"),
+        high: f("high"),
+        low: f("low"),
+        prev_close: f("prev_close"),
+        volume: f("volume") as i64,
+        oi: f("oi") as i64,
+        total_buy_qty: f("totalbuyqty") as i64,
+        total_sell_qty: f("totalsellqty") as i64,
+    }
+}
+
 /// Candles from a ticker text body (`EXCH:SYM,date[,time],o,h,l,c,v`, IST).
 fn candles_from_text(text: &str) -> Vec<Candle> {
     text.lines()
@@ -344,11 +378,23 @@ fn script(h: &H, rel: &str, f: &Value) {
         } else {
             body["data"]
                 .as_array()
-                .map(|a| a.iter().map(candle_of).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter(|c| c.get("_truncated").is_none())
+                        .map(candle_of)
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         *h.mock.history.lock() = Some(Ok(candles));
     }
+    // The recorded depth, for the instrument the fixture asks for; any
+    // other fixture meets the mock's empty depth.
+    *h.mock.depth.lock() = if rel.starts_with("depth/") && f["response"]["status_code"] == 200 {
+        Some(Ok(depth_of(&f["request"]["body"], &body["data"])))
+    } else {
+        None
+    };
     if rel.starts_with("margin/") {
         let d = &body["data"];
         let f = |k: &str| d.get(k).and_then(Value::as_f64).unwrap_or(0.0);
@@ -472,8 +518,480 @@ async fn replay(h: &H, rel: &str, ids: &mut Ids) -> Result<(), String> {
     let r = same_shape(want, &got);
     api_v1_support::STRICT_ARRAYS.with(|c| c.set(false));
     r?;
-    ids.learn(want, &got);
-    Ok(())
+    // Books list their rows in an order the replay cannot reproduce, so
+    // ids are learned only from the answers that place or change orders.
+    if !UNORDERED.iter().any(|(fx, _, _)| rel.starts_with(fx)) {
+        ids.learn(want, &got);
+    }
+    same_content(rel, want, &got, ids)
+}
+
+/// A field the replay cannot reproduce, and why. `field` is the path with
+/// list positions dropped (`.data.orders[].timestamp`); `*` is every field
+/// of the fixture. `Within(r)` accepts a relative difference up to `r`.
+enum Allow {
+    Any,
+    Within(f64),
+    /// Exactly this recorded value against exactly this reply (JSON text).
+    Pair(&'static str, &'static str),
+}
+
+/// The web had two analyzer entries before the recording and wrote five
+/// more than the desktop over session 2 (83 against 76): an open parity
+/// item, not yet traced to its requests (evaluation F, TOOLS-16).
+const OPEN_LOGS: &str = "open: analyzer entry count";
+const OPEN_MARGIN: &str = "open: margin blocked after session 2's activity";
+
+/// Fields of successful replies that are not compared by value (TOOLS-16).
+/// Everything else in a success must equal the recording: identities, list
+/// lengths, prices, quantities, counts and messages.
+const VARIABLE: &[(&str, &str, Allow, &str)] = &[
+    // Wall clock: the replay runs on one manual clock at the session's
+    // start; the web stamped each answer with the time it was recorded.
+    ("orderstatus/", ".data.timestamp", Allow::Any, "wall clock"),
+    (
+        "orderbook/",
+        ".data.orders[].timestamp",
+        Allow::Any,
+        "wall clock",
+    ),
+    ("tradebook/", ".data[].timestamp", Allow::Any, "wall clock"),
+    ("funds/", ".data.last_reset", Allow::Any, "wall clock"),
+    (
+        "gttorderbook/",
+        ".data[].created_at",
+        Allow::Any,
+        "wall clock",
+    ),
+    (
+        "gttorderbook/",
+        ".data[].updated_at",
+        Allow::Any,
+        "wall clock",
+    ),
+    (
+        "gttorderbook/",
+        ".data[].expires_at",
+        Allow::Any,
+        "wall clock",
+    ),
+    // Generated identities the replay cannot map: trade ids carry the
+    // time and a random suffix; `id` is the row number in each app's
+    // symbol table.
+    (
+        "tradebook/",
+        ".data[].tradeid",
+        Allow::Any,
+        "generated trade id",
+    ),
+    ("symbol/", ".data.id", Allow::Any, "symbol table row number"),
+    // NSE freeze limits changed on 5 October 2026 (openalgo#2218, ported
+    // in #63), after the recording.
+    (
+        "optionsymbol/",
+        ".freeze_qty",
+        Allow::Any,
+        "freeze limit changed after the recording",
+    ),
+    (
+        "symbol/",
+        ".data.freeze_qty",
+        Allow::Any,
+        "freeze limit changed after the recording",
+    ),
+    // Time to expiry: the web answered minutes after the replay's clock,
+    // so time-dependent figures differ in their last digits.
+    (
+        "optiongreeks/",
+        ".days_to_expiry",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".implied_volatility",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".greeks.theta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".greeks.vega",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".greeks.rho",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".greeks.delta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optiongreeks/",
+        ".greeks.gamma",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].days_to_expiry",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].implied_volatility",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].greeks.theta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].greeks.vega",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].greeks.rho",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].greeks.delta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "multioptiongreeks/",
+        ".data[].greeks.gamma",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].ce.implied_volatility",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].pe.implied_volatility",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].ce.theta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].pe.theta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].ce.vega",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].pe.vega",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].ce.delta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].pe.delta",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].ce.gamma",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    (
+        "optionchain/",
+        ".chain[].pe.gamma",
+        Allow::Within(0.005),
+        "clock minutes apart",
+    ),
+    // The replay's master is an extract of a few dozen rows, not the
+    // web's full master: listings drawn from it differ in rows and count.
+    (
+        "search/",
+        "*",
+        Allow::Any,
+        "the replay's master is an extract",
+    ),
+    (
+        "instruments/",
+        "*",
+        Allow::Any,
+        "the replay's master is an extract",
+    ),
+    // The mock broker offers fewer timeframes than Kite (the bucketing is
+    // unit-tested with Kite's map).
+    (
+        "intervals/",
+        "*",
+        Allow::Any,
+        "the mock broker's timeframes",
+    ),
+    // Session 1 recorded these against an empty book; the replay runs
+    // them after session 2's orders.
+    (
+        "orderbook/default.json",
+        "*",
+        Allow::Any,
+        "recorded before session 2",
+    ),
+    (
+        "tradebook/default.json",
+        "*",
+        Allow::Any,
+        "recorded before session 2",
+    ),
+    ("optionchain/", ".server_ts", Allow::Any, "wall clock"),
+    (
+        "analyzer/",
+        ".data.total_logs",
+        Allow::Pair("2", "0"),
+        OPEN_LOGS,
+    ),
+    (
+        "analyzer/",
+        ".data.total_logs",
+        Allow::Pair("83", "76"),
+        OPEN_LOGS,
+    ),
+    (
+        "analyzer/",
+        ".data.total_logs",
+        Allow::Pair("86", "79"),
+        OPEN_LOGS,
+    ),
+    (
+        "analyzer/status.json",
+        ".data.total_logs",
+        Allow::Pair("2", "79"),
+        OPEN_LOGS,
+    ),
+    // Open: with the same positions and orders, the desktop blocks
+    // 3,030.45 more margin than the web at this point of session 2; not
+    // traced yet (evaluation F, TOOLS-16). The values are pinned so any
+    // change shows.
+    (
+        "funds/after_activity.json",
+        ".data.availablecash",
+        Allow::Pair("9666628.79", "9663598.34"),
+        OPEN_MARGIN,
+    ),
+    (
+        "funds/after_activity.json",
+        ".data.grossexposure",
+        Allow::Pair("333371.21", "336401.66"),
+        OPEN_MARGIN,
+    ),
+    (
+        "funds/after_activity.json",
+        ".data.utiliseddebits",
+        Allow::Pair("333371.21", "336401.66"),
+        OPEN_MARGIN,
+    ),
+    // `closeposition` does not answer the ids of the orders it places, so
+    // they cannot be mapped onto the recording.
+    (
+        "orderbook/after_cleanup.json",
+        ".data.orders[].orderid",
+        Allow::Any,
+        "unmapped ids",
+    ),
+    (
+        "tradebook/after_cleanup.json",
+        ".data[].orderid",
+        Allow::Any,
+        "unmapped ids",
+    ),
+    // Web defect 1: the web's cancel-all skipped trigger-pending orders;
+    // the desktop cancels them (the two single cancels run first, above).
+    (
+        "orderbook/after_cleanup.json",
+        ".data.orders[].order_status",
+        Allow::Pair("\"trigger pending\"", "\"cancelled\""),
+        "web defect 1",
+    ),
+    (
+        "orderbook/after_cleanup.json",
+        ".data.statistics.total_trigger_pending_orders",
+        Allow::Pair("2", "0"),
+        "web defect 1",
+    ),
+    // Web defect 3: the web could not cancel its OCO, which stayed active
+    // with its margin; the desktop cancels it and ends with nothing
+    // blocked.
+    (
+        "gttorderbook/after_all_cancelled.json",
+        "*",
+        Allow::Any,
+        "web defect 3",
+    ),
+    ("gttorderbook/final.json", "*", Allow::Any, "web defect 3"),
+    (
+        "gttorderbook/status_all.json",
+        ".data[].status",
+        Allow::Pair("\"active\"", "\"cancelled\""),
+        "web defect 3",
+    ),
+    (
+        "gttorderbook/status_all.json",
+        ".data[].margin_blocked",
+        Allow::Pair("1106.8", "0.0"),
+        "web defect 3",
+    ),
+    (
+        "funds/final.json",
+        ".data.availablecash",
+        Allow::Pair("9999319.7", "10000000.0"),
+        "web defect 3",
+    ),
+    (
+        "funds/final.json",
+        ".data.grossexposure",
+        Allow::Pair("680.3", "0.0"),
+        "web defect 3",
+    ),
+    (
+        "funds/final.json",
+        ".data.utiliseddebits",
+        Allow::Pair("680.3", "0.0"),
+        "web defect 3",
+    ),
+    // The two legs' quotes were not recorded; the mock prices both at 100.
+    (
+        "syntheticfuture/",
+        ".synthetic_future_price",
+        Allow::Any,
+        "the legs' quotes were not recorded",
+    ),
+];
+
+/// Lists whose order the replay cannot reproduce, compared by these keys:
+/// each app's database order (positions), and books sorted by a time the
+/// replay's one manual clock gives every row alike.
+const UNORDERED: &[(&str, &str, &[&str])] = &[
+    ("positionbook/", "/data", &["symbol", "exchange", "product"]),
+    ("pnl/", "/data", &["symbol", "exchange", "product"]),
+    (
+        "orderbook/",
+        "/data/orders",
+        &[
+            "symbol",
+            "exchange",
+            "product",
+            "action",
+            "quantity",
+            "pricetype",
+            "order_status",
+            "price",
+            "trigger_price",
+            "orderid",
+        ],
+    ),
+    (
+        "tradebook/",
+        "/data",
+        &[
+            "symbol",
+            "exchange",
+            "product",
+            "action",
+            "quantity",
+            "average_price",
+            "orderid",
+        ],
+    ),
+];
+
+fn sorted_by(v: &mut Value, at: &str, key: &[&str]) {
+    if let Some(rows) = v.pointer_mut(at).and_then(Value::as_array_mut) {
+        rows.sort_by_key(|r| {
+            key.iter()
+                .map(|k| r.get(*k).map(Value::to_string).unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+    }
+}
+
+fn allowed(rel: &str, d: &api_v1_support::Diff) -> bool {
+    VARIABLE.iter().any(|(fx, field, allow, _)| {
+        rel.starts_with(fx)
+            && (*field == "*" || *field == d.field)
+            && match allow {
+                Allow::Any => true,
+                Allow::Within(r) => match (
+                    d.want.as_ref().and_then(Value::as_f64),
+                    d.got.as_ref().and_then(Value::as_f64),
+                ) {
+                    (Some(a), Some(b)) => (a - b).abs() <= r * a.abs().max(b.abs()),
+                    _ => false,
+                },
+                Allow::Pair(w, g) => {
+                    d.want.as_ref().map(Value::to_string).as_deref() == Some(*w)
+                        && d.got.as_ref().map(Value::to_string).as_deref() == Some(*g)
+                }
+            }
+    })
+}
+
+/// A success equals its recording by value, apart from the declared
+/// [`VARIABLE`] fields (TOOLS-16: it used to be compared by shape only).
+fn same_content(rel: &str, want: &Value, got: &Value, ids: &Ids) -> Result<(), String> {
+    let mut want: Value = serde_json::from_str(&ids.apply(&want.to_string())).unwrap();
+    let mut got = got.clone();
+    if let Some((_, at, key)) = UNORDERED.iter().find(|(fx, _, _)| rel.starts_with(fx)) {
+        sorted_by(&mut want, at, key);
+        sorted_by(&mut got, at, key);
+    }
+    let left: Vec<String> = api_v1_support::content_diffs(&want, &got)
+        .into_iter()
+        .filter(|d| !allowed(rel, d))
+        .map(|d| d.to_string())
+        .collect();
+    if left.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("content differs: {}", left.join("; ")))
+    }
 }
 
 /// Web `ORDER_RATE_LIMIT` (10/s per address): ten requests, then the

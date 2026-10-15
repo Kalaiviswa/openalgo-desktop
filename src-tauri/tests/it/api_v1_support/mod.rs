@@ -264,7 +264,8 @@ fn quote_from(symbol: &str, exchange: &str, d: &Value) -> Quote {
 }
 
 /// Quotes recorded in the fixtures (quotes, multiquotes, option chain
-/// legs), plus a plain LTP for every other master row.
+/// legs, then market fills in the recorded order books), plus a plain LTP
+/// for every other master row.
 pub fn quotes(rows: &[SymToken]) -> Vec<Quote> {
     let mut out: Vec<Quote> = Vec::new();
     let mut seen = BTreeSet::new();
@@ -314,6 +315,30 @@ pub fn quotes(rows: &[SymToken]) -> Vec<Quote> {
                         );
                     }
                 }
+            }
+        }
+    }
+    // Instruments the recording quoted only through a fill: a market
+    // order filled at the LTP of its moment.
+    for rel in all_fixtures()
+        .iter()
+        .filter(|r| r.starts_with("orderbook/"))
+    {
+        let f = fixture(rel);
+        let orders = f["response"]["body"]["data"]["orders"].as_array().cloned();
+        for o in orders.into_iter().flatten() {
+            let px = o["average_price"].as_f64().unwrap_or(0.0);
+            if o["pricetype"] == "MARKET" && o["order_status"] == "complete" && px > 0.0 {
+                push(
+                    Quote {
+                        symbol: o["symbol"].as_str().unwrap_or_default().into(),
+                        exchange: o["exchange"].as_str().unwrap_or_default().into(),
+                        ltp: px,
+                        close: px,
+                        ..Default::default()
+                    },
+                    &mut out,
+                );
             }
         }
     }
@@ -547,9 +572,10 @@ thread_local! {
     pub static STRICT_ARRAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Same JSON shape: same object keys and value types, recursively (first
-/// element of arrays when both are non-empty). Fixture bookkeeping keys
-/// (`_total_rows`, `_truncated`) are ignored.
+/// Same JSON shape: same object keys and value types, recursively, for
+/// every element of a list (TOOLS-16: it used to look at the first only).
+/// Fixture bookkeeping keys (`_total_rows`, `_truncated`) and the
+/// `{"_truncated": ..}` marker that stands for omitted rows are ignored.
 pub fn same_shape(want: &Value, got: &Value) -> Result<(), String> {
     match (want, got) {
         (Value::Object(w), Value::Object(g)) => {
@@ -563,17 +589,150 @@ pub fn same_shape(want: &Value, got: &Value) -> Result<(), String> {
             }
             Ok(())
         }
-        (Value::Array(w), Value::Array(g)) => match (w.first(), g.first()) {
-            (Some(a), Some(b)) => same_shape(a, b).map_err(|e| format!("[0]{}", e)),
-            (Some(_), None) if STRICT_ARRAYS.with(|c| c.get()) => {
-                Err(": want a non-empty list, got an empty one".to_string())
+        (Value::Array(w), Value::Array(g)) => {
+            let w: Vec<&Value> = w.iter().filter(|v| !is_marker(v)).collect();
+            if w.is_empty() || g.is_empty() {
+                return if !w.is_empty() && STRICT_ARRAYS.with(|c| c.get()) {
+                    Err(": want a non-empty list, got an empty one".to_string())
+                } else {
+                    Ok(())
+                };
             }
-            _ => Ok(()),
-        },
+            // Every element has the shape of the recorded ones: a list of
+            // one type compares each against the first recorded element.
+            for (i, b) in g.iter().enumerate() {
+                let a = w.get(i).copied().unwrap_or(w[0]);
+                same_shape(a, b).map_err(|e| format!("[{}]{}", i, e))?;
+            }
+            Ok(())
+        }
         (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_))
         | (Value::Bool(_), Value::Bool(_))
         | (Value::Null, Value::Null) => Ok(()),
         _ => Err(format!(": type differs: want {}, got {}", want, got)),
     }
+}
+
+/// The fixture recorder's stand-in for omitted rows.
+fn is_marker(v: &Value) -> bool {
+    v.as_object()
+        .is_some_and(|o| o.len() == 1 && o.contains_key("_truncated"))
+}
+
+/// One place where a reply differs from the recording.
+#[derive(Debug, Clone)]
+pub struct Diff {
+    /// `.data.orders[3].timestamp`
+    pub path: String,
+    /// The same path with list positions dropped: `.data.orders[].timestamp`
+    pub field: String,
+    pub want: Option<Value>,
+    pub got: Option<Value>,
+}
+
+impl std::fmt::Display for Diff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let show = |v: &Option<Value>| match v {
+            Some(v) => v.to_string(),
+            None => "nothing".to_string(),
+        };
+        write!(
+            f,
+            "{}: want {}, got {}",
+            self.path,
+            show(&self.want),
+            show(&self.got)
+        )
+    }
+}
+
+/// Every place where `got` differs from `want` in content (TOOLS-16):
+/// object keys, list lengths and every value, numbers compared as numbers.
+/// Fixture bookkeeping keys (`_...`) are ignored. A list the recorder
+/// truncated (`{"_truncated": ..}` between its first and last rows) is
+/// compared row by row at its head and at its tail.
+pub fn content_diffs(want: &Value, got: &Value) -> Vec<Diff> {
+    let mut out = Vec::new();
+    diff_into(want, got, String::new(), String::new(), &mut out);
+    out
+}
+
+fn diff_into(want: &Value, got: &Value, path: String, field: String, out: &mut Vec<Diff>) {
+    match (want, got) {
+        (Value::Object(w), Value::Object(g)) => {
+            for (k, wv) in w.iter().filter(|(k, _)| !k.starts_with('_')) {
+                let (p, f) = (format!("{}.{}", path, k), format!("{}.{}", field, k));
+                match g.get(k) {
+                    Some(gv) => diff_into(wv, gv, p, f, out),
+                    None => push(out, p, f, Some(wv), None),
+                }
+            }
+            for (k, gv) in g.iter().filter(|(k, _)| !w.contains_key(*k)) {
+                push(
+                    out,
+                    format!("{}.{}", path, k),
+                    format!("{}.{}", field, k),
+                    None,
+                    Some(gv),
+                );
+            }
+        }
+        (Value::Array(w), Value::Array(g)) => {
+            let item = format!("{}[]", field);
+            match w.iter().position(is_marker) {
+                Some(m) => {
+                    // Head rows by position, tail rows from the end.
+                    let (head, tail) = (&w[..m], &w[m + 1..]);
+                    if g.len() < head.len() + tail.len() {
+                        push(
+                            out,
+                            format!("{}.length", path),
+                            format!("{}.length", field),
+                            Some(&Value::from(head.len() + tail.len())),
+                            Some(&Value::from(g.len())),
+                        );
+                        return;
+                    }
+                    for (i, (a, b)) in head.iter().zip(g.iter()).enumerate() {
+                        diff_into(a, b, format!("{}[{}]", path, i), item.clone(), out);
+                    }
+                    let off = g.len() - tail.len();
+                    for (i, (a, b)) in tail.iter().zip(g[off..].iter()).enumerate() {
+                        diff_into(a, b, format!("{}[{}]", path, off + i), item.clone(), out);
+                    }
+                }
+                None => {
+                    if w.len() != g.len() {
+                        push(
+                            out,
+                            format!("{}.length", path),
+                            format!("{}.length", field),
+                            Some(&Value::from(w.len())),
+                            Some(&Value::from(g.len())),
+                        );
+                    }
+                    for (i, (a, b)) in w.iter().zip(g.iter()).enumerate() {
+                        diff_into(a, b, format!("{}[{}]", path, i), item.clone(), out);
+                    }
+                }
+            }
+        }
+        (Value::Number(a), Value::Number(b)) => {
+            if a.as_f64() != b.as_f64() {
+                push(out, path, field, Some(want), Some(got));
+            }
+        }
+        _ if want == got => {}
+        _ => push(out, path, field, Some(want), Some(got)),
+    }
+}
+
+fn push(out: &mut Vec<Diff>, path: String, field: String, w: Option<&Value>, g: Option<&Value>) {
+    out.push(Diff {
+        path,
+        field,
+        want: w.cloned(),
+        got: g.cloned(),
+    });
 }
