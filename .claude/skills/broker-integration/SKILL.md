@@ -251,7 +251,13 @@ export CARGO_TARGET_DIR=/Users/openalgo/openalgo-desktop/openalgo-desktop/src-ta
 cargo test --locked --lib brokers::<broker>
 cargo test --locked --test it broker_<broker>      # or the batch module name
 cargo clippy --all-targets --locked -- -D warnings
+(cd .. && python3 scripts/ci/code_health.py)        # CLAUDE.md, Code health
 ```
+
+A new broker is new code, so it meets the Code health limits in full: an
+adapter over 1,000 lines splits into `auth.rs`, `orders.rs`, `streaming.rs`
+and `mapping.rs` the way the existing brokers do, and a shared shape belongs
+in its family's generic code, not in a copy.
 
 ## 9. Frontend touchpoints
 

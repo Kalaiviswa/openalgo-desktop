@@ -100,6 +100,7 @@ npm ci
 npx tsc -b
 npx vitest run
 npx biome ci ./src
+python3 scripts/ci/code_health.py --base-ref origin/master   # CLAUDE.md, Code health
 gitleaks git --no-banner -c .github/gitleaks.toml --log-opts="origin/master..HEAD" .
 git push origin HEAD:master
 cd - && git worktree remove .claude/worktrees/merge-<topic>

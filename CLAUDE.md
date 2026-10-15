@@ -436,8 +436,8 @@ are in the same commit.
 - **Frontend**: Vitest unit and component tests carried over from the web with
   the pages, axe accessibility tests, Playwright end-to-end.
 - **CI** runs all of it on Linux x64, Linux ARM64, macOS and Windows, with
-  coverage reported. `cargo fmt --check`, `cargo clippy -D warnings` and
-  `biome check` must be clean.
+  coverage reported. `cargo fmt --check`, `cargo clippy -D warnings`,
+  `biome check` and the code-health gate must be clean.
 
 The maintainer's live OpenAlgo web instance can be used to record new fixtures.
 Never commit an API key, account id or email into a fixture; use the
@@ -448,6 +448,7 @@ Never commit an API key, account id or email into a fixture; use the
 - **Rust**: `cargo fmt`, `cargo clippy -- -D warnings`. `tracing` for logs;
   errors logged with context once, at the boundary that handles them. No
   `unwrap()` or `expect()` on runtime data paths. Business logic in services.
+  Size, structure and dead-code rules are in Code health.
 - **TypeScript/React**: Biome, functional components with hooks, PascalCase
   component files, TanStack Query for server state. Keep files close to their
   web originals so future web changes can be carried over by diff.
@@ -487,6 +488,78 @@ Never commit an API key, account id or email into a fixture; use the
   build. Never edit the two generated files by hand and never run a
   formatter over them: `biome.json` leaves them out, because `--check`
   compares the generator's exact output and a reformatted file fails it.
+
+## Code health
+
+Strict, by the maintainer's decision (2026-10-15). Code here is read far more
+often than it is written, by the next agent and by the maintainer, so every
+change leaves the code at least as easy to read, change and test as it found
+it. A change that works but breaks a rule below is not done.
+
+**Enforced by CI**: the `code-health` job, required by `ci-ok`, runs
+`scripts/ci/code_health.py`; clippy lints in `src-tauri/src/lib.rs` cover the
+last row.
+
+| Rule | Limit |
+| --- | --- |
+| A Rust file | 1,000 lines of non-test code |
+| A Rust function | 100 lines; 60 in an HTTP route or a Tauri command |
+| Database access in an HTTP route or a Tauri command | none: call a service |
+| `#[allow(..)]` or `#[expect(..)]` in production code | no new one |
+| A `pub fn` that nothing calls | none |
+| A desktop frontend file | 1,000 lines; files ported from the web are exempt |
+| `unwrap`, `expect`, `todo!`, `dbg!`, `println!`, `eprintln!` in production code | none |
+
+Whatever was over a limit when the gate started is listed in
+`.github/code-health-baseline.json` with its size then. The list is a ratchet:
+
+- **Nothing new joins it.** A change that would put something new over a
+  limit restructures first.
+- **A listed item may shrink, and the shrink is written back**: run
+  `python3 scripts/ci/code_health.py --update` and commit the lowered
+  baseline in the same change. CI fails until you do, so an improvement
+  cannot be undone.
+- **Until the code-health pass, a listed item that grows is a warning;
+  after it, a failure.** Even now, put new code in a new submodule or helper
+  instead of growing a listed file or function.
+- **Only the maintainer adds or raises an entry**, with the
+  `code-health-exception` label on the pull request; CI refuses it
+  otherwise. Edit the baseline by hand only to move an entry whose file or
+  function was renamed. `--init` is for the maintainer.
+- On a merge conflict in the baseline, take either side and rerun `--update`.
+
+**Also required, and checked in review:**
+
+- **Thin handlers.** An HTTP handler or Tauri command parses the request,
+  calls one service function and shapes the reply. Locks, choices between
+  outcomes and sequences of calls are service code.
+- **One place for one thing.** Search before writing a helper. The second
+  copy of a piece of logic or a constant becomes a shared one.
+- **Split by responsibility**, not by line count: a module directory
+  (`foo/mod.rs` plus `foo/orders.rs`, `foo/feed.rs`) whose short `mod.rs` says
+  what lives where. A long function becomes named steps that read as the
+  algorithm.
+- **No dead code.** Delete what nothing calls in the change that removes its
+  last caller. Make an item `pub(crate)` unless an integration test or the
+  binary needs it, so the compiler reports it when it goes unused.
+- **A parameter struct or a boxed error**, not a `too_many_arguments` or
+  `result_large_err` suppression. Fix an existing suppression when you touch
+  its function.
+- **Names and comments are for the reader.** A name says what the thing is in
+  trading terms. A comment says why: the web behaviour it mirrors, the defect
+  it prevents, the invariant it holds. It does not narrate the next line.
+- **A refactor is its own commit** (`refactor:`, no behaviour change), so
+  review and `git bisect` stay readable. Do not restructure files that other
+  open pull requests are changing; wait until they merge.
+- **Files ported from the web keep the web's shape**, size included, so web
+  changes still carry over by diff (see Conventions). Desktop additions to a
+  ported file go in a separate component or module.
+
+**Every review checks structure as well as correctness**: an agent's own pass
+before marking a pull request ready, and any independent review. Is the new
+code where it belongs? Does it duplicate something? Is anything left unused?
+Would the next reader understand it without the pull request description? A
+"yes, but" is fixed before merge.
 
 ## Known pitfalls for agents
 
@@ -550,7 +623,10 @@ and no build is running (`pgrep -fl 'cargo|rustc'` is empty), delete
 build: removing `incremental` fails it with `failed to move dependency graph`,
 and removing a `deps` entry it links against fails the link. If disk is
 critical while builds run, remove only per-crate `incremental/*` folders
-untouched for hours.
+untouched for hours. `incremental` alone reached 20 GB in three days and took
+the disk to zero on 2026-10-15, when every command failed, the agent tools'
+own output files included. The build lane now deletes it whenever free space
+is under 10 GB, while it holds the lane and so no other cargo runs.
 
 Cargo hashes this crate's build-script output (`target/debug/build/
 openalgo-desktop-<hash>/out`, the Tauri capabilities that
@@ -817,8 +893,9 @@ and add each new one here.
 
 - Each agent works in its own worktree and pushes only after `cargo fmt
   --check`, `cargo clippy --all-targets --locked -- -D warnings`, the full
-  `cargo test --locked`, `npx tsc -b`, vitest and gitleaks pass on the tree
-  being pushed. One unverified push once broke the build on master.
+  `cargo test --locked`, `npx tsc -b`, vitest, gitleaks and
+  `python3 scripts/ci/code_health.py` pass on the tree being pushed. One
+  unverified push once broke the build on master.
 - Merge a feature branch through a temporary worktree on current master and
   rerun the full gates there; the registration files (`state.rs`, `lib.rs`,
   `routes/mod.rs`, `middleware.rs`, the public-route list in
