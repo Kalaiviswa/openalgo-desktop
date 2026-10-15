@@ -59,7 +59,6 @@
   },
   "rust_functions": {
     "src-tauri/src/analytics/straddle.rs::simulate": 144,
-    "src-tauri/src/brokers/common/relay.rs::serve": 105,
     "src-tauri/src/brokers/iiflcapital/mqtt_relay.rs::serve": 164,
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,

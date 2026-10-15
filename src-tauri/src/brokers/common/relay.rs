@@ -26,6 +26,7 @@
 
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
@@ -260,9 +261,13 @@ async fn handshake(tcp: TcpStream, path: String) -> Option<WebSocketStream<TcpSt
     }
 }
 
-async fn serve(down: WebSocketStream<TcpStream>, upstream: Arc<dyn Upstream>) {
+/// The broker feed, opened within the timeout. A refused login sends the
+/// downstream the auth-failed frame first; any failure closes it.
+async fn open_or_close(
+    upstream: &dyn Upstream,
+    dw: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+) -> Option<Box<UpstreamWs>> {
     let broker = upstream.broker();
-    let (mut dw, mut dr) = down.split();
     let opened = match tokio::time::timeout(OPEN_TIMEOUT, upstream.open()).await {
         Ok(o) => o,
         Err(_) => {
@@ -270,17 +275,24 @@ async fn serve(down: WebSocketStream<TcpStream>, upstream: Arc<dyn Upstream>) {
             Open::Unavailable
         }
     };
-    let up = match opened {
-        Open::Ready(ws) => ws,
+    match opened {
+        Open::Ready(ws) => Some(ws),
         Open::AuthFailed(message) => {
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, dw.send(auth_failed_frame(&message))).await;
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, dw.close()).await;
-            return;
+            None
         }
         Open::Unavailable => {
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, dw.close()).await;
-            return;
+            None
         }
+    }
+}
+
+async fn serve(down: WebSocketStream<TcpStream>, upstream: Arc<dyn Upstream>) {
+    let (mut dw, mut dr) = down.split();
+    let Some(up) = open_or_close(&*upstream, &mut dw).await else {
+        return;
     };
     let (mut uw, mut ur) = up.split();
     let mut session = upstream.session();
