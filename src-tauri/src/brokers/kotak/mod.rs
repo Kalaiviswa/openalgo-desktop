@@ -22,6 +22,7 @@ mod feed_config;
 mod funds;
 pub mod mapping;
 pub mod master_contract;
+mod order_feed;
 mod orders;
 pub mod streaming;
 #[cfg(test)]
@@ -522,7 +523,7 @@ impl KotakBroker {
     /// through `Broker::create_order_feed`.
     pub fn order_socket(&self, auth: &AuthToken) -> Result<Box<dyn BrokerFeed>> {
         let s = KotakSession::parse(auth)?;
-        Ok(Box::new(streaming::KotakOrderFeed::new(
+        Ok(Box::new(order_feed::KotakOrderFeed::new(
             &s,
             self.symbols.clone(),
         )))
