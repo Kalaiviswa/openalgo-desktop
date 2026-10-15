@@ -91,6 +91,7 @@ pub mod gtt;
 pub mod holdings;
 pub mod locks;
 pub mod orders;
+mod placement;
 pub mod positions;
 pub mod quotes;
 pub mod replies;
@@ -233,7 +234,7 @@ impl Sandbox {
 
     /// `placeorder`.
     pub async fn place_order(&self, req: OrderRequest) -> SbResult<OrderPlaced> {
-        orders::place(self.core(), req, None).await
+        placement::place(self.core(), req, None).await
     }
 
     /// `placeorder` with a quote the caller already fetched (basket orders
@@ -243,7 +244,7 @@ impl Sandbox {
         req: OrderRequest,
         quote: Quote,
     ) -> SbResult<OrderPlaced> {
-        orders::place(self.core(), req, Some(quote)).await
+        placement::place(self.core(), req, Some(quote)).await
     }
 
     /// `placesmartorder`: reach `position_size`, deciding under the
@@ -315,7 +316,7 @@ impl Sandbox {
             product,
             strategy: req.strategy.clone(),
         };
-        let placed = orders::place_locked(core, &guard, order, None, None).await?;
+        let placed = placement::place_locked(core, &guard, order, None, None).await?;
         Ok(SmartOrderReply::Placed(placed))
     }
 

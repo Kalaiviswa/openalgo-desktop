@@ -19,7 +19,7 @@ use super::core::{blocking, Core, EngineCmd};
 use super::events::{gtt_expired, gtt_triggered, Outbox};
 use super::funds;
 use super::locks::PositionKey;
-use super::orders::{self, OrderRequest};
+use super::orders::OrderRequest;
 use super::quotes::{quote_is_old, Quote};
 use super::replies::{GttEntry, GttLegOut, GttOrderbookReply, GttReply, ANALYZE, SUCCESS};
 use super::types::{
@@ -843,7 +843,7 @@ pub(crate) async fn fire(core: &Arc<Core>, leg_id: i64, price: Decimal) -> SbRes
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "GTT".to_string()),
     };
-    let placed = orders::place_locked(core, &guard, req, None, Some(leg.id)).await;
+    let placed = super::placement::place_locked(core, &guard, req, None, Some(leg.id)).await;
     drop(guard);
     let gtt_id = gtt.gtt_id.clone();
     match placed {

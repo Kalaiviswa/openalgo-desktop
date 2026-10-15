@@ -767,7 +767,7 @@ pub(crate) async fn close_position_outcome(
         product: product.to_string(),
         strategy: "AUTO_SQUARE_OFF".to_string(),
     };
-    let placed = super::orders::place_locked(core, &guard, req, None, None).await?;
+    let placed = super::placement::place_locked(core, &guard, req, None, None).await?;
     let (s, e, p, id) = (
         symbol.to_string(),
         exchange.to_string(),
