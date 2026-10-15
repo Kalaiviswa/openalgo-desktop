@@ -29,7 +29,9 @@ Choose **Update** in the update window. OpenAlgo then:
 1. downloads the new version;
 2. checks its signature against the key built into OpenAlgo Desktop, and
    refuses anything that does not match;
-3. installs it and restarts. You may need to sign in again.
+3. installs it and restarts. Sign in again: OpenAlgo locks your keys whenever
+   it closes, and your broker connection and Live trading resume once you
+   sign in.
 
 | System | What the update does |
 | --- | --- |
@@ -43,9 +45,9 @@ data are kept.
 
 ## If something is running
 
-Restarting stops OpenAlgo from watching your trades until it opens again,
-usually within a minute. Before it restarts, OpenAlgo lists what would be
-interrupted and asks you to confirm:
+Restarting stops OpenAlgo from watching your trades until it opens again
+(usually within a minute) and you sign in. Before it restarts, OpenAlgo lists
+what would be interrupted and asks you to confirm:
 
 - **Live trading** (shown as a red warning): running Live strategies (their
   stops, targets and exits are not checked until OpenAlgo opens; then they

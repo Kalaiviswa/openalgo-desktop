@@ -406,7 +406,7 @@ tells you: **nothing is downloaded until you choose Update**.
 
 **Update** downloads the new version, checks its signature against the key
 built into the app (an update that does not match is refused), installs it
-and restarts. Before it downloads, and again before it restarts, OpenAlgo
+and restarts; then you sign in again. Before it downloads, and again before it restarts, OpenAlgo
 names anything a restart would interrupt (running Live strategies, OpenScript
 runs, scalping stops, open orders at your broker) and asks you to confirm;
 sandbox-only activity gets a lighter warning. It never restarts on its own.

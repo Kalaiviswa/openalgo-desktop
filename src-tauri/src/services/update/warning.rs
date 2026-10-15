@@ -162,7 +162,7 @@ fn live_warning(items: Vec<String>) -> Warning {
     Warning {
         level: "live",
         title: "Live trading is running".into(),
-        intro: "Updating restarts OpenAlgo. Until it opens again, usually within a minute, nothing watches your Live trades:".into(),
+        intro: "Updating restarts OpenAlgo. Until it opens again (usually within a minute) and you sign in, nothing watches your Live trades:".into(),
         items,
         advice: "Update now only if that is acceptable. Otherwise choose Later and update after the market closes.".into(),
     }
