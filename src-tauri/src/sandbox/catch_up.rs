@@ -21,6 +21,7 @@ use super::clock::ts;
 use super::config::SandboxConfig;
 use super::core::{blocking, Core};
 use super::events::Outbox;
+use super::expiry;
 use super::funds;
 use super::gtt;
 use super::holdings;
@@ -215,7 +216,7 @@ pub(crate) async fn run(core: &Arc<Core>) -> SbResult<Option<CatchUpReport>> {
             let cfg = SandboxConfig::load(tx)?;
             let reset = reset_stale_daily_pnl(tx, c)?;
             let mis = settle_stale_mis(tx, c, &cfg)?;
-            let expired = positions::cleanup_expired_contracts(tx, c, &cfg, c.now())?;
+            let expired = expiry::cleanup_expired_contracts(tx, c, &cfg, c.now())?;
             let t1 = if holdings::pending_t1(tx, c.now())? > 0 {
                 holdings::process_t1_in_tx(tx, c, c.now(), &mut outbox)?
             } else {

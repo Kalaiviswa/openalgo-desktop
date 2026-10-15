@@ -47,7 +47,6 @@
   "rust_files": {
     "src-tauri/src/sandbox/gtt.rs": 1183,
     "src-tauri/src/sandbox/orders.rs": 1017,
-    "src-tauri/src/sandbox/positions.rs": 1017,
     "src-tauri/src/strategy/engine.rs": 2181,
     "src-tauri/src/strategy/store.rs": 1784
   },

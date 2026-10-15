@@ -85,6 +85,7 @@ pub mod db;
 pub mod engine;
 pub mod events;
 pub mod execution;
+pub mod expiry;
 pub mod funds;
 pub mod gtt;
 pub mod holdings;

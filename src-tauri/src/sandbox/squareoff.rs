@@ -19,6 +19,7 @@ use super::clock::{ts, IST};
 use super::config::SandboxConfig;
 use super::core::{blocking, Core};
 use super::events::{auto_squareoff, Outbox};
+use super::expiry;
 use super::funds;
 use super::holdings;
 use super::orders;
@@ -61,8 +62,8 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
                         .square_off_time(&o.exchange)
                         .map(|sq| t >= sq)
                         .unwrap_or(false);
-                let expired = positions::is_contract_expired_now(
-                    positions::contract_expiry(c, &o.symbol, &o.exchange),
+                let expired = expiry::is_contract_expired_now(
+                    expiry::contract_expiry(c, &o.symbol, &o.exchange),
                     &o.exchange,
                     now,
                     &cfg,
@@ -95,7 +96,7 @@ pub(crate) async fn sweep(core: &Arc<Core>) -> SbResult<SweepReport> {
                     }
                 }
             }
-            let settled = positions::cleanup_expired_contracts(tx, c, &cfg, now)?;
+            let settled = expiry::cleanup_expired_contracts(tx, c, &cfg, now)?;
             let mut to_close = Vec::new();
             for p in positions::list_open(tx, Some(Product::Mis))? {
                 if p.user_id != c.user() {
