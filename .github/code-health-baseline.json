@@ -148,7 +148,6 @@
     "src-tauri/src/strategy/webhook.rs::handle_webhook": 338,
     "src-tauri/src/trading/runner/ending.rs::settle": 108,
     "src-tauri/src/trading/runner/launch.rs::launch": 133,
-    "src-tauri/src/trading/runner/store.rs::write": 112,
     "src-tauri/src/websocket/manager.rs::session": 141
   }
 }

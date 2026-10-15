@@ -390,16 +390,21 @@ fn an(words: &str) -> &'static str {
     }
 }
 
-/// Save what one script is run on (web `write_run_config`). Returns the
-/// deployment id and the sentence the route answers with.
-pub fn write(
-    conn: &mut Connection,
-    script: &str,
-    input: SettingsInput,
-    now: DateTime<Utc>,
-) -> Result<std::result::Result<(String, String), String>> {
+/// The run a deployment names, checked and normalised.
+struct RunFields {
+    symbol: String,
+    exchange: String,
+    interval: String,
+    product: String,
+    settings: Map<String, Value>,
+}
+
+/// Check what a script is to run on (its name, the instrument, exchange
+/// and interval, the product and the inputs); the trader's message when
+/// one is wrong.
+fn run_fields(script: &str, input: &SettingsInput) -> std::result::Result<RunFields, String> {
     if !is_script_name(script) {
-        return Ok(Err(not_a_script_name(script)));
+        return Err(not_a_script_name(script));
     }
     let symbol = input.symbol.trim().to_string();
     let exchange = input.exchange.trim().to_ascii_uppercase();
@@ -411,34 +416,57 @@ pub fn write(
         (&interval, "interval"),
     ] {
         if value.is_empty() {
-            return Ok(Err(format!(
+            return Err(format!(
                 "{} needs {} {} to run on",
                 script,
                 an(words),
                 words
-            )));
+            ));
         }
         if !is_run_field(value) {
-            return Ok(Err(format!(
+            return Err(format!(
                 "{} is not {} {} this can start a run on",
                 crate::trading::names::py_repr(value),
                 an(words),
                 words
-            )));
+            ));
         }
     }
     if !product.is_empty() && !PRODUCTS.contains(&product.as_str()) {
-        return Ok(Err(format!(
+        return Err(format!(
             "{} is not a product this platform sends. Use one of {}.",
             crate::trading::names::py_repr(&product),
             PRODUCTS.join(", ")
-        )));
+        ));
     }
-    let settings = match checked_inputs(&input.inputs) {
-        Ok(s) => s,
-        Err(e) => return Ok(Err(e)),
-    };
+    let settings = checked_inputs(&input.inputs)?;
+    Ok(RunFields {
+        symbol,
+        exchange,
+        interval,
+        product,
+        settings,
+    })
+}
 
+/// Save what one script is run on (web `write_run_config`). Returns the
+/// deployment id and the sentence the route answers with.
+pub fn write(
+    conn: &mut Connection,
+    script: &str,
+    input: SettingsInput,
+    now: DateTime<Utc>,
+) -> Result<std::result::Result<(String, String), String>> {
+    let RunFields {
+        symbol,
+        exchange,
+        interval,
+        product,
+        settings,
+    } = match run_fields(script, &input) {
+        Ok(f) => f,
+        Err(m) => return Ok(Err(m)),
+    };
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let stored = all_deployments(&tx)?;
     let held = if input.deployment.is_empty() {
