@@ -242,133 +242,111 @@ pub struct FillEffect {
     pub released: Decimal,
 }
 
-/// Apply a filled order to its position and to the funds, in the caller's
-/// transaction (web `_update_position`). `order.margin_blocked` already
-/// includes anything the fill itself had to block
-/// ([`margin_needed_at_fill`]).
-///
-/// Margin follows the order into the position, so after every fill
-/// `used_margin` equals the margin the books hold:
-/// * open / reopen / add: the position takes the order's margin;
-/// * reduce: a proportional share of the position margin and all of the
-///   order's margin (if any) are released with the realized P&L;
-/// * full close: the position margin and the order margin are released;
-/// * reversal: the old margin is released; the new position keeps the
-///   order margin that covers the excess quantity (at the order's margin
-///   price) and the rest is released. The web scales that excess-only margin
-///   by the excess share again, so its reversed position holds too little.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_fill(
-    conn: &Connection,
+/// A new position opened by a fill, holding the order's margin.
+fn new_position(order: &OrderRow, signed: i64, price: Decimal, now: &str) -> PositionRow {
+    let user = &order.user_id;
+    let m_order = order.margin_blocked;
+    PositionRow {
+        id: 0,
+        user_id: user.clone(),
+        symbol: order.symbol.clone(),
+        exchange: order.exchange.clone(),
+        product: order.product,
+        quantity: signed,
+        average_price: price,
+        ltp: Some(price),
+        pnl: Decimal::ZERO,
+        pnl_percent: Decimal::ZERO,
+        accumulated_realized_pnl: Decimal::ZERO,
+        today_realized_pnl: Decimal::ZERO,
+        margin_blocked: m_order,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    }
+}
+
+/// Nets a fill into an existing position (reopen, full close, add, reduce
+/// or reverse; see `apply_fill`). Answers the realized P&L and the margin
+/// to release.
+fn net_fill(
+    p: &mut PositionRow,
     cfg: &SandboxConfig,
     order: &OrderRow,
     price: Decimal,
     cv: Decimal,
-    now: &str,
-) -> rusqlite::Result<FillEffect> {
-    let user = &order.user_id;
+) -> (Decimal, Decimal) {
     let signed = order.action.sign() * order.quantity;
     let m_order = order.margin_blocked;
-    let existing = get(
-        conn,
-        user,
-        &order.symbol,
-        &order.exchange,
-        order.product.as_str(),
-    )?;
-
     let mut realized = Decimal::ZERO;
     let mut release_amount = Decimal::ZERO;
-
-    let position = match existing {
-        None => {
-            let mut p = PositionRow {
-                id: 0,
-                user_id: user.clone(),
-                symbol: order.symbol.clone(),
-                exchange: order.exchange.clone(),
-                product: order.product,
-                quantity: signed,
-                average_price: price,
-                ltp: Some(price),
-                pnl: Decimal::ZERO,
-                pnl_percent: Decimal::ZERO,
-                accumulated_realized_pnl: Decimal::ZERO,
-                today_realized_pnl: Decimal::ZERO,
-                margin_blocked: m_order,
-                created_at: now.to_string(),
-                updated_at: now.to_string(),
-            };
-            p.id = insert(conn, &p)?;
-            p
+    let old = p.quantity;
+    let fin = old + signed;
+    if old == 0 {
+        // Reopen: realized history kept, everything else restarts.
+        p.quantity = signed;
+        p.average_price = price;
+        p.pnl = Decimal::ZERO;
+        p.pnl_percent = Decimal::ZERO;
+        p.margin_blocked = m_order;
+    } else if fin == 0 {
+        realized = realized_pnl(old, p.average_price, signed.abs(), price, cv);
+        release_amount = p.margin_blocked + m_order;
+        p.accumulated_realized_pnl += realized;
+        p.today_realized_pnl += realized;
+        p.quantity = 0;
+        p.margin_blocked = Decimal::ZERO;
+        p.pnl = p.today_realized_pnl;
+        p.pnl_percent = Decimal::ZERO;
+    } else if (old > 0 && fin > old) || (old < 0 && fin < old) {
+        let total_qty = Decimal::from(old.abs() + signed.abs());
+        let value =
+            Decimal::from(old.abs()) * p.average_price + Decimal::from(signed.abs()) * price;
+        p.average_price = (value / total_qty).round_dp(AVG_DP);
+        p.quantity = fin;
+        p.margin_blocked += m_order;
+    } else {
+        let reduced = old.abs().min(signed.abs());
+        realized = realized_pnl(old, p.average_price, reduced, price, cv);
+        p.accumulated_realized_pnl += realized;
+        p.today_realized_pnl += realized;
+        if signed.abs() > old.abs() {
+            // Reversal.
+            let excess = signed.abs() - old.abs();
+            let needed = funds::margin_required(
+                cfg,
+                &order.symbol,
+                &order.exchange,
+                order.product,
+                order.action,
+                funds::notional(excess, margin_price(order), cv),
+            );
+            let new_margin = m_order.min(needed).max(Decimal::ZERO);
+            release_amount = p.margin_blocked + (m_order - new_margin);
+            p.quantity = signed.signum() * excess;
+            p.average_price = price;
+            p.margin_blocked = new_margin;
+        } else {
+            let release_pos = (p.margin_blocked * Decimal::from(reduced)
+                / Decimal::from(old.abs()))
+            .round_dp_with_strategy(MARGIN_DP, RoundingStrategy::MidpointAwayFromZero);
+            release_amount = release_pos + m_order;
+            p.quantity = fin;
+            p.margin_blocked -= release_pos;
         }
-        Some(mut p) => {
-            let old = p.quantity;
-            let fin = old + signed;
-            if old == 0 {
-                // Reopen: realized history kept, everything else restarts.
-                p.quantity = signed;
-                p.average_price = price;
-                p.pnl = Decimal::ZERO;
-                p.pnl_percent = Decimal::ZERO;
-                p.margin_blocked = m_order;
-            } else if fin == 0 {
-                realized = realized_pnl(old, p.average_price, signed.abs(), price, cv);
-                release_amount = p.margin_blocked + m_order;
-                p.accumulated_realized_pnl += realized;
-                p.today_realized_pnl += realized;
-                p.quantity = 0;
-                p.margin_blocked = Decimal::ZERO;
-                p.pnl = p.today_realized_pnl;
-                p.pnl_percent = Decimal::ZERO;
-            } else if (old > 0 && fin > old) || (old < 0 && fin < old) {
-                let total_qty = Decimal::from(old.abs() + signed.abs());
-                let value = Decimal::from(old.abs()) * p.average_price
-                    + Decimal::from(signed.abs()) * price;
-                p.average_price = (value / total_qty).round_dp(AVG_DP);
-                p.quantity = fin;
-                p.margin_blocked += m_order;
-            } else {
-                let reduced = old.abs().min(signed.abs());
-                realized = realized_pnl(old, p.average_price, reduced, price, cv);
-                p.accumulated_realized_pnl += realized;
-                p.today_realized_pnl += realized;
-                if signed.abs() > old.abs() {
-                    // Reversal.
-                    let excess = signed.abs() - old.abs();
-                    let needed = funds::margin_required(
-                        cfg,
-                        &order.symbol,
-                        &order.exchange,
-                        order.product,
-                        order.action,
-                        funds::notional(excess, margin_price(order), cv),
-                    );
-                    let new_margin = m_order.min(needed).max(Decimal::ZERO);
-                    release_amount = p.margin_blocked + (m_order - new_margin);
-                    p.quantity = signed.signum() * excess;
-                    p.average_price = price;
-                    p.margin_blocked = new_margin;
-                } else {
-                    let release_pos = (p.margin_blocked * Decimal::from(reduced)
-                        / Decimal::from(old.abs()))
-                    .round_dp_with_strategy(MARGIN_DP, RoundingStrategy::MidpointAwayFromZero);
-                    release_amount = release_pos + m_order;
-                    p.quantity = fin;
-                    p.margin_blocked -= release_pos;
-                }
-            }
-            p.ltp = Some(price);
-            if p.quantity != 0 {
-                p.pnl = unrealized_pnl(p.quantity, p.average_price, price, cv);
-                p.pnl_percent = pnl_percent(p.quantity, p.average_price, price);
-            }
-            p.updated_at = now.to_string();
-            save(conn, &p)?;
-            p
-        }
-    };
+    }
+    (realized, release_amount)
+}
 
+/// Releases a fill's margin and books its realized P&L (never releasing
+/// more than is reserved). Answers the margin released, zero when the
+/// funds could not be settled.
+fn settle_fill_funds(
+    conn: &Connection,
+    cfg: &SandboxConfig,
+    user: &str,
+    now: &str,
+    (release_amount, realized): (Decimal, Decimal),
+) -> rusqlite::Result<Decimal> {
     let mut released = Decimal::ZERO;
     if release_amount > Decimal::ZERO || realized != Decimal::ZERO {
         let capital = cfg.starting_capital;
@@ -390,6 +368,65 @@ pub fn apply_fill(
             Err(r) => tracing::error!("Sandbox fill could not settle funds: {}", r.0),
         }
     }
+    Ok(released)
+}
+
+/// Apply a filled order to its position and to the funds, in the caller's
+/// transaction (web `_update_position`). `order.margin_blocked` already
+/// includes anything the fill itself had to block
+/// ([`margin_needed_at_fill`]).
+///
+/// Margin follows the order into the position, so after every fill
+/// `used_margin` equals the margin the books hold:
+/// * open / reopen / add: the position takes the order's margin;
+/// * reduce: a proportional share of the position margin and all of the
+///   order's margin (if any) are released with the realized P&L;
+/// * full close: the position margin and the order margin are released;
+/// * reversal: the old margin is released; the new position keeps the
+///   order margin that covers the excess quantity (at the order's margin
+///   price) and the rest is released. The web scales that excess-only margin
+///   by the excess share again, so its reversed position holds too little.
+pub fn apply_fill(
+    conn: &Connection,
+    cfg: &SandboxConfig,
+    order: &OrderRow,
+    price: Decimal,
+    cv: Decimal,
+    now: &str,
+) -> rusqlite::Result<FillEffect> {
+    let user = &order.user_id;
+    let signed = order.action.sign() * order.quantity;
+    let existing = get(
+        conn,
+        user,
+        &order.symbol,
+        &order.exchange,
+        order.product.as_str(),
+    )?;
+
+    let mut realized = Decimal::ZERO;
+    let mut release_amount = Decimal::ZERO;
+
+    let position = match existing {
+        None => {
+            let mut p = new_position(order, signed, price, now);
+            p.id = insert(conn, &p)?;
+            p
+        }
+        Some(mut p) => {
+            (realized, release_amount) = net_fill(&mut p, cfg, order, price, cv);
+            p.ltp = Some(price);
+            if p.quantity != 0 {
+                p.pnl = unrealized_pnl(p.quantity, p.average_price, price, cv);
+                p.pnl_percent = pnl_percent(p.quantity, p.average_price, price);
+            }
+            p.updated_at = now.to_string();
+            save(conn, &p)?;
+            p
+        }
+    };
+
+    let released = settle_fill_funds(conn, cfg, user, now, (release_amount, realized))?;
 
     Ok(FillEffect {
         position,
