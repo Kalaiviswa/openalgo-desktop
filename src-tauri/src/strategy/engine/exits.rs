@@ -21,12 +21,16 @@ impl StrategyModule {
     ) -> Vec<Value> {
         // Claimed and classified in ONE hold of the run lock.
         let (live, unfilled) = self.state.claim_legs_for_exit(run_id, leg_ids, kind);
-        #[allow(clippy::large_enum_variant)] // short-lived, one per leg
+        // A live claim carries the whole leg state: boxed, so the two kinds
+        // of target are the same size.
         enum Target {
-            Live(crate::strategy::state::ExitClaim),
+            Live(Box<crate::strategy::state::ExitClaim>),
             Superseded(crate::strategy::state::SupersededClaim),
         }
-        let mut targets: Vec<Target> = live.into_iter().map(Target::Live).collect();
+        let mut targets: Vec<Target> = live
+            .into_iter()
+            .map(|c| Target::Live(Box::new(c)))
+            .collect();
         for leg_id in leg_ids {
             let position = self
                 .state
