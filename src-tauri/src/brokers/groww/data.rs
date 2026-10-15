@@ -351,6 +351,41 @@ async fn live_call(
     }
 }
 
+/// The live prices of a batch (the OHLC close is the previous session's,
+/// so the price comes from the LTP endpoint), and the message for a symbol
+/// without one.
+async fn batch_ltps(
+    core: &GrowwCore,
+    auth: &AuthToken,
+    segment: &str,
+    wanted: &[String],
+) -> Result<(Value, String)> {
+    let ltp_path = format!(
+        "/v1/live-data/ltp?segment={}&exchange_symbols={}",
+        segment,
+        urlencoding::encode(&wanted.join(","))
+    );
+    Ok(match live_call(core, auth, &ltp_path).await? {
+        Ok(lr) if lr.is_success() && lr.payload().is_object() => (
+            lr.payload().clone(),
+            "Groww returned no live price for this symbol".to_string(),
+        ),
+        Ok(lr) => {
+            let why = error_message(&lr.body);
+            tracing::warn!("Groww LTP batch failed for {}: {}", segment, why);
+            (
+                Value::Null,
+                if why.is_empty() {
+                    "Groww did not return live prices for this symbol.".to_string()
+                } else {
+                    format!("Groww did not return live prices: {}", why)
+                },
+            )
+        }
+        Err(why) => (Value::Null, why),
+    })
+}
+
 /// OHLC for one segment's instruments, dropping symbols Groww reports as
 /// invalid and retrying (at most `INVALID_SYMBOL_RETRIES` times).
 async fn ohlc_batch(
@@ -381,30 +416,7 @@ async fn ohlc_batch(
         if r.is_success() {
             // The OHLC close is the previous session's close, so the live
             // price comes from the LTP endpoint (08-live-data "Get LTP").
-            let ltp_path = format!(
-                "/v1/live-data/ltp?segment={}&exchange_symbols={}",
-                segment,
-                urlencoding::encode(&wanted.join(","))
-            );
-            let (ltps, no_price) = match live_call(core, auth, &ltp_path).await? {
-                Ok(lr) if lr.is_success() && lr.payload().is_object() => (
-                    lr.payload().clone(),
-                    "Groww returned no live price for this symbol".to_string(),
-                ),
-                Ok(lr) => {
-                    let why = error_message(&lr.body);
-                    tracing::warn!("Groww LTP batch failed for {}: {}", segment, why);
-                    (
-                        Value::Null,
-                        if why.is_empty() {
-                            "Groww did not return live prices for this symbol.".to_string()
-                        } else {
-                            format!("Groww did not return live prices: {}", why)
-                        },
-                    )
-                }
-                Err(why) => (Value::Null, why),
-            };
+            let (ltps, no_price) = batch_ltps(core, auth, segment, &wanted).await?;
             for es in &wanted {
                 let ohlc = r.payload().get(es).filter(|v| !v.is_null());
                 match ltp_of(ltps.get(es)) {
