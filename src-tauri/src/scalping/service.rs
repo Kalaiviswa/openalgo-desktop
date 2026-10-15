@@ -10,6 +10,7 @@
 
 use super::monitor::{exit_chunk, LEG_EXCHANGES, MAX_LOTS, SCALPING_STRATEGY};
 use super::store::{SlUpsert, MODE_ANALYZE, MODE_LIVE};
+use super::unconfirmed::{self, NewPending};
 use crate::brokers::common::symbols::SymToken;
 use crate::services::core::{analyze_mode, broker_handle, Reply};
 use crate::services::order_service::Route;
@@ -661,95 +662,6 @@ fn accepted(r: &Reply) -> bool {
     r.is_success() && r.body.get("status").and_then(Value::as_str) != Some("error")
 }
 
-/// Refuse an order for a contract the page has an unconfirmed order for:
-/// it may already be at the broker (LOG-08).
-fn unconfirmed_guard(
-    ctx: &AppState,
-    mode: &str,
-    symbol: &str,
-    exchange: &str,
-    product: &str,
-) -> Option<Reply> {
-    match super::unconfirmed::open_for(&ctx.sqlite, mode, symbol, exchange, product) {
-        Ok(false) => None,
-        Ok(true) => Some(err(409, super::unconfirmed::repeat_refusal(symbol))),
-        Err(e) => {
-            tracing::error!("Unconfirmed scalping orders could not be read: {}", e);
-            Some(err(
-                500,
-                "The scalping orders could not be read just now, so nothing was sent. Try again in a moment.",
-            ))
-        }
-    }
-}
-
-/// Record an order the broker did not confirm, so a retry is refused until
-/// the order book settles it, and tell the trader so.
-#[allow(clippy::too_many_arguments)]
-fn note_unconfirmed(
-    ctx: &AppState,
-    mode: &str,
-    kind: &str,
-    symbol: &str,
-    exchange: &str,
-    product: &str,
-    action: &str,
-    quantity: i64,
-    client_tag: Option<&str>,
-) -> Reply {
-    let recorded = super::unconfirmed::record(
-        &ctx.sqlite,
-        &super::unconfirmed::NewPending {
-            mode,
-            kind,
-            symbol,
-            exchange,
-            product,
-            action,
-            quantity,
-            client_tag,
-        },
-        ctx.now(),
-    );
-    if let Err(e) = recorded {
-        tracing::error!(
-            "The unconfirmed scalping {} {} {} could not be recorded: {}",
-            action,
-            quantity,
-            symbol,
-            e
-        );
-    }
-    ctx.reconciler.request_pass();
-    err(500, super::unconfirmed::NOT_CONFIRMED)
-}
-
-/// The quantity of the split chunk with no definite answer: the last one
-/// sent, as the chunks after it are reported not sent.
-fn uncertain_chunk(r: &Reply) -> Option<i64> {
-    r.body
-        .get("results")?
-        .as_array()?
-        .iter()
-        .rev()
-        .find(|row| {
-            row.get("message").and_then(Value::as_str)
-                != Some(crate::services::batch_order_service::SPLIT_HELD)
-        })?
-        .get("quantity")?
-        .as_i64()
-}
-
-/// The client tag an uncertain placement was sent with.
-fn client_tag_of(r: &Reply) -> Option<String> {
-    match &r.placement {
-        Some(crate::brokers::common::outcome::PlaceOutcome::Uncertain { client_tag, .. }) => {
-            client_tag.clone()
-        }
-        _ => None,
-    }
-}
-
 /// `POST /scalping/api/order`: one MARKET entry.
 pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
     let f = match order_fields(body, "MIS") {
@@ -788,7 +700,8 @@ pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
         Ok(a) => a,
         Err(r) => return r,
     };
-    if let Some(r) = unconfirmed_guard(ctx, mode_name(analyze), &f.symbol, &f.exchange, &f.product)
+    if let Some(r) =
+        unconfirmed::refuse_repeat(ctx, mode_name(analyze), &f.symbol, &f.exchange, &f.product)
     {
         return r;
     }
@@ -801,16 +714,18 @@ pub async fn place(ctx: &AppState, body: &Map<String, Value>) -> Reply {
     )
     .await;
     if r.is_uncertain() {
-        return note_unconfirmed(
+        return unconfirmed::note(
             ctx,
-            mode_name(analyze),
-            "entry",
-            &f.symbol,
-            &f.exchange,
-            &f.product,
-            &f.action,
-            f.quantity,
-            client_tag_of(&r).as_deref(),
+            &NewPending {
+                mode: mode_name(analyze),
+                kind: "entry",
+                symbol: &f.symbol,
+                exchange: &f.exchange,
+                product: &f.product,
+                action: &f.action,
+                quantity: f.quantity,
+                client_tag: unconfirmed::client_tag_of(&r).as_deref(),
+            },
         );
     }
     if accepted(&r) {
@@ -838,9 +753,19 @@ pub async fn reducing_exit(
     quantity: i64,
 ) -> Reply {
     let mode = mode_name(analyze);
-    if let Some(r) = unconfirmed_guard(ctx, mode, symbol, exchange, product) {
+    if let Some(r) = unconfirmed::refuse_repeat(ctx, mode, symbol, exchange, product) {
         return r;
     }
+    let exit = |quantity, client_tag| NewPending {
+        mode,
+        kind: "exit",
+        symbol,
+        exchange,
+        product,
+        action,
+        quantity,
+        client_tag,
+    };
     let chunk = match exit_chunk(&ctx.symbols, symbol, exchange, quantity) {
         Ok(c) => c,
         Err(e) => return err(400, e),
@@ -868,10 +793,8 @@ pub async fn reducing_exit(
         }
         // The split stopped at the first chunk with no definite answer and
         // sent nothing after it: that chunk may be at the broker.
-        let q = uncertain_chunk(&reply).unwrap_or(quantity);
-        return note_unconfirmed(
-            ctx, mode, "exit", symbol, exchange, product, action, q, None,
-        );
+        let q = unconfirmed::uncertain_chunk(&reply).unwrap_or(quantity);
+        return unconfirmed::note(ctx, &exit(q, None));
     }
     let req = json!({
         "strategy": SCALPING_STRATEGY,
@@ -894,17 +817,8 @@ pub async fn reducing_exit(
     )
     .await;
     if r.is_uncertain() {
-        return note_unconfirmed(
-            ctx,
-            mode,
-            "exit",
-            symbol,
-            exchange,
-            product,
-            action,
-            quantity,
-            client_tag_of(&r).as_deref(),
-        );
+        let tag = unconfirmed::client_tag_of(&r);
+        return unconfirmed::note(ctx, &exit(quantity, tag.as_deref()));
     }
     r
 }

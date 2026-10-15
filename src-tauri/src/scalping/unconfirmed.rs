@@ -23,8 +23,10 @@
 //! restart.
 
 use super::store::{MODE_ANALYZE, MODE_LIVE};
+use crate::brokers::common::outcome::PlaceOutcome;
 use crate::db::sqlite::SqliteDb;
 use crate::error::Result;
+use crate::services::core::Reply;
 use crate::services::order_reconciler::{
     held_message, Absence, AbsenceTracker, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
 };
@@ -33,6 +35,7 @@ use crate::strategy::dispatch::RunMode;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Weak;
 
@@ -46,6 +49,68 @@ pub fn repeat_refusal(symbol: &str) -> String {
         "An earlier order for {} was not confirmed by the broker, so nothing more is sent for it until the order book settles it. Check the order book.",
         symbol
     )
+}
+
+/// Refuse an order for a contract the page has an unconfirmed order for:
+/// it may already be at the broker.
+pub(crate) fn refuse_repeat(
+    ctx: &AppState,
+    mode: &str,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> Option<Reply> {
+    match open_for(&ctx.sqlite, mode, symbol, exchange, product) {
+        Ok(false) => None,
+        Ok(true) => Some(Reply::error(409, repeat_refusal(symbol))),
+        Err(e) => {
+            tracing::error!("Unconfirmed scalping orders could not be read: {}", e);
+            Some(Reply::error(
+                500,
+                "The scalping orders could not be read just now, so nothing was sent. Try again in a moment.",
+            ))
+        }
+    }
+}
+
+/// Record an order the broker did not confirm, so a retry is refused until
+/// the order book settles it; the page's answer tells the trader so.
+pub(crate) fn note(ctx: &AppState, p: &NewPending) -> Reply {
+    if let Err(e) = record(&ctx.sqlite, p, ctx.now()) {
+        tracing::error!(
+            "The unconfirmed scalping {} {} {} could not be recorded: {}",
+            p.action,
+            p.quantity,
+            p.symbol,
+            e
+        );
+    }
+    ctx.reconciler.request_pass();
+    Reply::error(500, NOT_CONFIRMED)
+}
+
+/// The quantity of the split chunk with no definite answer: the last one
+/// sent, as the chunks after it are reported not sent.
+pub(crate) fn uncertain_chunk(r: &Reply) -> Option<i64> {
+    r.body
+        .get("results")?
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|row| {
+            row.get("message").and_then(Value::as_str)
+                != Some(crate::services::batch_order_service::SPLIT_HELD)
+        })?
+        .get("quantity")?
+        .as_i64()
+}
+
+/// The client tag an uncertain placement was sent with.
+pub(crate) fn client_tag_of(r: &Reply) -> Option<String> {
+    match &r.placement {
+        Some(PlaceOutcome::Uncertain { client_tag, .. }) => client_tag.clone(),
+        _ => None,
+    }
 }
 
 /// Migration `085_scalping_unconfirmed`.
