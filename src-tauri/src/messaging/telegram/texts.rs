@@ -320,144 +320,159 @@ pub fn format_short(kind: &str, resp: &Option<Value>, cs: &str) -> String {
     }
     let r = resp.as_ref().unwrap_or(&Value::Null);
     match kind {
-        "orderbook" => {
-            let orders = list_in(&data(r), Some("orders"));
-            if orders.is_empty() {
-                return format!("*ORDERBOOK*\n{RULE}\n\nNo open orders");
-            }
-            let mut m = format!("*ORDERBOOK*\n{RULE}\n\n");
-            for o in orders.iter().take(10) {
-                let status = get_str(o, "order_status", "unknown");
-                let price = match o.get("price").map(py_float).unwrap_or(Some(0.0)) {
-                    Some(p) => {
-                        if p == 0.0 {
-                            "Market".to_string()
-                        } else {
-                            format!("{cs}{}", py_float_str(p))
-                        }
-                    }
-                    None => format!("{cs}{}", get_str(o, "price", "0")),
-                };
-                m += &format!(
-                    "{} *{}* ({})\n{} {} {} @ {}\n└ Status: {}\n\n",
-                    order_status_tag(&status),
-                    get_str(o, "symbol", "N/A"),
-                    get_str(o, "exchange", "N/A"),
-                    action_tag(o),
-                    get_str(o, "action", "N/A"),
-                    int_or_raw(o, "quantity"),
-                    price,
-                    title(&status)
-                );
-            }
-            if orders.len() > 10 {
-                m += &format!("_... and {} more orders_", orders.len() - 10);
-            }
-            m
-        }
-        "tradebook" => {
-            let trades = list_in(r, Some("data"));
-            if trades.is_empty() {
-                return format!("*TRADEBOOK*\n{RULE}\n\nNo trades executed today");
-            }
-            let mut m = format!("*TRADEBOOK*\n{RULE}\n\n");
-            for t in trades.iter().take(10) {
-                let avg = match t.get("average_price").map(py_float).unwrap_or(Some(0.0)) {
-                    Some(a) => format!("{cs}{}", comma2(a)),
-                    None => format!("{cs}{}", get_str(t, "average_price", "0")),
-                };
-                m += &format!(
-                    "{} *{}* ({})\n├ {} {} @ {}\n└ Time: {}\n\n",
-                    action_tag(t),
-                    get_str(t, "symbol", "N/A"),
-                    get_str(t, "exchange", "N/A"),
-                    get_str(t, "action", "N/A"),
-                    int_or_raw(t, "quantity"),
-                    avg,
-                    get_str(t, "timestamp", "N/A")
-                );
-            }
-            if trades.len() > 10 {
-                m += &format!("_... and {} more trades_", trades.len() - 10);
-            }
-            m
-        }
-        "positions" => {
-            let positions = list_in(r, Some("data"));
-            let active: Vec<&Value> = positions.iter().filter(|p| quantity_nonzero(p)).collect();
-            if active.is_empty() {
-                return format!("*POSITIONS*\n{RULE}\n\nNo active positions");
-            }
-            let mut m = format!("*POSITIONS*\n{RULE}\n\n");
-            for p in active.iter().take(10) {
-                let q = p.get("quantity").and_then(py_int).unwrap_or(0);
-                let (tag, kind) = if q > 0 {
-                    ("[LONG]", "LONG")
-                } else {
-                    ("[SHORT]", "SHORT")
-                };
-                m += &format!(
-                    "{} *{}* ({})\n├ {}\n└ Qty: {}\n\n",
-                    tag,
-                    get_str(p, "symbol", "N/A"),
-                    get_str(p, "exchange", "N/A"),
-                    kind,
-                    q.abs()
-                );
-            }
-            if active.len() > 10 {
-                m += &format!("_... and {} more positions_", active.len() - 10);
-            }
-            m
-        }
-        "holdings" => {
-            let holdings = list_in(&data(r), Some("holdings"));
-            if holdings.is_empty() {
-                return format!("*HOLDINGS*\n{RULE}\n\nNo holdings found");
-            }
-            let mut m = format!("*HOLDINGS*\n{RULE}\n\n");
-            for h in holdings.iter().take(10) {
-                let (pnl, pct) = match (
-                    h.get("pnl").map(py_float).unwrap_or(Some(0.0)),
-                    h.get("pnlpercent").map(py_float).unwrap_or(Some(0.0)),
-                ) {
-                    (Some(a), Some(b)) => (a, b),
-                    _ => (0.0, 0.0),
-                };
-                m += &format!(
-                    "{} *{}*\n└ P&L: {cs}{} ({}%)\n\n",
-                    sign_tag(pnl),
-                    get_str(h, "symbol", "N/A"),
-                    comma2(pnl),
-                    signed2(pct)
-                );
-            }
-            if holdings.len() > 10 {
-                m += &format!("_... and {} more holdings_", holdings.len() - 10);
-            }
-            m
-        }
-        "funds" => {
-            let f = data(r);
-            let vals = (
-                f.get("availablecash").map(py_float).unwrap_or(Some(0.0)),
-                f.get("collateral").map(py_float).unwrap_or(Some(0.0)),
-                f.get("utiliseddebits").map(py_float).unwrap_or(Some(0.0)),
-            );
-            let (a, c, u) = match vals {
-                (Some(a), Some(c), Some(u)) => (a, c, u),
-                _ => (0.0, 0.0, 0.0),
-            };
-            format!(
-                "*FUNDS*\n{RULE}\n\nAvailable: {cs}{}\nCollateral: {cs}{}\nUtilized: {cs}{}\nTotal: {cs}{}",
-                comma2(a),
-                comma2(c),
-                comma2(u),
-                comma2(a + c)
-            )
-        }
+        "orderbook" => short_orderbook(r, cs),
+        "tradebook" => short_tradebook(r, cs),
+        "positions" => short_positions(r),
+        "holdings" => short_holdings(r, cs),
+        "funds" => short_funds(r, cs),
         _ => "Unknown command".into(),
     }
+}
+
+/// The orderbook button: the first ten orders.
+fn short_orderbook(r: &Value, cs: &str) -> String {
+    let orders = list_in(&data(r), Some("orders"));
+    if orders.is_empty() {
+        return format!("*ORDERBOOK*\n{RULE}\n\nNo open orders");
+    }
+    let mut m = format!("*ORDERBOOK*\n{RULE}\n\n");
+    for o in orders.iter().take(10) {
+        let status = get_str(o, "order_status", "unknown");
+        let price = match o.get("price").map(py_float).unwrap_or(Some(0.0)) {
+            Some(p) => {
+                if p == 0.0 {
+                    "Market".to_string()
+                } else {
+                    format!("{cs}{}", py_float_str(p))
+                }
+            }
+            None => format!("{cs}{}", get_str(o, "price", "0")),
+        };
+        m += &format!(
+            "{} *{}* ({})\n{} {} {} @ {}\n└ Status: {}\n\n",
+            order_status_tag(&status),
+            get_str(o, "symbol", "N/A"),
+            get_str(o, "exchange", "N/A"),
+            action_tag(o),
+            get_str(o, "action", "N/A"),
+            int_or_raw(o, "quantity"),
+            price,
+            title(&status)
+        );
+    }
+    if orders.len() > 10 {
+        m += &format!("_... and {} more orders_", orders.len() - 10);
+    }
+    m
+}
+
+/// The tradebook button: the first ten of today's trades.
+fn short_tradebook(r: &Value, cs: &str) -> String {
+    let trades = list_in(r, Some("data"));
+    if trades.is_empty() {
+        return format!("*TRADEBOOK*\n{RULE}\n\nNo trades executed today");
+    }
+    let mut m = format!("*TRADEBOOK*\n{RULE}\n\n");
+    for t in trades.iter().take(10) {
+        let avg = match t.get("average_price").map(py_float).unwrap_or(Some(0.0)) {
+            Some(a) => format!("{cs}{}", comma2(a)),
+            None => format!("{cs}{}", get_str(t, "average_price", "0")),
+        };
+        m += &format!(
+            "{} *{}* ({})\n├ {} {} @ {}\n└ Time: {}\n\n",
+            action_tag(t),
+            get_str(t, "symbol", "N/A"),
+            get_str(t, "exchange", "N/A"),
+            get_str(t, "action", "N/A"),
+            int_or_raw(t, "quantity"),
+            avg,
+            get_str(t, "timestamp", "N/A")
+        );
+    }
+    if trades.len() > 10 {
+        m += &format!("_... and {} more trades_", trades.len() - 10);
+    }
+    m
+}
+
+/// The positions button: the first ten open positions.
+fn short_positions(r: &Value) -> String {
+    let positions = list_in(r, Some("data"));
+    let active: Vec<&Value> = positions.iter().filter(|p| quantity_nonzero(p)).collect();
+    if active.is_empty() {
+        return format!("*POSITIONS*\n{RULE}\n\nNo active positions");
+    }
+    let mut m = format!("*POSITIONS*\n{RULE}\n\n");
+    for p in active.iter().take(10) {
+        let q = p.get("quantity").and_then(py_int).unwrap_or(0);
+        let (tag, kind) = if q > 0 {
+            ("[LONG]", "LONG")
+        } else {
+            ("[SHORT]", "SHORT")
+        };
+        m += &format!(
+            "{} *{}* ({})\n├ {}\n└ Qty: {}\n\n",
+            tag,
+            get_str(p, "symbol", "N/A"),
+            get_str(p, "exchange", "N/A"),
+            kind,
+            q.abs()
+        );
+    }
+    if active.len() > 10 {
+        m += &format!("_... and {} more positions_", active.len() - 10);
+    }
+    m
+}
+
+/// The holdings button: the first ten holdings with their P&L.
+fn short_holdings(r: &Value, cs: &str) -> String {
+    let holdings = list_in(&data(r), Some("holdings"));
+    if holdings.is_empty() {
+        return format!("*HOLDINGS*\n{RULE}\n\nNo holdings found");
+    }
+    let mut m = format!("*HOLDINGS*\n{RULE}\n\n");
+    for h in holdings.iter().take(10) {
+        let (pnl, pct) = match (
+            h.get("pnl").map(py_float).unwrap_or(Some(0.0)),
+            h.get("pnlpercent").map(py_float).unwrap_or(Some(0.0)),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => (0.0, 0.0),
+        };
+        m += &format!(
+            "{} *{}*\n└ P&L: {cs}{} ({}%)\n\n",
+            sign_tag(pnl),
+            get_str(h, "symbol", "N/A"),
+            comma2(pnl),
+            signed2(pct)
+        );
+    }
+    if holdings.len() > 10 {
+        m += &format!("_... and {} more holdings_", holdings.len() - 10);
+    }
+    m
+}
+
+/// The funds button: cash, collateral, utilised and total.
+fn short_funds(r: &Value, cs: &str) -> String {
+    let f = data(r);
+    let vals = (
+        f.get("availablecash").map(py_float).unwrap_or(Some(0.0)),
+        f.get("collateral").map(py_float).unwrap_or(Some(0.0)),
+        f.get("utiliseddebits").map(py_float).unwrap_or(Some(0.0)),
+    );
+    let (a, c, u) = match vals {
+        (Some(a), Some(c), Some(u)) => (a, c, u),
+        _ => (0.0, 0.0, 0.0),
+    };
+    format!(
+        "*FUNDS*\n{RULE}\n\nAvailable: {cs}{}\nCollateral: {cs}{}\nUtilized: {cs}{}\nTotal: {cs}{}",
+        comma2(a),
+        comma2(c),
+        comma2(u),
+        comma2(a + c)
+    )
 }
 
 /// `/quote`.
