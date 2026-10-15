@@ -25,7 +25,7 @@
 
 use super::dispatch::RunMode;
 use super::engine::{ORDER_UNCONFIRMED, UNCONFIRMED};
-use super::store::{EventFields, OrderRow, RunRow};
+use super::store::{EventFields, OrderRow, RunRow, StrategyRow};
 use super::StrategyModule;
 use crate::services::order_reconciler::{
     held_message, Absence, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
@@ -117,6 +117,78 @@ impl StrategyModule {
         matches!(self.store.get_order_by_broker_id(order_id), Ok(Some(_)))
     }
 
+    /// An unconfirmed order the book does not show: settled as never placed
+    /// once that is certain, else held; a Live order is never released on
+    /// absence alone (P0-3), and the trader is told when it is held.
+    /// Answers how many orders it leaves unresolved (0 or 1).
+    async fn judge_absent(
+        &self,
+        key: &str,
+        o: &OrderRow,
+        strategy: &StrategyRow,
+        (mode, book): (RunMode, &BookSnapshot),
+        u: &Unconfirmed<'_>,
+    ) -> usize {
+        let id = o.id.to_string();
+        match self.reconcile_absence.judge(key, &id, mode, book, u).await {
+            Absence::NotPlaced => {
+                self.reconcile_absence.forget(key);
+                self.settle_never_placed(o, strategy.id, &strategy.user_id)
+                    .await;
+                0
+            }
+            Absence::Wait => 1,
+            Absence::Hold { alert } => {
+                // Live: never released on absence alone (P0-3). The claim
+                // stays; the trader decides, or corroboration releases it.
+                if alert {
+                    let what = format!("Strategy {}, leg {}", strategy.name, o.leg_id);
+                    let msg = held_message(&what, u);
+                    self.reconcile_absence.describe(key, &msg);
+                    book.alert_held(msg.clone());
+                    self.emit(
+                        strategy.id,
+                        &strategy.user_id,
+                        "order_unconfirmed_held",
+                        &msg,
+                        EventFields {
+                            run_id: Some(o.run_id),
+                            leg_id: Some(o.leg_id),
+                            severity: Some("critical"),
+                            payload: Some(json!({"order_id": o.id})),
+                        },
+                    )
+                    .await;
+                }
+                1
+            }
+        }
+    }
+
+    /// Several book orders match an unconfirmed order and nothing tells
+    /// them apart: reported once per order, and never sent again
+    /// automatically.
+    async fn report_ambiguous(&self, key: &str, o: &OrderRow, strategy: &StrategyRow, n: usize) {
+        if self.reconcile_ambiguous.lock().insert(key.to_string()) {
+            self.emit(
+                strategy.id,
+                &strategy.user_id,
+                "order_unconfirmed_ambiguous",
+                &format!(
+                    "{} orders in the broker's order book match the unconfirmed {} {} {} for leg {}, and nothing tells them apart. Check the order book; this leg is not sent again automatically.",
+                    n, o.action, o.qty, o.symbol, o.leg_id
+                ),
+                EventFields {
+                    run_id: Some(o.run_id),
+                    leg_id: Some(o.leg_id),
+                    severity: Some("critical"),
+                    payload: Some(json!({"order_id": o.id, "candidates": n})),
+                },
+            )
+            .await;
+        }
+    }
+
     /// Fold one book read for every open run of `mode`. Returns how many
     /// unconfirmed placements remain unresolved.
     pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
@@ -181,66 +253,13 @@ impl StrategyModule {
                             .await;
                     }
                     Found::Absent => {
-                        let id = o.id.to_string();
-                        match self
-                            .reconcile_absence
-                            .judge(&key, &id, mode, book, &u)
-                            .await
-                        {
-                            Absence::NotPlaced => {
-                                self.reconcile_absence.forget(&key);
-                                self.settle_never_placed(o, strategy.id, &strategy.user_id)
-                                    .await;
-                            }
-                            Absence::Wait => unresolved += 1,
-                            Absence::Hold { alert } => {
-                                // Live: never released on absence alone
-                                // (P0-3). The claim stays; the trader
-                                // decides, or corroboration releases it.
-                                unresolved += 1;
-                                if alert {
-                                    let what =
-                                        format!("Strategy {}, leg {}", strategy.name, o.leg_id);
-                                    let msg = held_message(&what, &u);
-                                    self.reconcile_absence.describe(&key, &msg);
-                                    book.alert_held(msg.clone());
-                                    self.emit(
-                                        strategy.id,
-                                        &strategy.user_id,
-                                        "order_unconfirmed_held",
-                                        &msg,
-                                        EventFields {
-                                            run_id: Some(o.run_id),
-                                            leg_id: Some(o.leg_id),
-                                            severity: Some("critical"),
-                                            payload: Some(json!({"order_id": o.id})),
-                                        },
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
+                        unresolved += self
+                            .judge_absent(&key, o, &strategy, (mode, book), &u)
+                            .await;
                     }
                     Found::Ambiguous(n) => {
                         unresolved += 1;
-                        if self.reconcile_ambiguous.lock().insert(key.clone()) {
-                            self.emit(
-                                strategy.id,
-                                &strategy.user_id,
-                                "order_unconfirmed_ambiguous",
-                                &format!(
-                                    "{} orders in the broker's order book match the unconfirmed {} {} {} for leg {}, and nothing tells them apart. Check the order book; this leg is not sent again automatically.",
-                                    n, o.action, o.qty, o.symbol, o.leg_id
-                                ),
-                                EventFields {
-                                    run_id: Some(o.run_id),
-                                    leg_id: Some(o.leg_id),
-                                    severity: Some("critical"),
-                                    payload: Some(json!({"order_id": o.id, "candidates": n})),
-                                },
-                            )
-                            .await;
-                        }
+                        self.report_ambiguous(&key, o, &strategy, n).await;
                     }
                 }
             }
