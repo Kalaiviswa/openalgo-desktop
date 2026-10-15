@@ -18,7 +18,8 @@
 //! socket frames: `POST {subscription_path}/instruments/subscription`
 //! (`PUT` to unsubscribe) with `Authorization: <socket token>`, at most 50
 //! instruments per call, 0.5 s apart, run in order by one worker task the
-//! feed owns (aborted on reconnect and when the feed is dropped). XTS
+//! feed owns (`worker`: aborted on reconnect and when the feed is dropped;
+//! a batch that failed for a passing reason is sent again, BF-03). XTS
 //! refuses a whole batch when one instrument in it is already subscribed
 //! ("e-session-0002"); for a member with `XtsHooks::split_duplicate_batch`
 //! (rmoney) such a batch is retried one instrument at a time so the others
@@ -54,6 +55,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use worker::{subscription_worker, WorkerSetup};
+
+pub(crate) mod worker;
 
 /// Instruments per subscription call (web F `adapter.py:36`).
 pub const SUBSCRIBE_BATCH: usize = 50;
@@ -424,118 +428,6 @@ pub async fn run_command(
     report
 }
 
-/// First wait before a failed batch is sent again; doubled per attempt.
-pub const RETRY_BASE: Duration = Duration::from_secs(1);
-/// Longest wait between retries of a failed batch.
-pub const RETRY_MAX: Duration = Duration::from_secs(30);
-/// Attempts after the first before a batch is given up (the next
-/// reconnect subscribes it again).
-pub const RETRY_ATTEMPTS: u32 = 5;
-
-/// A failed batch waiting to be sent again.
-struct Pending {
-    cmd: Command,
-    attempt: u32,
-    due: tokio::time::Instant,
-}
-
-/// Run commands in order until the queue closes, sending failed batches
-/// again with doubling waits from `retry_base` up to `RETRY_MAX`, at most
-/// `RETRY_ATTEMPTS` times (BF-03). A newer command for the same
-/// instruments and message code replaces their pending retry, so a failed
-/// unsubscribe sent again never undoes a later subscribe, nor a failed
-/// subscribe a later unsubscribe. A refused token sets `reconnect`,
-/// which the feed turns into a reconnect. Ends (and so cancels every
-/// pending retry) when the feed drops the queue or aborts the task.
-pub async fn run_commands(
-    t: &SubscriptionTarget<'_>,
-    mut rx: mpsc::Receiver<Command>,
-    snapshots: &mpsc::Sender<String>,
-    reconnect: &std::sync::atomic::AtomicBool,
-    retry_base: Duration,
-) {
-    let mut first = true;
-    let mut pending: std::collections::VecDeque<Pending> = std::collections::VecDeque::new();
-    loop {
-        let (cmd, attempt) = match pending.front().map(|p| p.due) {
-            Some(due) => tokio::select! {
-                biased;
-                c = rx.recv() => match c {
-                    Some(c) => (c, 0),
-                    None => return,
-                },
-                _ = tokio::time::sleep_until(due) => match pending.pop_front() {
-                    Some(p) => (p.cmd, p.attempt),
-                    None => continue,
-                },
-            },
-            None => match rx.recv().await {
-                Some(c) => (c, 0),
-                None => return,
-            },
-        };
-        for p in pending.iter_mut().filter(|p| p.cmd.code == cmd.code) {
-            p.cmd.instruments.retain(|i| !cmd.instruments.contains(i));
-        }
-        pending.retain(|p| !p.cmd.instruments.is_empty());
-        let report = run_command(t, &cmd, snapshots, &mut first).await;
-        if report.reconnect {
-            reconnect.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        if report.retry.is_empty() {
-            continue;
-        }
-        if attempt >= RETRY_ATTEMPTS {
-            tracing::warn!(
-                broker = t.broker,
-                instruments = report.retry.len(),
-                "Subscription still failing after {} retries; the next reconnect sends it again",
-                RETRY_ATTEMPTS
-            );
-            continue;
-        }
-        let wait = retry_base
-            .saturating_mul(1u32 << attempt.min(16))
-            .min(RETRY_MAX);
-        let p = Pending {
-            cmd: Command {
-                subscribe: cmd.subscribe,
-                code: cmd.code,
-                instruments: report.retry,
-            },
-            attempt: attempt + 1,
-            due: tokio::time::Instant::now() + wait,
-        };
-        let at = pending
-            .iter()
-            .position(|q| q.due > p.due)
-            .unwrap_or(pending.len());
-        pending.insert(at, p);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn subscription_worker(
-    broker: &'static str,
-    split_duplicates: bool,
-    http: reqwest::Client,
-    url: String,
-    token: Secret,
-    rx: mpsc::Receiver<Command>,
-    snapshots: mpsc::Sender<String>,
-    resync: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    let target = SubscriptionTarget {
-        broker,
-        http: &http,
-        url: &url,
-        token: token.expose(),
-        gap: SUBSCRIBE_GAP,
-        split_duplicates,
-    };
-    run_commands(&target, rx, &snapshots, &resync, RETRY_BASE).await;
-}
-
 // ---------------------------------------------------------------------------
 // Feed (manager side)
 // ---------------------------------------------------------------------------
@@ -700,17 +592,19 @@ impl XtsFeed {
                 .unwrap_or_default();
             let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
             self.worker = Some(handle.spawn(subscription_worker(
-                self.cfg.id,
-                self.cfg.hooks.split_duplicate_batch,
-                self.connector.http.clone(),
-                format!(
-                    "{}{}/instruments/subscription",
-                    self.connector.base_url, self.cfg.subscription_path
-                ),
-                token,
+                WorkerSetup {
+                    broker: self.cfg.id,
+                    split_duplicates: self.cfg.hooks.split_duplicate_batch,
+                    http: self.connector.http.clone(),
+                    url: format!(
+                        "{}{}/instruments/subscription",
+                        self.connector.base_url, self.cfg.subscription_path
+                    ),
+                    token,
+                    snapshots: self.snapshots_tx.clone(),
+                    resync: self.resync.clone(),
+                },
                 rx,
-                self.snapshots_tx.clone(),
-                self.resync.clone(),
             )));
             self.commands = Some(tx);
         }

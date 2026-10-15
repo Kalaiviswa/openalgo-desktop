@@ -1419,7 +1419,8 @@ mod subscription_batches {
                 gap: Duration::ZERO,
                 split_duplicates: cfg.hooks.split_duplicate_batch,
             };
-            super::super::streaming::run_commands(&t, rx, &snap_tx, &flag, retry_base).await;
+            super::super::streaming::worker::run_commands(&t, rx, &snap_tx, &flag, retry_base)
+                .await;
         });
         tokio::time::sleep(settle).await;
         drop(tx);
@@ -1593,7 +1594,7 @@ mod subscription_batches {
         .await;
         assert_eq!(
             seen.lock().len(),
-            1 + super::super::streaming::RETRY_ATTEMPTS as usize
+            1 + super::super::streaming::worker::RETRY_ATTEMPTS as usize
         );
         let (url, seen) = scripted(always).await;
         worker(
