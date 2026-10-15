@@ -6,6 +6,7 @@ use crate::sandbox::clock::display_seconds;
 use crate::sandbox::db::{DailyPnlRow, HoldingRow, PositionRow, TradeRow};
 use crate::sandbox::types::float;
 use crate::sandbox::{Sandbox, SandboxError};
+use rusqlite::Connection;
 use rust_decimal::Decimal;
 
 /// Which export.
@@ -94,186 +95,203 @@ fn headers(out: &mut String, h: &[&str]) {
     line(out, &h.iter().map(|s| s.to_string()).collect::<Vec<_>>());
 }
 
+/// The daily P&L history, newest first.
+fn daily_csv(conn: &Connection, user: &str) -> Result<Option<String>, SandboxError> {
+    let mut out = String::new();
+    let mut stmt =
+        conn.prepare("SELECT * FROM sandbox_daily_pnl WHERE user_id = ?1 ORDER BY date DESC")?;
+    let rows = stmt
+        .query_map([user], DailyPnlRow::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    headers(
+        &mut out,
+        &[
+            "Date",
+            "Realized P&L",
+            "Positions Unrealized",
+            "Holdings Unrealized",
+            "Total Unrealized",
+            "Total MTM",
+            "Portfolio Value",
+        ],
+    );
+    for r in rows {
+        line(
+            &mut out,
+            &[
+                sanitize(&r.date),
+                dec(r.realized_pnl),
+                dec(r.positions_unrealized_pnl),
+                dec(r.holdings_unrealized_pnl),
+                dec(r.positions_unrealized_pnl + r.holdings_unrealized_pnl),
+                dec(r.total_mtm),
+                dec(r.portfolio_value),
+            ],
+        );
+    }
+    Ok(Some(out))
+}
+
+/// The positions, most recently updated first.
+fn positions_csv(conn: &Connection, user: &str) -> Result<Option<String>, SandboxError> {
+    let mut out = String::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM sandbox_positions WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
+        PositionRow::COLUMNS
+    ))?;
+    let rows = stmt
+        .query_map([user], PositionRow::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    headers(
+        &mut out,
+        &[
+            "Symbol",
+            "Exchange",
+            "Product",
+            "Quantity",
+            "Average Price",
+            "LTP",
+            "Unrealized P&L",
+            "Today Realized P&L",
+            "All-Time Realized P&L",
+            "Margin Blocked",
+            "Status",
+            "Last Updated",
+        ],
+    );
+    for p in rows {
+        let open = p.quantity != 0;
+        line(
+            &mut out,
+            &[
+                sanitize(&p.symbol),
+                sanitize(&p.exchange),
+                sanitize(p.product.as_str()),
+                p.quantity.to_string(),
+                dec(p.average_price),
+                dec(p.ltp.unwrap_or(Decimal::ZERO)),
+                dec(if open { p.pnl } else { Decimal::ZERO }),
+                dec(p.today_realized_pnl),
+                dec(p.accumulated_realized_pnl),
+                dec(p.margin_blocked),
+                if open { "Open" } else { "Closed" }.to_string(),
+                display_seconds(&p.updated_at),
+            ],
+        );
+    }
+    Ok(Some(out))
+}
+
+/// The holdings, most recently updated first.
+fn holdings_csv(conn: &Connection, user: &str) -> Result<Option<String>, SandboxError> {
+    let mut out = String::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM sandbox_holdings WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
+        HoldingRow::COLUMNS
+    ))?;
+    let rows = stmt
+        .query_map([user], HoldingRow::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    headers(
+        &mut out,
+        &[
+            "Symbol",
+            "Exchange",
+            "Quantity",
+            "Average Price",
+            "LTP",
+            "Unrealized P&L",
+            "P&L %",
+            "Settlement Date",
+        ],
+    );
+    for h in rows {
+        line(
+            &mut out,
+            &[
+                sanitize(&h.symbol),
+                sanitize(&h.exchange),
+                h.quantity.to_string(),
+                dec(h.average_price),
+                dec(h.ltp.unwrap_or(Decimal::ZERO)),
+                dec(h.pnl),
+                dec(h.pnl_percent),
+                h.settlement_date.chars().take(10).collect(),
+            ],
+        );
+    }
+    Ok(Some(out))
+}
+
+/// The trades, newest first.
+fn trades_csv(conn: &Connection, user: &str) -> Result<Option<String>, SandboxError> {
+    let mut out = String::new();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM sandbox_trades WHERE user_id = ?1 ORDER BY trade_timestamp DESC, id DESC",
+        TradeRow::COLUMNS
+    ))?;
+    let rows = stmt
+        .query_map([user], TradeRow::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    headers(
+        &mut out,
+        &[
+            "Trade ID",
+            "Order ID",
+            "Symbol",
+            "Exchange",
+            "Action",
+            "Quantity",
+            "Price",
+            "Product",
+            "Strategy",
+            "Timestamp",
+        ],
+    );
+    for t in rows {
+        line(
+            &mut out,
+            &[
+                sanitize(&t.tradeid),
+                sanitize(&t.orderid),
+                sanitize(&t.symbol),
+                sanitize(&t.exchange),
+                sanitize(&t.action),
+                t.quantity.to_string(),
+                dec(t.price),
+                sanitize(&t.product),
+                sanitize(t.strategy.as_deref().unwrap_or("")),
+                display_seconds(&t.trade_timestamp),
+            ],
+        );
+    }
+    Ok(Some(out))
+}
+
 /// The CSV for one export, or `None` when there are no rows.
 pub async fn export(sb: &Sandbox, which: Export) -> Result<Option<String>, SandboxError> {
     let user = sb.user_id().to_string();
     let db = sb.db().clone();
     tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| -> Result<Option<String>, SandboxError> {
-            let mut out = String::new();
             match which {
-                Export::Daily => {
-                    let mut stmt = conn.prepare(
-                        "SELECT * FROM sandbox_daily_pnl WHERE user_id = ?1 ORDER BY date DESC",
-                    )?;
-                    let rows = stmt
-                        .query_map([&user], DailyPnlRow::from_row)?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    headers(
-                        &mut out,
-                        &[
-                            "Date",
-                            "Realized P&L",
-                            "Positions Unrealized",
-                            "Holdings Unrealized",
-                            "Total Unrealized",
-                            "Total MTM",
-                            "Portfolio Value",
-                        ],
-                    );
-                    for r in rows {
-                        line(
-                            &mut out,
-                            &[
-                                sanitize(&r.date),
-                                dec(r.realized_pnl),
-                                dec(r.positions_unrealized_pnl),
-                                dec(r.holdings_unrealized_pnl),
-                                dec(r.positions_unrealized_pnl + r.holdings_unrealized_pnl),
-                                dec(r.total_mtm),
-                                dec(r.portfolio_value),
-                            ],
-                        );
-                    }
-                }
-                Export::Positions => {
-                    let mut stmt = conn.prepare(&format!(
-                        "SELECT {} FROM sandbox_positions WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
-                        PositionRow::COLUMNS
-                    ))?;
-                    let rows = stmt
-                        .query_map([&user], PositionRow::from_row)?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    headers(
-                        &mut out,
-                        &[
-                            "Symbol",
-                            "Exchange",
-                            "Product",
-                            "Quantity",
-                            "Average Price",
-                            "LTP",
-                            "Unrealized P&L",
-                            "Today Realized P&L",
-                            "All-Time Realized P&L",
-                            "Margin Blocked",
-                            "Status",
-                            "Last Updated",
-                        ],
-                    );
-                    for p in rows {
-                        let open = p.quantity != 0;
-                        line(
-                            &mut out,
-                            &[
-                                sanitize(&p.symbol),
-                                sanitize(&p.exchange),
-                                sanitize(p.product.as_str()),
-                                p.quantity.to_string(),
-                                dec(p.average_price),
-                                dec(p.ltp.unwrap_or(Decimal::ZERO)),
-                                dec(if open { p.pnl } else { Decimal::ZERO }),
-                                dec(p.today_realized_pnl),
-                                dec(p.accumulated_realized_pnl),
-                                dec(p.margin_blocked),
-                                if open { "Open" } else { "Closed" }.to_string(),
-                                display_seconds(&p.updated_at),
-                            ],
-                        );
-                    }
-                }
-                Export::Holdings => {
-                    let mut stmt = conn.prepare(&format!(
-                        "SELECT {} FROM sandbox_holdings WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
-                        HoldingRow::COLUMNS
-                    ))?;
-                    let rows = stmt
-                        .query_map([&user], HoldingRow::from_row)?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    headers(
-                        &mut out,
-                        &[
-                            "Symbol",
-                            "Exchange",
-                            "Quantity",
-                            "Average Price",
-                            "LTP",
-                            "Unrealized P&L",
-                            "P&L %",
-                            "Settlement Date",
-                        ],
-                    );
-                    for h in rows {
-                        line(
-                            &mut out,
-                            &[
-                                sanitize(&h.symbol),
-                                sanitize(&h.exchange),
-                                h.quantity.to_string(),
-                                dec(h.average_price),
-                                dec(h.ltp.unwrap_or(Decimal::ZERO)),
-                                dec(h.pnl),
-                                dec(h.pnl_percent),
-                                h.settlement_date.chars().take(10).collect(),
-                            ],
-                        );
-                    }
-                }
-                Export::Trades => {
-                    let mut stmt = conn.prepare(&format!(
-                        "SELECT {} FROM sandbox_trades WHERE user_id = ?1 ORDER BY trade_timestamp DESC, id DESC",
-                        TradeRow::COLUMNS
-                    ))?;
-                    let rows = stmt
-                        .query_map([&user], TradeRow::from_row)?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    headers(
-                        &mut out,
-                        &[
-                            "Trade ID",
-                            "Order ID",
-                            "Symbol",
-                            "Exchange",
-                            "Action",
-                            "Quantity",
-                            "Price",
-                            "Product",
-                            "Strategy",
-                            "Timestamp",
-                        ],
-                    );
-                    for t in rows {
-                        line(
-                            &mut out,
-                            &[
-                                sanitize(&t.tradeid),
-                                sanitize(&t.orderid),
-                                sanitize(&t.symbol),
-                                sanitize(&t.exchange),
-                                sanitize(&t.action),
-                                t.quantity.to_string(),
-                                dec(t.price),
-                                sanitize(&t.product),
-                                sanitize(t.strategy.as_deref().unwrap_or("")),
-                                display_seconds(&t.trade_timestamp),
-                            ],
-                        );
-                    }
-                }
+                Export::Daily => daily_csv(conn, &user),
+                Export::Positions => positions_csv(conn, &user),
+                Export::Holdings => holdings_csv(conn, &user),
+                Export::Trades => trades_csv(conn, &user),
             }
-            Ok(Some(out))
         })
     })
     .await
