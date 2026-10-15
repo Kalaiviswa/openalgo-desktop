@@ -2699,6 +2699,51 @@ async fn cache_reload_and_skip_check_the_stored_master() {
     h.ctx().runtime.teardown(h.ctx()).await;
 }
 
+/// MC-04 through the API: Delta's fractional spot minimum (0.0001 BTC) is
+/// stored as a REAL, loaded back from the database and served exact by
+/// `/api/v1/symbol` (the web stores and serves the float); a whole lot
+/// stays an integer (`65`, never `65.0`).
+#[tokio::test]
+async fn fractional_lots_round_trip_through_the_symbol_api() {
+    use crate::brokers::common::symbols::tests::row;
+    let h = H::new();
+    let key = h.setup();
+    h.connect_broker();
+    let spot = row("BTCINR", "BTC_INR", "CRYPTO", "16614");
+    let future = crate::brokers::common::symbols::SymToken {
+        lot_size: 65,
+        ..row("NIFTY28OCT26FUT", "NIFTY26OCTFUT", "NFO", "52168")
+    };
+    let mut master = crate::brokers::types::MasterContract::new(vec![spot.clone(), future]);
+    master.lot_sizes.insert(spot.token.clone(), 0.0001);
+    {
+        let mut c = h.ctx().sqlite.conn().unwrap();
+        crate::db::sqlite::symbol::store_master(&mut c, "zerodha", h.ctx().now(), &master).unwrap();
+    }
+    assert_eq!(
+        crate::services::master_contract_service::load_cached(h.ctx(), "zerodha")
+            .await
+            .unwrap(),
+        2
+    );
+    let (s, v) = h
+        .json(post_json(
+            "/api/v1/symbol",
+            json!({"apikey": key, "symbol": "BTCINR", "exchange": "CRYPTO"}),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["data"]["lotsize"], json!(0.0001), "{}", v);
+    let (s, v) = h
+        .json(post_json(
+            "/api/v1/symbol",
+            json!({"apikey": key, "symbol": "NIFTY28OCT26FUT", "exchange": "NFO"}),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["data"]["lotsize"].to_string(), "65", "{}", v);
+}
+
 #[tokio::test]
 async fn master_contract_routes_and_server_settings_status() {
     let h = H::new();
