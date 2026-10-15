@@ -35,6 +35,6 @@
   },
   "rust_files": {},
   "rust_functions": {
-    "src-tauri/src/strategy/webhook.rs::handle_webhook": 338
+    "src-tauri/src/strategy/webhook/pipeline.rs::handle_webhook": 338
   }
 }
