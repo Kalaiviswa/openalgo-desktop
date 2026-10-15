@@ -4,7 +4,7 @@ use super::mapping::{f, i, noren_exchange, text};
 use super::transport::{
     emsg, is_no_data, is_session_error, noren_error, session, stat_ok, Category, Session,
 };
-use super::NorenBroker;
+use super::{NorenBroker, NorenConfig};
 use crate::brokers::common::streaming::round2;
 use crate::brokers::common::symbols::SymToken;
 use crate::brokers::types::*;
@@ -451,39 +451,9 @@ pub async fn get_history(
         tracing::warn!(broker = b.cfg.id, "History failed: {}", last_err);
         return Err(noren_error(b.cfg.name, &last_err));
     }
-    let parse = if b.cfg.strict_candles {
-        parse_candle_strict
-    } else {
-        parse_candle
-    };
-    let mut candles: Vec<Candle> = raw.iter().filter_map(parse).collect();
-    if b.cfg.strict_candles {
-        let skipped = raw.len() - candles.len();
-        if skipped > 0 {
-            tracing::warn!(
-                broker = b.cfg.id,
-                "Skipped {} history rows with a missing or zero price",
-                skipped
-            );
-        }
-        if !daily {
-            clean_intraday(&mut candles, &exch);
-        }
-    }
-    if daily && b.cfg.eod_widen {
-        candles.iter_mut().for_each(widen_to_open_close);
-    }
+    let mut candles = parse_history(b.cfg, &raw, daily, &exch);
     if daily {
-        let today = chrono::Utc::now().with_timezone(&Kolkata).date_naive();
-        let today_ts = if b.cfg.today_bar_utc {
-            today
-                .and_hms_opt(0, 0, 0)
-                .unwrap_or_default()
-                .and_utc()
-                .timestamp()
-        } else {
-            ist_epoch(today, 0, 0, 0)
-        };
+        let today_ts = today_bar_ts(b.cfg);
         let max = candles.iter().map(|c| c.timestamp).max();
         if today_ts >= start_ts && today_ts <= end_ts && max.is_none_or(|m| m < today_ts) {
             match quote_response(b, &s, &exch, &row.token).await {
@@ -502,19 +472,68 @@ pub async fn get_history(
     }
     let mut out = sort_dedupe_last(candles);
     if b.cfg.history_repair {
-        // Web shoonya `_repair_candles` (#2161): a bar still missing a price
-        // (NaN) has no honest repair and a chart refuses the whole series
-        // over it, so it is dropped before the rest are repaired.
-        let before = out.len();
-        out.retain(has_finite_prices);
-        if out.len() < before {
-            tracing::warn!(
-                broker = b.cfg.id,
-                "Dropped {} history bars with a missing price",
-                before - out.len()
-            );
-        }
-        out.iter_mut().for_each(repair);
+        repair_bars(b.cfg, &mut out);
     }
     Ok(out)
+}
+
+/// The history rows as candles: strictly parsed where the broker's rows
+/// can lack a price (the skipped ones logged, and intraday bars cleaned),
+/// and daily bars widened to their open and close where the broker needs
+/// it.
+fn parse_history(cfg: &NorenConfig, raw: &[Value], daily: bool, exch: &str) -> Vec<Candle> {
+    let parse = if cfg.strict_candles {
+        parse_candle_strict
+    } else {
+        parse_candle
+    };
+    let mut candles: Vec<Candle> = raw.iter().filter_map(parse).collect();
+    if cfg.strict_candles {
+        let skipped = raw.len() - candles.len();
+        if skipped > 0 {
+            tracing::warn!(
+                broker = cfg.id,
+                "Skipped {} history rows with a missing or zero price",
+                skipped
+            );
+        }
+        if !daily {
+            clean_intraday(&mut candles, exch);
+        }
+    }
+    if daily && cfg.eod_widen {
+        candles.iter_mut().for_each(widen_to_open_close);
+    }
+    candles
+}
+
+/// Today's daily bar timestamp: midnight UTC where the broker stamps bars
+/// so, else midnight IST.
+fn today_bar_ts(cfg: &NorenConfig) -> i64 {
+    let today = chrono::Utc::now().with_timezone(&Kolkata).date_naive();
+    if cfg.today_bar_utc {
+        today
+            .and_hms_opt(0, 0, 0)
+            .unwrap_or_default()
+            .and_utc()
+            .timestamp()
+    } else {
+        ist_epoch(today, 0, 0, 0)
+    }
+}
+
+/// Web shoonya `_repair_candles` (#2161): a bar still missing a price
+/// (NaN) has no honest repair and a chart refuses the whole series over it,
+/// so it is dropped before the rest are repaired.
+fn repair_bars(cfg: &NorenConfig, out: &mut Vec<Candle>) {
+    let before = out.len();
+    out.retain(has_finite_prices);
+    if out.len() < before {
+        tracing::warn!(
+            broker = cfg.id,
+            "Dropped {} history bars with a missing price",
+            before - out.len()
+        );
+    }
+    out.iter_mut().for_each(repair);
 }
