@@ -242,18 +242,18 @@ impl BrokerAuthService {
         Ok(url)
     }
 
-    /// Finish an OAuth login from the callback query parameters.
-    pub async fn complete_oauth(
+    /// The pending sign-in this OpenAlgo started for `broker`, used once
+    /// (consumed here), and whether it was found without a `state` (a
+    /// broker that drops it, from the same browser session, within the
+    /// short window).
+    fn take_pending(
         state: &AppState,
         broker: &str,
-        params: &HashMap<String, String>,
+        st: &str,
         origin: CallbackOrigin<'_>,
-    ) -> Result<BrokerSession> {
-        let st = params.get("state").cloned().unwrap_or_default();
+    ) -> Result<(Option<oauth_state::Pending>, bool)> {
         let now = state.now();
         let mut state_less = false;
-        // Every path needs a pending sign-in this OpenAlgo started for this
-        // broker, used once.
         let pending = {
             let conn = state.sqlite.conn()?;
             match origin {
@@ -262,7 +262,7 @@ impl BrokerAuthService {
                 // the same browser session, within three minutes.
                 CallbackOrigin::Redirect { session_id } => {
                     if !st.is_empty() {
-                        oauth_state::consume(&conn, &st, broker, now)?
+                        oauth_state::consume(&conn, st, broker, now)?
                     } else if let (false, Some(sid)) =
                         (catalog::callback_carries_state(broker), session_id)
                     {
@@ -283,7 +283,7 @@ impl BrokerAuthService {
                 // address has one, else its newest one for this broker.
                 CallbackOrigin::Manual { session_id } => {
                     if !st.is_empty() {
-                        oauth_state::consume_for_session(&conn, &st, broker, session_id, now)?
+                        oauth_state::consume_for_session(&conn, st, broker, session_id, now)?
                     } else {
                         oauth_state::consume_latest(
                             &conn,
@@ -296,6 +296,18 @@ impl BrokerAuthService {
                 }
             }
         };
+        Ok((pending, state_less))
+    }
+
+    /// Finish an OAuth login from the callback query parameters.
+    pub async fn complete_oauth(
+        state: &AppState,
+        broker: &str,
+        params: &HashMap<String, String>,
+        origin: CallbackOrigin<'_>,
+    ) -> Result<BrokerSession> {
+        let st = params.get("state").cloned().unwrap_or_default();
+        let (pending, state_less) = Self::take_pending(state, broker, &st, origin)?;
         // A ready token is accepted only when the signed-in trader pasted
         // the address into OpenAlgo; one arriving by redirect is ignored,
         // since nothing ties it to this trader.
