@@ -89,6 +89,100 @@ fn instrument_type(raw: &str, segment: &str, strike: Option<f64>) -> &'static st
     }
 }
 
+/// One CSV line as a master row, and whether it is a CASH row; `None` for
+/// a row without a symbol.
+fn parse_row(f: &[String], idx: &[usize]) -> Option<(SymToken, bool)> {
+    let col = |n: usize| field(f, idx, n);
+    let exchange_csv = col(0);
+    let token = col(1);
+    let trading_symbol = col(2);
+    let name = col(4);
+    let raw_type = col(5);
+    let segment = col(6);
+    let underlying = col(7);
+    let expiry_raw = col(8);
+    let strike = parse_num(col(9));
+    let lot = parse_num(col(10)).map(|v| v as i32).unwrap_or(1);
+    let tick = parse_num(col(11)).unwrap_or(0.05);
+
+    let is_index = segment == "IDX" || raw_type == "IDX";
+    let itype = instrument_type(raw_type, segment, strike);
+    let exchange = match (exchange_csv, segment, is_index) {
+        ("NSE", _, true) => "NSE_INDEX",
+        ("BSE", _, true) => "BSE_INDEX",
+        ("NSE", "FNO", _) => "NFO",
+        ("BSE", "FNO", _) => "BFO",
+        (e, _, _) => e,
+    };
+    let expiry = chrono::NaiveDate::parse_from_str(
+        expiry_raw.split([' ', 'T']).next().unwrap_or(""),
+        "%Y-%m-%d",
+    )
+    .map(format_expiry)
+    .unwrap_or_default();
+    let strike = strike.unwrap_or(0.0);
+
+    let mut symbol = rename(INDEX_RENAMES, trading_symbol)
+        .unwrap_or(trading_symbol)
+        .to_string();
+    let rebuild = matches!(
+        (exchange_csv, segment),
+        ("NSE", "FNO") | ("BSE", "FNO") | ("NSE", "COMMODITY")
+    );
+    if rebuild && !expiry.is_empty() {
+        let base = if underlying.is_empty() {
+            symbol.as_str()
+        } else {
+            underlying
+        };
+        let compact = expiry_compact(&expiry);
+        match (itype, raw_type) {
+            ("FUT", _) => symbol = format!("{}{}FUT", base, compact),
+            (_, "CE") | (_, "PE") => {
+                symbol = format!("{}{}{}{}", base, compact, format_strike(strike), raw_type)
+            }
+            _ => {}
+        }
+    }
+    if exchange == "NFO" && matches!(itype, "CE" | "PE") && trading_symbol.contains(' ') {
+        symbol = trading_symbol.replace(' ', "");
+    }
+    let brsymbol = if trading_symbol.is_empty() {
+        symbol.clone()
+    } else {
+        trading_symbol.to_string()
+    };
+    if symbol.trim().is_empty() {
+        return None;
+    }
+    let name = if matches!(itype, "FUT" | "CE" | "PE") && !underlying.is_empty() {
+        underlying.to_string()
+    } else if !name.is_empty() {
+        name.to_string()
+    } else {
+        symbol.clone()
+    };
+    let row = SymToken {
+        symbol,
+        brsymbol,
+        name,
+        exchange: exchange.to_string(),
+        brexchange: exchange_csv.to_string(),
+        token: token.to_string(),
+        expiry,
+        strike,
+        lot_size: lot,
+        instrument_type: itype.to_string(),
+        tick_size: tick,
+    };
+    Some((row, segment == "CASH"))
+}
+
+/// Column `n` of `REQUIRED` in a split line, trimmed.
+fn field<'a>(f: &'a [String], idx: &[usize], n: usize) -> &'a str {
+    f.get(idx[n]).map(|s| s.trim()).unwrap_or("")
+}
+
 /// Parse the CSV into master rows.
 pub fn parse_instruments(csv: &str) -> Result<Vec<SymToken>> {
     let mut lines = csv.lines();
@@ -106,9 +200,6 @@ pub fn parse_instruments(csv: &str) -> Result<Vec<SymToken>> {
             }
         }
     }
-    fn field<'a>(f: &'a [String], idx: &[usize], n: usize) -> &'a str {
-        f.get(idx[n]).map(|s| s.trim()).unwrap_or("")
-    }
     let i_series = header.index("series");
     let i_internal = header.index("internal_trading_symbol");
     let opt = |f: &[String], i: Option<usize>| -> String {
@@ -124,92 +215,13 @@ pub fn parse_instruments(csv: &str) -> Result<Vec<SymToken>> {
             continue;
         }
         let f = split_csv_line(line);
-        let col = |n: usize| field(&f, &idx, n);
-        let exchange_csv = col(0);
-        let token = col(1);
-        let trading_symbol = col(2);
-        let name = col(4);
-        let raw_type = col(5);
-        let segment = col(6);
-        let underlying = col(7);
-        let expiry_raw = col(8);
-        let strike = parse_num(col(9));
-        let lot = parse_num(col(10)).map(|v| v as i32).unwrap_or(1);
-        let tick = parse_num(col(11)).unwrap_or(0.05);
-
-        let is_index = segment == "IDX" || raw_type == "IDX";
-        let itype = instrument_type(raw_type, segment, strike);
-        let exchange = match (exchange_csv, segment, is_index) {
-            ("NSE", _, true) => "NSE_INDEX",
-            ("BSE", _, true) => "BSE_INDEX",
-            ("NSE", "FNO", _) => "NFO",
-            ("BSE", "FNO", _) => "BFO",
-            (e, _, _) => e,
-        };
-        let expiry = chrono::NaiveDate::parse_from_str(
-            expiry_raw.split([' ', 'T']).next().unwrap_or(""),
-            "%Y-%m-%d",
-        )
-        .map(format_expiry)
-        .unwrap_or_default();
-        let strike = strike.unwrap_or(0.0);
-
-        let mut symbol = rename(INDEX_RENAMES, trading_symbol)
-            .unwrap_or(trading_symbol)
-            .to_string();
-        let rebuild = matches!(
-            (exchange_csv, segment),
-            ("NSE", "FNO") | ("BSE", "FNO") | ("NSE", "COMMODITY")
-        );
-        if rebuild && !expiry.is_empty() {
-            let base = if underlying.is_empty() {
-                symbol.as_str()
-            } else {
-                underlying
-            };
-            let compact = expiry_compact(&expiry);
-            match (itype, raw_type) {
-                ("FUT", _) => symbol = format!("{}{}FUT", base, compact),
-                (_, "CE") | (_, "PE") => {
-                    symbol = format!("{}{}{}{}", base, compact, format_strike(strike), raw_type)
-                }
-                _ => {}
-            }
-        }
-        if exchange == "NFO" && matches!(itype, "CE" | "PE") && trading_symbol.contains(' ') {
-            symbol = trading_symbol.replace(' ', "");
-        }
-        let brsymbol = if trading_symbol.is_empty() {
-            symbol.clone()
-        } else {
-            trading_symbol.to_string()
-        };
-        if symbol.trim().is_empty() {
+        let Some((row, is_cash)) = parse_row(&f, &idx) else {
             continue;
-        }
-        let name = if matches!(itype, "FUT" | "CE" | "PE") && !underlying.is_empty() {
-            underlying.to_string()
-        } else if !name.is_empty() {
-            name.to_string()
-        } else {
-            symbol.clone()
         };
-        if segment == "CASH" {
+        if is_cash {
             cash.push((out.len(), opt(&f[..], i_series), opt(&f[..], i_internal)));
         }
-        out.push(SymToken {
-            symbol,
-            brsymbol,
-            name,
-            exchange: exchange.to_string(),
-            brexchange: exchange_csv.to_string(),
-            token: token.to_string(),
-            expiry,
-            strike,
-            lot_size: lot,
-            instrument_type: itype.to_string(),
-            tick_size: tick,
-        });
+        out.push(row);
     }
     disambiguate_series(&mut out, &cash);
     if out.is_empty() {
