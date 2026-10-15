@@ -686,6 +686,10 @@ worktree onto master. CI builds fresh and is unaffected.
 - Windows: a child process needs `SystemRoot` in its environment; DuckDB holds
   an exclusive lock, so open database files cannot be copied in a test;
   timers are coarse.
+- Windows: `sync_all` on a file opened read-only (`File::open(p)?.sync_all()`)
+  fails with "Access is denied": the flush needs a handle opened for writing.
+  The first REL-02 backup passed on macOS and Linux and failed every backup on
+  Windows this way.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
 

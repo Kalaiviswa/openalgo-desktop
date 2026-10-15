@@ -553,7 +553,9 @@ fn vacuum_into(src: &Path, dst: &Path) -> io::Result<()> {
     conn.execute("VACUUM INTO ?1", [to])
         .map_err(|e| io::Error::other(format!("copy {}: {}", src.display(), e)))?;
     drop(conn);
-    fs::File::open(dst)?.sync_all()
+    // Opened for writing: on Windows a flush needs a handle that may write
+    // (a read-only one fails with "Access is denied").
+    fs::OpenOptions::new().write(true).open(dst)?.sync_all()
 }
 
 /// Copy `src` into a new owner-only file `dst`, synced.
@@ -1110,13 +1112,18 @@ mod tests {
         let mut current = semver::Version::parse("2.0.0").unwrap();
         for i in 0..5 {
             current.minor += 1;
-            let _ = open_data(
+            let got = open_data(
                 dir,
                 &current.to_string(),
                 at(10 + i),
                 || -> crate::error::Result<()> {
                     Err(AppError::Internal("migration failed".into()))
                 },
+            );
+            assert!(
+                matches!(got, Err(OpenError::Refused(Refusal::Restored { .. }))),
+                "{:?}",
+                got.err()
             );
             assert!(backups(dir).len() <= KEEP_BACKUPS);
         }
@@ -1203,7 +1210,7 @@ mod tests {
         create_private_dir(&scratch.path().join("f")).unwrap();
         assert_eq!(mode(&scratch.path().join("f")), 0o700);
         // A whole backup, and the files a restore writes.
-        open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
+        let got = open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
             let root = dir.join(BACKUPS_DIR);
             assert_eq!(mode(&root), 0o700);
             let (b, _) = &backups(&dir)[0];
@@ -1212,8 +1219,12 @@ mod tests {
                 assert_eq!(mode(&e.path()), 0o600, "{}", e.path().display());
             }
             Err(AppError::Internal("migration failed".into()))
-        })
-        .unwrap_err();
+        });
+        assert!(
+            matches!(got, Err(OpenError::Refused(Refusal::Restored { .. }))),
+            "{:?}",
+            got.err()
+        );
         for name in ["openalgo.db", "logs.db", "historify.duckdb", "vault.json"] {
             assert_eq!(mode(&dir.join(name)), 0o600, "{}", name);
         }
@@ -1229,7 +1240,7 @@ mod tests {
     fn backups_carry_only_the_data_folders_acl_on_windows() {
         let d = folder(Some("1.0.0"));
         let dir = d.path().to_path_buf();
-        open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
+        let got = open_data(&dir, "1.1.0", at(5), || -> crate::error::Result<()> {
             let (b, _) = &backups(&dir)[0];
             let mut paths = vec![dir.join(BACKUPS_DIR), b.clone()];
             paths.extend(fs::read_dir(b).unwrap().flatten().map(|e| e.path()));
@@ -1246,8 +1257,14 @@ mod tests {
                 }
             }
             Err(AppError::Internal("migration failed".into()))
-        })
-        .unwrap_err();
+        });
+        // The backup was made and checked (a backup that could not be made
+        // would end in an error too).
+        assert!(
+            matches!(got, Err(OpenError::Refused(Refusal::Restored { .. }))),
+            "{:?}",
+            got.err()
+        );
     }
 
     /// Security review, finding 4: clearing and pruning backups never
