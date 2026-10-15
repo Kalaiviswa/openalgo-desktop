@@ -20,15 +20,10 @@ use std::sync::Arc;
 type Ctx = State<Arc<AppState>>;
 type Q = Query<HashMap<String, String>>;
 
-fn latest(ctx: &AppState) -> crate::error::Result<Option<store::HealthRow>> {
-    let c = ctx.logs.conn()?;
-    store::latest_health(&c)
-}
-
 /// The latest sample for a status answer, which reports a read failure as
 /// "unknown" instead of failing: the cause goes to the log here.
 fn latest_for_status(ctx: &AppState) -> crate::error::Result<Option<store::HealthRow>> {
-    let r = latest(ctx);
+    let r = health::latest_sample(ctx);
     if let Err(e) = &r {
         tracing::warn!("Reading the latest health sample failed: {}", e);
     }
@@ -78,16 +73,7 @@ pub async fn status(State(ctx): Ctx) -> Response {
 /// GET /health/check: database reachability plus the latest sample.
 pub async fn check(State(ctx): Ctx) -> Response {
     let now = ctx.now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
-    let main_ok = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?))
-        .is_ok();
-    let logs_ok = ctx
-        .logs
-        .conn()
-        .and_then(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?))
-        .is_ok();
+    let (main_ok, logs_ok) = health::databases_answer(&ctx);
     let pf = |b: bool| if b { "pass" } else { "fail" };
     let mut checks = serde_json::Map::new();
     checks.insert(
@@ -143,7 +129,7 @@ pub async fn check(State(ctx): Ctx) -> Response {
 /// `reason`, its own readings unchanged.
 pub async fn current(State(ctx): Ctx) -> Response {
     let c = ctx.clone();
-    let r = tokio::task::spawn_blocking(move || match latest(&c) {
+    let r = tokio::task::spawn_blocking(move || match health::latest_sample(&c) {
         Ok(Some(m)) => Ok(Some(m)),
         Ok(None) => health::sample_once(&c).map(Some),
         Err(e) => Err(e),
@@ -178,15 +164,10 @@ pub async fn current(State(ctx): Ctx) -> Response {
     }
 }
 
-fn rows_since(ctx: &AppState, hours: i64) -> crate::error::Result<Vec<store::HealthRow>> {
-    let c = ctx.logs.conn()?;
-    store::health_since(&c, health::since(ctx.now(), hours))
-}
-
 /// GET /health/api/history?hours=
 pub async fn history(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    match rows_since(&ctx, hours) {
+    match health::samples_since(&ctx, hours) {
         Ok(rows) => ok(health::history_json(&rows)),
         Err(e) => failed(
             "Health history",
@@ -199,7 +180,7 @@ pub async fn history(State(ctx): Ctx, Query(q): Q) -> Response {
 /// GET /health/api/stats?hours=
 pub async fn stats(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    match rows_since(&ctx, hours) {
+    match health::samples_since(&ctx, hours) {
         Ok(rows) => ok(health::stats_json(&rows, hours)),
         Err(e) => failed(
             "Health stats",
@@ -211,21 +192,14 @@ pub async fn stats(State(ctx): Ctx, Query(q): Q) -> Response {
 
 /// GET /health/api/alerts (unresolved, newest first)
 pub async fn alerts(State(ctx): Ctx) -> Response {
-    match ctx.logs.conn().and_then(|c| store::active_alerts(&c)) {
+    match health::active_alerts(&ctx) {
         Ok(rows) => ok(health::alerts_json(&rows)),
         Err(e) => failed("Health alerts", e, "Could not read alerts. Try again."),
     }
 }
 
 fn alert_action(ctx: &AppState, id: i64, resolve: bool) -> Response {
-    let now = ctx.now();
-    let r = ctx.logs.conn().and_then(|c| {
-        if resolve {
-            store::resolve_alert(&c, id, now)
-        } else {
-            store::acknowledge_alert(&c, id, now)
-        }
-    });
+    let r = health::settle_alert(ctx, id, resolve);
     let done = if resolve {
         "Alert resolved"
     } else {
@@ -300,7 +274,7 @@ pub async fn held_not_placed(State(ctx): Ctx, axum::Json(body): axum::Json<NotPl
 /// GET /health/export?hours=
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    let rows = match rows_since(&ctx, hours) {
+    let rows = match health::samples_since(&ctx, hours) {
         Ok(r) => r,
         Err(e) => {
             return failed(

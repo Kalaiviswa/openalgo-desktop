@@ -119,6 +119,31 @@ pub fn admin_holidays(ctx: &AppState, year: Option<i32>) -> Result<Value> {
     }))
 }
 
+/// How many holidays are listed.
+pub fn holiday_count(ctx: &AppState) -> Result<i64> {
+    let conn = ctx.sqlite.conn()?;
+    cal::holiday_count(&conn)
+}
+
+/// List a holiday. `None`: one is already listed on that date.
+pub fn add_holiday(ctx: &AppState, new: &cal::NewHoliday) -> Result<Option<i64>> {
+    let conn = ctx.sqlite.conn()?;
+    cal::add_holiday(&conn, new)
+}
+
+/// Remove the holiday `id`, answering its description. `None`: no such
+/// holiday.
+pub fn delete_holiday(ctx: &AppState, id: i64) -> Result<Option<String>> {
+    let conn = ctx.sqlite.conn()?;
+    cal::delete_holiday(&conn, id)
+}
+
+/// Set an exchange's regular trading hours (`HH:MM`, IST).
+pub fn update_timing(ctx: &AppState, exchange: &str, start: &str, end: &str) -> Result<()> {
+    let conn = ctx.sqlite.conn()?;
+    cal::update_timing(&conn, exchange, start, end)
+}
+
 /// `GET /admin/api/timings` body.
 pub fn admin_timings(ctx: &AppState) -> Result<Value> {
     let today = today_ist(ctx.now());

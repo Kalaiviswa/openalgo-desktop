@@ -704,6 +704,46 @@ pub fn since(now: DateTime<Utc>, hours: i64) -> DateTime<Utc> {
     now - Duration::hours(hours)
 }
 
+/// The newest health sample, if any.
+pub fn latest_sample(ctx: &AppState) -> Result<Option<HealthRow>> {
+    let c = ctx.logs.conn()?;
+    store::latest_health(&c)
+}
+
+/// The samples of the last `hours`.
+pub fn samples_since(ctx: &AppState, hours: i64) -> Result<Vec<HealthRow>> {
+    let c = ctx.logs.conn()?;
+    store::health_since(&c, since(ctx.now(), hours))
+}
+
+/// Whether the main database and the logs database each answer a query.
+pub fn databases_answer(ctx: &AppState) -> (bool, bool) {
+    let answers = |c: crate::db::sqlite::DbConn| -> Result<i64> {
+        Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)
+    };
+    (
+        ctx.sqlite.conn().and_then(answers).is_ok(),
+        ctx.logs.conn().and_then(answers).is_ok(),
+    )
+}
+
+/// The unresolved alerts, newest first.
+pub fn active_alerts(ctx: &AppState) -> Result<Vec<AlertRow>> {
+    let c = ctx.logs.conn()?;
+    store::active_alerts(&c)
+}
+
+/// Resolve the alert `id`, or only acknowledge it. `false`: no such alert.
+pub fn settle_alert(ctx: &AppState, id: i64, resolve: bool) -> Result<bool> {
+    let now = ctx.now();
+    let c = ctx.logs.conn()?;
+    if resolve {
+        store::resolve_alert(&c, id, now)
+    } else {
+        store::acknowledge_alert(&c, id, now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,7 @@ use crate::db::sqlite::market_calendar::{self as cal, OpenWindow};
 use crate::db::sqlite::webui;
 use crate::server::envelope::error;
 use crate::server::routes::webui::{download, failed, no_store, ok, JsonBody};
+use crate::services::freeze_qty_service;
 use crate::services::market_calendar_service as cal_service;
 use crate::services::system_info;
 use crate::state::AppState;
@@ -33,10 +34,8 @@ fn freeze_json(f: &webui::FreezeQty) -> Value {
 
 /// GET /admin/api/stats
 pub async fn stats(State(ctx): Ctx) -> Response {
-    let r = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| Ok((webui::freeze_count(&c, None)?, cal::holiday_count(&c)?)));
+    let r = freeze_qty_service::count(&ctx, None)
+        .and_then(|f| Ok((f, cal_service::holiday_count(&ctx)?)));
     match r {
         Ok((f, h)) => ok(json!({"status": "success", "freeze_count": f, "holiday_count": h})),
         Err(e) => failed(
@@ -51,7 +50,7 @@ pub async fn stats(State(ctx): Ctx) -> Response {
 
 /// GET /admin/api/freeze
 pub async fn freeze_list(State(ctx): Ctx) -> Response {
-    match ctx.sqlite.conn().and_then(|c| webui::freeze_list(&c)) {
+    match freeze_qty_service::list(&ctx) {
         Ok(v) => {
             ok(json!({"status": "success", "data": v.iter().map(freeze_json).collect::<Vec<_>>()}))
         }
@@ -63,15 +62,13 @@ pub async fn freeze_list(State(ctx): Ctx) -> Response {
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn qty_of(body: &JsonBody) -> Result<Option<i64>, Response> {
+/// The freeze quantity the body names, if any; `Err` is the trader's
+/// message when it is not a whole number above zero.
+fn qty_of(body: &JsonBody) -> Result<Option<i64>, &'static str> {
     match body.int("freeze_qty") {
         Ok(Some(q)) if q > 0 => Ok(Some(q)),
         Ok(None) => Ok(None),
-        _ => Err(error(
-            StatusCode::BAD_REQUEST,
-            "Freeze quantity must be a whole number above zero.",
-        )),
+        _ => Err("Freeze quantity must be a whole number above zero."),
     }
 }
 
@@ -84,7 +81,7 @@ pub async fn freeze_add(State(ctx): Ctx, body: JsonBody) -> Response {
     let symbol = body.str("symbol").unwrap_or_default().to_ascii_uppercase();
     let qty = match qty_of(&body) {
         Ok(q) => q,
-        Err(r) => return r,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
     let Some(qty) = qty.filter(|_| !symbol.is_empty()) else {
         return error(
@@ -92,11 +89,7 @@ pub async fn freeze_add(State(ctx): Ctx, body: JsonBody) -> Response {
             "Symbol and freeze_qty are required",
         );
     };
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| webui::freeze_add(&c, &exchange, &symbol, qty))
-    {
+    match freeze_qty_service::add(&ctx, &exchange, &symbol, qty) {
         Ok(Some(f)) => ok(json!({
             "status": "success",
             "message": format!("Added freeze qty for {}: {}", symbol, qty),
@@ -116,8 +109,9 @@ pub async fn freeze_add(State(ctx): Ctx, body: JsonBody) -> Response {
 
 /// PUT /admin/api/freeze/{id} (json: freeze_qty)
 pub async fn freeze_edit(State(ctx): Ctx, Path(id): Path<i64>, body: JsonBody) -> Response {
-    let conn = match ctx.sqlite.conn() {
-        Ok(c) => c,
+    let entry = match freeze_qty_service::get(&ctx, id) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "Entry not found"),
         Err(e) => {
             return failed(
                 "Editing freeze qty",
@@ -126,15 +120,12 @@ pub async fn freeze_edit(State(ctx): Ctx, Path(id): Path<i64>, body: JsonBody) -
             )
         }
     };
-    let Ok(Some(entry)) = webui::freeze_get(&conn, id) else {
-        return error(StatusCode::NOT_FOUND, "Entry not found");
-    };
     let qty = match qty_of(&body) {
         Ok(Some(q)) => q,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "No freeze_qty provided"),
-        Err(r) => return r,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
-    match webui::freeze_update(&conn, id, qty) {
+    match freeze_qty_service::update(&ctx, id, qty) {
         Ok(_) => ok(json!({
             "status": "success",
             "message": format!("Updated freeze qty for {}: {}", entry.symbol, qty),
@@ -150,8 +141,9 @@ pub async fn freeze_edit(State(ctx): Ctx, Path(id): Path<i64>, body: JsonBody) -
 
 /// DELETE /admin/api/freeze/{id}
 pub async fn freeze_delete(State(ctx): Ctx, Path(id): Path<i64>) -> Response {
-    let conn = match ctx.sqlite.conn() {
-        Ok(c) => c,
+    let entry = match freeze_qty_service::get(&ctx, id) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "Entry not found"),
         Err(e) => {
             return failed(
                 "Deleting freeze qty",
@@ -160,10 +152,7 @@ pub async fn freeze_delete(State(ctx): Ctx, Path(id): Path<i64>) -> Response {
             )
         }
     };
-    let Ok(Some(entry)) = webui::freeze_get(&conn, id) else {
-        return error(StatusCode::NOT_FOUND, "Entry not found");
-    };
-    match webui::freeze_delete(&conn, id) {
+    match freeze_qty_service::delete(&ctx, id) {
         Ok(_) => ok(
             json!({"status": "success", "message": format!("Deleted freeze qty for {}", entry.symbol)}),
         ),
@@ -175,20 +164,18 @@ pub async fn freeze_delete(State(ctx): Ctx, Path(id): Path<i64>) -> Response {
     }
 }
 
-/// POST /admin/api/freeze/upload (multipart: csv_file, exchange)
-pub async fn freeze_upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
+/// The uploaded file (name and bytes) and the exchange it is for (NFO when
+/// none is named); `Err` is the trader's message.
+async fn read_freeze_upload(
+    mp: &mut Multipart,
+) -> Result<(Option<(String, Vec<u8>)>, String), &'static str> {
     let mut file: Option<(String, Vec<u8>)> = None;
     let mut exchange = "NFO".to_string();
     loop {
         let field = match mp.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(_) => {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "The upload could not be read. Try again.",
-                )
-            }
+            Err(_) => return Err("The upload could not be read. Try again."),
         };
         match field.name().unwrap_or_default() {
             "csv_file" => {
@@ -196,17 +183,11 @@ pub async fn freeze_upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
                 match field.bytes().await {
                     Ok(b) if b.len() <= FREEZE_UPLOAD_MAX => file = Some((name, b.to_vec())),
                     Ok(_) => {
-                        return error(
-                            StatusCode::BAD_REQUEST,
+                        return Err(
                             "The file is too large. Upload the exchange's freeze quantity CSV.",
                         )
                     }
-                    Err(_) => {
-                        return error(
-                            StatusCode::BAD_REQUEST,
-                            "The upload could not be read. Try again.",
-                        )
-                    }
+                    Err(_) => return Err("The upload could not be read. Try again."),
                 }
             }
             "exchange" => {
@@ -220,6 +201,15 @@ pub async fn freeze_upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
             _ => {}
         }
     }
+    Ok((file, exchange))
+}
+
+/// POST /admin/api/freeze/upload (multipart: csv_file, exchange)
+pub async fn freeze_upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
+    let (file, exchange) = match read_freeze_upload(&mut mp).await {
+        Ok(v) => v,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
+    };
     let Some((name, bytes)) = file.filter(|(n, _)| !n.is_empty()) else {
         return error(StatusCode::BAD_REQUEST, "No file selected");
     };
@@ -236,11 +226,7 @@ pub async fn freeze_upload(State(ctx): Ctx, mut mp: Multipart) -> Response {
             "The file needs a SYMBOL column and a freeze quantity column. Download the freeze quantity file from the exchange and upload it as it is.",
         );
     };
-    let r = ctx.sqlite.conn().and_then(|c| {
-        webui::freeze_replace_exchange(&c, &exchange, &rows)?;
-        webui::freeze_count(&c, Some(&exchange))
-    });
-    match r {
+    match freeze_qty_service::replace_exchange(&ctx, &exchange, &rows) {
         Ok(count) => ok(json!({
             "status": "success",
             "message": format!("Successfully loaded {} freeze quantities for {}", count, exchange),
@@ -261,33 +247,36 @@ pub async fn holidays(State(ctx): Ctx, Query(q): Q) -> Response {
     }
 }
 
-/// POST /admin/api/holidays
-pub async fn holiday_add(State(ctx): Ctx, body: JsonBody) -> Response {
+/// A holiday the trader asked to list, checked.
+struct HolidayRequest {
+    date_str: String,
+    date: NaiveDate,
+    description: String,
+    holiday_type: String,
+    closed: Vec<String>,
+    open: Vec<OpenWindow>,
+}
+
+/// Read and check `POST /admin/api/holidays`; `Err` is the trader's message.
+/// Exchanges that are not supported, and open windows that end before they
+/// start, are left out.
+fn holiday_request(body: &JsonBody) -> Result<HolidayRequest, &'static str> {
     let date_str = body.str("date").unwrap_or_default();
     let description = body.str("description").unwrap_or_default();
     let holiday_type = body
         .non_empty("holiday_type")
         .unwrap_or_else(|| "TRADING_HOLIDAY".into());
     if date_str.is_empty() || description.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "Date and description are required");
+        return Err("Date and description are required");
     }
     if !cal::HOLIDAY_TYPES.contains(&holiday_type.as_str()) {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Choose a holiday type from the list.",
-        );
+        return Err("Choose a holiday type from the list.");
     }
     let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Invalid date format. Use YYYY-MM-DD",
-        );
+        return Err("Invalid date format. Use YYYY-MM-DD");
     };
     if description.chars().count() > 150 {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Keep the description under 150 characters.",
-        );
+        return Err("Keep the description under 150 characters.");
     }
     let exch_ok = |e: &str| cal::SUPPORTED_EXCHANGES.contains(&e);
     let closed: Vec<String> = match body.0.get("closed_exchanges") {
@@ -316,11 +305,31 @@ pub async fn holiday_add(State(ctx): Ctx, body: JsonBody) -> Response {
         _ => Vec::new(),
     };
     if holiday_type == "SPECIAL_SESSION" && open.is_empty() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Special session requires at least one exchange with timings",
-        );
+        return Err("Special session requires at least one exchange with timings");
     }
+    Ok(HolidayRequest {
+        date_str,
+        date,
+        description,
+        holiday_type,
+        closed,
+        open,
+    })
+}
+
+/// POST /admin/api/holidays
+pub async fn holiday_add(State(ctx): Ctx, body: JsonBody) -> Response {
+    let HolidayRequest {
+        date_str,
+        date,
+        description,
+        holiday_type,
+        closed,
+        open,
+    } = match holiday_request(&body) {
+        Ok(h) => h,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
+    };
     let new = cal::NewHoliday {
         date,
         description: &description,
@@ -328,7 +337,7 @@ pub async fn holiday_add(State(ctx): Ctx, body: JsonBody) -> Response {
         closed: &closed,
         open: &open,
     };
-    match ctx.sqlite.conn().and_then(|c| cal::add_holiday(&c, &new)) {
+    match cal_service::add_holiday(&ctx, &new) {
         Ok(Some(id)) => ok(json!({
             "status": "success",
             "message": format!("Added holiday: {} on {}", description, date_str),
@@ -358,7 +367,7 @@ pub async fn holiday_add(State(ctx): Ctx, body: JsonBody) -> Response {
 
 /// DELETE /admin/api/holidays/{id}
 pub async fn holiday_delete(State(ctx): Ctx, Path(id): Path<i64>) -> Response {
-    match ctx.sqlite.conn().and_then(|c| cal::delete_holiday(&c, id)) {
+    match cal_service::delete_holiday(&ctx, id) {
         Ok(Some(d)) => {
             ok(json!({"status": "success", "message": format!("Deleted holiday: {}", d)}))
         }
@@ -412,11 +421,7 @@ pub async fn timing_edit(
     if !cal::SUPPORTED_EXCHANGES.contains(&ex.as_str()) {
         return error(StatusCode::BAD_REQUEST, "Choose a supported exchange.");
     }
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| cal::update_timing(&c, &ex, &start, &end))
-    {
+    match cal_service::update_timing(&ctx, &ex, &start, &end) {
         Ok(()) => ok(json!({
             "status": "success",
             "message": format!("Updated timing for {}: {} - {}", exchange, start, end),
