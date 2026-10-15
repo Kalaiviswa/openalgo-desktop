@@ -301,4 +301,43 @@ describe('Broker Configuration', () => {
     )
     expect(screen.queryByText('End your Fyers session?')).toBeNull()
   })
+
+  // BRL-01: the Fyers API plan decides how OpenAlgo paces its requests.
+  it("saves the broker's API plan at once, without ending its session", async () => {
+    const PLANS = [
+      { id: 'standard', label: 'Standard', hint: 'Market data: 5 requests a second.' },
+      { id: 'prime', label: 'Prime', hint: 'Market data: 10 requests a second.' },
+    ]
+    list = brokerList([
+      {
+        ...saved(brokerEntry('fyers', 'Fyers', 'redirect'), {}),
+        active: true,
+        rate_plans: PLANS,
+        rate_plan: 'standard',
+      },
+      brokerEntry('zerodha', 'Zerodha', 'redirect'),
+    ])
+    serve({ status: 'success', message: 'Fyers requests are now paced for the Prime plan.' })
+    renderPage('fyers')
+    const plan = await screen.findByLabelText('API plan')
+    expect(plan).toHaveValue('standard')
+    expect(screen.getByTestId('rate-plan-hint')).toHaveTextContent(
+      'Market data: 5 requests a second. OpenAlgo paces Fyers requests to stay within these limits.'
+    )
+    fireEvent.change(plan, { target: { value: 'prime' } })
+    expect(
+      await screen.findByText('Fyers requests are now paced for the Prime plan.')
+    ).toBeInTheDocument()
+    expect(calls).toEqual([
+      { url: '/api/broker/rate-plan/fyers', method: 'PUT', body: { plan: 'prime' } },
+    ])
+    expect(screen.queryByText('End your Fyers session?')).toBeNull()
+  })
+
+  it('offers no API plan for a broker with one set of limits', async () => {
+    serve()
+    renderPage('zerodha')
+    expect(await screen.findByLabelText('API Key')).toBeInTheDocument()
+    expect(screen.queryByLabelText('API plan')).toBeNull()
+  })
 })

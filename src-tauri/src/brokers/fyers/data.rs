@@ -19,8 +19,9 @@ use std::collections::HashMap;
 pub const QUOTE_BATCH: usize = 50;
 /// web `OI_THRESHOLD`: above this many symbols no per-symbol OI is fetched.
 pub const OI_THRESHOLD: usize = 100;
-/// web: history chunk retries before a chunk is skipped.
-const HISTORY_RETRIES: u32 = 3;
+/// Time one history request may take, all chunks, waits and retries
+/// together (BRL-04).
+pub const HISTORY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -290,7 +291,7 @@ pub async fn get_multiquotes(
     for batch in wanted.chunks(QUOTE_BATCH) {
         let joined = batch.join(",");
         let path = format!("/data/quotes?symbols={}", urlencoding::encode(&joined));
-        // The shared pacer spaces batches (web sleeps 0.1 s between them).
+        // The data budget spaces batches (web sleeps 0.1 s between them).
         match b.raw(Method::GET, &path, auth, None).await {
             Ok((_, v)) if super::is_ok(&v) => quotes.extend(parse_quotes(&v)),
             Ok((status, v)) => {
@@ -427,6 +428,34 @@ pub fn parse_candles(rows: &[Vec<Value>], with_oi: bool) -> Vec<Candle> {
         .collect()
 }
 
+/// `s: "no_data"`: Fyers has no candles for the range.
+fn is_no_data(v: &Value) -> bool {
+    v.get("s")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.eq_ignore_ascii_case("no_data"))
+}
+
+/// A chunk that could not be read fails the whole history: a chart or a
+/// simulation must not take a gap for a quiet market (BRL-04). The web
+/// skips the chunk and answers with what it has.
+fn chunk_error(from: NaiveDate, to: NaiveDate, e: AppError) -> AppError {
+    tracing::warn!("Fyers history {}..{} not read: {}", from, to, e.code());
+    match e {
+        AppError::Broker(m) => AppError::Broker(format!(
+            "Fyers did not return the history for {} to {} ({}). Nothing is shown rather than a history with a gap; try again shortly.",
+            from.format("%d %b %Y"),
+            to.format("%d %b %Y"),
+            m.trim_end_matches('.')
+        )),
+        AppError::Http(_) => AppError::Broker(format!(
+            "Fyers could not be reached for the history from {} to {}. Nothing is shown rather than a history with a gap; try again shortly.",
+            from.format("%d %b %Y"),
+            to.format("%d %b %Y")
+        )),
+        other => other,
+    }
+}
+
 /// Today in IST (Fyers dates are exchange dates).
 fn today_ist() -> NaiveDate {
     (chrono::Utc::now() + chrono::Duration::minutes(330)).date_naive()
@@ -443,6 +472,11 @@ pub async fn get_history(
     let with_oi = wants_oi(&req.key.exchange);
     let encoded = urlencoding::encode(row.br_symbol()).into_owned();
     let mut out = Vec::new();
+    // One deadline and one retry budget for every chunk (BRL-04): a
+    // failing chunk can no longer cost four sends per attempt times four
+    // attempts, and a chunk that still fails fails the history rather than
+    // leaving a silent gap.
+    let mut op = super::ratelimit::Op::within(HISTORY_DEADLINE);
     for (from, to) in crate::brokers::common::history::chunks(start, end, chunk_days(resolution)) {
         let mut path = format!(
             "/data/history?symbol={}&resolution={}&date_format=1&range_from={}&range_to={}&cont_flag=1",
@@ -454,10 +488,10 @@ pub async fn get_history(
         if with_oi {
             path.push_str("&oi_flag=1");
         }
-        let mut attempt = 0;
+        let mut attempt = 0u32;
         loop {
-            match b.call(Method::GET, &path, auth, None).await {
-                Ok(v) => {
+            let failure = match b.raw_in(&mut op, Method::GET, &path, auth, None).await {
+                Ok((_, v)) if super::is_ok(&v) => {
                     let rows: Vec<Vec<Value>> = v
                         .get("candles")
                         .and_then(|c| serde_json::from_value(c.clone()).ok())
@@ -465,25 +499,37 @@ pub async fn get_history(
                     out.extend(parse_candles(&rows, with_oi));
                     break;
                 }
-                // An expired session will not recover by retrying.
-                Err(e @ AppError::Auth(_)) => return Err(e),
-                Err(e) if attempt < HISTORY_RETRIES => {
-                    attempt += 1;
-                    tracing::debug!(
-                        "Fyers history chunk {}..{} failed ({}); retry {}",
-                        from,
-                        to,
-                        e.code(),
-                        attempt
-                    );
-                    tokio::time::sleep(b.retry_base.saturating_mul(2 * attempt)).await;
+                // A range with no candles (a holiday stretch, before
+                // listing) is an answer, not a failure.
+                Ok((_, v)) if is_no_data(&v) => break,
+                Ok((status, v)) => {
+                    let (code, message) = super::code_message(&v);
+                    let err = super::fyers_error(status.as_u16(), code, &message);
+                    if !status.is_server_error() {
+                        return Err(chunk_error(from, to, err));
+                    }
+                    err
                 }
-                Err(e) => {
-                    // web: after the retries the chunk is skipped.
-                    tracing::error!("Fyers history chunk {}..{} skipped: {}", from, to, e.code());
-                    break;
-                }
+                // An expired session, a refusal before sending: no retry.
+                Err(e @ AppError::Http(_)) => e,
+                Err(e) => return Err(chunk_error(from, to, e)),
+            };
+            // A transport failure or a server error: retried within the
+            // request's one budget, never past its deadline.
+            let backoff = b.retry_base.saturating_mul(2 * (attempt + 1));
+            if op.retries_left == 0 || tokio::time::Instant::now() + backoff > op.deadline {
+                return Err(chunk_error(from, to, failure));
             }
+            op.retries_left -= 1;
+            attempt += 1;
+            tracing::debug!(
+                "Fyers history chunk {}..{} failed ({}); retry in {:?}",
+                from,
+                to,
+                failure.code(),
+                backoff
+            );
+            tokio::time::sleep(backoff).await;
         }
     }
     Ok(sort_dedupe(out))

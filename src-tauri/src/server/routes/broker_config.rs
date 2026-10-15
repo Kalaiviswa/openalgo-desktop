@@ -134,3 +134,31 @@ pub async fn forget(
         Err(e) => no_store(failed(e)),
     }
 }
+
+/// PUT /api/broker/rate-plan/{broker} (json or form: plan): the API plan
+/// the broker's requests are paced for (Fyers Standard or Prime). Applies
+/// at once; nothing about the session changes.
+pub async fn set_rate_plan(
+    State(ctx): Ctx,
+    Path(broker): Path<String>,
+    form: FormData,
+) -> Response {
+    let plan = form.get("plan").unwrap_or_default().to_string();
+    let name = crate::brokers::setup_guide::display_name(&broker);
+    match BrokerConfigService::set_rate_plan(&ctx, &broker, &plan) {
+        Ok(label) => no_store(json_response(
+            StatusCode::OK,
+            json!({
+                "status": "success",
+                "message": format!("{} requests are now paced for the {} plan.", name, label),
+                "rate_plan": plan.trim(),
+            }),
+        )),
+        Err(crate::error::AppError::Validation(m)) => no_store(error(StatusCode::BAD_REQUEST, m)),
+        Err(e) => no_store(crate::server::routes::webui::failed(
+            "Saving a broker API plan",
+            e,
+            "The API plan was not changed. Try again.",
+        )),
+    }
+}

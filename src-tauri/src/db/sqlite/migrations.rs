@@ -87,6 +87,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         crate::scalping::store::migrate_exit_attempts,
     )?;
     run_rust_migration(conn, "080_broker_redirect_url", m080_broker_redirect_url)?;
+    run_rust_migration(conn, "081_broker_rate_plan", super::rate_plan::migrate)?;
 
     tracing::info!("Database migrations completed");
     Ok(())

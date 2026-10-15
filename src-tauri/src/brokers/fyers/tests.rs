@@ -505,16 +505,22 @@ fn fyers_errors_are_trader_facing() {
     assert!(fyers_error(500, 0, "").client_message().contains("refused"));
     let mut h = reqwest::header::HeaderMap::new();
     let base = std::time::Duration::from_secs(1);
-    assert_eq!(retry_delay(&h, 2, base), std::time::Duration::from_secs(4));
+    let now = std::time::SystemTime::now();
+    let delay = |h: &reqwest::header::HeaderMap, a| ratelimit::retry_delay(h, a, base, now);
+    assert_eq!(delay(&h, 2), std::time::Duration::from_secs(4));
     h.insert("retry-after", "2".parse().unwrap());
-    assert_eq!(retry_delay(&h, 0, base), std::time::Duration::from_secs(2));
+    assert_eq!(delay(&h, 0), std::time::Duration::from_secs(2));
     h.insert("x-retry-after-ms", "250".parse().unwrap());
-    assert_eq!(
-        retry_delay(&h, 0, base),
-        std::time::Duration::from_millis(250)
-    );
+    assert_eq!(delay(&h, 0), std::time::Duration::from_millis(250));
+    // A long wait is read in full (it used to be cut to 10 s and resent
+    // early, BRL-03); the caller refuses what it cannot hold.
     h.insert("x-retry-after-ms", "600000".parse().unwrap());
-    assert_eq!(retry_delay(&h, 0, base), std::time::Duration::from_secs(10));
+    assert_eq!(delay(&h, 0), std::time::Duration::from_secs(600));
+    // A body-level throttle is recognised as one.
+    assert!(is_throttle_body(
+        &json!({"s": "error", "code": 429, "message": "request limit reached"})
+    ));
+    assert!(!is_throttle_body(&json!({"s": "ok", "code": 200})));
 }
 
 // ---------------------------------------------------------------------------

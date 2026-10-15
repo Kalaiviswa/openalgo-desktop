@@ -97,6 +97,23 @@ pub trait Broker: Send + Sync {
         None
     }
 
+    /// API plans the broker sells with different request limits, for
+    /// Broker Configuration: `(id, label, what it allows)`, the default
+    /// (what applies until the trader picks one) first. Empty when the
+    /// broker has one set of limits.
+    fn rate_plans(&self) -> &'static [RatePlan] {
+        &[]
+    }
+
+    /// Pace requests for the plan with this id (one of `rate_plans`);
+    /// anything else is the default plan.
+    fn set_rate_plan(&self, _plan: &str) {}
+
+    /// The plan requests are paced for now, when the broker has plans.
+    fn rate_plan(&self) -> Option<&'static str> {
+        None
+    }
+
     // ---- auth and session lifecycle ----
 
     /// Exchange login credentials (or an OAuth code) for a session token.
@@ -498,6 +515,15 @@ pub trait Broker: Send + Sync {
     fn feed_depth_levels(&self, _exchange: &str) -> Vec<u8> {
         self.capabilities().depth_levels.to_vec()
     }
+}
+
+/// One API plan of a broker (`Broker::rate_plans`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RatePlan {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// The limits it allows, for the trader.
+    pub hint: &'static str,
 }
 
 /// Broker credentials for authentication. `Debug` is redacted.

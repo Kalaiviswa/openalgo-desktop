@@ -228,6 +228,12 @@ pub fn table() -> Vec<RouteSpec> {
             User,
             broker_config::forget
         ),
+        r!(
+            PUT,
+            "/api/broker/rate-plan/{broker}",
+            User,
+            broker_config::set_rate_plan
+        ),
         // Desktop server settings (the older path is an alias).
         r!(GET, "/settings/api/server", User, settings::get_server),
         r!(POST, "/settings/api/server", User, settings::save_server),

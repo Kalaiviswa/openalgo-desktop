@@ -21,6 +21,7 @@ pub mod models;
 pub mod monitor;
 pub mod oauth_state;
 mod order_logs;
+pub mod rate_plan;
 pub mod sandbox;
 mod settings;
 mod strategy;
