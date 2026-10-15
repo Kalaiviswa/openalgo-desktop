@@ -90,6 +90,7 @@ pub mod funds;
 pub mod gtt;
 pub mod holdings;
 pub mod locks;
+mod mypnl;
 pub mod orders;
 mod placement;
 pub mod positions;
@@ -121,7 +122,7 @@ use rust_decimal::Decimal;
 use squareoff::Scheduler;
 use std::path::Path;
 use std::sync::Arc;
-use types::{float, money, pct};
+use types::money;
 
 /// What the engine runs against.
 #[derive(Clone)]
@@ -727,112 +728,7 @@ impl Sandbox {
     /// `/sandbox/mypnl/api/data`.
     pub async fn mypnl(&self) -> SbResult<MyPnlReply> {
         blocking(self.core(), |c| {
-            c.db.with_conn(|conn| {
-                let user = c.user();
-                let mut positions_rows = positions::list_user(conn, user)?;
-                positions_rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                let holdings_rows = holdings::list_user(conn, user)?;
-                let f = funds::read(conn, user)?;
-                let mut pos_unrealized = Decimal::ZERO;
-                let positions_out = positions_rows
-                    .iter()
-                    .map(|p| {
-                        let unrealized = if p.quantity != 0 { p.pnl } else { Decimal::ZERO };
-                        pos_unrealized += unrealized;
-                        MyPnlPosition {
-                            symbol: p.symbol.clone(),
-                            exchange: p.exchange.clone(),
-                            product: p.product.as_str().to_string(),
-                            quantity: p.quantity,
-                            average_price: money(p.average_price),
-                            ltp: money(p.ltp.unwrap_or(Decimal::ZERO)),
-                            unrealized_pnl: money(unrealized),
-                            today_realized_pnl: money(p.today_realized_pnl),
-                            all_time_realized_pnl: money(p.accumulated_realized_pnl),
-                            status: if p.quantity != 0 { "Open" } else { "Closed" }.to_string(),
-                            updated_at: display_seconds(&p.updated_at),
-                        }
-                    })
-                    .collect();
-                let mut hold_unrealized = Decimal::ZERO;
-                let holdings_out = holdings_rows
-                    .iter()
-                    .map(|h| {
-                        hold_unrealized += h.pnl;
-                        MyPnlHolding {
-                            symbol: h.symbol.clone(),
-                            exchange: h.exchange.clone(),
-                            product: "CNC".to_string(),
-                            quantity: h.quantity,
-                            average_price: money(h.average_price),
-                            ltp: money(h.ltp.unwrap_or(Decimal::ZERO)),
-                            unrealized_pnl: money(h.pnl),
-                            pnl_percent: pct(h.pnl_percent),
-                            settlement_date: h.settlement_date.clone(),
-                        }
-                    })
-                    .collect();
-                let trades = {
-                    let mut stmt = conn.prepare_cached(&format!(
-                        "SELECT {} FROM sandbox_trades WHERE user_id = ?1 ORDER BY trade_timestamp DESC, id DESC LIMIT 50",
-                        db::TradeRow::COLUMNS
-                    ))?;
-                    let rows = stmt.query_map(rusqlite::params![user], db::TradeRow::from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                let daily = {
-                    let mut stmt = conn.prepare_cached(
-                        "SELECT * FROM sandbox_daily_pnl WHERE user_id = ?1 ORDER BY date DESC LIMIT 30",
-                    )?;
-                    let rows = stmt.query_map(rusqlite::params![user], db::DailyPnlRow::from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                let today = f.as_ref().map(|f| f.today_realized_pnl).unwrap_or(Decimal::ZERO);
-                let total_unrealized = pos_unrealized + hold_unrealized;
-                Ok::<_, SandboxError>(MyPnlReply {
-                    status: SUCCESS,
-                    data: MyPnlData {
-                        summary: MyPnlSummary {
-                            today_realized_pnl: money(today),
-                            all_time_realized_pnl: f.as_ref().map(|f| money(f.realized_pnl)).unwrap_or(0.0),
-                            positions_unrealized_pnl: money(pos_unrealized),
-                            holdings_unrealized_pnl: money(hold_unrealized),
-                            total_unrealized_pnl: money(total_unrealized),
-                            today_total_mtm: money(today + total_unrealized),
-                            total_pnl: f.as_ref().map(|f| money(f.total_pnl)).unwrap_or(0.0),
-                            available_balance: f.as_ref().map(|f| money(f.available_balance)).unwrap_or(0.0),
-                            total_capital: f.as_ref().map(|f| money(f.total_capital)).unwrap_or(0.0),
-                        },
-                        daily_pnl: daily
-                            .iter()
-                            .map(|d| MyPnlDaily {
-                                date: d.date.clone(),
-                                realized_pnl: money(d.realized_pnl),
-                                positions_unrealized: money(d.positions_unrealized_pnl),
-                                holdings_unrealized: money(d.holdings_unrealized_pnl),
-                                total_unrealized: money(d.positions_unrealized_pnl + d.holdings_unrealized_pnl),
-                                total_mtm: money(d.total_mtm),
-                                portfolio_value: money(d.portfolio_value),
-                            })
-                            .collect(),
-                        positions: positions_out,
-                        holdings: holdings_out,
-                        trades: trades
-                            .iter()
-                            .map(|t| MyPnlTrade {
-                                tradeid: t.tradeid.clone(),
-                                symbol: t.symbol.clone(),
-                                exchange: t.exchange.clone(),
-                                action: t.action.clone(),
-                                quantity: t.quantity,
-                                price: float(t.price),
-                                product: t.product.clone(),
-                                timestamp: display_seconds(&t.trade_timestamp),
-                            })
-                            .collect(),
-                    },
-                })
-            })
+            c.db.with_conn(|conn| mypnl::read(conn, c.user()))
         })
         .await
     }

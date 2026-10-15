@@ -49,7 +49,6 @@
   },
   "rust_functions": {
     "src-tauri/src/sandbox/gtt.rs::place": 103,
-    "src-tauri/src/sandbox/mod.rs::mypnl": 111,
     "src-tauri/src/sandbox/positions.rs::close_position_outcome": 103,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
