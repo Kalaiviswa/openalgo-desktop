@@ -826,96 +826,8 @@ impl Bot {
             "cancel_action" => {
                 self.edit(chat, mid, "Action cancelled.", false, None).await;
             }
-            "confirm_closeall" => {
-                if Self::user(ctx, from.id).is_none() {
-                    self.edit(chat, mid, LINK_FIRST, false, None).await;
-                    return;
-                }
-                let Some(client) = Self::client(ctx, from.id) else {
-                    self.edit(chat, mid, "Failed to connect to OpenAlgo", false, None)
-                        .await;
-                    return;
-                };
-                self.edit(chat, mid, "Closing all positions...", false, None)
-                    .await;
-                let resp = client.closeposition().await;
-                let message = |r: &Option<Value>, d: &str| {
-                    r.as_ref()
-                        .and_then(|v| v.get("message"))
-                        .map(crate::messaging::format::py_str)
-                        .unwrap_or_else(|| d.into())
-                };
-                if is_success(&resp) {
-                    let text = format!(
-                        "*Positions Closed*\n{RULE}\n\n{}",
-                        message(&resp, "All positions closed")
-                    );
-                    self.send(chat, &text, true, None).await;
-                } else {
-                    let err = if resp.is_some() {
-                        message(&resp, "Unknown error")
-                    } else {
-                        "No response".into()
-                    };
-                    self.send(
-                        chat,
-                        &format!("*Failed to close positions*\n\n{}", err),
-                        true,
-                        None,
-                    )
-                    .await;
-                }
-                Self::log(ctx, from.id, &data, chat);
-            }
-            "mode_live" | "mode_analyze" => {
-                // Being linked once is not enough to change the trading mode:
-                // the linked key must still be valid now, as for every account
-                // action (a key regenerated or deleted since must stop it).
-                let allowed = match Self::client(ctx, from.id) {
-                    Some(c) => c.is_authorized().await,
-                    None => false,
-                };
-                if !allowed {
-                    self.edit(chat, mid, KEY_NO_LONGER_VALID, false, None).await;
-                    return;
-                }
-                let requested = data == "mode_analyze";
-                match crate::services::AnalyzerService::set_mode(ctx, requested).await {
-                    Ok(s) => {
-                        crate::messaging::emit(
-                            ctx,
-                            "app_mode_changed",
-                            json!({"analyze_mode": s.analyze_mode}),
-                        )
-                        .await;
-                        let label = if s.analyze_mode {
-                            "Analyze Mode"
-                        } else {
-                            "Live Mode"
-                        };
-                        self.edit(
-                            chat,
-                            mid,
-                            &format!("*Mode Changed*\n{RULE}\n\nNow in: {}", label),
-                            true,
-                            None,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Telegram mode change failed: {}", e);
-                        self.edit(
-                            chat,
-                            mid,
-                            "Failed to change mode. Check server logs.",
-                            false,
-                            None,
-                        )
-                        .await;
-                    }
-                }
-                Self::log(ctx, from.id, &data, chat);
-            }
+            "confirm_closeall" => self.on_confirm_closeall(ctx, chat, mid, &from, &data).await,
+            "mode_live" | "mode_analyze" => self.on_mode_button(ctx, chat, mid, &from, &data).await,
             "menu" => {
                 let ts = crate::messaging::alerts::local_time(ctx);
                 self.edit(
@@ -930,30 +842,143 @@ impl Bot {
                 )
                 .await;
             }
-            other => {
-                let Some(user) = Self::user(ctx, from.id) else {
-                    self.send(chat, LINK_FIRST, false, None).await;
-                    return;
+            other => self.on_book_button(ctx, chat, &from, other).await,
+        }
+    }
+
+    /// The "Yes, close all" button: close every position and say how it
+    /// went.
+    async fn on_confirm_closeall(
+        &self,
+        ctx: &Arc<AppState>,
+        chat: i64,
+        mid: i64,
+        from: &From,
+        data: &str,
+    ) {
+        if Self::user(ctx, from.id).is_none() {
+            self.edit(chat, mid, LINK_FIRST, false, None).await;
+            return;
+        }
+        let Some(client) = Self::client(ctx, from.id) else {
+            self.edit(chat, mid, "Failed to connect to OpenAlgo", false, None)
+                .await;
+            return;
+        };
+        self.edit(chat, mid, "Closing all positions...", false, None)
+            .await;
+        let resp = client.closeposition().await;
+        let message = |r: &Option<Value>, d: &str| {
+            r.as_ref()
+                .and_then(|v| v.get("message"))
+                .map(crate::messaging::format::py_str)
+                .unwrap_or_else(|| d.into())
+        };
+        if is_success(&resp) {
+            let text = format!(
+                "*Positions Closed*\n{RULE}\n\n{}",
+                message(&resp, "All positions closed")
+            );
+            self.send(chat, &text, true, None).await;
+        } else {
+            let err = if resp.is_some() {
+                message(&resp, "Unknown error")
+            } else {
+                "No response".into()
+            };
+            self.send(
+                chat,
+                &format!("*Failed to close positions*\n\n{}", err),
+                true,
+                None,
+            )
+            .await;
+        }
+        Self::log(ctx, from.id, data, chat);
+    }
+
+    /// The mode buttons: switch analyze mode, with a key that is still
+    /// valid.
+    async fn on_mode_button(
+        &self,
+        ctx: &Arc<AppState>,
+        chat: i64,
+        mid: i64,
+        from: &From,
+        data: &str,
+    ) {
+        // Being linked once is not enough to change the trading mode:
+        // the linked key must still be valid now, as for every account
+        // action (a key regenerated or deleted since must stop it).
+        let allowed = match Self::client(ctx, from.id) {
+            Some(c) => c.is_authorized().await,
+            None => false,
+        };
+        if !allowed {
+            self.edit(chat, mid, KEY_NO_LONGER_VALID, false, None).await;
+            return;
+        }
+        let requested = data == "mode_analyze";
+        match crate::services::AnalyzerService::set_mode(ctx, requested).await {
+            Ok(s) => {
+                crate::messaging::emit(
+                    ctx,
+                    "app_mode_changed",
+                    json!({"analyze_mode": s.analyze_mode}),
+                )
+                .await;
+                let label = if s.analyze_mode {
+                    "Analyze Mode"
+                } else {
+                    "Live Mode"
                 };
-                let cs = Self::cs(&user);
-                let Some(client) = Self::client(ctx, from.id) else {
-                    self.send(chat, "Failed to connect to OpenAlgo", false, None)
-                        .await;
-                    return;
-                };
-                let text = match other {
-                    "orderbook" => format_short("orderbook", &client.orderbook().await, cs),
-                    "tradebook" => format_short("tradebook", &client.tradebook().await, cs),
-                    "positions" => format_short("positions", &client.positionbook().await, cs),
-                    "holdings" => format_short("holdings", &client.holdings().await, cs),
-                    "funds" => format_short("funds", &client.funds().await, cs),
-                    "pnl" => format_pnl_funds(&client.funds().await, cs),
-                    _ => "Unknown command".into(),
-                };
-                self.send(chat, &text, true, None).await;
-                Self::log(ctx, from.id, other, chat);
+                self.edit(
+                    chat,
+                    mid,
+                    &format!("*Mode Changed*\n{RULE}\n\nNow in: {}", label),
+                    true,
+                    None,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!("Telegram mode change failed: {}", e);
+                self.edit(
+                    chat,
+                    mid,
+                    "Failed to change mode. Check server logs.",
+                    false,
+                    None,
+                )
+                .await;
             }
         }
+        Self::log(ctx, from.id, data, chat);
+    }
+
+    /// A book, funds or P&L button: the short text for it.
+    async fn on_book_button(&self, ctx: &Arc<AppState>, chat: i64, from: &From, other: &str) {
+        let Some(user) = Self::user(ctx, from.id) else {
+            self.send(chat, LINK_FIRST, false, None).await;
+            return;
+        };
+        let cs = Self::cs(&user);
+        let Some(client) = Self::client(ctx, from.id) else {
+            self.send(chat, "Failed to connect to OpenAlgo", false, None)
+                .await;
+            return;
+        };
+        let text = match other {
+            "orderbook" => format_short("orderbook", &client.orderbook().await, cs),
+            "tradebook" => format_short("tradebook", &client.tradebook().await, cs),
+            "positions" => format_short("positions", &client.positionbook().await, cs),
+            "holdings" => format_short("holdings", &client.holdings().await, cs),
+            "funds" => format_short("funds", &client.funds().await, cs),
+            "pnl" => format_pnl_funds(&client.funds().await, cs),
+            _ => "Unknown command".into(),
+        };
+        self.send(chat, &text, true, None).await;
+        Self::log(ctx, from.id, other, chat);
     }
 }
 

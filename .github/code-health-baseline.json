@@ -101,7 +101,6 @@
     "src-tauri/src/mcp/ta/surface.rs::call": 115,
     "src-tauri/src/mcp/ta/surface.rs::compute": 232,
     "src-tauri/src/messaging/telegram/bot.rs::cmd_chart": 108,
-    "src-tauri/src/messaging/telegram/bot.rs::on_callback": 174,
     "src-tauri/src/messaging/telegram/texts.rs::format_short": 146,
     "src-tauri/src/messaging/whatsapp/tasks.rs::bot_task": 203,
     "src-tauri/src/messaging/whatsapp/tasks.rs::pair_task": 109,
