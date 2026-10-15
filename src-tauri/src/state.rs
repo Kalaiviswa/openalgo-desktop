@@ -74,10 +74,11 @@ pub struct AppState {
     pub api_keys: ApiKeyCache,
     pub broker_session: RwLock<Option<BrokerSession>>,
     /// A broker session ended in memory whose stored row is still to be
-    /// revoked (the database write failed). While set, no stored session is
-    /// resumed; the session poll and the next sign-in finish the revoke
+    /// revoked (the database write failed), and which rows (every one, or
+    /// the daily boundary's). While set, no stored session is resumed; the
+    /// session poll and the next sign-in finish the revoke
     /// (`BrokerAuthService::retry_pending_revoke`).
-    pub revoke_pending: Mutex<bool>,
+    pub revoke_pending: Mutex<Option<crate::services::broker_auth_service::PendingRevoke>>,
     /// One broker is logged in at a time. Completing a sign-in (which ends
     /// any other broker's session first), resuming one, ending one and
     /// forgetting the logged-in broker run under this lock, so two of them
@@ -316,7 +317,7 @@ impl AppState {
             limiter: RateLimiter::new(),
             api_keys: ApiKeyCache::new(),
             broker_session: RwLock::new(None),
-            revoke_pending: Mutex::new(false),
+            revoke_pending: Mutex::new(None),
             session_switch: tokio::sync::Mutex::new(()),
             switch_guard: RwLock::new(Arc::new(crate::services::obligations::OutcomesGuard)),
             server_status: RwLock::new(ServerStatus::Starting),

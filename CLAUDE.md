@@ -1012,7 +1012,11 @@ and add each new one here.
   memory and in a marker file in the data folder
   (`broker_auth_service::REVOKE_MARKER`) before memory is cleared, so
   neither a failed write nor a restart before the retry lets the session
-  resume; the session poll, a resume or the next sign-in writes it.
+  resume; the session poll, a resume or the next sign-in writes it. The
+  marker records what is still to be revoked (`PendingRevoke`): every
+  session after a logout or a switch, but after the daily boundary only
+  what was authenticated before it and never a crypto session, so a retry
+  never ends a session that should outlive it.
 - A GET with a global effect (`/auth/logout` ending every session) runs
   only for a same-origin navigation: the Lax cookie rides on a link from
   another site in browsers without Fetch Metadata.

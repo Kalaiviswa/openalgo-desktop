@@ -442,31 +442,69 @@ mod tests {
         ctx.runtime.teardown(ctx).await;
     }
 
+    /// The database refuses every change to a stored broker session.
+    fn fail_auth_writes(ctx: &AppState) {
+        ctx.sqlite
+            .conn()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER test_fail_auth_update BEFORE UPDATE ON auth
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+    }
+
+    fn allow_auth_writes(ctx: &AppState) {
+        ctx.sqlite
+            .conn()
+            .unwrap()
+            .execute_batch("DROP TRIGGER test_fail_auth_update")
+            .unwrap();
+    }
+
+    /// Whether `broker`'s stored session row is revoked.
+    fn revoked(ctx: &AppState, broker: &str) -> bool {
+        ctx.sqlite
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT is_revoked FROM auth WHERE broker_id = ?1",
+                [broker],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    }
+
     /// SES-02 with SEC-05b: when the boundary's revoke cannot be written
     /// while a session signed in after the boundary is live, the revoke is
-    /// not left pending (a pending revoke revokes every stored row, the new
-    /// session's too). Here Zerodha's 02:00 row is still stored when Angel
-    /// signs in at 03:00:05, and the database refuses the boundary's write.
+    /// still left pending (like a failed sign-out) and finished once the
+    /// database recovers, but only for what came before the boundary: the
+    /// newer session and its stored row stay. Here Zerodha's 02:00 row is
+    /// still stored when Angel signs in at 03:00:05.
     #[tokio::test]
-    async fn a_failed_boundary_write_never_revokes_a_newer_session() {
+    async fn a_failed_boundary_write_is_finished_without_the_newer_session() {
         let (t, _) = harness(ist(5, 2, 0, 0));
         let ctx = &t.ctx;
         sign_in(ctx, "zerodha");
         t.clock.set(ist(5, 3, 0, 5));
         let fresh = sign_in(ctx, "angel");
-        let conn = ctx.sqlite.conn().unwrap();
-        conn.execute_batch(
-            "CREATE TRIGGER test_fail_auth_update BEFORE UPDATE ON auth
-             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
-        )
-        .unwrap();
+        fail_auth_writes(ctx);
         t.clock.set(ist(5, 3, 0, 20));
         assert!(expire_if_crossed(ctx, ist(5, 2, 59, 50)).await);
-        assert!(!BrokerAuthService::revoke_is_pending(ctx));
-        conn.execute_batch("DROP TRIGGER test_fail_auth_update")
-            .unwrap();
-        drop(conn);
+        assert!(
+            BrokerAuthService::revoke_is_pending(ctx),
+            "the boundary's revoke is kept to be written"
+        );
+        assert_eq!(
+            ctx.get_broker_session().map(|s| s.broker_id).as_deref(),
+            Some("angel")
+        );
+        allow_auth_writes(ctx);
         poll_tick(ctx, ctx.now()).await;
+        assert!(!BrokerAuthService::revoke_is_pending(ctx));
+        assert!(revoked(ctx, "zerodha"), "the 02:00 row is revoked");
+        assert!(!revoked(ctx, "angel"));
         assert_eq!(
             stored(ctx),
             Some(("angel".to_string(), fresh.authenticated_at))
@@ -475,6 +513,81 @@ mod tests {
             ctx.get_broker_session().map(|s| s.broker_id).as_deref(),
             Some("angel")
         );
+    }
+
+    /// SES-01 with SEC-05b: the boundary's revoke that cannot be written
+    /// while no session is live (after a restart, before the trader signs
+    /// in) is left pending and blocks resume until written, on disk across
+    /// a restart; written, it revokes the stale Indian broker row but keeps
+    /// the stored crypto session, which then resumes.
+    #[tokio::test]
+    async fn a_failed_boundary_write_keeps_a_stored_crypto_session() {
+        let (t, _) = harness(ist(5, 2, 0, 0));
+        let ctx = &t.ctx;
+        sign_in(ctx, "zerodha");
+        t.clock.set(ist(5, 2, 30, 0));
+        let delta = sign_in(ctx, "deltaexchange");
+        // A restart: nothing live in memory.
+        ctx.set_broker_session(None);
+        fail_auth_writes(ctx);
+        t.clock.set(ist(5, 3, 0, 20));
+        assert!(expire_if_crossed(ctx, ist(5, 2, 59, 50)).await);
+        assert!(BrokerAuthService::revoke_is_pending(ctx));
+        // Another restart: only the marker on disk remembers it.
+        *ctx.revoke_pending.lock() = None;
+        assert!(BrokerAuthService::revoke_is_pending(ctx));
+        assert!(
+            BrokerAuthService::try_resume(ctx).await.unwrap().is_none(),
+            "nothing resumes while the revoke is unwritten"
+        );
+        allow_auth_writes(ctx);
+        let resumed = BrokerAuthService::try_resume(ctx).await.unwrap();
+        assert_eq!(
+            resumed.map(|s| (s.broker_id, s.authenticated_at)),
+            Some(("deltaexchange".to_string(), delta.authenticated_at))
+        );
+        assert!(!BrokerAuthService::revoke_is_pending(ctx));
+        assert!(revoked(ctx, "zerodha"));
+        assert!(!revoked(ctx, "deltaexchange"));
+        ctx.runtime.teardown(ctx).await;
+    }
+
+    /// SEC-05b with the boundary's scoped revoke: a logout whose revoke
+    /// cannot be written is never narrowed to the boundary's revoke already
+    /// pending on disk, even when the marker cannot be rewritten (a full
+    /// disk refuses both). Delta is live with Zerodha's stale row; the
+    /// boundary's write fails (pending: before the boundary); the trader
+    /// logs out of Delta while the database and the marker write still
+    /// fail. After a restart the logged-out Delta session is not resumed.
+    #[tokio::test]
+    async fn a_failed_logout_is_never_narrowed_to_the_boundarys_revoke() {
+        let (t, _) = harness(ist(5, 2, 0, 0));
+        let ctx = &t.ctx;
+        sign_in(ctx, "zerodha");
+        t.clock.set(ist(5, 2, 30, 0));
+        sign_in(ctx, "deltaexchange");
+        fail_auth_writes(ctx);
+        t.clock.set(ist(5, 3, 0, 20));
+        assert!(expire_if_crossed(ctx, ist(5, 2, 59, 50)).await);
+        assert!(ctx.is_broker_connected(), "Delta has no daily boundary");
+        // The marker cannot be rewritten: its temporary file's place is
+        // taken.
+        std::fs::create_dir(ctx.data_dir.join("broker-revoke.tmp")).unwrap();
+        assert!(
+            BrokerAuthService::revoke(ctx, SessionEndReason::Logout)
+                .await
+                .is_err(),
+            "the row is still to be revoked"
+        );
+        // A restart: only the marker on disk remembers the logout.
+        *ctx.revoke_pending.lock() = None;
+        allow_auth_writes(ctx);
+        assert!(
+            BrokerAuthService::try_resume(ctx).await.unwrap().is_none(),
+            "the logged-out Delta session came back"
+        );
+        assert!(revoked(ctx, "deltaexchange"));
+        assert!(revoked(ctx, "zerodha"));
     }
 
     /// 14-N2: a continuous (crypto) session refreshes its master once when

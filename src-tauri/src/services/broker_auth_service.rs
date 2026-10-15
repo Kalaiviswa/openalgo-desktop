@@ -43,11 +43,61 @@ use std::time::Duration;
 pub const OAUTH_STATE_TTL_MINUTES: i64 = 10;
 /// In the data folder while an ended broker session's stored row is still
 /// to be revoked, so a restart before the retry does not resume it
-/// (SEC-05b).
+/// (SEC-05b). It holds what is still to be revoked (`PendingRevoke`).
 pub const REVOKE_MARKER: &str = "broker-revoke.pending";
 const RESUME_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct BrokerAuthService;
+
+/// What a broker revoke whose database write failed still has to write
+/// (SEC-05b), kept in memory and in the marker file (`REVOKE_MARKER`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingRevoke {
+    /// A logout, a broker switch or any other explicit revoke: every stored
+    /// session. An empty or unreadable marker means this (fail closed; it
+    /// is also what a marker written before scopes existed holds).
+    All,
+    /// The daily boundary (SES-02): the stored sessions authenticated
+    /// before it, except continuous (crypto) ones (SES-01). A session
+    /// signed in after the boundary is never touched by its retry.
+    Before(chrono::DateTime<chrono::Utc>),
+}
+
+impl PendingRevoke {
+    /// Two revokes both still to be written: the wider one.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Before(a), Self::Before(b)) => Self::Before(a.max(b)),
+            _ => Self::All,
+        }
+    }
+
+    fn write(self, conn: &rusqlite::Connection) -> Result<()> {
+        match self {
+            Self::All => auth::revoke_all(conn).map(|_| ()),
+            Self::Before(boundary) => auth::revoke_before(conn, boundary, |broker| {
+                catalog::session_policy(broker) == catalog::SessionPolicy::Continuous
+            })
+            .map(|_| ()),
+        }
+    }
+
+    /// The marker's contents: empty for `All`, the boundary (RFC 3339) for
+    /// `Before`.
+    fn encode(self) -> String {
+        match self {
+            Self::All => String::new(),
+            Self::Before(boundary) => boundary.to_rfc3339(),
+        }
+    }
+
+    /// Read a marker; anything but a boundary means every session.
+    fn decode(text: &str) -> Self {
+        chrono::DateTime::parse_from_rfc3339(text.trim())
+            .map(|b| Self::Before(b.with_timezone(&chrono::Utc)))
+            .unwrap_or(Self::All)
+    }
+}
 
 /// Where a broker callback came from.
 #[derive(Debug, Clone, Copy)]
@@ -622,8 +672,8 @@ impl BrokerAuthService {
             let was_pending = Self::pending_locked(state, &pending);
             let mut conn = state.sqlite.conn()?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if was_pending {
-                auth::revoke_all(&tx)?;
+            if let Some(what) = was_pending {
+                what.write(&tx)?;
             }
             auth::upsert(
                 &tx,
@@ -665,12 +715,14 @@ impl BrokerAuthService {
             return Ok(Some(s));
         }
         // A session the trader ended whose row could not be revoked yet is
-        // never brought back.
+        // never brought back: the pending revoke is written first, and
+        // while it cannot be, nothing is resumed. Once written, only what
+        // it spared can come back (a crypto session the boundary kept).
         if Self::revoke_is_pending(state) {
             if let Err(e) = Self::retry_pending_revoke(state) {
                 tracing::warn!("The ended broker session is still to be revoked: {}", e);
+                return Ok(None);
             }
-            return Ok(None);
         }
         let stored = {
             let conn = state.sqlite.conn()?;
@@ -796,7 +848,7 @@ impl BrokerAuthService {
         // stop or a restart before the row is written cannot bring it back.
         {
             let mut pending = state.revoke_pending.lock();
-            Self::mark_pending_locked(state, &mut pending);
+            Self::mark_pending_locked(state, &mut pending, PendingRevoke::All);
         }
         state.set_broker_session(None);
         state.api_keys.clear();
@@ -821,13 +873,12 @@ impl BrokerAuthService {
     /// `get_broker_session` may already have dropped the memory copy).
     ///
     /// The stored rows from before the boundary are revoked by time. When
-    /// that write fails and no session is live any more, the revoke is left
-    /// pending like a failed sign-out (SEC-05b: no resume until it is
-    /// written, on disk across a restart). With a session still live (one
-    /// signed in after the boundary, or a crypto one) it is not: a pending
-    /// revoke revokes every stored row, that session's too; a stale row left
-    /// then is refused by the freshness check on resume. Returns whether a
-    /// live session ended.
+    /// that write fails, the revoke is left pending like a failed sign-out
+    /// (SEC-05b: in memory and on disk across a restart; no resume until it
+    /// is written), recorded as the boundary's (`PendingRevoke::Before`):
+    /// its retry revokes only what this write would have, never a session
+    /// signed in after the boundary or a crypto one. Returns whether a live
+    /// session ended.
     pub async fn expire_before(
         state: &AppState,
         boundary: chrono::DateTime<chrono::Utc>,
@@ -860,10 +911,8 @@ impl BrokerAuthService {
             .conn()
             .and_then(|conn| auth::revoke_before(&conn, boundary, |b| !daily(b)));
         if let Err(e) = written {
-            if state.broker_session.read().is_none() {
-                let mut pending = state.revoke_pending.lock();
-                Self::mark_pending_locked(state, &mut pending);
-            }
+            let mut pending = state.revoke_pending.lock();
+            Self::mark_pending_locked(state, &mut pending, PendingRevoke::Before(boundary));
             return Err(e);
         }
         Ok(ended)
@@ -873,7 +922,7 @@ impl BrokerAuthService {
     /// this run or one before it (the marker file).
     pub fn revoke_is_pending(state: &AppState) -> bool {
         let pending = state.revoke_pending.lock();
-        Self::pending_locked(state, &pending)
+        Self::pending_locked(state, &pending).is_some()
     }
 
     /// Write a pending revoke; a no-op when none is pending. Run by
@@ -881,11 +930,11 @@ impl BrokerAuthService {
     /// finishes a revoke a previous run left pending) and before a resume.
     pub fn retry_pending_revoke(state: &AppState) -> Result<()> {
         let mut pending = state.revoke_pending.lock();
-        if !Self::pending_locked(state, &pending) {
+        let Some(what) = Self::pending_locked(state, &pending) else {
             return Ok(());
-        }
+        };
         let conn = state.sqlite.conn()?;
-        auth::revoke_all(&conn)?;
+        what.write(&conn)?;
         Self::clear_pending_locked(state, &mut pending);
         Ok(())
     }
@@ -901,23 +950,48 @@ impl BrokerAuthService {
         state.data_dir.join(REVOKE_MARKER)
     }
 
-    fn pending_locked(state: &AppState, pending: &bool) -> bool {
-        *pending || Self::revoke_marker(state).exists()
+    /// What is still to be revoked: this run's and the marker's (a
+    /// previous run's), the wider of the two.
+    fn pending_locked(state: &AppState, pending: &Option<PendingRevoke>) -> Option<PendingRevoke> {
+        let on_disk = match std::fs::read_to_string(Self::revoke_marker(state)) {
+            Ok(text) => Some(PendingRevoke::decode(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // Present but unreadable: fail closed.
+            Err(_) => Some(PendingRevoke::All),
+        };
+        match (*pending, on_disk) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        }
     }
 
-    fn mark_pending_locked(state: &AppState, pending: &mut bool) {
-        *pending = true;
+    fn mark_pending_locked(
+        state: &AppState,
+        pending: &mut Option<PendingRevoke>,
+        what: PendingRevoke,
+    ) {
+        let what = Self::pending_locked(state, pending).map_or(what, |p| p.merge(what));
+        *pending = Some(what);
+        let marker = Self::revoke_marker(state);
         if let Err(e) =
-            crate::security::fsperm::write_private_file(&Self::revoke_marker(state), b"")
+            crate::security::fsperm::write_private_file(&marker, what.encode().as_bytes())
         {
+            // A wider revoke never leaves a narrower one on disk: a
+            // boundary's marker is emptied in place (empty means every
+            // session), which needs no free space on a full disk.
+            if what == PendingRevoke::All {
+                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&marker) {
+                    let _ = f.set_len(0).and_then(|()| f.sync_all());
+                }
+            }
             // Memory still refuses a resume in this run; only a restart
             // before the row is written would lose the intent.
             tracing::warn!("Could not record the broker sign-out on disk: {}", e);
         }
     }
 
-    fn clear_pending_locked(state: &AppState, pending: &mut bool) {
-        *pending = false;
+    fn clear_pending_locked(state: &AppState, pending: &mut Option<PendingRevoke>) {
+        *pending = None;
         let marker = Self::revoke_marker(state);
         if marker.exists() {
             if let Err(e) = std::fs::remove_file(&marker) {
@@ -936,6 +1010,39 @@ impl BrokerAuthService {
             .ok()
             .and_then(|c| auth::has_revoked(&c).ok())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod pending_revoke_tests {
+    use super::PendingRevoke;
+    use chrono::TimeZone;
+
+    /// The marker's scope: empty (as written before scopes existed) or
+    /// unreadable means every session; a boundary reads back as written;
+    /// two pending revokes merge to the wider.
+    #[test]
+    fn a_marker_reads_back_its_scope_and_merges_to_the_wider() {
+        let b1 = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 4, 21, 30, 0)
+            .unwrap();
+        let b2 = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 5, 21, 30, 0)
+            .unwrap();
+        let (all, before1, before2) = (
+            PendingRevoke::All,
+            PendingRevoke::Before(b1),
+            PendingRevoke::Before(b2),
+        );
+        for unreadable in ["", "\n", "2026-10-0", "garbage"] {
+            assert_eq!(PendingRevoke::decode(unreadable), all, "{:?}", unreadable);
+        }
+        assert_eq!(all.encode(), "");
+        assert_eq!(PendingRevoke::decode(&before1.encode()), before1);
+        assert_eq!(before1.merge(before2), before2);
+        assert_eq!(before2.merge(before1), before2);
+        assert_eq!(before1.merge(all), all);
+        assert_eq!(all.merge(before1), all);
     }
 }
 
