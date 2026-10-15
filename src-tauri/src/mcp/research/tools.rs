@@ -188,14 +188,10 @@ async fn snapshot(
     let df = load_history(ctx, &symbol, &exchange, &itv, &w)
         .await
         .map_err(&act)?;
-    let (h, l, c) = (df.col("high"), df.col("low"), df.col("close"));
-    let hlc = |name: &str, p: Map<String, Value>| -> Result<Out, PyErr> {
-        let (h, l, c) = (h.clone()?, l.clone()?, c.clone()?);
-        ta::call(name, &[&h, &l, &c], &p)
-    };
-    let one = |name: &str, p: Value| -> Result<Out, PyErr> {
-        let c = c.clone()?;
-        ta::call(name, &[&c], &kw(p))
+    let cols = Cols {
+        h: df.col("high"),
+        l: df.col("low"),
+        c: df.col("close"),
     };
     let mut out = Map::new();
     out.insert("symbol".into(), json!(symbol.to_uppercase()));
@@ -204,116 +200,150 @@ async fn snapshot(
     out.insert("from".into(), json!(df.iso(0)));
     out.insert("to".into(), json!(df.iso(df.len() - 1)));
     out.insert("bars_loaded".into(), json!(df.len()));
+    let last_close = opt(ta::last(&df.close()));
     match kind {
-        Snap::Trend => {
-            out.insert("last_close".into(), opt(ta::last(&df.close())));
-            out.insert(
-                "indicators".into(),
-                bundle(vec![
-                    ("sma_20", one("sma", json!({"period": 20}))),
-                    ("sma_50", one("sma", json!({"period": 50}))),
-                    ("sma_200", one("sma", json!({"period": 200}))),
-                    ("ema_20", one("ema", json!({"period": 20}))),
-                    ("ema_50", one("ema", json!({"period": 50}))),
-                    ("supertrend", hlc("supertrend", no_params())),
-                    ("adx_di", hlc("adx", kw(json!({"period": 14})))),
-                    ("ichimoku", hlc("ichimoku", no_params())),
-                ]),
-            );
-            out.insert(
-                "legend".into(),
-                json!({
-                    "supertrend": "[supertrend_value, direction(+1 up / -1 down)]",
-                    "adx_di": "[+DI, -DI, ADX]",
-                    "ichimoku": "[tenkan, kijun, senkou_a, senkou_b, chikou]",
-                }),
-            );
-        }
-        Snap::Momentum => {
-            out.insert("last_close".into(), opt(ta::last(&df.close())));
-            out.insert(
-                "indicators".into(),
-                bundle(vec![
-                    ("rsi_14", one("rsi", json!({"period": 14}))),
-                    ("macd", one("macd", json!({}))),
-                    ("stochastic", hlc("stochastic", no_params())),
-                    ("cci_20", hlc("cci", kw(json!({"period": 20})))),
-                    (
-                        "williams_r_14",
-                        hlc("williams_r", kw(json!({"period": 14}))),
-                    ),
-                ]),
-            );
-            out.insert(
-                "legend".into(),
-                json!({"macd": "[macd_line, signal_line, histogram]", "stochastic": "[%K, %D]"}),
-            );
-        }
-        Snap::Volatility => {
-            let donchian = || -> Result<Out, PyErr> {
-                let (h, l) = (h.clone()?, l.clone()?);
-                ta::call("donchian", &[&h, &l], &kw(json!({"period": 20})))
-            };
-            out.insert("last_close".into(), opt(ta::last(&df.close())));
-            out.insert(
-                "indicators".into(),
-                bundle(vec![
-                    ("atr_14", hlc("atr", kw(json!({"period": 14})))),
-                    ("natr_14", hlc("natr", kw(json!({"period": 14})))),
-                    (
-                        "bbands",
-                        one("bbands", json!({"period": 20, "std_dev": 2.0})),
-                    ),
-                    (
-                        "bb_percent_b",
-                        one("bbpercent", json!({"period": 20, "std_dev": 2.0})),
-                    ),
-                    (
-                        "bb_width",
-                        one("bbwidth", json!({"period": 20, "std_dev": 2.0})),
-                    ),
-                    ("keltner", hlc("keltner", no_params())),
-                    ("donchian", donchian()),
-                    ("historical_volatility", one("hv", json!({}))),
-                ]),
-            );
-            out.insert(
-                "legend".into(),
-                json!({
-                    "bbands": "[upper, middle, lower]",
-                    "keltner": "[upper, middle, lower]",
-                    "donchian": "[upper, middle, lower]",
-                }),
-            );
-        }
+        Snap::Trend => trend_snapshot(&cols, &mut out, last_close),
+        Snap::Momentum => momentum_snapshot(&cols, &mut out, last_close),
+        Snap::Volatility => volatility_snapshot(&cols, &mut out, last_close),
         Snap::Levels => {
             let period = i(a, "period").unwrap_or(20);
-            let hl = |name: &str, col: &Result<Vec<f64>, PyErr>| -> Result<Out, PyErr> {
-                let v = col.clone()?;
-                ta::call(name, &[&v], &kw(json!({"period": period})))
-            };
-            let donchian = || -> Result<Out, PyErr> {
-                let (h, l) = (h.clone()?, l.clone()?);
-                ta::call("donchian", &[&h, &l], &kw(json!({"period": period})))
-            };
-            out.insert("period".into(), json!(period));
-            out.insert("last_close".into(), opt(ta::last(&df.close())));
-            out.insert(
-                "levels".into(),
-                bundle(vec![
-                    ("donchian", donchian()),
-                    ("highest_high", hl("highest", &h)),
-                    ("lowest_low", hl("lowest", &l)),
-                    ("pivot_points", hlc("pivot_points", no_params())),
-                ]),
-            );
-            out.insert(
-                "legend".into(),
-                json!({"donchian": "[upper, middle, lower]"}),
-            );
+            levels_snapshot(&cols, &mut out, last_close, period)
         }
     }
     Ok(Value::Object(out))
+}
+
+/// The price columns a snapshot computes from (each may be missing).
+struct Cols {
+    h: Result<Vec<f64>, PyErr>,
+    l: Result<Vec<f64>, PyErr>,
+    c: Result<Vec<f64>, PyErr>,
+}
+
+impl Cols {
+    /// An indicator of high, low and close.
+    fn hlc(&self, name: &str, p: Map<String, Value>) -> Result<Out, PyErr> {
+        let (h, l, c) = (self.h.clone()?, self.l.clone()?, self.c.clone()?);
+        ta::call(name, &[&h, &l, &c], &p)
+    }
+
+    /// An indicator of the close.
+    fn one(&self, name: &str, p: Value) -> Result<Out, PyErr> {
+        let c = self.c.clone()?;
+        ta::call(name, &[&c], &kw(p))
+    }
+
+    /// The Donchian channel over `period` bars.
+    fn donchian(&self, period: i64) -> Result<Out, PyErr> {
+        let (h, l) = (self.h.clone()?, self.l.clone()?);
+        ta::call("donchian", &[&h, &l], &kw(json!({"period": period})))
+    }
+}
+
+/// `get_trend_snapshot`: moving averages, Supertrend, ADX/DI, Ichimoku.
+fn trend_snapshot(cols: &Cols, out: &mut Map<String, Value>, last_close: Value) {
+    out.insert("last_close".into(), last_close);
+    out.insert(
+        "indicators".into(),
+        bundle(vec![
+            ("sma_20", cols.one("sma", json!({"period": 20}))),
+            ("sma_50", cols.one("sma", json!({"period": 50}))),
+            ("sma_200", cols.one("sma", json!({"period": 200}))),
+            ("ema_20", cols.one("ema", json!({"period": 20}))),
+            ("ema_50", cols.one("ema", json!({"period": 50}))),
+            ("supertrend", cols.hlc("supertrend", no_params())),
+            ("adx_di", cols.hlc("adx", kw(json!({"period": 14})))),
+            ("ichimoku", cols.hlc("ichimoku", no_params())),
+        ]),
+    );
+    out.insert(
+        "legend".into(),
+        json!({
+            "supertrend": "[supertrend_value, direction(+1 up / -1 down)]",
+            "adx_di": "[+DI, -DI, ADX]",
+            "ichimoku": "[tenkan, kijun, senkou_a, senkou_b, chikou]",
+        }),
+    );
+}
+
+/// `get_momentum_snapshot`: RSI, MACD, stochastic, CCI, Williams %R.
+fn momentum_snapshot(cols: &Cols, out: &mut Map<String, Value>, last_close: Value) {
+    out.insert("last_close".into(), last_close);
+    out.insert(
+        "indicators".into(),
+        bundle(vec![
+            ("rsi_14", cols.one("rsi", json!({"period": 14}))),
+            ("macd", cols.one("macd", json!({}))),
+            ("stochastic", cols.hlc("stochastic", no_params())),
+            ("cci_20", cols.hlc("cci", kw(json!({"period": 20})))),
+            (
+                "williams_r_14",
+                cols.hlc("williams_r", kw(json!({"period": 14}))),
+            ),
+        ]),
+    );
+    out.insert(
+        "legend".into(),
+        json!({"macd": "[macd_line, signal_line, histogram]", "stochastic": "[%K, %D]"}),
+    );
+}
+
+/// `get_volatility_snapshot`: ATR, NATR, Bollinger, Keltner, Donchian, HV.
+fn volatility_snapshot(cols: &Cols, out: &mut Map<String, Value>, last_close: Value) {
+    out.insert("last_close".into(), last_close);
+    out.insert(
+        "indicators".into(),
+        bundle(vec![
+            ("atr_14", cols.hlc("atr", kw(json!({"period": 14})))),
+            ("natr_14", cols.hlc("natr", kw(json!({"period": 14})))),
+            (
+                "bbands",
+                cols.one("bbands", json!({"period": 20, "std_dev": 2.0})),
+            ),
+            (
+                "bb_percent_b",
+                cols.one("bbpercent", json!({"period": 20, "std_dev": 2.0})),
+            ),
+            (
+                "bb_width",
+                cols.one("bbwidth", json!({"period": 20, "std_dev": 2.0})),
+            ),
+            ("keltner", cols.hlc("keltner", no_params())),
+            ("donchian", cols.donchian(20)),
+            ("historical_volatility", cols.one("hv", json!({}))),
+        ]),
+    );
+    out.insert(
+        "legend".into(),
+        json!({
+            "bbands": "[upper, middle, lower]",
+            "keltner": "[upper, middle, lower]",
+            "donchian": "[upper, middle, lower]",
+        }),
+    );
+}
+
+/// `get_support_resistance`: Donchian, highest high, lowest low, pivots.
+fn levels_snapshot(cols: &Cols, out: &mut Map<String, Value>, last_close: Value, period: i64) {
+    let hl = |name: &str, col: &Result<Vec<f64>, PyErr>| -> Result<Out, PyErr> {
+        let v = col.clone()?;
+        ta::call(name, &[&v], &kw(json!({"period": period})))
+    };
+    out.insert("period".into(), json!(period));
+    out.insert("last_close".into(), last_close);
+    out.insert(
+        "levels".into(),
+        bundle(vec![
+            ("donchian", cols.donchian(period)),
+            ("highest_high", hl("highest", &cols.h)),
+            ("lowest_low", hl("lowest", &cols.l)),
+            ("pivot_points", cols.hlc("pivot_points", no_params())),
+        ]),
+    );
+    out.insert(
+        "legend".into(),
+        json!({"donchian": "[upper, middle, lower]"}),
+    );
 }
 
 fn one_series(o: Out) -> Vec<f64> {

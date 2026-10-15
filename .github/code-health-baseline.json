@@ -94,7 +94,6 @@
     "src-tauri/src/feed/server/session.rs::unsubscribe": 115,
     "src-tauri/src/historify/import.rs::read_file": 194,
     "src-tauri/src/historify/jobs/processor.rs::run": 214,
-    "src-tauri/src/mcp/research/tools.rs::snapshot": 147,
     "src-tauri/src/mcp/ta/surface.rs::call": 115,
     "src-tauri/src/mcp/ta/surface.rs::compute": 232,
     "src-tauri/src/messaging/telegram/texts.rs::format_short": 146,
