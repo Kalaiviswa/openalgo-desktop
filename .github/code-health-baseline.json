@@ -113,8 +113,6 @@
     "src-tauri/src/scalping/monitor/exits.rs::execute_exit": 265,
     "src-tauri/src/scalping/monitor/mod.rs::sync": 113,
     "src-tauri/src/scalping/monitor/reconcile.rs::reconcile_book": 174,
-    "src-tauri/src/server/routes/auth.rs::login": 103,
-    "src-tauri/src/server/routes/auth.rs::login_totp": 74,
     "src-tauri/src/server/routes/strategy_module.rs::update": 100,
     "src-tauri/src/server/routes/strategy_module.rs::webhook": 84,
     "src-tauri/src/services/action_center_service.rs::parse_pending_order": 169,

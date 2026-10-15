@@ -2,7 +2,7 @@
 
 use crate::events::Event;
 use crate::security::{totp, Secret};
-use crate::server::envelope::{error, json_response};
+use crate::server::envelope::{error, json_response, EarlyReply};
 use crate::server::form::FormData;
 use crate::server::middleware::{
     claim_sign_in, clear_session_cookie, login_limited, redirect, same_origin_navigation,
@@ -12,7 +12,8 @@ use crate::server::routes::webui::no_store;
 use crate::services::apikey_service::ApiKeyService;
 use crate::services::auth_service::{AuthService, LoginOutcome, Refusal};
 use crate::services::broker_auth_service::BrokerAuthService;
-use crate::session::web::PENDING_TOTP_SECS;
+use crate::services::security_service::record_login;
+use crate::session::web::{WebSession, PENDING_TOTP_SECS};
 use crate::state::AppState;
 use axum::{
     extract::State,
@@ -183,7 +184,7 @@ fn refuse(
         Refusal::InvalidCredentials => {
             attempt.failed();
             tracing::info!("Sign-in failed: invalid credentials");
-            crate::services::security_service::record_login(
+            record_login(
                 ctx,
                 username,
                 ip,
@@ -212,6 +213,65 @@ fn refuse(
     }
 }
 
+/// A sign-in that is not needed or not possible yet: initial setup comes
+/// first, and a signed-in session is already signed in.
+fn setup_or_signed_in(ctx: &AppState, sess: Option<&WebSession>) -> Option<Response> {
+    match AuthService::needs_setup(ctx) {
+        Ok(true) => {
+            return Some(json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"status": "error", "message": "Please complete initial setup first.", "redirect": "/setup"}),
+            ))
+        }
+        Ok(false) => {}
+        Err(e) => return Some(e.into_response()),
+    }
+    if sess.is_some_and(|s| s.user.is_some()) {
+        let to = if ctx.is_broker_connected() {
+            "/dashboard"
+        } else {
+            "/broker"
+        };
+        return Some(ok(
+            json!({"status": "success", "message": "Already logged in", "redirect": to}),
+        ));
+    }
+    None
+}
+
+/// The password was right and the account has 2FA: a session (rotated, or
+/// new) holds the pending sign-in until the code step.
+fn ask_for_code(
+    ctx: &AppState,
+    sess: Option<&WebSession>,
+    user: String,
+    epoch: u64,
+    keys: crate::security::Unlocked,
+) -> Response {
+    let now = ctx.now();
+    let s = match sess {
+        Some(s) => ctx.sessions.rotate(&s.id, now),
+        None => ctx.sessions.create(now),
+    };
+    ctx.sessions.update(&s.id, |x| {
+        x.user = None;
+        x.pending_totp_user = Some(user);
+        x.pending_totp_started = Some(now);
+        // The code step issues the session only if the password is
+        // still the one checked here.
+        x.pending_epoch = Some(epoch);
+        // The keys the password opened, used only to check the
+        // code and installed only with the session (KEY-01).
+        x.pending_keys = Some(keys);
+    });
+    with_cookie(
+        ok(
+            json!({"status": "totp_required", "message": "Enter the 6-digit code from your authenticator app."}),
+        ),
+        &s.id,
+    )
+}
+
 /// POST /auth/login (form: username, password)
 pub async fn login(
     State(ctx): Ctx,
@@ -231,27 +291,8 @@ pub async fn login(
         return r;
     }
     let username = form.non_empty("username").unwrap_or_default();
-    match AuthService::needs_setup(&ctx) {
-        Ok(true) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json!({"status": "error", "message": "Please complete initial setup first.", "redirect": "/setup"}),
-            )
-        }
-        Ok(false) => {}
-        Err(e) => return e.into_response(),
-    }
-    if let Some(s) = &sess {
-        if s.user.is_some() {
-            let to = if ctx.is_broker_connected() {
-                "/dashboard"
-            } else {
-                "/broker"
-            };
-            return ok(
-                json!({"status": "success", "message": "Already logged in", "redirect": to}),
-            );
-        }
+    if let Some(r) = setup_or_signed_in(&ctx, sess.as_ref()) {
+        return r;
     }
     // The failure budget of this source, whatever name was typed (so the
     // delays never tell which name is the account's), claimed and counted
@@ -278,39 +319,15 @@ pub async fn login(
         Ok(LoginOutcome::Success(user, keys)) => {
             attempt.succeeded();
             tracing::info!("Sign-in succeeded");
-            crate::services::security_service::record_login(
-                &ctx, &user, ip, "success", "password", None,
-            );
-            let old_session = sess.as_ref().map(|s| s.id.as_str());
-            finish_sign_in(&ctx, old_session, &user, epoch, keys).await
+            record_login(&ctx, &user, ip, "success", "password", None);
+            let old = sess.as_ref().map(|s| s.id.as_str());
+            finish_sign_in(&ctx, old, &user, epoch, keys).await
         }
         Ok(LoginOutcome::TotpRequired(user, keys)) => {
-            // The password was right, so this attempt is given back; earlier
-            // failures stay until the code is right too, so someone who
-            // knows the password cannot clear them between code guesses.
+            // The password was right: this attempt is given back. Earlier failures stay
+            // until the code is right too, so the password cannot clear them between guesses.
             attempt.released();
-            let now = ctx.now();
-            let s = match &sess {
-                Some(s) => ctx.sessions.rotate(&s.id, now),
-                None => ctx.sessions.create(now),
-            };
-            ctx.sessions.update(&s.id, |x| {
-                x.user = None;
-                x.pending_totp_user = Some(user);
-                x.pending_totp_started = Some(now);
-                // The code step issues the session only if the password is
-                // still the one checked here.
-                x.pending_epoch = Some(epoch);
-                // The keys the password opened, used only to check the
-                // code and installed only with the session (KEY-01).
-                x.pending_keys = Some(keys);
-            });
-            with_cookie(
-                ok(
-                    json!({"status": "totp_required", "message": "Enter the 6-digit code from your authenticator app."}),
-                ),
-                &s.id,
-            )
+            ask_for_code(&ctx, sess.as_ref(), user, epoch, keys)
         }
         Ok(other) => refuse(&ctx, attempt, other.refusal(from), &username, ip),
         Err(_) => refuse(&ctx, attempt, Refusal::sign_in_broke(from), &username, ip),
@@ -329,6 +346,40 @@ pub async fn login_page(State(ctx): Ctx, Sess(sess): Sess) -> Response {
     }
 }
 
+/// The sign-in a code completes: this session's pending one, while it is
+/// fresh (an expired one is forgotten), with the user and the keys its
+/// password opened.
+fn pending_code_step(
+    ctx: &AppState,
+    sess: Option<WebSession>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(WebSession, String, crate::security::Unlocked), EarlyReply> {
+    let none = || {
+        Box::new(error(
+            StatusCode::UNAUTHORIZED,
+            "No pending login. Sign in first.",
+        ))
+    };
+    let Some(s) = sess else {
+        return Err(none());
+    };
+    let fresh = s
+        .pending_totp_started
+        .map(|t| (now - t).num_seconds() <= PENDING_TOTP_SECS)
+        .unwrap_or(false);
+    if !fresh {
+        ctx.sessions.update(&s.id, |x| x.forget_pending_sign_in());
+        return Err(Box::new(json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"status": "error", "message": "Login session expired. Please sign in again.", "redirect": "/login"}),
+        )));
+    }
+    let (Some(user), Some(keys)) = (s.pending_totp_user.clone(), s.pending_keys.clone()) else {
+        return Err(none());
+    };
+    Ok((s, user, keys))
+}
+
 /// POST /auth/login/totp (json: totp_code)
 pub async fn login_totp(
     State(ctx): Ctx,
@@ -345,22 +396,9 @@ pub async fn login_totp(
         return r;
     }
     let now = ctx.now();
-    let Some(s) = sess else {
-        return error(StatusCode::UNAUTHORIZED, "No pending login. Sign in first.");
-    };
-    let fresh = s
-        .pending_totp_started
-        .map(|t| (now - t).num_seconds() <= PENDING_TOTP_SECS)
-        .unwrap_or(false);
-    if !fresh {
-        ctx.sessions.update(&s.id, |x| x.forget_pending_sign_in());
-        return json_response(
-            StatusCode::UNAUTHORIZED,
-            json!({"status": "error", "message": "Login session expired. Please sign in again.", "redirect": "/login"}),
-        );
-    }
-    let (Some(user), Some(keys)) = (s.pending_totp_user.clone(), s.pending_keys.clone()) else {
-        return error(StatusCode::UNAUTHORIZED, "No pending login. Sign in first.");
+    let (s, user, keys) = match pending_code_step(&ctx, sess, now) {
+        Ok(p) => p,
+        Err(r) => return *r,
     };
     let code = form.non_empty("totp_code").unwrap_or_default();
     if code.is_empty() {
@@ -377,9 +415,7 @@ pub async fn login_totp(
             attempt.succeeded();
             ctx.sessions
                 .update(&s.id, |x| x.totp_verified_at = Some(now));
-            crate::services::security_service::record_login(
-                &ctx, &user, ip, "success", "totp", None,
-            );
+            record_login(&ctx, &user, ip, "success", "totp", None);
             // The generation read at the password step: a password change
             // since then voids this sign-in. A pending sign-in without one
             // never issues a session.
@@ -388,14 +424,7 @@ pub async fn login_totp(
         }
         Ok(false) => {
             attempt.failed();
-            crate::services::security_service::record_login(
-                &ctx,
-                &user,
-                ip,
-                "failed",
-                "totp",
-                Some("invalid_totp"),
-            );
+            record_login(&ctx, &user, ip, "failed", "totp", Some("invalid_totp"));
             error(StatusCode::UNAUTHORIZED, "Invalid TOTP code.")
         }
         Err(e) => {
