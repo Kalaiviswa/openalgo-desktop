@@ -74,6 +74,15 @@ impl JsonBody {
     }
 }
 
+/// A numeric path id as the web's `<int:id>` converter reads it: digits
+/// only. `None` answers the web's 404.
+pub fn int_id(raw: &str) -> Option<i64> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
+}
+
 pub fn ok(v: Value) -> Response {
     json_response(StatusCode::OK, v)
 }

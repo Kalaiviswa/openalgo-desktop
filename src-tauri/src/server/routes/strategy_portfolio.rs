@@ -1,9 +1,10 @@
 //! Web `blueprints/strategy_portfolio.py`: saved Strategy Builder
 //! strategies in the `mytrades` and `simulation` watchlists.
 
-use crate::db::sqlite::strategy_portfolio::{self as store, Entry, WATCHLISTS};
+use crate::db::sqlite::strategy_portfolio::{Entry, WATCHLISTS};
 use crate::server::envelope::{error, not_found};
-use crate::server::routes::webui::{failed, ok, JsonBody};
+use crate::server::routes::webui::{failed, int_id, ok, JsonBody};
+use crate::services::strategy_portfolio_service;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -17,12 +18,6 @@ use std::sync::Arc;
 type Ctx = State<Arc<AppState>>;
 
 const SAVE_FAILED: &str = "Could not save the strategy. Try again.";
-
-fn int_id(raw: &str) -> Option<i64> {
-    (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| raw.parse().ok())
-        .flatten()
-}
 
 /// Python truthiness of a JSON value.
 fn truthy(v: Option<&Value>) -> bool {
@@ -45,30 +40,27 @@ fn as_text(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Web `_validate_payload`, then the entry to save.
-#[allow(clippy::result_large_err)]
-fn entry_from(b: &JsonBody) -> Result<Entry, Response> {
-    let bad = |m: String| error(StatusCode::BAD_REQUEST, m);
+/// Web `_validate_payload`, then the entry to save; `Err` is the message
+/// of the 400 answer.
+fn entry_from(b: &JsonBody) -> Result<Entry, String> {
     for field in ["name", "watchlist", "underlying", "exchange"] {
         if !truthy(b.0.get(field)) {
-            return Err(bad(format!("'{}' is required", field)));
+            return Err(format!("'{}' is required", field));
         }
     }
     let watchlist = b.0.get("watchlist").and_then(Value::as_str).unwrap_or("");
     if !WATCHLISTS.contains(&watchlist) {
-        return Err(bad(
-            "watchlist must be one of ['mytrades', 'simulation']".into()
-        ));
+        return Err("watchlist must be one of ['mytrades', 'simulation']".into());
     }
     let legs = match b.0.get("legs") {
         Some(Value::Array(a)) if !a.is_empty() => Value::Array(a.clone()),
-        _ => return Err(bad("at least one leg is required".into())),
+        _ => return Err("at least one leg is required".into()),
     };
     let Some(Value::String(name)) = b.0.get("name") else {
-        return Err(bad("Give the strategy a name.".into()));
+        return Err("Give the strategy a name.".into());
     };
     if name.chars().count() > 120 {
-        return Err(bad("name too long (max 120 chars)".into()));
+        return Err("name too long (max 120 chars)".into());
     }
     Ok(Entry {
         watchlist: watchlist.to_string(),
@@ -92,7 +84,7 @@ pub async fn list(State(ctx): Ctx, Query(q): Query<HashMap<String, String>>) -> 
             return error(StatusCode::BAD_REQUEST, "invalid watchlist");
         }
     }
-    let items = match ctx.sqlite.conn().and_then(|c| store::list(&c, wl)) {
+    let items = match strategy_portfolio_service::list(&ctx, wl) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Reading the strategy portfolio failed: {}", e);
@@ -107,7 +99,7 @@ pub async fn get(State(ctx): Ctx, Path(id): Path<String>) -> Response {
     let Some(id) = int_id(&id) else {
         return not_found("/api/strategy-portfolio");
     };
-    match ctx.sqlite.conn().and_then(|c| store::get(&c, id)) {
+    match strategy_portfolio_service::get(&ctx, id) {
         Ok(Some(item)) => ok(json!({"status": "success", "item": item})),
         Ok(None) => error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => {
@@ -121,13 +113,9 @@ pub async fn get(State(ctx): Ctx, Path(id): Path<String>) -> Response {
 pub async fn create(State(ctx): Ctx, body: JsonBody) -> Response {
     let e = match entry_from(&body) {
         Ok(e) => e,
-        Err(r) => return r,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| store::save(&c, None, &e, ctx.now()))
-    {
+    match strategy_portfolio_service::save(&ctx, None, &e) {
         Ok(Some(item)) => ok(json!({"status": "success", "item": item})),
         Ok(None) => error(StatusCode::INTERNAL_SERVER_ERROR, SAVE_FAILED),
         Err(err) => failed("Saving a strategy", err, SAVE_FAILED),
@@ -141,13 +129,9 @@ pub async fn update(State(ctx): Ctx, Path(id): Path<String>, body: JsonBody) -> 
     };
     let e = match entry_from(&body) {
         Ok(e) => e,
-        Err(r) => return r,
+        Err(m) => return error(StatusCode::BAD_REQUEST, m),
     };
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| store::save(&c, Some(id), &e, ctx.now()))
-    {
+    match strategy_portfolio_service::save(&ctx, Some(id), &e) {
         Ok(Some(item)) => ok(json!({"status": "success", "item": item})),
         Ok(None) => error(StatusCode::NOT_FOUND, "not found"),
         Err(err) => failed("Updating a strategy", err, SAVE_FAILED),
@@ -159,7 +143,7 @@ pub async fn delete(State(ctx): Ctx, Path(id): Path<String>) -> Response {
     let Some(id) = int_id(&id) else {
         return not_found("/api/strategy-portfolio");
     };
-    match ctx.sqlite.conn().and_then(|c| store::delete(&c, id)) {
+    match strategy_portfolio_service::delete(&ctx, id) {
         Ok(true) => ok(json!({"status": "success"})),
         Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
         Err(err) => failed(
