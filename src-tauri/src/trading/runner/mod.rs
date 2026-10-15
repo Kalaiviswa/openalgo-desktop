@@ -51,6 +51,7 @@ pub mod inbox;
 pub mod orders;
 pub mod reconcile;
 pub mod schedule;
+mod sending;
 pub mod services;
 pub mod store;
 #[cfg(feature = "runner-window")]
@@ -1393,46 +1394,12 @@ impl Runner {
         entry: Option<&RunEntry>,
         internal: bool,
     ) -> Result<(i64, crate::strategy::dispatch::DispatchResult), String> {
-        let services = self.services();
-        let row_id = {
-            let conn = self.db.conn().map_err(|e| e.to_string())?;
-            store::insert_order(
-                &conn,
-                &store::NewOrder {
-                    deployment: info.run_id.clone(),
-                    mode: info.mode.as_str().into(),
-                    intent_id: (p.intent_id >= 0).then_some(p.intent_id),
-                    tag: p.tag.clone(),
-                    symbol: target.symbol.into(),
-                    exchange: target.exchange.into(),
-                    action: p.action.into(),
-                    quantity: p.quantity,
-                    pricetype: p.pricetype.into(),
-                    price: p.price,
-                    trigger_price: p.trigger_price,
-                    product: target.product.into(),
-                    is_exit: internal,
-                },
-                self.clock.now(),
-            )
-            .map_err(|e| e.to_string())?
-        };
-        let result = services
+        let row_id = self.record_sent(info, target, p, internal)?;
+        let result = self
+            .services()
             .place(info.mode, &target.request(p), internal)
             .await;
-        // Three outcomes (LOG-08): an answer that is neither an acceptance nor
-        // a refusal means the order may be at the destination. Its row is
-        // unconfirmed, never rejected: it is not sent again, not counted as
-        // flat, and the order book settles it.
-        let status = if result.ok {
-            "working"
-        } else if result.uncertain {
-            store::UNCONFIRMED
-        } else {
-            "rejected"
-        };
-        // The destination's answer is what lets this run follow the order:
-        // unsaved, its row has no id, so its fill would never be counted.
+        let status = sending::row_status(&result);
         let ack = Unsaved {
             row_id,
             orderid: result.broker_order_id.clone(),
@@ -1440,78 +1407,13 @@ impl Runner {
             message: result.error.clone(),
             client_tag: result.client_tag.clone(),
         };
-        if !self.save_ack(&ack).await {
-            self.write_log(
-                info,
-                &[format!(
-                    "The answer for order {} could not be saved, so nothing new is sent and Stop waits until it is.",
-                    ack.orderid.as_deref().unwrap_or("without a number")
-                )],
-            );
-            if let Some(e) = entry {
-                e.unsaved.lock().push(ack);
-            }
-        }
-        let line = if result.ok {
-            format!(
-                "Sent {} {} {} as {} {} on the {} side. Order {}.",
-                p.action,
-                p.quantity,
-                target.symbol,
-                p.pricetype,
-                target.product,
-                info.mode.as_str(),
-                result.broker_order_id.as_deref().unwrap_or("not numbered")
-            )
-        } else if result.uncertain {
-            format!(
-                "The {} did not confirm {} {} {} ({}). It may have been placed, so it is not sent again, and nothing new is sent, until the order book settles it.",
-                if info.mode == RunMode::Live {
-                    "broker"
-                } else {
-                    "sandbox"
-                },
-                p.action,
-                p.quantity,
-                target.symbol,
-                result
-                    .error
-                    .as_deref()
-                    .unwrap_or("no answer came back")
-                    .trim_end_matches('.')
-            )
-        } else {
-            format!(
-                "An order was not sent: {}",
-                result.error.as_deref().unwrap_or("it was refused")
-            )
-        };
-        self.write_log(info, &[line]);
+        self.keep_answer(info, entry, ack).await;
+        self.write_log(info, &[sending::sent_line(info, target, p, &result)]);
         if result.uncertain {
             self.services().request_reconcile();
         }
-        if let Some(e) = entry {
-            if p.intent_id >= 0 {
-                // The engine's own word for an order sent and not yet
-                // acknowledged: the intent stays pending, never rejected.
-                let word = if status == store::UNCONFIRMED {
-                    "placed"
-                } else {
-                    status
-                };
-                e.inbox.push(Message::Frame {
-                    intent_id: p.intent_id,
-                    frame: orders::frame(
-                        p.intent_id,
-                        word,
-                        0,
-                        None,
-                        result.broker_order_id.as_deref(),
-                        result.error.as_deref(),
-                        self.clock.now().timestamp_millis(),
-                    ),
-                });
-            }
+        if let Some(e) = entry.filter(|_| p.intent_id >= 0) {
+            self.tell_page(e, p, status, &result);
         }
         Ok((row_id, result))
     }
