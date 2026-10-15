@@ -56,31 +56,20 @@ pub const ALL_BROKERS: &[&str] = &[
 
 /// Brokers that trade crypto around the clock (web `CRYPTO_BROKERS`): the
 /// one list. Their master follows the UTC day and their session has no
-/// daily boundary (`session_policy`).
+/// daily boundary (`has_daily_boundary`).
 pub const CRYPTO_BROKERS: &[&str] = &["deltaexchange"];
 
 pub fn is_crypto(broker: &str) -> bool {
     CRYPTO_BROKERS.contains(&broker)
 }
 
-/// How a broker session ends (SES-01).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionPolicy {
-    /// Indian brokers: the token expires at the daily boundary (03:00 IST
-    /// by default), where the session is ended.
-    DailyBoundary,
-    /// 24x7 crypto: the saved API key does not expire, so the session lasts
-    /// until logout or until the broker refuses it (the web disables
-    /// session expiry for a crypto install, `DISABLE_SESSION_EXPIRY`).
-    Continuous,
-}
-
-pub fn session_policy(broker: &str) -> SessionPolicy {
-    if is_crypto(broker) {
-        SessionPolicy::Continuous
-    } else {
-        SessionPolicy::DailyBoundary
-    }
+/// Whether `broker`'s session ends at the daily boundary (03:00 IST by
+/// default), where Indian brokers' tokens expire (SES-01). A 24x7 crypto
+/// broker's saved API key does not expire: its session lasts until logout
+/// or until the broker refuses it (the web disables session expiry for a
+/// crypto install, `DISABLE_SESSION_EXPIRY`).
+pub fn has_daily_boundary(broker: &str) -> bool {
+    !is_crypto(broker)
 }
 
 pub fn auth_type(broker: &str) -> AuthType {

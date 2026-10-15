@@ -353,7 +353,7 @@ anything that is not the signed-in user.
   password login until that boundary, then is revoked; the boundary ends
   only what was authenticated before it, so a sign-in made just after it
   survives a late poll. Logout revokes it. The broker session of a crypto
-  broker (`catalog::session_policy`, Delta Exchange) has no daily boundary
+  broker (`catalog::has_daily_boundary`, Delta Exchange) has no daily boundary
   and its master refreshes when the UTC day turns; the app's own sessions
   expire at the boundary for every broker.
 

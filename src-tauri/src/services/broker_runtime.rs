@@ -92,10 +92,11 @@ impl BrokerRuntime {
         boundary: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         let _guard = self.lifecycle.lock().await;
-        let daily = self.active.lock().as_ref().is_some_and(|b| {
-            crate::brokers::catalog::session_policy(b.id())
-                == crate::brokers::catalog::SessionPolicy::DailyBoundary
-        });
+        let daily = self
+            .active
+            .lock()
+            .as_ref()
+            .is_some_and(|b| crate::brokers::catalog::has_daily_boundary(b.id()));
         let old = daily && self.started.lock().is_some_and(|t| t < boundary);
         if old {
             self.teardown_locked(ctx).await;

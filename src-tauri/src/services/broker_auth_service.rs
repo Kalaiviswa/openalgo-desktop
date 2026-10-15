@@ -17,7 +17,7 @@
 //!   `revoke` tears it down.
 //! * After a password sign-in, `try_resume` brings back the stored session
 //!   if it was issued after the last 03:00 IST boundary (any time for a
-//!   continuous crypto session, `catalog::session_policy`) and the broker
+//!   crypto session, `catalog::has_daily_boundary`) and the broker
 //!   still accepts it (validated with a funds call, like the web).
 //! * Logout, a broker switch and account reset call `revoke`, which ends
 //!   the session in memory before it writes the stored row, and retries
@@ -705,7 +705,7 @@ impl BrokerAuthService {
             return Ok(None);
         };
         let cfg = state.server_config();
-        if catalog::session_policy(&stored.broker_id) == catalog::SessionPolicy::DailyBoundary
+        if catalog::has_daily_boundary(&stored.broker_id)
             && !crate::session::boundary::is_fresh(
                 stored.authenticated_at,
                 state.now(),

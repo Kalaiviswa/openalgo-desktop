@@ -30,8 +30,7 @@ impl BrokerAuthService {
         state: &AppState,
         boundary: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
-        let daily =
-            |broker: &str| catalog::session_policy(broker) == catalog::SessionPolicy::DailyBoundary;
+        let daily = catalog::has_daily_boundary;
         let _held = Self::session_lock(state).await;
         let taken = {
             let mut live = state.broker_session.write();

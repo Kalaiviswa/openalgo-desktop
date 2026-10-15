@@ -4,7 +4,7 @@
 pub mod boundary;
 pub mod web;
 
-use crate::brokers::catalog::{self, SessionPolicy};
+use crate::brokers::catalog;
 use crate::brokers::types::AuthToken;
 use crate::services::broker_auth_service::BrokerAuthService;
 use crate::services::master_contract_service;
@@ -61,7 +61,7 @@ pub fn refresh_master_if_day_turned(ctx: &AppState, last_check: DateTime<Utc>) -
     let Some(s) = ctx.get_broker_session() else {
         return false;
     };
-    if catalog::session_policy(&s.broker_id) != SessionPolicy::Continuous {
+    if catalog::has_daily_boundary(&s.broker_id) {
         return false;
     }
     let (Some(broker), Some(me)) = (ctx.brokers.get(&s.broker_id), ctx.arc()) else {

@@ -506,8 +506,7 @@ impl AppState {
     /// (SES-01).
     pub fn get_broker_session(&self) -> Option<BrokerSession> {
         let s = self.broker_session.read().clone()?;
-        let continuous = crate::brokers::catalog::session_policy(&s.broker_id)
-            == crate::brokers::catalog::SessionPolicy::Continuous;
+        let continuous = !crate::brokers::catalog::has_daily_boundary(&s.broker_id);
         let fresh = {
             let cfg = self.config.read();
             crate::session::boundary::is_fresh(
