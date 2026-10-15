@@ -76,7 +76,6 @@
     "src-tauri/src/brokers/motilal/data.rs::multiquote_batch": 125,
     "src-tauri/src/brokers/motilal/master_contract.rs::parse_scrip_csv": 158,
     "src-tauri/src/brokers/nubra/streaming.rs::parse_binary": 110,
-    "src-tauri/src/brokers/paytm/master_contract.rs::parse_security_master": 105,
     "src-tauri/src/brokers/paytm/streaming.rs::decode_packet": 112,
     "src-tauri/src/brokers/samco/data.rs::get_history": 104,
     "src-tauri/src/brokers/upstox/streaming.rs::normalise": 112,

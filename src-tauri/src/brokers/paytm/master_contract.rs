@@ -146,6 +146,39 @@ fn num(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(0.0)
 }
 
+/// A row's OpenAlgo symbol, broker symbol and name, by instrument type.
+fn row_names(
+    itype: &str,
+    exchange: &str,
+    name: &str,
+    raw_symbol: String,
+    expiry: &str,
+    strike: f64,
+) -> (String, String, String) {
+    let base = name.split(' ').next().unwrap_or("").trim().to_string();
+    match itype {
+        "INDEX" => (
+            index_symbol(exchange, name),
+            joined_upper(name),
+            name.to_string(),
+        ),
+        "FUT" => (future_symbol(&base, expiry), raw_symbol, base.clone()),
+        "EQ" => (raw_symbol.clone(), raw_symbol, name.to_string()),
+        _ => {
+            // Options: CE/PE from CALL/PUT, else the name's last word.
+            let suffix = match itype {
+                "CE" | "PE" => itype.to_string(),
+                _ => name.split(' ').next_back().unwrap_or("").to_string(),
+            };
+            (
+                option_symbol(&base, expiry, strike, &suffix),
+                raw_symbol,
+                base.clone(),
+            )
+        }
+    }
+}
+
 /// Parse the security master CSV.
 pub fn parse_security_master(text: &str) -> Result<Vec<SymToken>> {
     let mut lines = text.lines();
@@ -200,28 +233,8 @@ pub fn parse_security_master(text: &str) -> Result<Vec<SymToken>> {
             .map(format_expiry)
             .unwrap_or_default();
         let strike = num(get(i_strike));
-        let base = name.split(' ').next().unwrap_or("").trim().to_string();
-        let (symbol, brsymbol, row_name) = match itype.as_str() {
-            "INDEX" => (
-                index_symbol(exchange, name),
-                joined_upper(name),
-                name.to_string(),
-            ),
-            "FUT" => (future_symbol(&base, &expiry), raw_symbol, base.clone()),
-            "EQ" => (raw_symbol.clone(), raw_symbol, name.to_string()),
-            _ => {
-                // Options: CE/PE from CALL/PUT, else the name's last word.
-                let suffix = match itype.as_str() {
-                    "CE" | "PE" => itype.clone(),
-                    _ => name.split(' ').next_back().unwrap_or("").to_string(),
-                };
-                (
-                    option_symbol(&base, &expiry, strike, &suffix),
-                    raw_symbol,
-                    base.clone(),
-                )
-            }
-        };
+        let (symbol, brsymbol, row_name) =
+            row_names(&itype, exchange, name, raw_symbol, &expiry, strike);
         if symbol.trim().is_empty() {
             continue;
         }
