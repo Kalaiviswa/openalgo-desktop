@@ -8,7 +8,7 @@ use crate::feed::auth::{AuthOutcome, FEED_LOCKED};
 use crate::feed::outbox::Outbox;
 use crate::feed::protocol::{self as p, code, py_str, py_truthy, py_type_name, request_id};
 use crate::feed::registry::ClientId;
-use crate::feed::source::{InstrumentKey, Mode, DEFAULT_DEPTH};
+use crate::feed::source::{InstrumentKey, MarketDataSource, Mode, DEFAULT_DEPTH};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -32,6 +32,54 @@ pub(super) struct Session {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// The depth a subscribe asks for (`depth`, else `depth_level`): the
+/// default when neither is given, `None` when it is not a positive whole
+/// number.
+fn requested_depth(data: &Value) -> Option<i64> {
+    let depth_v = match data.get("depth") {
+        Some(v) if !v.is_null() => Some(v),
+        _ => data.get("depth_level").filter(|v| !v.is_null()),
+    };
+    match depth_v {
+        None => Some(DEFAULT_DEPTH as i64),
+        Some(v) => match v.as_i64() {
+            Some(d) if !v.is_f64() && d > 0 => Some(d),
+            _ => None,
+        },
+    }
+}
+
+/// The instruments a subscribe lists: `symbols`, else the single
+/// `symbol` and `exchange` (Python iteration over `symbols`).
+fn subscribe_items(data: &Value) -> Result<Vec<Value>, String> {
+    let symbols_v = data.get("symbols").unwrap_or(&Value::Null);
+    let mut items: Vec<Value> = if py_truthy(symbols_v) {
+        py_iter(symbols_v)?
+    } else {
+        Vec::new()
+    };
+    if items.is_empty() {
+        let s = data.get("symbol").unwrap_or(&Value::Null);
+        let e = data.get("exchange").unwrap_or(&Value::Null);
+        if py_truthy(s) && py_truthy(e) {
+            items.push(serde_json::json!({"symbol": s, "exchange": e}));
+        }
+    }
+    Ok(items)
+}
+
+/// One instrument unsubscribed, as the acknowledgement lists it.
+fn unsubscribed(sym: Value, exch: Value, mode: Mode, broker: &str) -> p::UnsubscribeItem {
+    p::UnsubscribeItem {
+        symbol: sym,
+        exchange: exch,
+        mode: Some(mode.label()),
+        status: "success",
+        message: None,
+        broker: broker.to_string(),
+    }
 }
 
 /// Python `a or b` on two optional JSON fields.
@@ -180,19 +228,58 @@ impl Session {
         }
     }
 
+    /// Subscribes one instrument: the depth it got (the largest the broker
+    /// supports up to the one asked for, in depth mode), or why not.
+    fn subscribe_key(
+        &self,
+        source: &Arc<dyn MarketDataSource>,
+        key: &InstrumentKey,
+        mode: Mode,
+        requested_depth: i64,
+    ) -> Result<i64, String> {
+        if !source.resolve(key) {
+            Err(format!(
+                "Token not found for {} on {}",
+                key.symbol, key.exchange
+            ))
+        } else if mode == Mode::Depth {
+            let supported = source.supported_depths(&key.exchange);
+            let actual = if supported.iter().any(|d| *d as i64 == requested_depth) {
+                Some(requested_depth as u8)
+            } else {
+                supported
+                    .iter()
+                    .copied()
+                    .filter(|d| (*d as i64) <= requested_depth)
+                    .max()
+            };
+            match actual {
+                Some(d) => self
+                    .shared
+                    .registry
+                    .subscribe(self.id, key, mode, d)
+                    .map(|_| d as i64),
+                None => Err(format!(
+                    "Depth level {} is not supported by this broker",
+                    requested_depth
+                )),
+            }
+        } else {
+            self.shared
+                .registry
+                .subscribe(self.id, key, mode, DEFAULT_DEPTH)
+                .map(|_| requested_depth)
+        }
+    }
+
     fn subscribe(&mut self, data: &Value) -> Result<(), String> {
         let rid = request_id(data);
         if self.user_id.is_none() {
             self.error(code::NOT_AUTHENTICATED, p::NOT_AUTHENTICATED_MSG, rid);
             return Ok(());
         }
-        let symbols_v = data.get("symbols").unwrap_or(&Value::Null);
         let default_mode = Value::String("Quote".into());
         let raw_mode = data.get("mode").unwrap_or(&default_mode);
-        let depth_v = match data.get("depth") {
-            Some(v) if !v.is_null() => Some(v),
-            _ => data.get("depth_level").filter(|v| !v.is_null()),
-        };
         let mode = match p::normalize_mode(raw_mode) {
             Ok(m) => m,
             Err(e) => {
@@ -200,32 +287,15 @@ impl Session {
                 return Ok(());
             }
         };
-        let requested_depth: i64 = match depth_v {
-            None => DEFAULT_DEPTH as i64,
-            Some(v) => match v.as_i64() {
-                Some(d) if !v.is_f64() && d > 0 => d,
-                _ => {
-                    self.error(
-                        code::INVALID_PARAMETERS,
-                        "Depth must be one of 5, 20, 30 or 50",
-                        rid,
-                    );
-                    return Ok(());
-                }
-            },
+        let Some(requested_depth) = requested_depth(data) else {
+            self.error(
+                code::INVALID_PARAMETERS,
+                "Depth must be one of 5, 20, 30 or 50",
+                rid,
+            );
+            return Ok(());
         };
-        let mut items: Vec<Value> = if py_truthy(symbols_v) {
-            py_iter(symbols_v)?
-        } else {
-            Vec::new()
-        };
-        if items.is_empty() {
-            let s = data.get("symbol").unwrap_or(&Value::Null);
-            let e = data.get("exchange").unwrap_or(&Value::Null);
-            if py_truthy(s) && py_truthy(e) {
-                items.push(serde_json::json!({"symbol": s, "exchange": e}));
-            }
-        }
+        let items = subscribe_items(data)?;
         if items.is_empty() {
             self.error(
                 code::INVALID_PARAMETERS,
@@ -252,39 +322,7 @@ impl Session {
                 continue;
             }
             let key = InstrumentKey::new(py_str(sym), py_str(exch));
-            let outcome: Result<i64, String> = if !source.resolve(&key) {
-                Err(format!(
-                    "Token not found for {} on {}",
-                    key.symbol, key.exchange
-                ))
-            } else if mode == Mode::Depth {
-                let supported = source.supported_depths(&key.exchange);
-                let actual = if supported.iter().any(|d| *d as i64 == requested_depth) {
-                    Some(requested_depth as u8)
-                } else {
-                    supported
-                        .iter()
-                        .copied()
-                        .filter(|d| (*d as i64) <= requested_depth)
-                        .max()
-                };
-                match actual {
-                    Some(d) => self
-                        .shared
-                        .registry
-                        .subscribe(self.id, &key, mode, d)
-                        .map(|_| d as i64),
-                    None => Err(format!(
-                        "Depth level {} is not supported by this broker",
-                        requested_depth
-                    )),
-                }
-            } else {
-                self.shared
-                    .registry
-                    .subscribe(self.id, &key, mode, DEFAULT_DEPTH)
-                    .map(|_| requested_depth)
-            };
+            let outcome = self.subscribe_key(&source, &key, mode, requested_depth);
             results.push(match outcome {
                 Ok(depth) => p::SubscribeItem::Ok {
                     symbol: sym.clone(),
@@ -315,6 +353,57 @@ impl Session {
             request_id: rid,
         }));
         Ok(())
+    }
+
+    /// Unsubscribes the listed instruments, each under its own mode or the
+    /// request's: those done, and those whose mode was invalid.
+    fn unsubscribe_items(
+        &self,
+        items: &[Value],
+        top_mode: &Value,
+        broker: &str,
+    ) -> Result<(Vec<p::UnsubscribeItem>, Vec<p::UnsubscribeItem>), String> {
+        let mut ok = Vec::new();
+        let mut failed = Vec::new();
+        for it in items {
+            let raw_mode = match it {
+                Value::Object(o) => o.get("mode").unwrap_or(top_mode),
+                Value::Array(_) | Value::String(_) => top_mode,
+                other => {
+                    return Err(format!(
+                        "argument of type '{}' is not iterable",
+                        py_type_name(other)
+                    ))
+                }
+            };
+            if !it.is_object() {
+                // `"mode" in item` worked on a str/list; `.get` does not.
+                return Err(not_a_dict(it));
+            }
+            let sym = it.get("symbol").cloned().unwrap_or(Value::Null);
+            let exch = it.get("exchange").cloned().unwrap_or(Value::Null);
+            let mode = match p::normalize_mode(raw_mode) {
+                Ok(m) => m,
+                Err(e) => {
+                    failed.push(p::UnsubscribeItem {
+                        symbol: sym,
+                        exchange: exch,
+                        mode: None,
+                        status: "error",
+                        message: Some(e),
+                        broker: broker.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if !py_truthy(&sym) || !py_truthy(&exch) {
+                continue;
+            }
+            let key = InstrumentKey::new(py_str(&sym), py_str(&exch));
+            self.shared.registry.unsubscribe(self.id, &key, mode);
+            ok.push(unsubscribed(sym, exch, mode, broker));
+        }
+        Ok((ok, failed))
     }
 
     fn unsubscribe(&mut self, data: &Value) -> Result<(), String> {
@@ -360,62 +449,17 @@ impl Session {
             return Ok(());
         };
 
-        let mut ok = Vec::new();
-        let mut failed = Vec::new();
-        let item = |sym: Value, exch: Value, mode: Mode| p::UnsubscribeItem {
-            symbol: sym,
-            exchange: exch,
-            mode: Some(mode.label()),
-            status: "success",
-            message: None,
-            broker: broker.clone(),
-        };
-        if is_all {
+        let (ok, failed) = if is_all {
+            let mut ok = Vec::new();
             for (key, mode) in self.shared.registry.unsubscribe_all(self.id) {
                 let sym = Value::String(key.symbol.clone());
                 let exch = Value::String(key.exchange.clone());
-                ok.push(item(sym, exch, mode));
+                ok.push(unsubscribed(sym, exch, mode, &broker));
             }
+            (ok, Vec::new())
         } else {
-            for it in &items {
-                let raw_mode = match it {
-                    Value::Object(o) => o.get("mode").unwrap_or(top_mode),
-                    Value::Array(_) | Value::String(_) => top_mode,
-                    other => {
-                        return Err(format!(
-                            "argument of type '{}' is not iterable",
-                            py_type_name(other)
-                        ))
-                    }
-                };
-                if !it.is_object() {
-                    // `"mode" in item` worked on a str/list; `.get` does not.
-                    return Err(not_a_dict(it));
-                }
-                let sym = it.get("symbol").cloned().unwrap_or(Value::Null);
-                let exch = it.get("exchange").cloned().unwrap_or(Value::Null);
-                let mode = match p::normalize_mode(raw_mode) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        failed.push(p::UnsubscribeItem {
-                            symbol: sym,
-                            exchange: exch,
-                            mode: None,
-                            status: "error",
-                            message: Some(e),
-                            broker: broker.clone(),
-                        });
-                        continue;
-                    }
-                };
-                if !py_truthy(&sym) || !py_truthy(&exch) {
-                    continue;
-                }
-                let key = InstrumentKey::new(py_str(&sym), py_str(&exch));
-                self.shared.registry.unsubscribe(self.id, &key, mode);
-                ok.push(item(sym, exch, mode));
-            }
-        }
+            self.unsubscribe_items(&items, top_mode, &broker)?
+        };
         let status = match (ok.is_empty(), failed.is_empty()) {
             (_, true) => "success",
             (false, false) => "partial",

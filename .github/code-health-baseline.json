@@ -62,8 +62,6 @@
     "src-tauri/src/db/duckdb/migrations.rs::convert_desktop_v1": 127,
     "src-tauri/src/events/subscribers/socketio.rs::translate": 198,
     "src-tauri/src/feed/server/mod.rs::serve_conn": 248,
-    "src-tauri/src/feed/server/session.rs::subscribe": 136,
-    "src-tauri/src/feed/server/session.rs::unsubscribe": 115,
     "src-tauri/src/historify/import.rs::read_file": 194,
     "src-tauri/src/historify/jobs/processor.rs::run": 214,
     "src-tauri/src/risk/aggregate.rs::evaluate_aggregate": 137,
