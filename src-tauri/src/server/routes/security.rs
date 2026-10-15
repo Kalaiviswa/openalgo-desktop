@@ -3,7 +3,7 @@
 //! Errors keep the web's `{"error": ...}` shape; successes `{"success": true}`.
 
 use crate::db::sqlite::monitor as store;
-use crate::db::sqlite::webui::{self, SecuritySettings};
+use crate::db::sqlite::webui::SecuritySettings;
 use crate::server::envelope::json_response;
 use crate::server::middleware::User;
 use crate::server::routes::webui::{failed, ok, JsonBody};
@@ -84,23 +84,9 @@ pub async fn ban(State(ctx): Ctx, body: JsonBody) -> Response {
     if own_network_address(&ip) {
         return err(StatusCode::BAD_REQUEST, OWN_ADDRESS);
     }
-    let now = ctx.now();
-    let limit = ctx.monitor.security_settings(&ctx).repeat_offender_limit;
-    let r = ctx.logs.conn().and_then(|c| {
-        store::ban_ip(
-            &c,
-            &ip,
-            &reason,
-            Some(hours.clamp(1, 8_760)),
-            permanent,
-            "manual",
-            now,
-            limit,
-        )
-    });
-    match r {
+    let hours = Some(hours.clamp(1, 8_760));
+    match security_service::ban_address(&ctx, &ip, &reason, hours, permanent) {
         Ok(true) => {
-            ctx.monitor.reload_bans(&ctx);
             tracing::info!("Address blocked by the trader");
             ok(json!({"success": true, "message": format!("IP {} has been banned", ip)}))
         }
@@ -116,11 +102,8 @@ pub async fn unban(State(ctx): Ctx, body: JsonBody) -> Response {
         return err(StatusCode::BAD_REQUEST, "IP address is required");
     }
     let ip = crate::server::addr::canonical_text(&ip).unwrap_or(ip);
-    match ctx.logs.conn().and_then(|c| store::unban_ip(&c, &ip)) {
-        Ok(true) => {
-            ctx.monitor.reload_bans(&ctx);
-            ok(json!({"success": true, "message": format!("IP {} has been unbanned", ip)}))
-        }
+    match security_service::unban_address(&ctx, &ip) {
+        Ok(true) => ok(json!({"success": true, "message": format!("IP {} has been unbanned", ip)})),
         Ok(false) => err(StatusCode::NOT_FOUND, "IP not found in ban list"),
         Err(e) => internal("Unblocking an address", e),
     }
@@ -137,8 +120,6 @@ pub async fn ban_host(State(ctx): Ctx, body: JsonBody) -> Response {
         .unwrap_or_else(|| format!("Host ban: {}", host));
     let permanent = body.bool("permanent");
     let hours = (!permanent).then_some(24);
-    let now = ctx.now();
-    let limit = ctx.monitor.security_settings(&ctx).repeat_offender_limit;
     if let Some(host) = crate::server::addr::canonical_text(&host) {
         if store::is_loopback_ip(&host) {
             return err(StatusCode::BAD_REQUEST, OWN_COMPUTER);
@@ -146,23 +127,9 @@ pub async fn ban_host(State(ctx): Ctx, body: JsonBody) -> Response {
         if store::never_banned(&host) {
             return err(StatusCode::BAD_REQUEST, TUNNEL_IDENTITY);
         }
-        let r = ctx.logs.conn().and_then(|c| {
-            store::ban_ip(
-                &c,
-                &host,
-                &format!("Manual ban: {}", reason),
-                hours,
-                permanent,
-                "manual",
-                now,
-                limit,
-            )
-        });
-        return match r {
-            Ok(true) => {
-                ctx.monitor.reload_bans(&ctx);
-                ok(json!({"success": true, "message": format!("Banned IP: {}", host)}))
-            }
+        let reason = format!("Manual ban: {}", reason);
+        return match security_service::ban_address(&ctx, &host, &reason, hours, permanent) {
+            Ok(true) => ok(json!({"success": true, "message": format!("Banned IP: {}", host)})),
             Ok(false) => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Failed to ban IP: {}", host),
@@ -173,29 +140,7 @@ pub async fn ban_host(State(ctx): Ctx, body: JsonBody) -> Response {
     if !valid_hostname(&host) {
         return err(StatusCode::BAD_REQUEST, "Invalid hostname format");
     }
-    ctx.monitor.drain_now(&ctx);
-    let r = ctx.logs.conn().and_then(|c| {
-        let ips = store::traffic_ips_for_host(&c, &host)?;
-        let mut n = 0;
-        for ip in &ips {
-            if !store::never_banned(ip)
-                && store::ban_ip(
-                    &c,
-                    ip,
-                    &format!("Host ban: {} - {}", host, reason),
-                    hours,
-                    permanent,
-                    "host_ban",
-                    now,
-                    limit,
-                )?
-            {
-                n += 1;
-            }
-        }
-        Ok((ips.len(), n))
-    });
-    match r {
+    match security_service::ban_host_addresses(&ctx, &host, &reason, hours, permanent) {
         Ok((0, _)) => json_response(
             StatusCode::NOT_FOUND,
             json!({
@@ -203,12 +148,9 @@ pub async fn ban_host(State(ctx): Ctx, body: JsonBody) -> Response {
                 "suggestion": "Use the Manual IP Ban form above to ban specific IP addresses directly.",
             }),
         ),
-        Ok((_, n)) => {
-            ctx.monitor.reload_bans(&ctx);
-            ok(
-                json!({"success": true, "message": format!("Banned {} IPs associated with host: {}", n, host)}),
-            )
-        }
+        Ok((_, n)) => ok(
+            json!({"success": true, "message": format!("Banned {} IPs associated with host: {}", n, host)}),
+        ),
         Err(e) => internal("Blocking a host", e),
     }
 }
@@ -219,8 +161,7 @@ pub async fn clear_404(State(ctx): Ctx, body: JsonBody) -> Response {
     if ip.is_empty() {
         return err(StatusCode::BAD_REQUEST, "IP address is required");
     }
-    ctx.monitor.drain_now(&ctx);
-    match ctx.logs.conn().and_then(|c| store::clear_404(&c, &ip)) {
+    match security_service::clear_404(&ctx, &ip) {
         Ok(true) => {
             ok(json!({"success": true, "message": format!("404 tracker cleared for {}", ip)}))
         }
@@ -299,13 +240,8 @@ pub async fn settings(State(ctx): Ctx, body: JsonBody) -> Response {
         api_ban_duration: dapi,
         repeat_offender_limit: rep,
     };
-    match ctx
-        .sqlite
-        .conn()
-        .and_then(|c| webui::set_security_settings(&c, &s))
-    {
+    match security_service::save_settings(&ctx, &s) {
         Ok(()) => {
-            ctx.monitor.invalidate_settings();
             tracing::info!("Security settings updated");
             ok(json!({
                 "success": true,
@@ -342,12 +278,8 @@ pub async fn login_activity(State(ctx): Ctx, Query(q): Query<HashMap<String, Str
 
 /// POST /security/api/login-activity/clear
 pub async fn clear_login_activity(State(ctx): Ctx) -> Response {
-    match ctx
-        .logs
-        .conn()
-        .and_then(|c| store::clear_login_attempts(&c))
-    {
-        Ok(_) => ok(json!({"status": "success", "message": "Login history cleared"})),
+    match security_service::clear_login_activity(&ctx) {
+        Ok(()) => ok(json!({"status": "success", "message": "Login history cleared"})),
         Err(e) => failed("Clearing login history", e, "Failed to clear history"),
     }
 }
