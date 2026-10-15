@@ -1,7 +1,6 @@
 {
   "_doc": "Code-health ratchet: what was over a limit when the gate started, with its size then. Entries may only go down; `python3 scripts/ci/code_health.py --update` lowers them after an improvement. Adding or raising one needs the maintainer (the code-health-exception label). See CLAUDE.md, Code health.",
   "dead_public_functions": [
-    "src-tauri/src/brokers/kotak/mod.rs::create_hsm_feed",
     "src-tauri/src/sandbox/catch_up.rs::before_session",
     "src-tauri/src/sandbox/clock.rs::now_ist_aware",
     "src-tauri/src/sandbox/events.rs::into_events",
@@ -144,7 +143,6 @@
     "src-tauri/src/brokers/iiflcapital/data.rs::get_multiquotes": 105,
     "src-tauri/src/brokers/iiflcapital/master_contract.rs::parse_segment": 110,
     "src-tauri/src/brokers/iiflcapital/mqtt_relay.rs::serve": 164,
-    "src-tauri/src/brokers/kotak/hsm.rs::decode": 118,
     "src-tauri/src/brokers/kotak/streaming.rs::decode_packet": 134,
     "src-tauri/src/brokers/kotak/streaming.rs::on_packet": 130,
     "src-tauri/src/brokers/motilal/data.rs::multiquote_batch": 125,

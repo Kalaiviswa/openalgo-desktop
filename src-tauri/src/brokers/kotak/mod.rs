@@ -19,7 +19,6 @@
 pub mod auth;
 mod data;
 mod funds;
-pub mod hsm;
 pub mod mapping;
 pub mod master_contract;
 mod orders;
@@ -509,17 +508,6 @@ impl KotakBroker {
     /// The UCC the SFeed `user` field carries.
     fn ucc_hint(&self) -> String {
         self.ucc.lock().clone().unwrap_or_default()
-    }
-
-    /// The legacy HSM market feed, for a data centre the config service
-    /// still routes to source `hs` (none does today).
-    pub fn create_hsm_feed(&self, auth: &AuthToken) -> Result<Box<dyn BrokerFeed>> {
-        let s = KotakSession::parse(auth)?;
-        Ok(Box::new(hsm::KotakHsmFeed::new(
-            hsm::DEFAULT_HSM_URL,
-            &s.token,
-            &s.sid,
-        )))
     }
 
     fn has_feed_url(&self, data_center: &str) -> bool {

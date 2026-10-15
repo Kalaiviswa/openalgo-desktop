@@ -9,7 +9,6 @@ use super::data::{
     repair_candles,
 };
 use super::funds::{funds_from_limits, parse_margin, LIMITS_BODY};
-use super::hsm::{self, HsmDecoder, HsmEvent, KotakHsmFeed};
 use super::mapping::*;
 use super::master_contract::{
     combine_details, expiry_from_epoch, fallback_urls, file_key, parse_file, parse_file_paths,
@@ -1023,13 +1022,6 @@ fn feed_config_and_dividers() {
         (None, DEFAULT_SFEED_URL.into())
     );
     assert_eq!(to_wss("http://h/x"), "ws://h/x");
-    let hsm = KotakHsmFeed::new(hsm::DEFAULT_HSM_URL, "t", "s");
-    assert_eq!(
-        crate::brokers::common::streaming::normalize_request(hsm.ws_request().unwrap())
-            .uri()
-            .to_string(),
-        "wss://mlhsm.kotaksecurities.com/"
-    );
     assert_eq!(to_wss("wss://h"), "wss://h");
     let d = parse_dividers(
         &json!({"exchanges": {"cde_fo": {"divider": 10000000}, "nse_cm": {"value": 1, "divider": 100}}}),
@@ -1107,137 +1099,6 @@ fn order_feed_handshake_alternates_and_parses_orders() {
         .parse(&Message::Text(r#"{"type":"position","data":{}}"#.into()))
         .is_empty());
     assert!(f.parse(&Message::Text("keepalive".into())).is_empty());
-}
-
-// ---------------------------------------------------------------------------
-// Legacy HSM
-// ---------------------------------------------------------------------------
-
-#[test]
-fn hsm_request_frames_match_hswebsocketlib() {
-    // [u16 len][type 1][3 fields][1][u16 len][jwt][2][u16 len][sid][3][u16 6]JS_API
-    let c = hsm::connect_frame("ab", "s");
-    assert_eq!(
-        c,
-        vec![
-            0, 20, 1, 3, 1, 0, 2, b'a', b'b', 2, 0, 1, b's', 3, 0, 6, b'J', b'S', b'_', b'A', b'P',
-            b'I'
-        ]
-    );
-    let s = hsm::subscription_frame(&["nse_cm|1".to_string()], true, "sf", 1).unwrap();
-    // [len][4][2][1][u16 data len][u16 count][u8 len]"sf|nse_cm|1"[2][u16 1][channel]
-    let mut want = vec![4u8, 2, 1, 0, 14, 0, 1, 11];
-    want.extend(b"sf|nse_cm|1");
-    want.extend([2, 0, 1, 1]);
-    let mut framed = (want.len() as u16).to_be_bytes().to_vec();
-    framed.extend(want);
-    assert_eq!(s, framed);
-    let too_many: Vec<String> = (0..101).map(|i| format!("nse_cm|{}", i)).collect();
-    assert!(hsm::subscription_frame(&too_many, true, "sf", 1).is_none());
-    assert_eq!(hsm::ack_frame(7), vec![0, 9, 3, 1, 1, 0, 4, 0, 0, 0, 7]);
-}
-
-fn be32(v: u32) -> [u8; 4] {
-    v.to_be_bytes()
-}
-
-#[test]
-fn hsm_decoder_snapshots_updates_and_acks() {
-    let mut d = HsmDecoder::new();
-    // Connection ok with an ack every 2 messages.
-    let conn = vec![0, 11, 1, 2, 1, 0, 1, b'K', 2, 0, 1, 2];
-    assert_eq!(d.decode(&conn), Some(HsmEvent::Connected { ok: true }));
-    // Data: [len][6][u32 msg num][u16 count][u16 sub len][83 snap][u32 topic]
-    // [u8 name len][name][u8 n][n x u32][u8 m][(fid, len, text)...]
-    let name = b"sf|nse_cm|3045";
-    let mut sub = vec![83u8];
-    sub.extend(be32(9));
-    sub.push(name.len() as u8);
-    sub.extend(name);
-    let mut vals = vec![0u32; 25];
-    vals[4] = 4_823_170; // volume
-    vals[5] = 81_410; // ltp
-    vals[20] = 81_000; // open
-    vals[21] = 81_235; // close
-    vals[23] = 1; // multiplier
-    vals[24] = 2; // precision
-    vals[13] = 0x8000_0000; // not available
-    sub.push(vals.len() as u8);
-    for v in &vals {
-        sub.extend(be32(*v));
-    }
-    sub.push(2);
-    sub.extend([52, 4]);
-    sub.extend(b"3045");
-    sub.extend([53, 6]);
-    sub.extend(b"nse_cm");
-    let mut body = vec![6u8];
-    body.extend(be32(101));
-    body.extend(1u16.to_be_bytes());
-    body.extend((sub.len() as u16).to_be_bytes());
-    body.extend(&sub);
-    let mut frame = (body.len() as u16).to_be_bytes().to_vec();
-    frame.extend(&body);
-    assert_eq!(d.decode(&frame), Some(HsmEvent::Data(vec![9])));
-    let t = &d.topics[&9];
-    assert_eq!(
-        (t.price(5), t.price(21), t.long(4)),
-        (814.1, 812.35, 4_823_170)
-    );
-    assert_eq!(t.price(13), 0.0);
-    assert!(d.pending_acks.is_empty());
-    // Update: [85][u32 topic][u8 n][n x u32]; second message triggers an ack.
-    let mut upd = vec![85u8];
-    upd.extend(be32(9));
-    upd.push(6);
-    for v in [0x8000_0000u32, 0, 0, 0, 0, 81_500] {
-        upd.extend(be32(v));
-    }
-    let mut body = vec![6u8];
-    body.extend(be32(102));
-    body.extend(1u16.to_be_bytes());
-    body.extend((upd.len() as u16).to_be_bytes());
-    body.extend(&upd);
-    let mut frame2 = (body.len() as u16).to_be_bytes().to_vec();
-    frame2.extend(&body);
-    assert_eq!(d.decode(&frame2), Some(HsmEvent::Data(vec![9])));
-    assert_eq!(d.topics[&9].price(5), 815.0);
-    assert_eq!(d.topics[&9].long(0), 0);
-    assert_eq!(d.pending_acks, vec![102]);
-    // Malformed frames are dropped, not panics.
-    assert_eq!(d.decode(&[0, 5, 6, 0]), None);
-    assert_eq!(d.decode(&[0]), None);
-    assert_eq!(
-        d.decode(&[0, 8, 4, 1, 1, 0, 1, b'N']),
-        Some(HsmEvent::Subscription { ok: false })
-    );
-
-    // The feed turns the same frames into ticks for the subscription.
-    let mut feed = KotakHsmFeed::new(hsm::DEFAULT_HSM_URL, "tok", "sid");
-    assert!(matches!(
-        feed.on_connected().as_slice(),
-        [Message::Binary(_)]
-    ));
-    assert_eq!(feed.parse(&Message::Binary(conn)), vec![FeedEvent::AuthOk]);
-    let frames = feed.subscribe_frames(&[fsub("SBIN", "NSE", FeedMode::Quote)]);
-    assert_eq!(frames.len(), 1);
-    match &feed.parse(&Message::Binary(frame))[..] {
-        [FeedEvent::Tick(t)] => {
-            assert_eq!(
-                (t.symbol.as_str(), t.ltp, t.open, t.close, t.volume),
-                ("SBIN", 814.1, 810.0, 812.35, 4_823_170)
-            );
-        }
-        other => panic!("unexpected {:?}", other),
-    }
-    assert_eq!(feed.topic_count(), 1);
-    // A data frame due an acknowledgement is answered on the same socket.
-    let ev = feed.parse(&Message::Binary(frame2));
-    assert!(
-        ev.contains(&FeedEvent::Reply(Message::Binary(hsm::ack_frame(102)))),
-        "{:?}",
-        ev
-    );
 }
 
 #[test]
