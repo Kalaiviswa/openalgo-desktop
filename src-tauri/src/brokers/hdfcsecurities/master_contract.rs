@@ -121,6 +121,26 @@ struct Raw {
 /// Parse the security-master CSV into master rows (web
 /// `process_security_master`).
 pub fn parse_security_master(text: &str) -> Result<Vec<SymbolData>> {
+    let raws = read_raws(text)?;
+    let nse_names = nse_cash_names(&raws);
+    // (rank, original index, row)
+    let kept: Vec<(u8, usize, SymbolData)> = raws
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, r)| row_of(r, &nse_names).map(|(rank, row)| (rank, idx, row)))
+        .collect();
+    let out = best_per_symbol(kept);
+    if out.is_empty() {
+        return Err(AppError::Broker(
+            "The HDFC Securities instrument list was empty. Your existing master contract was kept; try again later."
+                .into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// The CSV's rows, as the columns the master reads.
+fn read_raws(text: &str) -> Result<Vec<Raw>> {
     let mut lines = text.lines();
     let header = CsvHeader::parse(lines.next().ok_or_else(bad_format)?);
     let col = |n: &str| header.index(n).ok_or_else(bad_format);
@@ -155,126 +175,136 @@ pub fn parse_security_master(text: &str) -> Result<Vec<SymbolData>> {
             }
         })
         .collect();
+    Ok(raws)
+}
 
-    // NSE cash names by security_id, for BSE rows with a blank name.
+/// NSE cash names by security_id, for BSE rows with a blank name.
+fn nse_cash_names(raws: &[Raw]) -> HashMap<&str, &str> {
     let mut nse_names: HashMap<&str, &str> = HashMap::new();
-    for r in &raws {
+    for r in raws {
         if r.segment == "EQUITY" && r.brexchange == "NSE" && !r.symbol_name.is_empty() {
             nse_names
                 .entry(r.security_id.as_str())
                 .or_insert(r.symbol_name.as_str());
         }
     }
+    nse_names
+}
 
-    // (rank, original index, row)
-    let mut kept: Vec<(u8, usize, SymbolData)> = Vec::new();
-    for (idx, r) in raws.iter().enumerate() {
-        let Ok(token_num) = r.token.parse::<f64>() else {
-            continue;
-        };
-        if r.security_id.is_empty() || !token_num.is_finite() {
-            continue;
-        }
-        let is_cash = r.segment == "EQUITY";
-        let mut exchange = if is_cash {
-            r.brexchange.clone()
-        } else {
-            SEGMENT_EXCHANGE
-                .iter()
-                .find(|((e, s), _)| *e == r.brexchange && *s == r.segment)
-                .map(|(_, oa)| (*oa).to_string())
-                .unwrap_or_default()
-        };
-        let is_nse_index =
-            is_cash && r.brexchange == "NSE" && (26000.0..=26999.0).contains(&token_num);
-        let is_bse_index = is_cash && r.brexchange == "BSE" && token_num <= 999.0;
-        if is_nse_index {
-            exchange = "NSE_INDEX".into();
-        } else if is_bse_index {
-            exchange = "BSE_INDEX".into();
-        }
-        // COM / UNDCUR underlyings are not tradable.
-        if exchange.is_empty() {
-            continue;
-        }
-        let expiry = NaiveDate::parse_from_str(&r.expiry, "%Y-%m-%d")
-            .map(format_expiry)
-            .unwrap_or_default();
-        let compact = expiry.replace('-', "");
-        // Futures carry placeholder strikes (-0.01, -1e-7, 0).
-        let strike = r.strike.parse::<f64>().unwrap_or(0.0).max(0.0) + 0.0;
-        let lot = r.lot.parse::<f64>().map(|v| v as i64).unwrap_or(0);
-        let lot = if lot > 0 && lot < 100_000_000 {
-            lot as i32
-        } else {
-            1
-        };
-        let is_option = matches!(r.option_type.as_str(), "CE" | "PE");
-        let is_future = !is_option && !is_cash && !expiry.is_empty();
-        let is_deriv = is_option || is_future;
-
-        let cash_symbol = if !r.symbol_name.is_empty() {
-            r.symbol_name.clone()
-        } else if let Some(n) = nse_names.get(r.security_id.as_str()) {
-            (*n).to_string()
-        } else {
-            r.security_id.clone()
-        };
-        let symbol = if is_nse_index || is_bse_index {
-            classify_index_symbol(&r.symbol_name, &r.security_id)
-        } else if is_option {
-            format!(
-                "{}{}{}{}",
-                r.symbol_name,
-                compact,
-                format_strike(strike),
-                r.option_type
-            )
-        } else if is_future {
-            format!("{}{}FUT", r.symbol_name, compact)
-        } else {
-            cash_symbol
-        };
-        if symbol.is_empty() {
-            continue;
-        }
-        let instrument_type = if is_option {
-            r.option_type.clone()
-        } else if is_future {
-            "FUT".into()
-        } else {
-            "EQ".into()
-        };
-        let name = if is_deriv {
-            r.symbol_name.clone()
-        } else {
-            symbol.clone()
-        };
-        let rank = if is_deriv {
-            0
-        } else {
-            cash_rank(&r.security_id)
-        };
-        kept.push((
-            rank,
-            idx,
-            SymbolData {
-                symbol,
-                brsymbol: r.security_id.clone(),
-                name,
-                exchange,
-                brexchange: r.brexchange.clone(),
-                token: r.token.clone(),
-                expiry,
-                strike,
-                lot_size: lot,
-                instrument_type,
-                tick_size: tick_size(&r.tick),
-            },
-        ));
+/// A row's OpenAlgo exchange (empty for a segment that is not tradable)
+/// and whether it is an NSE or BSE index (by its token's range).
+fn row_exchange(r: &Raw, token_num: f64) -> (String, bool) {
+    let is_cash = r.segment == "EQUITY";
+    let mut exchange = if is_cash {
+        r.brexchange.clone()
+    } else {
+        SEGMENT_EXCHANGE
+            .iter()
+            .find(|((e, s), _)| *e == r.brexchange && *s == r.segment)
+            .map(|(_, oa)| (*oa).to_string())
+            .unwrap_or_default()
+    };
+    let is_nse_index = is_cash && r.brexchange == "NSE" && (26000.0..=26999.0).contains(&token_num);
+    let is_bse_index = is_cash && r.brexchange == "BSE" && token_num <= 999.0;
+    if is_nse_index {
+        exchange = "NSE_INDEX".into();
+    } else if is_bse_index {
+        exchange = "BSE_INDEX".into();
     }
+    (exchange, is_nse_index || is_bse_index)
+}
 
-    // Keep the best-ranked row per (symbol, exchange), then file order.
+/// One raw row as a master row with its cash rank; `None` for a row that
+/// is not listed.
+fn row_of(r: &Raw, nse_names: &HashMap<&str, &str>) -> Option<(u8, SymbolData)> {
+    let token_num = r.token.parse::<f64>().ok()?;
+    if r.security_id.is_empty() || !token_num.is_finite() {
+        return None;
+    }
+    let is_cash = r.segment == "EQUITY";
+    let (exchange, is_index) = row_exchange(r, token_num);
+    // COM / UNDCUR underlyings are not tradable.
+    if exchange.is_empty() {
+        return None;
+    }
+    let expiry = NaiveDate::parse_from_str(&r.expiry, "%Y-%m-%d")
+        .map(format_expiry)
+        .unwrap_or_default();
+    let compact = expiry.replace('-', "");
+    // Futures carry placeholder strikes (-0.01, -1e-7, 0).
+    let strike = r.strike.parse::<f64>().unwrap_or(0.0).max(0.0) + 0.0;
+    let lot = r.lot.parse::<f64>().map(|v| v as i64).unwrap_or(0);
+    let lot = if lot > 0 && lot < 100_000_000 {
+        lot as i32
+    } else {
+        1
+    };
+    let is_option = matches!(r.option_type.as_str(), "CE" | "PE");
+    let is_future = !is_option && !is_cash && !expiry.is_empty();
+    let is_deriv = is_option || is_future;
+
+    let cash_symbol = if !r.symbol_name.is_empty() {
+        r.symbol_name.clone()
+    } else if let Some(n) = nse_names.get(r.security_id.as_str()) {
+        (*n).to_string()
+    } else {
+        r.security_id.clone()
+    };
+    let symbol = if is_index {
+        classify_index_symbol(&r.symbol_name, &r.security_id)
+    } else if is_option {
+        format!(
+            "{}{}{}{}",
+            r.symbol_name,
+            compact,
+            format_strike(strike),
+            r.option_type
+        )
+    } else if is_future {
+        format!("{}{}FUT", r.symbol_name, compact)
+    } else {
+        cash_symbol
+    };
+    if symbol.is_empty() {
+        return None;
+    }
+    let instrument_type = if is_option {
+        r.option_type.clone()
+    } else if is_future {
+        "FUT".into()
+    } else {
+        "EQ".into()
+    };
+    let name = if is_deriv {
+        r.symbol_name.clone()
+    } else {
+        symbol.clone()
+    };
+    let rank = if is_deriv {
+        0
+    } else {
+        cash_rank(&r.security_id)
+    };
+    Some((
+        rank,
+        SymbolData {
+            symbol,
+            brsymbol: r.security_id.clone(),
+            name,
+            exchange,
+            brexchange: r.brexchange.clone(),
+            token: r.token.clone(),
+            expiry,
+            strike,
+            lot_size: lot,
+            instrument_type,
+            tick_size: tick_size(&r.tick),
+        },
+    ))
+}
+
+/// Keep the best-ranked row per (symbol, exchange), in file order.
+fn best_per_symbol(kept: Vec<(u8, usize, SymbolData)>) -> Vec<SymbolData> {
     let mut best: HashMap<(String, String), (u8, usize)> = HashMap::new();
     for (rank, idx, row) in &kept {
         let k = (row.symbol.clone(), row.exchange.clone());
@@ -283,21 +313,13 @@ pub fn parse_security_master(text: &str) -> Result<Vec<SymbolData>> {
             *e = (*rank, *idx);
         }
     }
-    let out: Vec<SymbolData> = kept
-        .into_iter()
+    kept.into_iter()
         .filter(|(_, idx, row)| {
             best.get(&(row.symbol.clone(), row.exchange.clone()))
                 .is_some_and(|(_, i)| i == idx)
         })
         .map(|(_, _, row)| row)
-        .collect();
-    if out.is_empty() {
-        return Err(AppError::Broker(
-            "The HDFC Securities instrument list was empty. Your existing master contract was kept; try again later."
-                .into(),
-        ));
-    }
-    Ok(out)
+        .collect()
 }
 
 pub async fn download(b: &HdfcSecuritiesBroker) -> Result<Vec<SymbolData>> {
