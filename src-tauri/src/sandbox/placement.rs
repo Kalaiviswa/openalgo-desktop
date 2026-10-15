@@ -5,6 +5,7 @@
 use super::clock::ts;
 use super::config::SandboxConfig;
 use super::core::{blocking, Core, EngineCmd};
+use super::db::OrderRow;
 use super::events::{order_update, Outbox};
 use super::execution;
 use super::funds;
@@ -72,54 +73,9 @@ fn read_context(conn: &Connection, user: &str, n: &Normalized) -> rusqlite::Resu
     })
 }
 
-/// Place an order, taking the position's lock.
-pub(crate) async fn place(
-    core: &Arc<Core>,
-    req: OrderRequest,
-    prefetched: Option<Quote>,
-) -> SbResult<OrderPlaced> {
-    // Validation needs no lock; refusing early keeps the lock table quiet.
-    let n = normalize(core, &req)?;
-    let guard = core
-        .locks
-        .lock(PositionKey::new(
-            core.user(),
-            &n.exchange,
-            &n.symbol,
-            n.product.as_str(),
-        ))
-        .await;
-    place_locked(core, &guard, req, prefetched, None).await
-}
-
-/// Place an order while the caller holds the position's lock (smart order,
-/// close position, GTT fire).
-pub(crate) async fn place_locked(
-    core: &Arc<Core>,
-    _guard: &PositionGuard,
-    req: OrderRequest,
-    prefetched: Option<Quote>,
-    gtt_leg_id: Option<i64>,
-) -> SbResult<OrderPlaced> {
-    let n = normalize(core, &req)?;
-    let user = core.user().to_string();
-
-    let ctx = {
-        let n = n.clone();
-        let user = user.clone();
-        blocking(core, move |c| {
-            c.db.with_conn(|conn| {
-                let cfg = SandboxConfig::load(conn)?;
-                let ctx = read_context(conn, &user, &n)?;
-                Ok::<_, SandboxError>((cfg, ctx))
-            })
-        })
-        .await?
-    };
-    let (cfg, ctx) = ctx;
-    let now = core.now();
-    mis_gate(&cfg, &n, now, ctx.position_qty)?;
-
+/// A CNC sell's refusal when the position and the holdings cannot cover
+/// it (CNC is delivery: it needs existing shares).
+fn cnc_rejection(n: &Normalized, ctx: &Context) -> Option<String> {
     let mut cnc_rejection: Option<String> = None;
     if n.action == Action::Sell && n.product == Product::Cnc {
         let total = ctx.position_qty + ctx.holdings_qty;
@@ -135,8 +91,26 @@ pub(crate) async fn place_locked(
             ));
         }
     }
+    cnc_rejection
+}
 
-    // Price the margin; keep a quote when the order can fill right away.
+/// How an order is priced for its margin, and the quote to fill it with
+/// at once when it can fill right away.
+struct Pricing {
+    margin_price: Decimal,
+    cached: Option<Quote>,
+    trigger_met: bool,
+}
+
+/// Price the margin (MARKET at the quote, else the position's last price;
+/// LIMIT at its price; SL and SL-M at the trigger), and keep a quote when
+/// the order can fill right away.
+async fn price_order(
+    core: &Core,
+    n: &Normalized,
+    ctx: &Context,
+    prefetched: Option<Quote>,
+) -> SbResult<Pricing> {
     let usable = |q: &Quote| q.ltp > Decimal::ZERO;
     let prefetched = prefetched.filter(usable);
     let margin_price: Option<Decimal>;
@@ -217,134 +191,161 @@ pub(crate) async fn place_locked(
             )))
         }
     };
+    Ok(Pricing {
+        margin_price,
+        cached,
+        trigger_met,
+    })
+}
 
-    // One transaction: re-read the position, net the margin, block it and
-    // record the order (or the rejection).
-    let initial_status = if n.price_type.has_trigger() && !trigger_met {
-        OrderStatus::TriggerPending
-    } else {
-        OrderStatus::Open
-    };
-    let stored_price = if n.price_type == PriceType::Market {
-        Some(margin_price)
-    } else {
-        n.price
-    };
-    let order = {
-        let n = n.clone();
-        let user = user.clone();
-        let cnc_rejection = cnc_rejection.clone();
-        blocking(core, move |c| {
-            let mut outbox = Outbox::new();
-            let r = c.db.with_tx(|tx| {
-                let cfg = SandboxConfig::load(tx)?;
-                let now = c.now();
-                let now_s = ts(now);
-                funds::ensure(tx, &user, cfg.starting_capital, &now_s)?;
-                if let Some(reason) = &cnc_rejection {
-                    let row = insert_order(
-                        tx,
-                        &NewOrder {
-                            user: &user,
-                            n: &n,
-                            price: stored_price,
-                            status: OrderStatus::Rejected,
-                            pending_quantity: 0,
-                            rejection_reason: Some(reason),
-                            margin: Decimal::ZERO,
-                            gtt_leg_id: None,
-                            now,
-                        },
-                    )?;
-                    outbox.push(order_update(&row, OrderStatus::Rejected, reason));
-                    return Ok::<_, SandboxError>(Err(
-                        SandboxError::bad_request(reason.clone()).with_orderid(row.orderid)
-                    ));
-                }
-                let cv = c.contract_value(&n.symbol, &n.exchange);
-                let required = funds::margin_required(
-                    &cfg,
+/// The margin to block for an order: what its notional needs, netted
+/// against an opposite position (nothing when the position covers it),
+/// and nothing for an order that blocks no margin.
+fn margin_to_block(
+    conn: &Connection,
+    cfg: &SandboxConfig,
+    user: &str,
+    n: &Normalized,
+    (margin_price, cv): (Decimal, Decimal),
+) -> rusqlite::Result<Decimal> {
+    let required = funds::margin_required(
+        cfg,
+        &n.symbol,
+        &n.exchange,
+        n.product,
+        n.action,
+        funds::notional(n.quantity, margin_price, cv),
+    );
+    let pos = positions::get(conn, user, &n.symbol, &n.exchange, n.product.as_str())?;
+    let mut to_block = required;
+    if let Some(p) = pos.filter(|p| p.quantity != 0) {
+        let opposite = (p.quantity > 0 && n.action == Action::Sell)
+            || (p.quantity < 0 && n.action == Action::Buy);
+        if opposite {
+            let existing = p.quantity.abs();
+            to_block = if n.quantity <= existing {
+                Decimal::ZERO
+            } else {
+                funds::margin_required(
+                    cfg,
                     &n.symbol,
                     &n.exchange,
                     n.product,
                     n.action,
-                    funds::notional(n.quantity, margin_price, cv),
-                );
-                let pos = positions::get(tx, &user, &n.symbol, &n.exchange, n.product.as_str())?;
-                let mut to_block = required;
-                if let Some(p) = pos.filter(|p| p.quantity != 0) {
-                    let opposite = (p.quantity > 0 && n.action == Action::Sell)
-                        || (p.quantity < 0 && n.action == Action::Buy);
-                    if opposite {
-                        let existing = p.quantity.abs();
-                        to_block = if n.quantity <= existing {
-                            Decimal::ZERO
-                        } else {
-                            funds::margin_required(
-                                &cfg,
-                                &n.symbol,
-                                &n.exchange,
-                                n.product,
-                                n.action,
-                                funds::notional(n.quantity - existing, margin_price, cv),
-                            )
-                        };
-                    }
-                }
-                if !funds::blocks_margin(&n.symbol, &n.exchange, n.product, n.action) {
-                    to_block = Decimal::ZERO;
-                }
-                if to_block > Decimal::ZERO {
-                    let current = funds::ensure(tx, &user, cfg.starting_capital, &now_s)?;
-                    if let Err(r) = funds::check_available(&current, to_block) {
-                        return Ok(Err(SandboxError::bad_request(r.0)));
-                    }
-                    let blocked = funds::apply(tx, &user, cfg.starting_capital, &now_s, |f| {
-                        funds::block(f, to_block)
-                    })?;
-                    if let Err(r) = blocked {
-                        return Err(SandboxError::bad_request(r.0));
-                    }
-                }
+                    funds::notional(n.quantity - existing, margin_price, cv),
+                )
+            };
+        }
+    }
+    if !funds::blocks_margin(&n.symbol, &n.exchange, n.product, n.action) {
+        to_block = Decimal::ZERO;
+    }
+    Ok(to_block)
+}
+
+/// What the placement transaction records.
+struct NewPlacement {
+    n: Normalized,
+    user: String,
+    stored_price: Option<Decimal>,
+    cnc_rejection: Option<String>,
+    margin_price: Decimal,
+    initial_status: OrderStatus,
+    gtt_leg_id: Option<i64>,
+}
+
+/// One transaction: re-read the position, net the margin, block it and
+/// record the order (or the CNC rejection). Its events are published once
+/// it commits.
+async fn record_order(core: &Arc<Core>, p: NewPlacement) -> SbResult<OrderRow> {
+    let NewPlacement {
+        n,
+        user,
+        stored_price,
+        cnc_rejection,
+        margin_price,
+        initial_status,
+        gtt_leg_id,
+    } = p;
+    blocking(core, move |c| {
+        let mut outbox = Outbox::new();
+        let r = c.db.with_tx(|tx| {
+            let cfg = SandboxConfig::load(tx)?;
+            let now = c.now();
+            let now_s = ts(now);
+            funds::ensure(tx, &user, cfg.starting_capital, &now_s)?;
+            if let Some(reason) = &cnc_rejection {
                 let row = insert_order(
                     tx,
                     &NewOrder {
                         user: &user,
                         n: &n,
                         price: stored_price,
-                        status: initial_status,
-                        pending_quantity: n.quantity,
-                        rejection_reason: None,
-                        margin: to_block,
-                        gtt_leg_id,
+                        status: OrderStatus::Rejected,
+                        pending_quantity: 0,
+                        rejection_reason: Some(reason),
+                        margin: Decimal::ZERO,
+                        gtt_leg_id: None,
                         now,
                     },
                 )?;
-                outbox.push(order_update(&row, initial_status, ""));
-                Ok(Ok(row))
-            });
-            match r {
-                Ok(inner) => {
-                    c.publish(outbox);
-                    Ok(inner)
-                }
-                Err(e) => Err(e),
+                outbox.push(order_update(&row, OrderStatus::Rejected, reason));
+                return Ok::<_, SandboxError>(Err(
+                    SandboxError::bad_request(reason.clone()).with_orderid(row.orderid)
+                ));
             }
-        })
-        .await??
-    };
-    tracing::info!(
-        "Sandbox order {} placed: {} {} {} {}",
-        order.orderid,
-        order.symbol,
-        order.action.as_str(),
-        order.quantity,
-        order.price_type.as_str()
-    );
+            let cv = c.contract_value(&n.symbol, &n.exchange);
+            let to_block = margin_to_block(tx, &cfg, &user, &n, (margin_price, cv))?;
+            if to_block > Decimal::ZERO {
+                let current = funds::ensure(tx, &user, cfg.starting_capital, &now_s)?;
+                if let Err(r) = funds::check_available(&current, to_block) {
+                    return Ok(Err(SandboxError::bad_request(r.0)));
+                }
+                let blocked = funds::apply(tx, &user, cfg.starting_capital, &now_s, |f| {
+                    funds::block(f, to_block)
+                })?;
+                if let Err(r) = blocked {
+                    return Err(SandboxError::bad_request(r.0));
+                }
+            }
+            let row = insert_order(
+                tx,
+                &NewOrder {
+                    user: &user,
+                    n: &n,
+                    price: stored_price,
+                    status: initial_status,
+                    pending_quantity: n.quantity,
+                    rejection_reason: None,
+                    margin: to_block,
+                    gtt_leg_id,
+                    now,
+                },
+            )?;
+            outbox.push(order_update(&row, initial_status, ""));
+            Ok(Ok(row))
+        });
+        match r {
+            Ok(inner) => {
+                c.publish(outbox);
+                Ok(inner)
+            }
+            Err(e) => Err(e),
+        }
+    })
+    .await?
+}
 
-    // Immediate execution: MARKET always, LIMIT when marketable, SL/SL-M
-    // when the trigger (and for SL the limit) is already met.
-    if n.price_type == PriceType::Market || cached.is_some() {
+/// Immediate execution: MARKET always, LIMIT when marketable, SL/SL-M
+/// when the trigger (and for SL the limit) is already met; deferred to the
+/// engine when the quote looks stale or is old.
+async fn fill_now(
+    core: &Arc<Core>,
+    order: &OrderRow,
+    price_type: PriceType,
+    cached: Option<Quote>,
+) -> SbResult<()> {
+    if price_type == PriceType::Market || cached.is_some() {
         if let Some(q) = cached.filter(|q| {
             let stale = quote_looks_stale(q);
             if stale {
@@ -364,9 +365,9 @@ pub(crate) async fn place_locked(
             }
             !stale && !old
         }) {
-            match n.price_type {
+            match price_type {
                 PriceType::Market => {
-                    execution::process(core, &order, &q).await?;
+                    execution::process(core, order, &q).await?;
                 }
                 _ => {
                     if q.ltp > Decimal::ZERO {
@@ -376,8 +377,12 @@ pub(crate) async fn place_locked(
             }
         }
     }
+    Ok(())
+}
 
-    // Still resting: make sure the engine watches the symbol.
+/// Still resting: make sure the engine watches the symbol. Otherwise a
+/// fill may have opened or closed a position: refresh what needs ticks.
+async fn watch_or_rebuild(core: &Arc<Core>, order: &OrderRow) -> SbResult<()> {
     let still_pending = {
         let id = order.id;
         blocking(core, move |c| {
@@ -393,9 +398,100 @@ pub(crate) async fn place_locked(
             order.exchange.clone(),
         )));
     } else {
-        // A fill may have opened or closed a position: refresh what needs
-        // ticks.
         core.notify_engine(EngineCmd::Rebuild);
     }
+    Ok(())
+}
+
+/// Place an order, taking the position's lock.
+pub(crate) async fn place(
+    core: &Arc<Core>,
+    req: OrderRequest,
+    prefetched: Option<Quote>,
+) -> SbResult<OrderPlaced> {
+    // Validation needs no lock; refusing early keeps the lock table quiet.
+    let n = normalize(core, &req)?;
+    let guard = core
+        .locks
+        .lock(PositionKey::new(
+            core.user(),
+            &n.exchange,
+            &n.symbol,
+            n.product.as_str(),
+        ))
+        .await;
+    place_locked(core, &guard, req, prefetched, None).await
+}
+
+/// Place an order while the caller holds the position's lock (smart order,
+/// close position, GTT fire).
+pub(crate) async fn place_locked(
+    core: &Arc<Core>,
+    _guard: &PositionGuard,
+    req: OrderRequest,
+    prefetched: Option<Quote>,
+    gtt_leg_id: Option<i64>,
+) -> SbResult<OrderPlaced> {
+    let n = normalize(core, &req)?;
+    let user = core.user().to_string();
+
+    let ctx = {
+        let n = n.clone();
+        let user = user.clone();
+        blocking(core, move |c| {
+            c.db.with_conn(|conn| {
+                let cfg = SandboxConfig::load(conn)?;
+                let ctx = read_context(conn, &user, &n)?;
+                Ok::<_, SandboxError>((cfg, ctx))
+            })
+        })
+        .await?
+    };
+    let (cfg, ctx) = ctx;
+    let now = core.now();
+    mis_gate(&cfg, &n, now, ctx.position_qty)?;
+
+    let cnc_rejection = cnc_rejection(&n, &ctx);
+
+    let Pricing {
+        margin_price,
+        cached,
+        trigger_met,
+    } = price_order(core, &n, &ctx, prefetched).await?;
+
+    let initial_status = if n.price_type.has_trigger() && !trigger_met {
+        OrderStatus::TriggerPending
+    } else {
+        OrderStatus::Open
+    };
+    let stored_price = if n.price_type == PriceType::Market {
+        Some(margin_price)
+    } else {
+        n.price
+    };
+    let order = record_order(
+        core,
+        NewPlacement {
+            n: n.clone(),
+            user,
+            stored_price,
+            cnc_rejection,
+            margin_price,
+            initial_status,
+            gtt_leg_id,
+        },
+    )
+    .await?;
+    tracing::info!(
+        "Sandbox order {} placed: {} {} {} {}",
+        order.orderid,
+        order.symbol,
+        order.action.as_str(),
+        order.quantity,
+        order.price_type.as_str()
+    );
+
+    fill_now(core, &order, n.price_type, cached).await?;
+    watch_or_rebuild(core, &order).await?;
     Ok(OrderPlaced::new(order.orderid))
 }

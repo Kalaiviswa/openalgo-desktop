@@ -53,7 +53,6 @@
     "src-tauri/src/sandbox/gtt.rs::fire": 181,
     "src-tauri/src/sandbox/gtt.rs::place": 103,
     "src-tauri/src/sandbox/mod.rs::mypnl": 111,
-    "src-tauri/src/sandbox/placement.rs::place_locked": 305,
     "src-tauri/src/sandbox/positions.rs::apply_fill": 139,
     "src-tauri/src/sandbox/positions.rs::close_position_outcome": 103,
     "src-tauri/src/sandbox/squareoff.rs::sweep": 133,
