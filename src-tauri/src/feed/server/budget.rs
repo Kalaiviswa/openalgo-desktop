@@ -2,12 +2,19 @@
 //! each a token bucket, charged for every frame before it is parsed. A
 //! client that spends either is closed with 1008 (policy violation), so a
 //! flood of messages costs it its connection instead of the app's CPU: a
-//! 1 MiB frame is JSON-parsed in full, which on a Raspberry Pi serving a
-//! LAN or a tunnel is the expensive part.
+//! 1 MiB frame is JSON-parsed in full, the expensive part when the feed is
+//! open to the network or a tunnel.
 //!
-//! The defaults leave every real client far inside: an SDK that subscribes
-//! the most instruments one client may hold one message at a time, the
-//! app's own pages, and a bulk subscribe of all of them in one message.
+//! It is a resource cap, like the 1 MiB message size, not a failure budget:
+//! each connection has its own, so no other caller can spend it, and this
+//! computer's authenticated clients keep it like every other connection
+//! (CLAUDE.md, the availability guarantees). The defaults leave every real
+//! client far inside:
+//! * an SDK that subscribes, one message each, the 3000 instruments a
+//!   client may hold;
+//! * the app's own pages;
+//! * a bulk subscribe of all of them in one message.
+//!
 //! The web reads frames without a limit; this is a deliberate addition.
 
 use tokio::time::Instant;

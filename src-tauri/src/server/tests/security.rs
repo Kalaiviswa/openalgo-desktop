@@ -2366,6 +2366,60 @@ async fn s03_automatic_bans_never_ban_this_computer_or_the_tunnel() {
     );
 }
 
+/// Sends `n` JSON pings on a feed socket (after authenticating with `key`,
+/// when given) while reading the answers: the pongs answered, and the
+/// close reason if the feed closed it.
+async fn feed_burst(
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    key: Option<&str>,
+    n: usize,
+) -> (usize, Option<String>) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut tx, mut rx) = ws.split();
+    if let Some(k) = key {
+        let auth = json!({"action": "authenticate", "api_key": k}).to_string();
+        tx.send(Message::Text(auth)).await.unwrap();
+        loop {
+            match rx.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    assert_eq!(v["status"], "success", "{}", v);
+                    break;
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("no answer to authenticate: {:?}", other.map(|r| r.is_ok())),
+            }
+        }
+    }
+    let sender = tokio::spawn(async move {
+        let ping = Message::Text(json!({"action": "ping"}).to_string());
+        for _ in 0..n {
+            if tx.send(ping.clone()).await.is_err() {
+                break;
+            }
+        }
+        tx
+    });
+    let mut answered = 0;
+    let mut closed = None;
+    while answered < n {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx.next()).await {
+            Ok(Some(Ok(Message::Text(_)))) => answered += 1,
+            Ok(Some(Ok(Message::Close(f)))) => {
+                closed = Some(f.map(|f| f.reason.to_string()).unwrap_or_default());
+                break;
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
+        }
+    }
+    sender.abort();
+    (answered, closed)
+}
+
 /// Availability guarantees (security review S-02, S-03), one table across
 /// every surface: `/api/v1`, the strategy and Chartink webhooks, `/mcp`,
 /// Socket.IO, the feed's `authenticate` and `/auth/login`. After hostile
@@ -2615,6 +2669,31 @@ async fn availability_guarantees_hold_on_every_surface() {
         let v: Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["status"], "success", "feed (tunnel {}): {}", tunnel, v);
     }
+    // The feed's message budget (RATE-01) is a resource cap of each
+    // connection, never shared: a stranger through the tunnel that floods
+    // the feed is closed once its own budget is spent (G4), and this
+    // computer's authenticated client, right after, sends a burst inside
+    // the default budget and gets every answer (G1).
+    let mut r = feed_url.as_str().into_client_request().unwrap();
+    r.headers_mut()
+        .insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+    let (stranger, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+    let (answered, closed) = feed_burst(stranger, None, 20_000).await;
+    assert_eq!(
+        closed.as_deref(),
+        Some("too many messages"),
+        "the flood was answered {} times",
+        answered
+    );
+    let (local, _) = tokio_tungstenite::connect_async(feed_url.as_str())
+        .await
+        .unwrap();
+    let (answered, closed) = feed_burst(local, Some(key.as_str()), 3000).await;
+    assert_eq!(
+        (answered, closed),
+        (3000, None),
+        "this computer's burst inside its own budget"
+    );
 
     // -------------------------------------------------------------- G3: bans
     let t = h.ctx().now();
