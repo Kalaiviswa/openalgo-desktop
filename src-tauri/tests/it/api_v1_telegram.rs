@@ -107,6 +107,23 @@ async fn settings_are_saved_and_the_token_is_never_shown_whole() {
     for key in ["bot_username", "created_at", "updated_at"] {
         assert!(data.get(key).is_some(), "{} missing: {}", key, v);
     }
+    // The shortened token the settings show, or a token that is not text,
+    // never replaces the real one.
+    for (token, msg) in [
+        (
+            json!("1234567890..."),
+            "Send the whole bot token from BotFather, not the shortened one the settings show.",
+        ),
+        (json!(123), "The bot token must be text."),
+    ] {
+        let body = h.with_key(json!({ "token": token }));
+        assert_eq!(
+            post(&h, "/api/v1/telegram/config", body).await,
+            (400, json!({"status": "error", "message": msg}))
+        );
+    }
+    let (_, v) = get(&h, "/api/v1/telegram/config", Some(h.key.as_str())).await;
+    assert_eq!(v["data"]["token"], "1234567890...");
     for (rate, msg) in [
         (json!(0), "rate_limit_per_minute must be between 1 and 120"),
         (

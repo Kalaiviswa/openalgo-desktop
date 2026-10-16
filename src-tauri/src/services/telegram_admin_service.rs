@@ -11,6 +11,8 @@
 //!   is a stub that reports zero deliveries.
 //! - A preference of the wrong type is refused with 400; the web fails
 //!   with 500.
+//! - A token that is not text, or the shortened form the settings answer
+//!   shows, is refused instead of being saved over the real one.
 
 use super::core::Reply;
 use crate::messaging::format::{http_date, py_int};
@@ -66,11 +68,10 @@ pub fn config_reply(ctx: &AppState) -> Reply {
 pub fn update_config_reply(ctx: &AppState, body: &Map<String, Value>) -> Reply {
     let mut u = ConfigUpdate::default();
     if let Some(t) = body.get("token") {
-        u.token = Some(
-            t.as_str()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        );
+        u.token = match token_update(t) {
+            Ok(token) => Some(token),
+            Err(refused) => return refused,
+        };
     }
     if let Some(v) = body.get("broadcast_enabled") {
         u.broadcast_enabled = Some(crate::messaging::format::truthy(Some(v)));
@@ -88,6 +89,21 @@ pub fn update_config_reply(ctx: &AppState, body: &Map<String, Value>) -> Reply {
             tracing::error!("Saving the Telegram settings failed: {}", e);
             Reply::error(500, "Failed to update bot configuration")
         }
+    }
+}
+
+/// The token a settings update sets: `None` clears it (`null` or empty
+/// text). A token that is not text, or the masked form `GET config` shows,
+/// is refused rather than saved over the real one.
+fn token_update(t: &Value) -> Result<Option<String>, Reply> {
+    match t {
+        Value::Null => Ok(None),
+        Value::String(s) if s.trim().ends_with("...") => Err(Reply::error(
+            400,
+            "Send the whole bot token from BotFather, not the shortened one the settings show.",
+        )),
+        Value::String(s) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+        _ => Err(Reply::error(400, "The bot token must be text.")),
     }
 }
 
