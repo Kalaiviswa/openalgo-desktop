@@ -129,26 +129,29 @@ pub(crate) struct Aliases {
 /// canonical name, or the web adapter does not send the field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Dialect {
-    last_quantity: Option<LastQuantity>,
+    last_quantity: Option<QuantityKey>,
     avg_trade_price: bool,
-    change: Option<Change>,
-    change_percent: Option<ChangePercent>,
+    change: Option<ChangeKey>,
+    change_percent: Option<PercentKey>,
 }
 
+/// The web key for `last_quantity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LastQuantity {
+enum QuantityKey {
     LastTradeQuantity,
     Ltq,
 }
 
+/// The web key for `price_change`: `change` or `change_absolute`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Change {
+enum ChangeKey {
     Change,
-    ChangeAbsolute,
+    Absolute,
 }
 
+/// The web key for `price_change_percent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChangePercent {
+enum PercentKey {
     ChangePercent,
     PercentChange,
     ChangePercentage,
@@ -162,9 +165,9 @@ const CANONICAL: Dialect = Dialect {
 };
 
 fn dialect(broker: &str) -> Dialect {
-    use Change as C;
-    use ChangePercent as P;
-    use LastQuantity as Q;
+    use ChangeKey as C;
+    use PercentKey as P;
+    use QuantityKey as Q;
     match broker {
         "fyers" => Dialect {
             last_quantity: Some(Q::LastTradeQuantity),
@@ -178,7 +181,7 @@ fn dialect(broker: &str) -> Dialect {
         },
         "paytm" => Dialect {
             last_quantity: Some(Q::LastTradeQuantity),
-            change: Some(C::ChangeAbsolute),
+            change: Some(C::Absolute),
             change_percent: Some(P::ChangePercent),
             ..CANONICAL
         },
@@ -228,22 +231,22 @@ pub(crate) fn aliases(broker: &str, c: Canonical) -> Aliases {
     let d = dialect(broker);
     let mut a = Aliases::default();
     match d.last_quantity {
-        Some(LastQuantity::LastTradeQuantity) => a.last_trade_quantity = c.last_quantity,
-        Some(LastQuantity::Ltq) => a.ltq = c.last_quantity,
+        Some(QuantityKey::LastTradeQuantity) => a.last_trade_quantity = c.last_quantity,
+        Some(QuantityKey::Ltq) => a.ltq = c.last_quantity,
         None => {}
     }
     if d.avg_trade_price {
         a.avg_trade_price = c.average_price;
     }
     match d.change {
-        Some(Change::Change) => a.change = c.price_change,
-        Some(Change::ChangeAbsolute) => a.change_absolute = c.price_change,
+        Some(ChangeKey::Change) => a.change = c.price_change,
+        Some(ChangeKey::Absolute) => a.change_absolute = c.price_change,
         None => {}
     }
     match d.change_percent {
-        Some(ChangePercent::ChangePercent) => a.change_percent = c.price_change_percent,
-        Some(ChangePercent::PercentChange) => a.percent_change = c.price_change_percent,
-        Some(ChangePercent::ChangePercentage) => a.change_percentage = c.price_change_percent,
+        Some(PercentKey::ChangePercent) => a.change_percent = c.price_change_percent,
+        Some(PercentKey::PercentChange) => a.percent_change = c.price_change_percent,
+        Some(PercentKey::ChangePercentage) => a.change_percentage = c.price_change_percent,
         None => {}
     }
     a
