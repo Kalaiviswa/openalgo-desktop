@@ -24,7 +24,8 @@ pub(crate) fn instructions() -> String {
          Indicators: calculate_indicator and the research tools compute {count} indicators: \
          {names}. Any other indicator name is refused with error_type \"not_available\".\n\
          \n\
-         Research limits, checked before any data is fetched (a call over one is refused with \
+         Research limits, for the research tools and get_instruments, which counts as a \
+         research call, checked before any data is fetched (a call over one is refused with \
          error_type \"limit_exceeded\"): screen_instruments takes at most {symbols} symbols; \
          multi_timeframe_analysis at most {timeframes} intervals; bars, lookback_bars and limit \
          at most {bars}; lookback_days and a date range at most {days} days; one history fetch \
@@ -62,6 +63,9 @@ mod tests {
         for name in ta::supported() {
             assert!(text.contains(name), "{} missing", name);
         }
+        // get_instruments is admitted like a research call: its slot, its
+        // busy answer and its row limit apply to it too.
+        assert!(text.contains("get_instruments, which counts as a research call"));
         for n in [
             MAX_SCREEN_SYMBOLS.to_string(),
             MAX_BARS.to_string(),
