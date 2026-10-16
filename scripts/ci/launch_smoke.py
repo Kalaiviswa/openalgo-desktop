@@ -87,38 +87,42 @@ class Client:
         headers = {"Accept": "application/json"}
         data = None
         if form is not None:
-            token = self.csrf()
+            try:
+                token = self.csrf()
+            except (OSError, ValueError, KeyError) as e:
+                return 0, {"message": f"no CSRF token: {e}"}
             data = urllib.parse.urlencode({**form, "csrf_token": token}).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
             headers["X-CSRFToken"] = token
+        return self._send(method, path, data, headers)
+
+    def call_json(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+        """A JSON request with the session's CSRF token (the app's own pages)."""
+        try:
+            token = self.csrf()
+        except (OSError, ValueError, KeyError) as e:
+            return 0, {"message": f"no CSRF token: {e}"}
+        headers = {"Accept": "application/json", "X-CSRFToken": token, "Content-Type": "application/json"}
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        return self._send(method, path, data, headers)
+
+    def _send(self, method: str, path: str, data: bytes | None, headers: dict[str, str]) -> tuple[int, dict]:
+        """The status and JSON body; a request that got no answer at all
+        (refused, reset, timed out) is status 0 with the reason, so the
+        caller reports it and the app's output is still printed."""
         req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
         try:
             with self.opener.open(req, timeout=30) as r:
                 status, raw = r.status, r.read()
         except urllib.error.HTTPError as e:
             status, raw = e.code, e.read()
+        except OSError as e:
+            return 0, {"message": f"no answer: {e}"}
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except ValueError:
             body = {"unparsed": raw[:200].decode("utf-8", "replace")}
         return status, body if isinstance(body, dict) else {"value": body}
-
-    def call_json(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-        """A JSON request with the session's CSRF token (the app's own pages)."""
-        token = self.csrf()
-        headers = {"Accept": "application/json", "X-CSRFToken": token, "Content-Type": "application/json"}
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
-        try:
-            with self.opener.open(req, timeout=30) as r:
-                status, raw = r.status, r.read()
-        except urllib.error.HTTPError as e:
-            status, raw = e.code, e.read()
-        try:
-            parsed = json.loads(raw.decode("utf-8")) if raw else {}
-        except ValueError:
-            parsed = {"unparsed": raw[:200].decode("utf-8", "replace")}
-        return status, parsed if isinstance(parsed, dict) else {"value": parsed}
 
     def csrf(self) -> str:
         req = urllib.request.Request(URL, headers={"Accept": "application/json"})

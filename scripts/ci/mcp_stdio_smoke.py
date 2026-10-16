@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 CLOSED_URL = "http://127.0.0.1:9"
 MISSING_TOKEN = "no token was given"
@@ -178,13 +179,19 @@ class Bridge:
         self.proc.stdin.flush()
 
     def request(self, method: str, params: dict) -> dict:
+        """The answer to one request; notifications before it are skipped."""
         self.next_id += 1
         self.send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
-        try:
-            reply = json.loads(self.lines.get(timeout=WAIT_S))
-        except (queue.Empty, ValueError):
-            reply = {}
-        if reply.get("id") != self.next_id:
+        deadline = time.monotonic() + WAIT_S
+        while True:
+            try:
+                reply = json.loads(self.lines.get(timeout=max(deadline - time.monotonic(), 0.01)))
+            except (queue.Empty, ValueError):
+                reply = {}
+            if isinstance(reply, dict) and "id" not in reply and "method" in reply:
+                continue
+            break
+        if not isinstance(reply, dict) or reply.get("id") != self.next_id:
             raise RuntimeError(f"no answer to {method}: {reply}")
         return reply
 
@@ -207,7 +214,10 @@ class Bridge:
         """Ends the session; what went wrong with how the process behaved."""
         problems: list[str] = []
         assert self.proc.stdin is not None
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass  # the bridge already exited; its exit code says why
         try:
             code = self.proc.wait(timeout=WAIT_S)
         except subprocess.TimeoutExpired:
@@ -245,9 +255,10 @@ def against_app(exe: str, url: str, token: str, revoke) -> list[str]:
         agreed = (odd.initialize("1999-01-01").get("result") or {}).get("protocolVersion")
         if not agreed or agreed == "1999-01-01":
             problems.append(f"an unknown protocol version was not answered with a supported one: {agreed}")
-    except RuntimeError as e:
-        problems.append(str(e))
-    problems += odd.close()
+    except (RuntimeError, OSError) as e:
+        problems.append(f"the bridge failed: {e}")
+    finally:
+        problems += odd.close()
 
     b = Bridge(exe, url, token)
     try:
@@ -268,9 +279,10 @@ def against_app(exe: str, url: str, token: str, revoke) -> list[str]:
         failed, text = b.call("get_funds", {})
         if not failed or "did not accept this AI client's token" not in text:
             problems.append(f"a revoked token was not told so: {text[:300]}")
-    except RuntimeError as e:
-        problems.append(str(e))
-    problems += b.close()
+    except (RuntimeError, OSError) as e:
+        problems.append(f"the bridge failed: {e}")
+    finally:
+        problems += b.close()
     if not problems:
         print("OK: the packaged bridge served the running app: protocol versions, 49 tools, two calls, a revoked token.")
     return problems
