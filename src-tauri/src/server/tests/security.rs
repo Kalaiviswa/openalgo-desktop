@@ -2366,58 +2366,84 @@ async fn s03_automatic_bans_never_ban_this_computer_or_the_tunnel() {
     );
 }
 
-/// Sends `n` JSON pings on a feed socket (after authenticating with `key`,
-/// when given) while reading the answers: the pongs answered, and the
-/// close reason if the feed closed it.
-async fn feed_burst(
-    ws: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    key: Option<&str>,
-    n: usize,
-) -> (usize, Option<String>) {
+type FeedSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Floods a feed socket with `n` WebSocket pings, which the server charges
+/// to the connection's message budget but answers with no queued frame (so
+/// its outbox never fills); the reason the feed closed it, if it did.
+async fn feed_ping_flood(ws: FeedSocket, n: usize) -> Option<String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
     let (mut tx, mut rx) = ws.split();
-    if let Some(k) = key {
-        let auth = json!({"action": "authenticate", "api_key": k}).to_string();
-        tx.send(Message::Text(auth)).await.unwrap();
-        loop {
-            match rx.next().await {
-                Some(Ok(Message::Text(t))) => {
-                    let v: Value = serde_json::from_str(&t).unwrap();
-                    assert_eq!(v["status"], "success", "{}", v);
-                    break;
-                }
-                Some(Ok(_)) => continue,
-                other => panic!("no answer to authenticate: {:?}", other.map(|r| r.is_ok())),
-            }
-        }
-    }
     let sender = tokio::spawn(async move {
-        let ping = Message::Text(json!({"action": "ping"}).to_string());
         for _ in 0..n {
-            if tx.send(ping.clone()).await.is_err() {
+            if tx.send(Message::Ping(Vec::new())).await.is_err() {
                 break;
             }
         }
         tx
     });
-    let mut answered = 0;
     let mut closed = None;
-    while answered < n {
-        match tokio::time::timeout(std::time::Duration::from_secs(10), rx.next()).await {
-            Ok(Some(Ok(Message::Text(_)))) => answered += 1,
-            Ok(Some(Ok(Message::Close(f)))) => {
+    while let Ok(Some(item)) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx.next()).await
+    {
+        match item {
+            Ok(Message::Close(f)) => {
                 closed = Some(f.map(|f| f.reason.to_string()).unwrap_or_default());
                 break;
             }
-            Ok(Some(Ok(_))) => continue,
-            _ => break,
+            Ok(_) => continue,
+            Err(_) => break,
         }
     }
     sender.abort();
-    (answered, closed)
+    closed
+}
+
+/// Authenticates with `key`, then sends `n` JSON pings in windows of 500
+/// (each window read back before the next, so the client is never slow to
+/// read): the pongs answered, and the close reason if the feed closed it.
+async fn feed_burst(mut ws: FeedSocket, key: &str, n: usize) -> (usize, Option<String>) {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    async fn next_text(ws: &mut FeedSocket) -> Result<Value, String> {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) => return Ok(serde_json::from_str(&t).unwrap()),
+                Ok(Some(Ok(Message::Close(f)))) => {
+                    return Err(f.map(|f| f.reason.to_string()).unwrap_or_default())
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => return Err("no answer".into()),
+            }
+        }
+    }
+    let auth = json!({"action": "authenticate", "api_key": key}).to_string();
+    ws.send(Message::Text(auth)).await.unwrap();
+    match next_text(&mut ws).await {
+        Ok(v) => assert_eq!(v["status"], "success", "{}", v),
+        Err(reason) => return (0, Some(reason)),
+    }
+    let ping = json!({"action": "ping"}).to_string();
+    let mut answered = 0;
+    while answered < n {
+        let window = 500.min(n - answered);
+        for _ in 0..window {
+            if ws.send(Message::Text(ping.clone())).await.is_err() {
+                return (answered, Some("send failed".into()));
+            }
+        }
+        for _ in 0..window {
+            match next_text(&mut ws).await {
+                Ok(_) => answered += 1,
+                Err(reason) => return (answered, Some(reason)),
+            }
+        }
+    }
+    (answered, None)
 }
 
 /// Availability guarantees (security review S-02, S-03), one table across
@@ -2678,17 +2704,12 @@ async fn availability_guarantees_hold_on_every_surface() {
     r.headers_mut()
         .insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
     let (stranger, _) = tokio_tungstenite::connect_async(r).await.unwrap();
-    let (answered, closed) = feed_burst(stranger, None, 20_000).await;
-    assert_eq!(
-        closed.as_deref(),
-        Some("too many messages"),
-        "the flood was answered {} times",
-        answered
-    );
+    let closed = feed_ping_flood(stranger, 20_000).await;
+    assert_eq!(closed.as_deref(), Some("too many messages"), "the flood");
     let (local, _) = tokio_tungstenite::connect_async(feed_url.as_str())
         .await
         .unwrap();
-    let (answered, closed) = feed_burst(local, Some(key.as_str()), 3000).await;
+    let (answered, closed) = feed_burst(local, &key, 3000).await;
     assert_eq!(
         (answered, closed),
         (3000, None),
