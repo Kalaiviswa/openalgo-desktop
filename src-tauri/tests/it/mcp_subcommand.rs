@@ -466,7 +466,12 @@ async fn every_tool_through_the_bridge_process_against_the_running_app() {
     let m = M::new().await;
     *m.h.mock.history.lock() = Some(Ok(history_candles()));
     m.h.analyze(false);
-    // Order tools are limited per token (5 a minute): three tokens.
+    // Each token may make 5 order-tool calls a minute (http::WRITE_LIMIT),
+    // 60 to each read scope and 120 requests in all. The calls below are
+    // split to stay inside: token 0 makes the 39 reads and 4 order calls
+    // (place, modify, cancel, cancel all), token 1 the other 5 placements,
+    // token 2 close_all_positions and analyzer_toggle. A new order tool or
+    // setup call needs its place in that count, or a fourth token.
     let tokens: Vec<String> = (0..3).map(|_| m.token(TokenScope::ReadWrite)).collect();
     let (url, server) = serve_app(&m).await;
     let ctx = m.h.ctx.clone();
