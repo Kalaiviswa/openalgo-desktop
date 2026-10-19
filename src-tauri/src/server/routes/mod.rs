@@ -101,6 +101,7 @@ pub fn table() -> Vec<RouteSpec> {
         watchlists(),
         oi_and_iv_tools(),
         straddle_and_builder_tools(),
+        strike_profile_tool(),
         strategy_management(),
         strategy_controls(),
         strategy_records(),
@@ -728,6 +729,17 @@ fn straddle_and_builder_tools() -> Vec<RouteSpec> {
             options_tools::all_intervals
         ),
     ]
+}
+
+/// Options tools: Strike Profile, GEX and DEX by strike and expiry (web
+/// `blueprints/strike_profile.py`).
+fn strike_profile_tool() -> Vec<RouteSpec> {
+    vec![r!(
+        POST,
+        "/strikeprofile/api/profile-data",
+        User,
+        options_tools::strike_profile_data
+    )]
 }
 
 /// Strategy module (web `blueprints/strategy_module.py`): the strategies

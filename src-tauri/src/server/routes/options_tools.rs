@@ -1,8 +1,9 @@
 //! The options tool pages (web blueprints `oiprofile.py`, `oitracker.py`,
 //! `ivchart.py`, `gamma_density.py`, `straddle_chart.py`,
 //! `custom_straddle.py`, `vol_surface.py`, `gex.py`, `ivsmile.py`,
-//! `arbitrage.py`, `strategy_chart.py`). Handlers check the session's
-//! prerequisites, validate like the web and call one service.
+//! `arbitrage.py`, `strategy_chart.py`, `strike_profile.py`). Handlers
+//! check the session's prerequisites, validate like the web and call one
+//! service.
 
 use crate::server::api_v1::send;
 use crate::server::envelope::{error, EarlyReply};
@@ -11,6 +12,7 @@ use crate::services::apikey_service::ApiKeyService;
 use crate::services::chain_tools_service as chain;
 use crate::services::history_tools_service::{self as hist, ChartRequest, SimParams};
 use crate::services::options_service::Expiry;
+use crate::services::strike_profile_service::{self as strike_profile, ProfileRequest};
 use crate::services::{arbitrage_service, market_data_service};
 use crate::state::AppState;
 use axum::{
@@ -171,6 +173,89 @@ pub async fn profile_data(State(ctx): Ctx, body: JsonBody) -> Response {
         return r;
     }
     send(chain::oi_profile(&ctx, &u, &e, &x, &interval, days).await)
+}
+
+/// Python's `str()` of a JSON field, as far as it decides which refusal
+/// the web gives: a number keeps its digits, `null` reads `None`, `true`
+/// reads `True`; a missing field is empty (`data.get(k, "")`).
+fn py_str(v: Option<&Value>) -> String {
+    match v {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) => "None".into(),
+        Some(Value::Bool(true)) => "True".into(),
+        Some(Value::Bool(false)) => "False".into(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn bad_request(msg: &str) -> EarlyReply {
+    error(StatusCode::BAD_REQUEST, msg).into()
+}
+
+/// The strike window: 5% when not given, every loaded strike for `null`,
+/// otherwise one of 2, 5 and 10 (`float()` of a number or a string).
+fn range_pct(v: Option<&Value>) -> Result<Option<f64>, EarlyReply> {
+    let pct = match v {
+        None => 5.0,
+        Some(Value::Null) => return Ok(None),
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(f64::NAN),
+        Some(Value::String(s)) => s.trim().parse::<f64>().unwrap_or(f64::NAN),
+        Some(Value::Bool(b)) => f64::from(u8::from(*b)),
+        Some(_) => f64::NAN,
+    };
+    if strike_profile::ALLOWED_RANGES.contains(&pct) {
+        Ok(Some(pct))
+    } else {
+        Err(bad_request("Invalid strike range"))
+    }
+}
+
+/// The Strike Profile request (web `strike_profile.py`), refused in the
+/// web's order: underlying and exchange (20 characters each), the expiry
+/// list (the first [`strike_profile::MAX_EXPIRIES`], upper-cased), the
+/// strike window.
+fn strike_profile_request(b: &JsonBody) -> Result<ProfileRequest, EarlyReply> {
+    let field = |k: &str| -> String { py_str(b.0.get(k)).trim().chars().take(20).collect() };
+    let (underlying, exchange) = (field("underlying"), field("exchange"));
+    if underlying.is_empty() || exchange.is_empty() {
+        return Err(bad_request("underlying and exchange are required"));
+    }
+    if !upper_alnum(&underlying, false) || !upper_alnum(&exchange, true) {
+        return Err(bad_request("Invalid input format"));
+    }
+    let expiries: Vec<String> = match b.0.get("expiry_dates") {
+        Some(Value::Array(a)) if !a.is_empty() => a
+            .iter()
+            .take(strike_profile::MAX_EXPIRIES)
+            .map(|e| py_str(Some(e)).trim().to_uppercase())
+            .collect(),
+        _ => return Err(bad_request("Select at least one expiry.")),
+    };
+    if !expiries.iter().all(|e| is_ddmmmyy(e)) {
+        return Err(bad_request("Invalid expiry format. Expected DDMMMYY"));
+    }
+    Ok(ProfileRequest {
+        underlying,
+        exchange,
+        expiries,
+        range_pct: range_pct(b.0.get("range_pct"))?,
+    })
+}
+
+/// POST /strikeprofile/api/profile-data
+pub async fn strike_profile_data(State(ctx): Ctx, body: JsonBody) -> Response {
+    if let Some(r) = need_key(&ctx, NO_KEY) {
+        return r;
+    }
+    let req = match strike_profile_request(&body) {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    if let Some(r) = need_broker(&ctx) {
+        return r;
+    }
+    send(strike_profile::strike_profile(&ctx, &req).await)
 }
 
 /// The broker's intervals, or the refusal.
@@ -525,5 +610,23 @@ mod tests {
         assert!(!upper_alnum("nifty", false));
         assert_eq!(clamp_days(0), 1);
         assert_eq!(clamp_days(999), 30);
+    }
+
+    /// Web `str()` then `float()` of the Strike Profile fields.
+    #[test]
+    fn strike_profile_fields() {
+        assert_eq!(py_str(None), "");
+        assert_eq!(py_str(Some(&json!(5))), "5");
+        assert_eq!(py_str(Some(&json!(null))), "None");
+        assert_eq!(py_str(Some(&json!(true))), "True");
+        let range = |v: Option<Value>| range_pct(v.as_ref()).ok();
+        assert_eq!(range(None), Some(Some(5.0)));
+        assert_eq!(range(Some(json!(null))), Some(None));
+        assert_eq!(range(Some(json!(10))), Some(Some(10.0)));
+        assert_eq!(range(Some(json!(" 2 "))), Some(Some(2.0)));
+        assert_eq!(range(Some(json!(2.5))), None);
+        assert_eq!(range(Some(json!("abc"))), None);
+        assert_eq!(range(Some(json!(true))), None);
+        assert_eq!(range(Some(json!([5]))), None);
     }
 }

@@ -8,6 +8,7 @@
 //! | [`black76`] | `opengreeks.black76` (via `option_greeks_service.py`) |
 //! | [`chain`] | `oi_tracker_service.py` (PCR, max pain), `gex_service.py`, `iv_smile_service.py`, `gamma_density_service.py` |
 //! | [`series`] | `strategy_chart_service.py` (windows, date cap, combined premium), `iv_chart_service.py` (IV series) |
+//! | [`strike_profile`] | `strike_profile_service.py` (GEX and DEX in crore, gamma flip, walls, strike window) |
 //! | [`straddle`] | `straddle_chart_service.py`, `custom_straddle_service.py` |
 //! | [`surface`] | `vol_surface_service.py` (strike grid) |
 
@@ -15,6 +16,7 @@ pub mod black76;
 pub mod chain;
 pub mod series;
 pub mod straddle;
+pub mod strike_profile;
 pub mod surface;
 
 /// Python `round(x, n)`.

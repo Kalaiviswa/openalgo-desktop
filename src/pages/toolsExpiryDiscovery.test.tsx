@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => {
     volSurface: { getSurfaceData: vi.fn() },
     straddle: { getIntervals: vi.fn(), getStraddleData: vi.fn() },
     custom: { getIntervals: vi.fn(), getLotSize: vi.fn(), simulate: vi.fn() },
+    strikeProfile: { ...listing(), getProfileData: vi.fn() },
   }
 })
 
@@ -52,6 +53,7 @@ vi.mock('@/api/iv-chart', () => ({ ivChartApi: mocks.ivChart }))
 vi.mock('@/api/vol-surface', () => ({ volSurfaceApi: mocks.volSurface }))
 vi.mock('@/api/straddle-chart', () => ({ straddleChartApi: mocks.straddle }))
 vi.mock('@/api/custom-straddle', () => ({ customStraddleApi: mocks.custom }))
+vi.mock('@/api/strike-profile', () => ({ strikeProfileApi: mocks.strikeProfile }))
 vi.mock('@/lib/Plot2D', () => ({ default: () => null }))
 vi.mock('@/lib/Plot3D', () => ({ default: () => null }))
 vi.mock('lightweight-charts', () => {
@@ -100,6 +102,8 @@ interface PageCase {
   listing: ApiMock
   /** The data request a recovered page starts on its own, if any. */
   data?: () => ReturnType<typeof vi.fn>
+  /** What the page shows once the dates arrive, when not the date itself. */
+  ready?: string
 }
 
 const PAGES: PageCase[] = [
@@ -159,6 +163,14 @@ const PAGES: PageCase[] = [
     data: () => mocks.straddle.getStraddleData,
   },
   { name: 'Straddle PnL', load: () => import('./CustomStraddle'), listing: mocks.oiProfile },
+  {
+    name: 'Strike Profile',
+    load: () => import('./StrikeProfile'),
+    listing: mocks.strikeProfile,
+    data: () => mocks.strikeProfile.getProfileData,
+    // The dates sit in the expiry picker; its button counts them.
+    ready: 'All 1 expiries',
+  },
 ]
 
 const busy = 'OpenAlgo is busy. Try again in a few seconds.'
@@ -211,6 +223,7 @@ beforeEach(() => {
     mocks.oiTracker,
     mocks.oiProfile,
     mocks.ivChart,
+    mocks.strikeProfile,
   ] as ApiMock[]) {
     api.getUnderlyings.mockResolvedValue({ status: 'success', underlyings: ['NIFTY'] })
     api.getExpiries.mockResolvedValue({ status: 'success', expiries: [EXPIRY] })
@@ -228,6 +241,7 @@ beforeEach(() => {
     mocks.volSurface.getSurfaceData,
     mocks.straddle.getStraddleData,
     mocks.custom.simulate,
+    mocks.strikeProfile.getProfileData,
   ]) {
     fn.mockImplementation(pending)
   }
@@ -239,7 +253,7 @@ beforeEach(() => {
   mocks.custom.getLotSize.mockResolvedValue({ status: 'success', lotsize: 65 })
 })
 
-describe.each(PAGES)('$name', ({ load, listing, data }) => {
+describe.each(PAGES)('$name', ({ load, listing, data, ready }) => {
   it.each(OUTCOMES)('settles on $outcome with Retry, then recovers', async ({ fail, text }) => {
     await fail(listing)
     const { default: Page } = await load()
@@ -256,7 +270,7 @@ describe.each(PAGES)('$name', ({ load, listing, data }) => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     // The notice leaves while the retry runs; wait for the dates themselves.
-    await waitFor(() => expect(screen.getAllByText(EXPIRY).length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getAllByText(ready ?? EXPIRY).length).toBeGreaterThan(0))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(listing.getExpiries.mock.calls.length).toBe(lookups + 1)
     expect(listing.getExpiries).toHaveBeenLastCalledWith('NFO', 'NIFTY')
@@ -280,6 +294,9 @@ describe('the expiry lookup request', () => {
       vi
         .importActual<typeof import('@/api/oi-tracker')>('@/api/oi-tracker')
         .then((m) => m.oiTrackerApi),
+      vi
+        .importActual<typeof import('@/api/strike-profile')>('@/api/strike-profile')
+        .then((m) => m.strikeProfileApi),
     ])
     const seen: string[] = []
     const original = webClient.defaults.adapter
@@ -307,6 +324,6 @@ describe('the expiry lookup request', () => {
         '/search/api/expiries?exchange=NFO&underlying=BAJAJ-AUTO&instrumenttype=options',
       ])
     )
-    expect(seen).toHaveLength(12)
+    expect(seen).toHaveLength(14)
   })
 })
