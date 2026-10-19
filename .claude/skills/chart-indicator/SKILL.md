@@ -22,7 +22,7 @@ runtime; that path exists only on the web).
 
 This skill is the web repository's `chart-indicator` skill, carried over for
 OpenAlgo Desktop. The desktop pins the same `openalgo-charts` version as the
-web (`package.json` at the repository root, currently 2.6.4) and loads custom
+web (`package.json` at the repository root, currently 2.6.6) and loads custom
 indicators with the same loader (`src/lib/trading/customIndicators.ts`, the
 same file as the web's `frontend/src/lib/trading/customIndicators.ts`), so the
 contract, pitfalls, cookbook and examples apply unchanged. What differs:
@@ -92,6 +92,19 @@ when the indicator loads. Do not silently skip validation.
 The descriptor contract has only gained optional fields since this skill was
 written, so an existing indicator keeps working on the pinned build. What
 changed, newest first:
+
+- **2.6.6: nothing for a descriptor to change.** Legend actions now sit
+  before changing readings, so crosshair movement and live ticks keep the
+  same click targets. The packaged widget opens the selected study's settings;
+  `/trading` keeps its existing host dialog. The registry stays at 112 and
+  the generated index at 433 names.
+
+- **2.6.5: nothing for a descriptor to change.** The packaged widget puts
+  running studies before its catalog and adds searchable, grouped mobile
+  drawing tools with shared favorites. Historify uses the widget's drawing
+  controls; both pages keep their custom indicator pickers. The trade-feed adapter
+  also serializes order modifications and requires reconciliation after an
+  uncertain outcome. Indicator calculations and saved descriptors are unchanged.
 
 - **2.6.4: nothing for a descriptor to change.** An order flow release in the
   profile tier: the footprint compares a cell beside an untraded row with
