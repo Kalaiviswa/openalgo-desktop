@@ -147,7 +147,7 @@ pub async fn calculate_margin(
                     trigger: l.trigger_price,
                 };
                 let (prctyp, prc) = match b.cfg.margin_mpp {
-                    MarginMpp::LtpOrSupplied => mpp_margin(&order, quote),
+                    MarginMpp::LtpOrSupplied => mpp_margin(&order, quote)?,
                     MarginMpp::TriggerFirst => {
                         mpp_margin_trigger_first(&order, quote, row.tick_size)
                             .map_err(AppError::Validation)?

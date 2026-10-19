@@ -686,51 +686,62 @@ fn mpp_scopes() {
     // 812.4 * 1.005 = 816.462 -> 816.45 on a 0.05 tick.
     let m = mo(PriceType::Market, 0.0, 0.0);
     assert_eq!(
-        mpp_place(MppScope::MarketAndStop, &m, q, 0.05),
+        mpp_place(MppScope::MarketAndStop, &m, q, 0.05).unwrap(),
         ("LMT", "816.45".into())
     );
     assert_eq!(
-        mpp_place(MppScope::MarketAndStop, &m, None, 0.05),
+        mpp_place(MppScope::MarketAndStop, &m, None, 0.05).unwrap(),
         ("MKT", "0".into())
     );
     let slm = mo(PriceType::SlM, 0.0, 800.0);
     assert_eq!(
-        mpp_place(MppScope::MarketAndStop, &slm, q, 0.05).0,
+        mpp_place(MppScope::MarketAndStop, &slm, q, 0.05).unwrap().0,
         "SL-LMT"
     );
     // No quote: SL-LMT priced off the trigger, buffered by the master tick.
     assert_eq!(
-        mpp_place(MppScope::MarketAndStop, &slm, None, 0.05),
+        mpp_place(MppScope::MarketAndStop, &slm, None, 0.05).unwrap(),
         ("SL-LMT", "804".into())
     );
     assert_eq!(
-        mpp_place(MppScope::MarketAndStop, &slm, None, 0.0),
+        mpp_place(MppScope::MarketAndStop, &slm, None, 0.0).unwrap(),
         ("SL-LMT", "800".into())
     );
     // Zebu: MARKET only.
     assert_eq!(
-        mpp_place(MppScope::MarketOnly, &slm, q, 0.05),
+        mpp_place(MppScope::MarketOnly, &slm, q, 0.05).unwrap(),
         ("SL-MKT", "0".into())
     );
-    assert_eq!(mpp_place(MppScope::MarketOnly, &m, q, 0.05).0, "LMT");
+    assert_eq!(
+        mpp_place(MppScope::MarketOnly, &m, q, 0.05).unwrap().0,
+        "LMT"
+    );
     // Tradesmart: always converts, SL-M off the trigger.
     assert_eq!(
-        mpp_place(MppScope::AlwaysConvert, &slm, q, 0.05),
+        mpp_place(MppScope::AlwaysConvert, &slm, q, 0.05).unwrap(),
         ("SL-LMT", "804".into())
     );
     assert_eq!(
-        mpp_place(MppScope::AlwaysConvert, &m, None, 0.05),
+        mpp_place(MppScope::AlwaysConvert, &m, None, 0.05).unwrap(),
         ("LMT", "0".into())
     );
     let lim = mo(PriceType::Limit, 811.0, 0.0);
     assert_eq!(
-        mpp_place(MppScope::AlwaysConvert, &lim, q, 0.05),
+        mpp_place(MppScope::AlwaysConvert, &lim, q, 0.05).unwrap(),
         ("LMT", "811".into())
     );
+    // Web #2052: a quote that is not a number refuses the order instead of
+    // becoming its limit price.
+    let inf = Some(MppQuote {
+        ltp: f64::INFINITY,
+        tick: Some(0.05),
+    });
+    assert!(mpp_place(MppScope::MarketAndStop, &m, inf, 0.05).is_err());
+    assert!(mpp_margin(&m, inf).is_err());
     // Margin legs always convert.
-    assert_eq!(mpp_margin(&m, None), ("LMT", "0".into()));
-    assert_eq!(mpp_margin(&slm, None), ("SL-LMT", "800".into()));
-    assert_eq!(mpp_margin(&m, q).1, "816.45");
+    assert_eq!(mpp_margin(&m, None).unwrap(), ("LMT", "0".into()));
+    assert_eq!(mpp_margin(&slm, None).unwrap(), ("SL-LMT", "800".into()));
+    assert_eq!(mpp_margin(&m, q).unwrap().1, "816.45");
 }
 
 /// Web flattrade `margin_data._apply_mpp` (#2161): SL-M is protected off
@@ -795,7 +806,7 @@ fn trigger_first_margin_pricing() {
         Ok(("LMT", "811".into()))
     );
     // The shoonya rule is unchanged: a MARKET leg without a quote goes at 0.
-    assert_eq!(mpp_margin(&m, None), ("LMT", "0".into()));
+    assert_eq!(mpp_margin(&m, None).unwrap(), ("LMT", "0".into()));
 }
 
 /// Web shoonya `_repair_candles` (#2161) drops a bar with a NaN price.

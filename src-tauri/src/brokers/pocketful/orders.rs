@@ -26,19 +26,19 @@ fn order_id_from(v: &Value, fallback: &str) -> String {
 /// The order type and price `transform_data` sends: a MARKET order becomes
 /// a LIMIT at the protected price (web `utils/mpp_slab`) when a live price
 /// is available, and stays MARKET otherwise.
-pub fn market_protection(o: &ResolvedOrder, ltp: Option<f64>) -> (&'static str, f64) {
+pub fn market_protection(o: &ResolvedOrder, ltp: Option<f64>) -> Result<(&'static str, f64)> {
     if o.pricetype != PriceType::Market {
-        return (mapping::order_type(o.pricetype), o.price);
+        return Ok((mapping::order_type(o.pricetype), o.price));
     }
-    match ltp.filter(|p| *p > 0.0) {
+    Ok(match ltp.filter(|p| *p > 0.0) {
         Some(ltp) => {
             let tick = (o.instrument.tick_size > 0.0).then_some(o.instrument.tick_size);
             let price =
-                protected_price(ltp, o.action, instrument_type_from_symbol(&o.symbol), tick);
+                protected_price(ltp, o.action, instrument_type_from_symbol(&o.symbol), tick)?;
             ("LIMIT", price)
         }
         None => ("MARKET", o.price),
-    }
+    })
 }
 
 pub async fn place_order(
@@ -67,7 +67,7 @@ pub async fn place_order(
     } else {
         None
     };
-    let (order_type, price) = market_protection(o, ltp);
+    let (order_type, price) = market_protection(o, ltp)?;
     let body = mapping::place_payload(o, &client_id, order_type, price);
     let v = b
         .call_order(Method::POST, "/api/v1/orders", auth, Some(&body))

@@ -39,10 +39,10 @@ pub fn gtt_ok(v: &Value) -> bool {
 /// web `_apply_mpp_if_market`: SINGLE protects the limit around LTP (kept
 /// as sent when no LTP is known), OCO protects each leg around its own
 /// trigger; pricetype becomes LIMIT.
-pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: Option<f64>) -> GttRequest {
+pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: Option<f64>) -> Result<GttRequest> {
     let mut r = req.clone();
     if r.pricetype != PriceType::Market {
-        return r;
+        return Ok(r);
     }
     let it = if row.instrument_type.is_empty() {
         instrument_type_from_symbol(&row.symbol).to_string()
@@ -53,16 +53,16 @@ pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: Option<f64>) -> G
     match r.trigger_type {
         GttTriggerType::Oco => {
             if r.triggerprice_sl > 0.0 {
-                r.stoploss = protected_price(r.triggerprice_sl, r.action, &it, tick);
+                r.stoploss = protected_price(r.triggerprice_sl, r.action, &it, tick)?;
             }
             if r.triggerprice_tg > 0.0 {
-                r.target = protected_price(r.triggerprice_tg, r.action, &it, tick);
+                r.target = protected_price(r.triggerprice_tg, r.action, &it, tick)?;
             }
         }
         GttTriggerType::Single => match last_price.filter(|p| *p > 0.0) {
             Some(lp) => {
                 r.last_price = Some(lp);
-                r.price = protected_price(lp, r.action, &it, tick);
+                r.price = protected_price(lp, r.action, &it, tick)?;
             }
             None => tracing::warn!(
                 "GTT price protection: no last price for {} on {}; sending the price as LIMIT",
@@ -72,7 +72,7 @@ pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: Option<f64>) -> G
         },
     }
     r.pricetype = PriceType::Limit;
-    r
+    Ok(r)
 }
 
 fn leg(price: f64, trigger: f64, qty: i64) -> Value {
@@ -153,7 +153,7 @@ async fn adjusted(
     } else {
         req.last_price
     };
-    Ok((apply_mpp(req, &row, lp), row))
+    Ok((apply_mpp(req, &row, lp)?, row))
 }
 
 fn id_of(v: &Value) -> String {

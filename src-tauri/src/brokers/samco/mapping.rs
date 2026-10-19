@@ -172,6 +172,13 @@ pub fn resolve_order_type(
 ) -> std::result::Result<Resolved, String> {
     let it = mpp::instrument_type_from_symbol(symbol);
     let tick = tick_size.filter(|t| *t > 0.0);
+    // The protected limit off `base` and its slab percentage; a base that
+    // is not a number is refused.
+    let protect = |base: f64| -> std::result::Result<(String, f64), String> {
+        let pct = mpp::mpp_percentage(base, it).map_err(|e| e.client_message())?;
+        let limit = mpp::protected_price(base, action, it, tick).map_err(|e| e.client_message())?;
+        Ok((py_float(limit), pct))
+    };
     match pricetype {
         PriceType::Market => {
             let ltp = ltp.unwrap_or(0.0);
@@ -181,10 +188,11 @@ pub fn resolve_order_type(
                     symbol
                 ));
             }
+            let (price, pct) = protect(ltp)?;
             Ok(Resolved {
                 order_type: "L",
-                price: py_float(mpp::protected_price(ltp, action, it, tick)),
-                mpp_percentage: Some(mpp::mpp_percentage(ltp, it)),
+                price,
+                mpp_percentage: Some(pct),
             })
         }
         PriceType::SlM => {
@@ -194,10 +202,11 @@ pub fn resolve_order_type(
                     symbol
                 ));
             }
+            let (price, pct) = protect(trigger_price)?;
             Ok(Resolved {
                 order_type: "SL",
-                price: py_float(mpp::protected_price(trigger_price, action, it, tick)),
-                mpp_percentage: Some(mpp::mpp_percentage(trigger_price, it)),
+                price,
+                mpp_percentage: Some(pct),
             })
         }
         other => Ok(Resolved {
