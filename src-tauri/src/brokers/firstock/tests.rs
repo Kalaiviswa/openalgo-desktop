@@ -193,7 +193,7 @@ fn order(pt: &str) -> ResolvedOrder {
 
 #[test]
 fn order_payloads_and_mpp() {
-    let b = place_body(&order("MARKET"), Some(812.4));
+    let b = place_body(&order("MARKET"), Some(812.4)).unwrap();
     assert_eq!(
         b,
         json!({"exchange":"NSE","tradingSymbol":"SBIN-EQ","quantity":"10","price":"816.45",
@@ -201,7 +201,10 @@ fn order_payloads_and_mpp() {
                "retention":"DAY","mkt_protection":"0","remarks":"Place Order"})
     );
     // No quote: sent as MKT, server-side protection applies.
-    assert_eq!(place_body(&order("MARKET"), None)["priceType"], "MKT");
+    assert_eq!(
+        place_body(&order("MARKET"), None).unwrap()["priceType"],
+        "MKT"
+    );
     assert_eq!(
         mpp(
             "SBIN",
@@ -211,7 +214,8 @@ fn order_payloads_and_mpp() {
             Some(1000.0),
             0.05,
             false
-        ),
+        )
+        .unwrap(),
         ("SL-LMT", "995".into(), "0")
     );
     // Modify without a quote defers to the server with mkt_protection 1.
@@ -224,7 +228,8 @@ fn order_payloads_and_mpp() {
             None,
             0.05,
             true
-        ),
+        )
+        .unwrap(),
         ("MKT", "0".into(), "1")
     );
     assert_eq!(
@@ -236,7 +241,8 @@ fn order_payloads_and_mpp() {
             None,
             0.05,
             true
-        ),
+        )
+        .unwrap(),
         ("LMT", "811".into(), "0")
     );
     let basket = basket_body(vec![

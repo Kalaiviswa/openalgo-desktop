@@ -497,20 +497,23 @@ fn market_orders_get_price_protection() {
     let o = resolved("RELIANCE", "NSE", PriceType::Market, 10);
     // The web slab reads the symbol suffix: RELIANCE ends in CE, so the
     // option slab (1 % above 500) applies, rounded to the 0.10 tick.
-    assert_eq!(protected_order(&o, Some(2400.0)), ("LIMIT", 2424.0));
-    assert_eq!(protected_order(&o, None), ("MARKET", 0.0));
-    assert_eq!(protected_order(&o, Some(0.0)), ("MARKET", 0.0));
+    assert_eq!(
+        protected_order(&o, Some(2400.0)).unwrap(),
+        ("LIMIT", 2424.0)
+    );
+    assert_eq!(protected_order(&o, None).unwrap(), ("MARKET", 0.0));
+    assert_eq!(protected_order(&o, Some(0.0)).unwrap(), ("MARKET", 0.0));
 
     let mut sl = resolved("RELIANCE", "NSE", PriceType::SlM, 10);
     sl.trigger_price = 2400.0;
     sl.action = Action::Sell;
-    assert_eq!(protected_order(&sl, None), ("STOPLOSS", 2376.0));
+    assert_eq!(protected_order(&sl, None).unwrap(), ("STOPLOSS", 2376.0));
     sl.trigger_price = 0.0;
-    assert_eq!(protected_order(&sl, None).0, "STOPLOSS");
+    assert_eq!(protected_order(&sl, None).unwrap().0, "STOPLOSS");
 
     let mut lim = resolved("RELIANCE", "NSE", PriceType::Limit, 10);
     lim.price = 2399.5;
-    assert_eq!(protected_order(&lim, None), ("LIMIT", 2399.5));
+    assert_eq!(protected_order(&lim, None).unwrap(), ("LIMIT", 2399.5));
 }
 
 #[test]

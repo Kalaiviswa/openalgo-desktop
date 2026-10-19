@@ -342,7 +342,7 @@ pub fn slm_protected_price(
             symbol
         )));
     }
-    let pct = mpp::mpp_percentage(trigger, mpp::instrument_type_from_symbol(symbol)) / 100.0;
+    let pct = mpp::mpp_percentage(trigger, mpp::instrument_type_from_symbol(symbol))? / 100.0;
     match action {
         Action::Sell => {
             let raw = (trigger * (1.0 - pct)).min(trigger - tick_size);

@@ -9,6 +9,7 @@ use crate::brokers::families::noren::mapping::{
     side, text,
 };
 use crate::brokers::types::*;
+use crate::error::Result;
 use serde_json::{json, Value};
 
 fn clamp_i32(v: i64) -> i32 {
@@ -41,30 +42,30 @@ pub fn mpp(
     ltp: Option<f64>,
     tick: f64,
     on_modify: bool,
-) -> (&'static str, String, &'static str) {
+) -> Result<(&'static str, String, &'static str)> {
     let base = pricetype_code(pricetype);
     if !matches!(pricetype, PriceType::Market | PriceType::SlM) {
-        return (base, num(price), "0");
+        return Ok((base, num(price), "0"));
     }
     let target = if pricetype == PriceType::Market {
         "LMT"
     } else {
         "SL-LMT"
     };
-    match (action, ltp.filter(|l| *l > 0.0)) {
+    Ok(match (action, ltp.filter(|l| *l > 0.0)) {
         (Some(a), Some(l)) => {
             let t = (tick > 0.0).then_some(tick);
-            let p = protected_price(l, a, instrument_type_from_symbol(symbol), t);
+            let p = protected_price(l, a, instrument_type_from_symbol(symbol), t)?;
             (target, num(p), "0")
         }
         // Modify without a usable quote defers to server-side protection.
         _ if on_modify => (base, num(price), "1"),
         _ => (base, num(price), "0"),
-    }
+    })
 }
 
 /// `/placeOrder` body (without `jKey`/`userId`).
-pub fn place_body(o: &ResolvedOrder, ltp: Option<f64>) -> Value {
+pub fn place_body(o: &ResolvedOrder, ltp: Option<f64>) -> Result<Value> {
     let (pt, prc, mp) = mpp(
         &o.symbol,
         Some(o.action),
@@ -73,8 +74,8 @@ pub fn place_body(o: &ResolvedOrder, ltp: Option<f64>) -> Value {
         ltp,
         o.instrument.tick_size,
         false,
-    );
-    json!({
+    )?;
+    Ok(json!({
         "exchange": o.exchange.as_str(),
         "tradingSymbol": escape_tsym(o.brsymbol()),
         "quantity": o.quantity.to_string(),
@@ -86,11 +87,11 @@ pub fn place_body(o: &ResolvedOrder, ltp: Option<f64>) -> Value {
         "retention": "DAY",
         "mkt_protection": mp,
         "remarks": "Place Order",
-    })
+    }))
 }
 
 /// `/modifyOrder` body (without `jKey`/`userId`).
-pub fn modify_body(m: &ResolvedModify, ltp: Option<f64>) -> Value {
+pub fn modify_body(m: &ResolvedModify, ltp: Option<f64>) -> Result<Value> {
     let (pt, prc, mp) = mpp(
         &m.symbol,
         Some(m.action),
@@ -99,8 +100,8 @@ pub fn modify_body(m: &ResolvedModify, ltp: Option<f64>) -> Value {
         ltp,
         m.instrument.tick_size,
         true,
-    );
-    json!({
+    )?;
+    Ok(json!({
         "exchange": m.exchange.as_str(),
         "orderNumber": m.order_id,
         "priceType": pt,
@@ -111,7 +112,7 @@ pub fn modify_body(m: &ResolvedModify, ltp: Option<f64>) -> Value {
         "retention": "DAY",
         "mkt_protection": mp,
         "product": product_code(m.product),
-    })
+    }))
 }
 
 pub fn map_order(o: &Value, symbols: &SymbolResolver) -> Order {

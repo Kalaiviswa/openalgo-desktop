@@ -11,6 +11,7 @@ use crate::brokers::common::mpp::{instrument_type_from_symbol, protected_price, 
 use crate::brokers::common::streaming::OrderUpdate;
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
+use crate::error::Result;
 use serde_json::{json, Map, Value};
 
 // ---------------------------------------------------------------------------
@@ -226,7 +227,7 @@ pub fn mpp_place(
     o: &MppOrder<'_>,
     quote: Option<MppQuote>,
     master_tick: f64,
-) -> (&'static str, String) {
+) -> Result<(&'static str, String)> {
     let MppOrder {
         symbol,
         action,
@@ -238,35 +239,35 @@ pub fn mpp_place(
     let is_market = pricetype == PriceType::Market;
     let is_slm = pricetype == PriceType::SlM;
     if !is_market && !is_slm {
-        return (base, num(price));
+        return Ok((base, num(price)));
     }
     let it = instrument_type_from_symbol(symbol);
     let target = if is_market { "LMT" } else { "SL-LMT" };
     let ltp = quote.map(|q| q.ltp).unwrap_or(0.0);
     let tick = quote.and_then(|q| q.tick).filter(|t| *t > 0.0);
-    match scope {
+    Ok(match scope {
         MppScope::MarketOnly => {
             if is_market && ltp > 0.0 {
-                ("LMT", num(protected_price(ltp, action, it, tick)))
+                ("LMT", num(protected_price(ltp, action, it, tick)?))
             } else {
                 (base, num(price))
             }
         }
         MppScope::MarketAndStop => {
             if ltp > 0.0 {
-                return (target, num(protected_price(ltp, action, it, tick)));
+                return Ok((target, num(protected_price(ltp, action, it, tick)?)));
             }
             if is_market {
-                return (base, num(price));
+                return Ok((base, num(price)));
             }
             // SL-M without a quote still goes as SL-LMT, priced off the
             // trigger; the MPP buffer only when the master has a tick size.
             if trigger > 0.0 {
                 if master_tick > 0.0 {
-                    let p = protected_price(trigger, action, it, Some(master_tick));
-                    return ("SL-LMT", num(p));
+                    let p = protected_price(trigger, action, it, Some(master_tick))?;
+                    return Ok(("SL-LMT", num(p)));
                 }
-                return ("SL-LMT", num(trigger));
+                return Ok(("SL-LMT", num(trigger)));
             }
             ("SL-LMT", num(price))
         }
@@ -279,20 +280,20 @@ pub fn mpp_place(
                 ltp
             };
             if basis > 0.0 {
-                (target, num(protected_price(basis, action, it, tick)))
+                (target, num(protected_price(basis, action, it, tick)?))
             } else if is_market {
                 (target, num(price))
             } else {
                 (target, num(trigger))
             }
         }
-    }
+    })
 }
 
 /// Margin legs: MARKET/SL-M always convert (GetBasketMargin rejects
 /// MKT/SL-MKT); without a quote MARKET uses the supplied price and SL-M the
 /// trigger.
-pub fn mpp_margin(o: &MppOrder<'_>, quote: Option<MppQuote>) -> (&'static str, String) {
+pub fn mpp_margin(o: &MppOrder<'_>, quote: Option<MppQuote>) -> Result<(&'static str, String)> {
     let MppOrder {
         symbol,
         action,
@@ -300,7 +301,7 @@ pub fn mpp_margin(o: &MppOrder<'_>, quote: Option<MppQuote>) -> (&'static str, S
         price,
         trigger,
     } = *o;
-    match pricetype {
+    Ok(match pricetype {
         PriceType::Market | PriceType::SlM => {
             let target = if pricetype == PriceType::Market {
                 "LMT"
@@ -320,13 +321,13 @@ pub fn mpp_margin(o: &MppOrder<'_>, quote: Option<MppQuote>) -> (&'static str, S
                         action,
                         instrument_type_from_symbol(symbol),
                         q.tick.filter(|t| *t > 0.0),
-                    )),
+                    )?),
                 ),
                 None => (target, num(fallback)),
             }
         }
         other => (pricetype_code(other), num(price)),
-    }
+    })
 }
 
 /// Margin legs for `MarginMpp::TriggerFirst` (web flattrade
@@ -387,7 +388,8 @@ pub fn mpp_margin_trigger_first(
                 action,
                 instrument_type_from_symbol(symbol),
                 Some(tick),
-            );
+            )
+            .map_err(|e| e.client_message())?;
             if positive(protected) > 0.0 {
                 return Ok((target, num(protected)));
             }

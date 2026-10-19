@@ -26,10 +26,10 @@ fn lookup(b: &ZerodhaBroker, key: &QuoteKey) -> Result<SymToken> {
 
 /// Apply MPP to a MARKET GTT: SINGLE protects the limit around LTP, OCO
 /// protects each leg around its own trigger. Returns the adjusted request.
-pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: f64) -> GttRequest {
+pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: f64) -> Result<GttRequest> {
     let mut r = req.clone();
     if r.pricetype != PriceType::Market {
-        return r;
+        return Ok(r);
     }
     let it = if row.instrument_type.is_empty() {
         instrument_type_from_symbol(&row.symbol).to_string()
@@ -40,20 +40,20 @@ pub fn apply_mpp(req: &GttRequest, row: &SymToken, last_price: f64) -> GttReques
     match r.trigger_type {
         GttTriggerType::Oco => {
             if r.triggerprice_sl > 0.0 {
-                r.stoploss = protected_price(r.triggerprice_sl, r.action, &it, tick);
+                r.stoploss = protected_price(r.triggerprice_sl, r.action, &it, tick)?;
             }
             if r.triggerprice_tg > 0.0 {
-                r.target = protected_price(r.triggerprice_tg, r.action, &it, tick);
+                r.target = protected_price(r.triggerprice_tg, r.action, &it, tick)?;
             }
         }
         GttTriggerType::Single => {
             if last_price > 0.0 {
-                r.price = protected_price(last_price, r.action, &it, tick);
+                r.price = protected_price(last_price, r.action, &it, tick)?;
             }
         }
     }
     r.pricetype = PriceType::Limit;
-    r
+    Ok(r)
 }
 
 /// Kite `{type, condition, orders}` for a GTT (web `transform_place_gtt`).
@@ -126,7 +126,7 @@ async fn send(
 ) -> Result<GttResponse> {
     let row = lookup(b, &req.key)?;
     let lp = last_price(b, auth, req).await?;
-    let adjusted = apply_mpp(req, &row, lp);
+    let adjusted = apply_mpp(req, &row, lp)?;
     let (kind, condition, orders) = gtt_body(&adjusted, &row, lp)?;
     let form = [
         ("type", kind),

@@ -313,14 +313,25 @@ fn modify_payload_carries_order_id() {
 fn market_orders_become_protected_limits() {
     let buy = order("NIFTY06OCT2625000CE", "NFO", "MARKET", "BUY");
     // Option at 120: 2% slab, tick 0.05.
-    assert_eq!(market_protection(&buy, Some(120.0)), ("LIMIT", 122.4));
+    assert_eq!(
+        market_protection(&buy, Some(120.0)).unwrap(),
+        ("LIMIT", 122.4)
+    );
     let sell = order("NIFTY27OCT26FUT", "NFO", "MARKET", "SELL");
     // Future above 500: 0.5% slab, tick 0.1.
-    assert_eq!(market_protection(&sell, Some(25000.0)), ("LIMIT", 24875.0));
-    assert_eq!(market_protection(&buy, None), ("MARKET", 0.0));
-    assert_eq!(market_protection(&buy, Some(0.0)), ("MARKET", 0.0));
+    assert_eq!(
+        market_protection(&sell, Some(25000.0)).unwrap(),
+        ("LIMIT", 24875.0)
+    );
+    assert_eq!(market_protection(&buy, None).unwrap(), ("MARKET", 0.0));
+    assert_eq!(market_protection(&buy, Some(0.0)).unwrap(), ("MARKET", 0.0));
+    // Web #2052: an infinite live price is refused, never sent as a limit.
+    assert!(market_protection(&buy, Some(f64::INFINITY)).is_err());
     let limit = order("SBIN", "NSE", "LIMIT", "BUY");
-    assert_eq!(market_protection(&limit, Some(800.0)), ("LIMIT", 0.0));
+    assert_eq!(
+        market_protection(&limit, Some(800.0)).unwrap(),
+        ("LIMIT", 0.0)
+    );
     assert_eq!(buy.action, Action::Buy);
 }
 

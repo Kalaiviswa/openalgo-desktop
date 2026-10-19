@@ -48,7 +48,7 @@ async fn mpp_quote(b: &NorenBroker, s: &Session, o: &ResolvedOrder) -> Option<Mp
 }
 
 /// PlaceOrder `jData` for a resolved order, MPP applied.
-pub(crate) async fn place_body(b: &NorenBroker, s: &Session, o: &ResolvedOrder) -> Value {
+pub(crate) async fn place_body(b: &NorenBroker, s: &Session, o: &ResolvedOrder) -> Result<Value> {
     let needs_quote = match o.pricetype {
         PriceType::Market => true,
         PriceType::SlM => b.cfg.mpp != super::MppScope::MarketOnly,
@@ -70,8 +70,8 @@ pub(crate) async fn place_body(b: &NorenBroker, s: &Session, o: &ResolvedOrder) 
         },
         quote,
         o.instrument.tick_size,
-    );
-    mapping::place_jdata(b.cfg, &s.uid, o, prctyp, &prc)
+    )?;
+    Ok(mapping::place_jdata(b.cfg, &s.uid, o, prctyp, &prc))
 }
 
 pub async fn place_order(
@@ -82,10 +82,7 @@ pub async fn place_order(
     let s = session(b.cfg, auth)?;
     // The price-protection quote comes before the order is sent: a server
     // error it meets never counts against the order's answer (LOG-08).
-    let body = crate::brokers::common::outcome::before_send(async {
-        Ok::<_, crate::error::AppError>(place_body(b, &s, o).await)
-    })
-    .await?;
+    let body = crate::brokers::common::outcome::before_send(place_body(b, &s, o)).await?;
     let v = b.post_raw("/PlaceOrder", body, &s, Category::Order).await?;
     if stat_ok(&v) {
         let id = text(&v, "norenordno");

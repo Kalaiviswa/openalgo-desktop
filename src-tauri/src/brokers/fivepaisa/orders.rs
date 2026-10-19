@@ -120,7 +120,7 @@ pub fn strict_rows(v: &Value) -> Result<Vec<Value>> {
 /// back to the request price when no LTP is available, like the web.
 /// Read before the order is sent: a server error on the quote never counts
 /// against the order's own answer (review P2-3).
-async fn market_price(b: &FivepaisaBroker, auth: &AuthToken, o: &ResolvedOrder) -> f64 {
+async fn market_price(b: &FivepaisaBroker, auth: &AuthToken, o: &ResolvedOrder) -> Result<f64> {
     let key = QuoteKey::new(o.exchange.as_str(), o.symbol.clone());
     match crate::brokers::common::outcome::before_send(super::data::get_quote(b, auth, &key)).await
     {
@@ -140,7 +140,7 @@ async fn market_price(b: &FivepaisaBroker, auth: &AuthToken, o: &ResolvedOrder) 
                 o.symbol,
                 o.exchange
             );
-            o.price
+            Ok(o.price)
         }
         Err(e) => {
             tracing::warn!(
@@ -148,7 +148,7 @@ async fn market_price(b: &FivepaisaBroker, auth: &AuthToken, o: &ResolvedOrder) 
                 "Quote for MARKET protection failed ({}); sent at the request price",
                 e.code()
             );
-            o.price
+            Ok(o.price)
         }
     }
 }
@@ -160,7 +160,7 @@ pub(crate) async fn order_price(
     o: &ResolvedOrder,
 ) -> Result<f64> {
     match o.pricetype {
-        PriceType::Market => Ok(market_price(b, auth, o).await),
+        PriceType::Market => market_price(b, auth, o).await,
         PriceType::SlM if o.trigger_price > 0.0 => mapping::slm_protected_price(
             &o.symbol,
             o.action,

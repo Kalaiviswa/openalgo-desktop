@@ -33,18 +33,18 @@ fn lookup(b: &UpstoxBroker, key: &QuoteKey) -> Result<SymToken> {
 
 /// `market_protection` for a MARKET request (web `_market_protection`): the
 /// shared MPP slab percentage for the price, rounded and clamped to 1..=25.
-pub fn market_protection(req: &GttRequest, row: &SymToken, base_price: f64) -> Option<i64> {
+pub fn market_protection(req: &GttRequest, row: &SymToken, base_price: f64) -> Result<Option<i64>> {
     if req.pricetype != PriceType::Market {
-        return None;
+        return Ok(None);
     }
     let it = if row.instrument_type.is_empty() {
         instrument_type_from_symbol(&row.symbol).to_string()
     } else {
         row.instrument_type.clone()
     };
-    let pct = mpp_percentage(base_price, &it);
+    let pct = mpp_percentage(base_price, &it)?;
     let pct = if pct > 0.0 { pct } else { 1.0 };
-    Some((py_round(pct, 0) as i64).clamp(1, 25))
+    Ok(Some((py_round(pct, 0) as i64).clamp(1, 25)))
 }
 
 fn rule(strategy: &str, trigger_type: &str, trigger: f64, mp: Option<i64>) -> Value {
@@ -94,8 +94,8 @@ pub fn build_rules(
     req: &GttRequest,
     row: &SymToken,
     last_price: f64,
-) -> (&'static str, Action, Vec<Value>) {
-    match req.trigger_type {
+) -> Result<(&'static str, Action, Vec<Value>)> {
+    Ok(match req.trigger_type {
         GttTriggerType::Oco => {
             // OpenAlgo's action is the exit side; Upstox's is the entry side.
             let entry = req.action.opposite();
@@ -113,19 +113,19 @@ pub fn build_rules(
                     "ENTRY",
                     "IMMEDIATE",
                     last_price,
-                    market_protection(req, row, last_price),
+                    market_protection(req, row, last_price)?,
                 ),
                 rule(
                     "TARGET",
                     "IMMEDIATE",
                     target,
-                    market_protection(req, row, target),
+                    market_protection(req, row, target)?,
                 ),
                 rule(
                     "STOPLOSS",
                     "IMMEDIATE",
                     stop,
-                    market_protection(req, row, stop),
+                    market_protection(req, row, stop)?,
                 ),
             ];
             ("MULTIPLE", entry, rules)
@@ -145,41 +145,46 @@ pub fn build_rules(
                     "ENTRY",
                     dir,
                     trigger,
-                    market_protection(req, row, trigger),
+                    market_protection(req, row, trigger)?,
                 )],
             )
         }
-    }
+    })
 }
 
 /// `POST /v3/order/gtt/place` body (web `transform_place_gtt`).
-pub fn place_body(req: &GttRequest, row: &SymToken, last_price: f64) -> Value {
-    let (kind, side, rules) = build_rules(req, row, last_price);
-    json!({
+pub fn place_body(req: &GttRequest, row: &SymToken, last_price: f64) -> Result<Value> {
+    let (kind, side, rules) = build_rules(req, row, last_price)?;
+    Ok(json!({
         "type": kind,
         "quantity": req.quantity,
         "product": product_code(req.product),
         "instrument_token": row.token,
         "transaction_type": side.as_str(),
         "rules": rules,
-    })
+    }))
 }
 
 /// `PUT /v3/order/gtt/modify` body (web `transform_modify_gtt`): no
 /// instrument, product, side or `market_protection`.
-pub fn modify_body(req: &GttRequest, row: &SymToken, last_price: f64, trigger_id: &str) -> Value {
-    let (kind, _side, mut rules) = build_rules(req, row, last_price);
+pub fn modify_body(
+    req: &GttRequest,
+    row: &SymToken,
+    last_price: f64,
+    trigger_id: &str,
+) -> Result<Value> {
+    let (kind, _side, mut rules) = build_rules(req, row, last_price)?;
     for r in rules.iter_mut() {
         if let Some(o) = r.as_object_mut() {
             o.remove("market_protection");
         }
     }
-    json!({
+    Ok(json!({
         "type": kind,
         "quantity": req.quantity,
         "gtt_order_id": trigger_id,
         "rules": rules,
-    })
+    }))
 }
 
 /// `gtt_order_ids[0]` or `gtt_order_id` of a GTT answer.
@@ -232,7 +237,7 @@ pub async fn place_gtt(
             "Upstox GTT OCO is placed as a bracket: the entry leg opens the position at market before the target and stop-loss are set"
         );
     }
-    let body = place_body(req, &row, lp);
+    let body = place_body(req, &row, lp)?;
     let data = b
         .call(
             Method::POST,
@@ -261,7 +266,7 @@ pub async fn modify_gtt(
     }
     let row = lookup(b, &req.key)?;
     let lp = last_price(b, auth, req).await?;
-    let body = modify_body(req, &row, lp, trigger_id);
+    let body = modify_body(req, &row, lp, trigger_id)?;
     let data = b
         .call(
             Method::PUT,

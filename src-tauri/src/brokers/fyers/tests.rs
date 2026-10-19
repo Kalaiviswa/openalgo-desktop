@@ -589,13 +589,14 @@ fn gtt_market_is_price_protected() {
         &gtt(GttTriggerType::Single, PriceType::Market),
         &row,
         Some(954.1),
-    );
+    )
+    .unwrap();
     assert_eq!(r.pricetype, PriceType::Limit);
     assert_eq!(r.price, 958.85);
     // No LTP: the price is sent as a LIMIT unchanged (web logs and goes on).
-    let r = apply_mpp(&gtt(GttTriggerType::Single, PriceType::Market), &row, None);
+    let r = apply_mpp(&gtt(GttTriggerType::Single, PriceType::Market), &row, None).unwrap();
     assert_eq!((r.pricetype, r.price), (PriceType::Limit, 901.0));
-    let r = apply_mpp(&gtt(GttTriggerType::Oco, PriceType::Market), &row, None);
+    let r = apply_mpp(&gtt(GttTriggerType::Oco, PriceType::Market), &row, None).unwrap();
     assert_eq!((r.stoploss, r.target), (884.4, 994.95));
 }
 

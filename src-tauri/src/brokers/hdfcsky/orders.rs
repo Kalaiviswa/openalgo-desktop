@@ -40,7 +40,7 @@ pub(crate) async fn protected_order(
         return Ok((mapping::order_type(o.pricetype), o.price));
     }
     let tick = (o.instrument.tick_size > 0.0).then_some(o.instrument.tick_size);
-    let price = protected_price(base, o.action, instrument_type_from_symbol(&o.symbol), tick);
+    let price = protected_price(base, o.action, instrument_type_from_symbol(&o.symbol), tick)?;
     Ok((limit_type, price))
 }
 
