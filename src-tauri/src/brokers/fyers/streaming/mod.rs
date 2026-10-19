@@ -17,8 +17,10 @@
 //!   85 update records (`_parse_data_feed`). Values are big-endian `i32`
 //!   with `-2147483648` meaning absent; the topic id is read in host
 //!   (little-endian) order, as the web does.
-//! * Prices: `value / multiplier / 100` for scrips and depth, `value / 100`
-//!   for indices, rounded to the frame's precision (`fyers_mapping.py`).
+//! * Prices: `value / (10^precision * multiplier)`, the official SDK's
+//!   formula, rounded to the precision (`fyers_mapping.py` `_price_scale`).
+//!   Precision is per instrument: 2 for equity, F&O and commodity, 4 for
+//!   currency. Index frames carry neither field, so they divide by 100.
 //! * HSM has no selective unsubscribe (web `unsubscribe_symbols`); an
 //!   unsubscribed topic is dropped locally and is gone after a reconnect.
 //!
@@ -239,7 +241,6 @@ pub fn auth_response_ok(data: &[u8]) -> bool {
 struct TopicSub {
     symbol: String,
     exchange: String,
-    brsymbol: String,
     mode: FeedMode,
 }
 
@@ -363,7 +364,6 @@ impl HsmFeed {
                 let entry = TopicSub {
                     symbol: s.symbol.clone(),
                     exchange: s.exchange.clone(),
-                    brsymbol: s.brsymbol.clone(),
                     mode: s.mode,
                 };
                 self.topics.insert(t.clone(), entry);
@@ -446,7 +446,8 @@ impl HsmFeed {
         let mut values = c.values(count as usize);
         values.resize(kind.field_len().max(values.len()), None);
         values.truncate(kind.field_len());
-        let (mut multiplier, mut precision) = (100u16, 2u8);
+        // web `_price_scale` defaults: index frames carry neither field.
+        let (mut multiplier, mut precision) = (1u16, 2u8);
         if kind != Topic::Index {
             c.skip(2);
             match (c.u16_be(), c.u8()) {
@@ -535,25 +536,20 @@ impl HsmFeed {
     }
 }
 
-/// `/100` for the paise-quoted segments (every Fyers cash and derivative
-/// symbol), by the exchange prefix of the Fyers symbol.
-fn segment_divisor(brsymbol: &str) -> f64 {
-    let ex = brsymbol.split(':').next().unwrap_or("");
-    if matches!(ex, "BSE" | "MCX" | "NSE" | "NFO" | "CDS" | "BCD") {
-        100.0
-    } else {
-        1.0
-    }
-}
-
-/// web `convert_price`: 0 for absent/zero values or a zero multiplier.
-fn price(v: Option<i32>, multiplier: u16, precision: u8, divisor: f64) -> f64 {
-    match v {
-        Some(x) if x != 0 && multiplier > 0 => py_round(
-            f64::from(x) / f64::from(multiplier) / divisor,
-            i32::from(precision),
-        ),
-        _ => 0.0,
+impl TopicState {
+    /// Field `i` in rupees (web `_price_scale` and `convert_price`): the
+    /// SDK's `raw / (10^precision * multiplier)`, rounded to the precision;
+    /// 0 for an absent or zero value. A zero multiplier counts as 1, so a
+    /// bad field never zeroes or skips the conversion.
+    fn price(&self, i: usize) -> f64 {
+        match field(self, i) {
+            Some(x) if x != 0 => {
+                let divisor =
+                    10f64.powi(i32::from(self.precision)) * f64::from(self.multiplier.max(1));
+                py_round(f64::from(x) / divisor, i32::from(self.precision))
+            }
+            _ => 0.0,
+        }
     }
 }
 
@@ -566,8 +562,7 @@ fn field(st: &TopicState, i: usize) -> Option<i32> {
 }
 
 fn scrip_tick(sub: &TopicSub, st: &TopicState, now: i64) -> NormalizedTick {
-    let div = segment_divisor(&sub.brsymbol);
-    let p = |i| price(field(st, i), st.multiplier, st.precision, div);
+    let p = |i| st.price(i);
     let mut t = NormalizedTick {
         symbol: sub.symbol.clone(),
         exchange: sub.exchange.clone(),
@@ -592,8 +587,7 @@ fn scrip_tick(sub: &TopicSub, st: &TopicState, now: i64) -> NormalizedTick {
 }
 
 fn index_tick(sub: &TopicSub, st: &TopicState, now: i64) -> NormalizedTick {
-    // Index frames carry no multiplier: web divides by its default 100.
-    let p = |i| price(field(st, i), 100, 2, 1.0);
+    let p = |i| st.price(i);
     let mut t = NormalizedTick {
         symbol: sub.symbol.clone(),
         exchange: sub.exchange.clone(),
@@ -614,8 +608,7 @@ fn index_tick(sub: &TopicSub, st: &TopicState, now: i64) -> NormalizedTick {
 /// web `map_to_openalgo_depth`: levels with a price only; LTP is the mid of
 /// the best bid and ask.
 fn depth_event(sub: &TopicSub, st: &TopicState, now: i64) -> NormalizedDepth {
-    let div = segment_divisor(&sub.brsymbol);
-    let p = |i| price(field(st, i), st.multiplier, st.precision, div);
+    let p = |i| st.price(i);
     let mut buy = Vec::new();
     let mut sell = Vec::new();
     for i in 0..5 {

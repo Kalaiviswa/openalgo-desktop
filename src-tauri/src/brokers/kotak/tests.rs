@@ -664,6 +664,61 @@ fn master_contract_helpers() {
     assert!(parse_file("NSE_COM", "anything").unwrap().is_empty());
 }
 
+/// Rows copied verbatim from Kotak's cde_fo.csv of 2026-10-15 (web
+/// test/test_kotak_cds_strike_scale.py), with its padded and
+/// semicolon-suffixed column names.
+const CDE_FO_ROWS: &str = "\
+pSymbol,pExchSeg,pSymbolName,pTrdSymbol,pOptionType,dTickSize ,lLotSize,lExpiryDate ,dStrikePrice;
+10806,cde_fo,JPYINR,JPYINR26NOV64.5PE,PE,25000,1,1480170600,6.45e+08
+4690,cde_fo,USDINR,USDINR26DEC101.75PE,PE,25000,1,1483021800,1.0175e+09
+8392,cde_fo,GBPUSD,GBPUSD26OCT1.375CE,CE,1000,1,1477665000,1.375e+07
+9990,cde_fo,USDJPY,USDJPY26OCT163CE,CE,100000,1,1477665000,1.63e+09
+2928,cde_fo,USDINR,USDINR27MARFUT,XX,25000,1,1490797800,-1
+";
+
+/// Web #2235 (test/test_kotak_cds_strike_scale.py): cde_fo prices are 10^7
+/// times the rupee value, not paise. Dividing by 100 stored
+/// USDINR26DEC101.75PE with strike 10175000, built its symbol from that
+/// (USDINR29DEC2610175000PE) and stored USDINR's 0.0025 tick as 250.
+#[test]
+fn cds_strike_and_tick_size_come_from_the_cde_fo_scale() {
+    let rows = parse_file("CDE_FO", CDE_FO_ROWS).unwrap();
+    let by = |brsymbol: &str| rows.iter().find(|r| r.brsymbol == brsymbol).unwrap();
+    for (brsymbol, strike, symbol, tick) in [
+        (
+            "USDINR26DEC101.75PE",
+            101.75,
+            "USDINR29DEC26101.75PE",
+            0.0025,
+        ),
+        ("JPYINR26NOV64.5PE", 64.5, "JPYINR26NOV2664.5PE", 0.0025),
+        ("GBPUSD26OCT1.375CE", 1.375, "GBPUSD28OCT261.375CE", 0.0001),
+        ("USDJPY26OCT163CE", 163.0, "USDJPY28OCT26163CE", 0.01),
+    ] {
+        let r = by(brsymbol);
+        assert_eq!(
+            (r.strike, r.symbol.as_str(), r.tick_size),
+            (strike, symbol, tick),
+            "{}",
+            brsymbol
+        );
+    }
+    // The futures placeholder strike stays -0.01, as in the other segments.
+    let fut = by("USDINR27MARFUT");
+    assert_eq!(
+        (fut.strike, fut.tick_size, fut.symbol.as_str()),
+        (-0.01, 0.0025, "USDINR29MAR27FUT")
+    );
+    // NSE F&O is in paise; its scale is unchanged.
+    let nfo = parse_file(
+        "NSE_FO",
+        "pSymbol,pExchSeg,pSymbolName,pTrdSymbol,pOptionType,dTickSize ,lLotSize,lExpiryDate ,dStrikePrice;\n\
+         35003,nse_fo,NIFTY,NIFTY26OCT25000CE,CE,5,75,1477665000,2500000\n",
+    )
+    .unwrap();
+    assert_eq!((nfo[0].strike, nfo[0].tick_size), (25000.0, 0.05));
+}
+
 // ---------------------------------------------------------------------------
 // SFeed
 // ---------------------------------------------------------------------------

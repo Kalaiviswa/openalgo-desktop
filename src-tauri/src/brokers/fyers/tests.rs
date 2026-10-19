@@ -924,7 +924,7 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
     assert_eq!(ticks.len(), 3);
     let s = &ticks[0];
     assert_eq!((s.symbol.as_str(), s.exchange.as_str()), ("SBIN", "NSE"));
-    // value / multiplier / 100
+    // value / (10^precision * multiplier)
     assert_eq!(
         (s.ltp, s.open, s.high, s.low, s.close),
         (954.1, 951.0, 957.4, 948.2, 950.65)
@@ -1014,6 +1014,73 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
     let full = data_frame(&[snapshot(7, "sf|nse_cm|3045", &[1; 23], Some((100, 2)))]);
     for cut in 0..full.len() {
         let _ = f.parse(&Message::Binary(full[..cut].to_vec()));
+    }
+}
+
+/// Web test/test_fyers_hsm_price_precision.py (#2235): HSM prices are
+/// scaled by the instrument's precision, as the SDK decodes them
+/// (`raw / (10^precision * multiplier)`), not by a fixed /100. Currency
+/// carries precision 4, so USDINR came out 100x too large (9574.25 on the
+/// socket against 95.7425 from REST).
+#[test]
+fn hsm_prices_scale_by_the_instrument_precision() {
+    let mut f = feed();
+    f.subscribe_frames(&[
+        sub("USDINR27OCT26FUT", "CDS", FeedMode::Depth),
+        sub("SBIN", "NSE", FeedMode::Ltp),
+    ]);
+    let mut quote = vec![NA; 21];
+    quote[0] = 957_425; // ltp
+    quote[11] = 957_125; // average trade price
+    quote[13] = 956_000; // low
+    quote[14] = 958_000; // high
+    quote[19] = 957_000; // open
+    quote[20] = 957_500; // previous close
+    let mut book = vec![NA; 32];
+    book[0] = 957_400; // best bid
+    book[5] = 957_450; // best ask
+    book[10] = 10;
+    book[15] = 12;
+    let ev = f.parse(&Message::Binary(data_frame(&[
+        snapshot(1, "sf|cde_fo|12001", &quote, Some((1, 4))),
+        snapshot(2, "dp|cde_fo|12001", &book, Some((1, 4))),
+        // Precision 2 with a multiplier: the SDK divides by both.
+        snapshot(3, "sf|nse_cm|3045", &[250_000], Some((10, 2))),
+    ])));
+    let tick = |symbol: &str| {
+        ev.iter()
+            .find_map(|e| match e {
+                FeedEvent::Tick(t) if t.symbol == symbol => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let usd = tick("USDINR27OCT26FUT");
+    assert_eq!(
+        (usd.ltp, usd.open, usd.high, usd.low, usd.close),
+        (95.7425, 95.7, 95.8, 95.6, 95.75)
+    );
+    assert_eq!(usd.average_price, 95.7125);
+    let depth = ev
+        .iter()
+        .find_map(|e| match e {
+            FeedEvent::Depth(d) => Some(d.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((depth.buy[0].price, depth.sell[0].price), (95.74, 95.745));
+    assert_eq!(tick("SBIN").ltp, 250.0);
+
+    // A zero multiplier counts as 1: it never zeroes or skips the scale.
+    let ev = f.parse(&Message::Binary(data_frame(&[snapshot(
+        4,
+        "sf|cde_fo|12001",
+        &[957_425],
+        Some((0, 4)),
+    )])));
+    match &ev[..] {
+        [FeedEvent::Tick(t)] => assert_eq!(t.ltp, 95.7425),
+        other => panic!("unexpected {:?}", other),
     }
 }
 
