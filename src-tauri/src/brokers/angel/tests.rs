@@ -568,11 +568,11 @@ fn gtt_bodies_single_and_oco_legs() {
 #[test]
 fn gtt_market_becomes_protected_limit() {
     let row = master().by_symbol("NSE", "SBIN").unwrap();
-    let r = apply_mpp(&gtt(GttTriggerType::Single, PriceType::Market), &row, 954.1);
+    let r = apply_mpp(&gtt(GttTriggerType::Single, PriceType::Market), &row, 954.1).unwrap();
     assert_eq!(r.pricetype, PriceType::Limit);
     // 954.1 * 1.005 = 958.8705 -> tick 0.05 -> 958.85
     assert_eq!(r.price, 958.85);
-    let r = apply_mpp(&gtt(GttTriggerType::Oco, PriceType::Market), &row, 0.0);
+    let r = apply_mpp(&gtt(GttTriggerType::Oco, PriceType::Market), &row, 0.0).unwrap();
     assert_eq!((r.stoploss, r.target), (884.4, 994.95));
 }
 

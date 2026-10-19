@@ -38,12 +38,12 @@ pub fn quantity_in_lots(symbol: &str, exchange: &str, quantity: i64, lot_size: i
 /// Order type and limit price after Market Price Protection (web
 /// `transform_data`): MARKET -> LIMIT at LTP +/- slab when an LTP is known,
 /// SL-M -> STOPLOSS with a limit at trigger +/- slab.
-pub fn protected_order(o: &ResolvedOrder, ltp: Option<f64>) -> (&'static str, f64) {
+pub fn protected_order(o: &ResolvedOrder, ltp: Option<f64>) -> Result<(&'static str, f64)> {
     let tick = Some(o.instrument.tick_size).filter(|t| *t > 0.0);
     let itype = mpp::instrument_type_from_symbol(&o.symbol);
-    match o.pricetype {
+    Ok(match o.pricetype {
         PriceType::Market => match ltp.filter(|l| *l > 0.0) {
-            Some(l) => ("LIMIT", mpp::protected_price(l, o.action, itype, tick)),
+            Some(l) => ("LIMIT", mpp::protected_price(l, o.action, itype, tick)?),
             None => {
                 tracing::warn!("No LTP for {}; sending the MARKET order as is", o.symbol);
                 ("MARKET", o.price)
@@ -51,10 +51,10 @@ pub fn protected_order(o: &ResolvedOrder, ltp: Option<f64>) -> (&'static str, f6
         },
         PriceType::SlM if o.trigger_price > 0.0 => (
             "STOPLOSS",
-            mpp::protected_price(o.trigger_price, o.action, itype, tick),
+            mpp::protected_price(o.trigger_price, o.action, itype, tick)?,
         ),
         other => (mapping::map_order_type(other), o.price),
-    }
+    })
 }
 
 /// web `place_order_api` payload.
@@ -113,7 +113,7 @@ pub async fn place_order(
     } else {
         None
     };
-    let (ordertype, price) = protected_order(o, ltp);
+    let (ordertype, price) = protected_order(o, ltp)?;
     let body = place_order_body(o, ordertype, price, lots);
     let v = b.post(&s, paths::PLACE, Some(&body)).await?;
     let id = vs(&v, "uniqueorderid").ok_or_else(|| {

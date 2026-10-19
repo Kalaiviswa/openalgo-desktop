@@ -556,7 +556,7 @@ fn gtt(kind: GttTriggerType, action: Action, pricetype: PriceType) -> GttRequest
 fn gtt_single_direction_follows_last_price() {
     let row = master().by_symbol("NSE", "RELIANCE").unwrap();
     let mut req = gtt(GttTriggerType::Single, Action::Buy, PriceType::Limit);
-    let (kind, side, rules) = build_rules(&req, &row, 1400.0);
+    let (kind, side, rules) = build_rules(&req, &row, 1400.0).unwrap();
     assert_eq!((kind, side), ("SINGLE", Action::Buy));
     assert_eq!(
         rules,
@@ -564,17 +564,20 @@ fn gtt_single_direction_follows_last_price() {
     );
     req.trigger_price = 1450.0;
     assert_eq!(
-        build_rules(&req, &row, 1400.0).2[0]["trigger_type"],
+        build_rules(&req, &row, 1400.0).unwrap().2[0]["trigger_type"],
         "ABOVE"
     );
     req.trigger_price = 1400.0;
     assert_eq!(
-        build_rules(&req, &row, 1400.0).2[0]["trigger_type"],
+        build_rules(&req, &row, 1400.0).unwrap().2[0]["trigger_type"],
         "IMMEDIATE"
     );
     // Without a last price the populated field decides.
     req.trigger_price = 0.0;
-    assert_eq!(build_rules(&req, &row, 0.0).2[0]["trigger_type"], "ABOVE");
+    assert_eq!(
+        build_rules(&req, &row, 0.0).unwrap().2[0]["trigger_type"],
+        "ABOVE"
+    );
 }
 
 #[test]
@@ -582,7 +585,7 @@ fn gtt_oco_is_a_bracket_with_inverted_entry() {
     let row = master().by_symbol("NSE", "RELIANCE").unwrap();
     // Exit side SELL -> entry BUY (long): target above, stop below.
     let req = gtt(GttTriggerType::Oco, Action::Sell, PriceType::Limit);
-    let (kind, side, rules) = build_rules(&req, &row, 1400.0);
+    let (kind, side, rules) = build_rules(&req, &row, 1400.0).unwrap();
     assert_eq!((kind, side), ("MULTIPLE", Action::Buy));
     assert_eq!(rules[0]["strategy"], "ENTRY");
     assert_eq!(rules[0]["trigger_price"], 1400.0);
@@ -593,7 +596,7 @@ fn gtt_oco_is_a_bracket_with_inverted_entry() {
     assert_eq!(rules[2]["trigger_price"], 1300.0);
     // Exit side BUY -> entry SELL (short): target below.
     let req = gtt(GttTriggerType::Oco, Action::Buy, PriceType::Limit);
-    let (_, side, rules) = build_rules(&req, &row, 1400.0);
+    let (_, side, rules) = build_rules(&req, &row, 1400.0).unwrap();
     assert_eq!(side, Action::Sell);
     assert_eq!(rules[1]["trigger_price"], 1300.0);
     assert_eq!(rules[2]["trigger_price"], 1500.0);
@@ -603,17 +606,17 @@ fn gtt_oco_is_a_bracket_with_inverted_entry() {
 fn gtt_market_uses_market_protection_and_modify_strips_it() {
     let row = master().by_symbol("NSE", "RELIANCE").unwrap();
     let req = gtt(GttTriggerType::Single, Action::Buy, PriceType::Market);
-    assert_eq!(market_protection(&req, &row, 1300.0), Some(1));
-    assert_eq!(market_protection(&req, &row, 50.0), Some(2));
-    let (_, _, rules) = build_rules(&req, &row, 1400.0);
+    assert_eq!(market_protection(&req, &row, 1300.0).unwrap(), Some(1));
+    assert_eq!(market_protection(&req, &row, 50.0).unwrap(), Some(2));
+    let (_, _, rules) = build_rules(&req, &row, 1400.0).unwrap();
     assert_eq!(rules[0]["market_protection"], 1);
-    let m = modify_body(&req, &row, 1400.0, "GTT-1");
+    let m = modify_body(&req, &row, 1400.0, "GTT-1").unwrap();
     assert_eq!(m["gtt_order_id"], "GTT-1");
     assert!(m["rules"][0].get("market_protection").is_none());
     assert!(m.get("instrument_token").is_none());
     assert!(m.get("transaction_type").is_none());
     let opt = master().by_symbol("NFO", "NIFTY06OCT2624500CE").unwrap();
-    assert_eq!(market_protection(&req, &opt, 5.0), Some(5));
+    assert_eq!(market_protection(&req, &opt, 5.0).unwrap(), Some(5));
 }
 
 #[test]

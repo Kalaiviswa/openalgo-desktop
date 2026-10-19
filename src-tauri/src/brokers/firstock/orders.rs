@@ -57,7 +57,7 @@ pub async fn place_order(
         None
     };
     let v = b
-        .call_ok("/placeOrder", mapping::place_body(o, quote), &s)
+        .call_ok("/placeOrder", mapping::place_body(o, quote)?, &s)
         .await?;
     let id = v
         .get("data")
@@ -88,7 +88,7 @@ pub async fn modify_order(
     } else {
         None
     };
-    b.call_ok("/modifyOrder", mapping::modify_body(m, quote), &s)
+    b.call_ok("/modifyOrder", mapping::modify_body(m, quote)?, &s)
         .await?;
     Ok(OrderResponse {
         order_id: m.order_id.clone(),
@@ -268,7 +268,7 @@ pub async fn calculate_margin(
                 trigger: l.trigger_price,
             },
             quote,
-        );
+        )?;
         built.push(json!({
             "exchange": l.key.exchange,
             "tradingSymbol": escape_tsym(row.br_symbol()),

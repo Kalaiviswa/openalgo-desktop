@@ -22,7 +22,7 @@ use std::collections::HashSet;
 
 /// web `_protective_limit`: the MPP-protected limit off a trigger, or the
 /// trigger itself when the instrument has no tick size.
-pub fn protective_limit(trigger: f64, action: Action, symbol: &str, tick: f64) -> f64 {
+pub fn protective_limit(trigger: f64, action: Action, symbol: &str, tick: f64) -> Result<f64> {
     if tick > 0.0 {
         protected_price(
             trigger,
@@ -31,7 +31,7 @@ pub fn protective_limit(trigger: f64, action: Action, symbol: &str, tick: f64) -
             Some(tick),
         )
     } else {
-        trigger
+        Ok(trigger)
     }
 }
 
@@ -74,7 +74,7 @@ pub fn place_body(o: &ResolvedOrder, ltp: Option<f64>) -> Result<(&'static str, 
         let limit = if o.pricetype == PriceType::Sl && o.price > 0.0 {
             o.price
         } else {
-            protective_limit(trigger, o.action, &o.symbol, tick)
+            protective_limit(trigger, o.action, &o.symbol, tick)?
         };
         m.insert("order_type".into(), json!("TRIGGER"));
         m.insert("validity".into(), json!("DAY"));
