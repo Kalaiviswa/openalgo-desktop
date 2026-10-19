@@ -953,9 +953,9 @@ fn listed_segments(s: &Server) -> Vec<(&'static str, String, &'static str)> {
 
 /// MC-02: a Kotak master is all or nothing. A listed segment file that is
 /// refused, has no instruments or cannot be read fails the download by
-/// name, so the stored master is kept; a required segment missing from the
-/// listing fails it too; only the currency and commodity files may be
-/// absent from the day's listing.
+/// name, so the stored master is kept; a segment missing from the listing
+/// fails it too, the currency and commodity files included (web #2235
+/// `REQUIRED_SEGMENTS`: all six).
 #[tokio::test]
 async fn master_contract_is_all_or_nothing() {
     async fn run(
@@ -1006,11 +1006,18 @@ async fn master_contract_is_all_or_nothing() {
         .unwrap_err()
         .client_message();
     assert!(msg.contains("BSE_CM"), "{}", msg);
-    // No commodity file listed today: the rest is a complete master.
-    let rows = run(Some("MCX_FO"), None).await.unwrap();
-    assert!(!rows.is_empty());
-    assert!(!rows.iter().any(|r| r.exchange == "MCX"));
-    assert!(rows.iter().any(|r| r.exchange == "BFO"));
+    // Web test_a_segment_missing_from_the_scripmaster_list_also_keeps_them:
+    // no commodity or currency file listed is no complete master either.
+    for key in ["MCX_FO", "CDE_FO"] {
+        let msg = run(Some(key), None).await.unwrap_err().client_message();
+        assert!(msg.contains(key), "{}", msg);
+        assert!(msg.contains("existing symbols were kept"), "{}", msg);
+    }
+    // Every file listed and readable: a complete master.
+    let rows = run(None, None).await.unwrap();
+    for ex in ["NSE", "NFO", "BSE", "CDS", "MCX", "BFO"] {
+        assert!(rows.iter().any(|r| r.exchange == ex), "{}", ex);
+    }
 }
 
 #[tokio::test]
