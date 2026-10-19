@@ -172,54 +172,53 @@ impl SqliteDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
-    /// DB-01: a write that has waited a while still gets in at the first
-    /// pause after the transaction it waits for, every time. SQLite's own
-    /// `busy_timeout` backs off to a try every 100 ms after the first
-    /// 228 ms: behind a 400 ms transaction its tries land in the 20 ms pause
-    /// that follows only by chance (about one time in five, as its sleeps
-    /// overrun under load), otherwise it waits for a later pause (820 ms or
-    /// more). Three writes in a row all getting in at their first pause is
-    /// then about a one in a hundred chance. This is how a write kept
-    /// missing the pauses between the master replacement's transactions.
+    /// DB-01: a write waiting behind a transaction gets in during the
+    /// master replacement's pause that follows it, every time. Checked by
+    /// order, not by the clock: the holder counts the rows at the start of
+    /// each transaction, so a write that missed the pause shows up as a
+    /// count one short, however slow the runner. SQLite's own
+    /// `busy_timeout` retries at about 228, 328 and 428 ms into its wait:
+    /// behind a 350 ms transaction none of its tries fall in the pause, so
+    /// it misses every time; `retry_busy` tries every millisecond (every
+    /// timer tick where sleeps are coarser) and gets in each time.
     #[test]
     fn a_waiting_write_gets_in_at_the_first_pause() {
         let dir = tempfile::tempdir().unwrap();
         let pool = open_pool(&dir.path().join("t.db"), 2, Durability::MAIN).unwrap();
         let holder = pool.get().unwrap();
         holder.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
-        let hold = Duration::from_millis(400);
-        let pause = Duration::from_millis(20);
+        let hold = Duration::from_millis(350);
         let rounds = 3;
         let (began, holding) = std::sync::mpsc::sync_channel(rounds);
         let busy = std::thread::spawn(move || {
-            for _ in 0..rounds {
+            let mut seen = Vec::new();
+            for round in 0..=rounds {
                 holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let rows: i64 = holder
+                    .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+                    .unwrap();
+                seen.push(rows);
+                if round == rounds {
+                    holder.execute_batch("COMMIT").unwrap();
+                    break;
+                }
                 let _ = began.try_send(());
                 std::thread::sleep(hold);
                 holder.execute_batch("COMMIT").unwrap();
-                std::thread::sleep(pause);
+                std::thread::sleep(master_swap::PAUSE);
             }
+            seen
         });
         let writer = pool.get().unwrap();
-        let mut waits = Vec::new();
         for _ in 0..rounds {
             holding.recv().unwrap();
-            let t = Instant::now();
             writer.execute("INSERT INTO t VALUES (1)", []).unwrap();
-            waits.push(t.elapsed());
         }
-        busy.join().unwrap();
-        // Each in at its first pause, about 400 ms (one retry, a timer tick
-        // at most, after the transaction ends), not at the next one, about
-        // 820 ms: the limit is midway, a 200 ms margin each way on a loaded
-        // runner.
-        let limit = (hold + hold * 2 + pause) / 2;
-        assert!(
-            waits.iter().all(|w| *w < limit),
-            "the writes waited {:?}",
-            waits
-        );
+        let seen = busy.join().unwrap();
+        // Before round k's transaction the writer's k earlier writes are in:
+        // each got in during the pause right after the transaction it waited
+        // for, ahead of the holder's next one.
+        assert_eq!(seen, vec![0, 1, 2, 3], "rows seen at each transaction");
     }
 }

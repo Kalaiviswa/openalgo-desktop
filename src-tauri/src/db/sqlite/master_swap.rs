@@ -43,10 +43,11 @@ const CHUNK_ROWS: usize = 2_000;
 /// The pause after each short transaction. SQLite's busy wait has no
 /// queue: a writer that begins again at once starves a waiting one (a
 /// back-to-back loop kept a small write waiting over 3 s). A waiting
-/// connection retries every millisecond (`retry_busy`), or every timer tick
-/// where sleeps are coarser (about 15.6 ms on Windows), so a pause longer
-/// than a tick always lets it in.
-const PAUSE: Duration = Duration::from_millis(20);
+/// connection retries every millisecond (`retry_busy`), but a sleep lasts
+/// at least a timer tick where sleeps are coarser (about 15.6 ms on
+/// Windows) and overruns under load: a 20 ms pause held one tick and was
+/// missed on a loaded Windows runner. Three ticks always contain a retry.
+pub(super) const PAUSE: Duration = Duration::from_millis(50);
 
 /// The indexes every master table carries: (name key, columns).
 const INDEXES: [(&str, &str); 5] = [
