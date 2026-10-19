@@ -534,7 +534,9 @@ pub async fn run_claimed(
 }
 
 /// After a sign-in or resume: download when the smart rule says so,
-/// otherwise load the stored master (web `handle_auth_success`).
+/// otherwise load the stored master (web `handle_auth_success`). `Ok(0)`
+/// when a download for the broker is already running: it installs the
+/// master itself when it finishes.
 pub async fn ensure(
     ctx: &Arc<AppState>,
     broker: &Arc<dyn Broker>,
@@ -549,6 +551,18 @@ pub async fn ensure(
         reason
     );
     if !needed {
+        // The stored copy is loaded under the download claim (web #2133
+        // `try_start_cached_master_contract_load`): a running download owns
+        // the status row and is about to install a newer master, which a
+        // load read before its swap would replace with the older one. Held
+        // here, the claim also refuses a download started during the load.
+        let Some(claim) = try_claim(ctx, id) else {
+            tracing::info!(
+                "Master contract download for {} running; not loading the stored copy",
+                id
+            );
+            return Ok(0);
+        };
         {
             let conn = ctx.sqlite.conn()?;
             mcs::init_pending(&conn, id, ctx.now())?;
@@ -559,7 +573,7 @@ pub async fn ensure(
             Ok(_) => tracing::warn!("Stored master for {} is empty; downloading", id),
             Err(e) => tracing::warn!("Stored master for {} could not be read: {}", id, e),
         }
-        return download(ctx, broker, auth).await;
+        return run_claimed(ctx, broker, auth, claim).await;
     }
     // Claim first, reset the row second (web `handle_auth_success`).
     let Some(claim) = claim_and_reset(ctx, id) else {
@@ -1075,6 +1089,76 @@ mod tests {
         drop(held);
         assert!(!ctx.runtime.claims.is_running("zerodha"));
         assert!(claim_and_reset(ctx, "zerodha").is_some());
+    }
+
+    /// Web #2133 (test_gthread_foundation_db.py
+    /// `test_a_login_on_a_fresh_cache_during_a_download_leaves_it_alone`):
+    /// with today's master stored and a forced re-download running, a
+    /// session start taking the cached path neither resets the download's
+    /// status row nor loads the stored copy it is about to replace.
+    #[tokio::test]
+    async fn a_cached_load_during_a_download_leaves_it_alone() {
+        let (t, zerodha, _angel) = two_brokers(ist(3, 10, 0));
+        let ctx = &t.ctx;
+        let zd: Arc<dyn Broker> = zerodha.clone();
+        download(ctx, &zd, &AuthToken::new("t")).await.unwrap();
+        ctx.clear_symbol_cache();
+        assert!(!should_download(ctx, "zerodha").unwrap().0);
+        // The forced re-download holds the claim and owns the row.
+        let running = claim_and_reset(ctx, "zerodha").expect("download claim");
+        {
+            let c = ctx.sqlite.conn().unwrap();
+            mcs::update(&c, "zerodha", "downloading", "running", None, ctx.now()).unwrap();
+        }
+        zerodha.calls.lock().clear();
+        session_for(ctx, "zerodha");
+        assert_eq!(ensure(ctx, &zd, &AuthToken::new("t")).await.unwrap(), 0);
+        let row = mcs::get(&ctx.sqlite.conn().unwrap(), "zerodha", ctx.now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.status, "downloading",
+            "the running download's row was reset"
+        );
+        assert_eq!(ctx.symbol_count(), 0, "the stored copy was loaded");
+        assert!(zerodha.calls.lock().is_empty(), "a second download started");
+        drop(running);
+    }
+
+    /// Web #2133 (`test_a_download_is_refused_while_the_saved_copy_loads`,
+    /// `test_a_failed_cached_load_releases_its_claim`): a download started
+    /// while the stored copy loads is refused, and the claim is released
+    /// once the load ends; a stored copy that cannot be used falls through
+    /// to a download under the same claim.
+    #[tokio::test]
+    async fn a_download_is_refused_while_the_stored_copy_loads() {
+        let (t, zerodha, _angel) = two_brokers(ist(3, 10, 0));
+        let ctx = &t.ctx;
+        let zd: Arc<dyn Broker> = zerodha.clone();
+        download(ctx, &zd, &AuthToken::new("t")).await.unwrap();
+        ctx.clear_symbol_cache();
+        session_for(ctx, "zerodha");
+        let refused = Arc::new(Mutex::new(None));
+        let (c2, seen) = (ctx.clone(), refused.clone());
+        test_hooks::before_next_load(ctx, move || {
+            *seen.lock() = Some(claim_and_reset(&c2, "zerodha").is_none());
+        });
+        assert_eq!(ensure(ctx, &zd, &AuthToken::new("t")).await.unwrap(), 1);
+        assert_eq!(*refused.lock(), Some(true), "a download started mid-load");
+        assert!(!ctx.runtime.claims.is_running("zerodha"));
+        // An emptied stored copy is downloaded under the load's claim.
+        {
+            let mut c = ctx.sqlite.conn().unwrap();
+            symbol::store_symbols(&mut c, "zerodha", ctx.now(), &[]).unwrap();
+        }
+        ctx.clear_symbol_cache();
+        zerodha.calls.lock().clear();
+        assert_eq!(ensure(ctx, &zd, &AuthToken::new("t")).await.unwrap(), 1);
+        assert!(zerodha
+            .calls
+            .lock()
+            .contains(&crate::brokers::mock::MockCall::MasterContract));
+        assert!(!ctx.runtime.claims.is_running("zerodha"));
     }
 
     #[test]
