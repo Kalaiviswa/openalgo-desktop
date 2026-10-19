@@ -237,6 +237,16 @@ jobs:
         run: npx biome ci --reporter=github ./src
       - name: Type check
         run: npx tsc -b
+      - name: Chart engine references match the pinned openalgo-charts
+        # The web's chart-indicator-skill job: a version bump that leaves the
+        # chart-indicator skill's export index or the generated drawing-tool
+        # and glyph modules behind fails here (CLAUDE.md, "Bumping
+        # openalgo-charts is one change").
+        run: |
+          node .claude/skills/chart-indicator/generate-api-index.mjs --check
+          node .claude/skills/chart-indicator/coverage.mjs
+          node scripts/generate-drawing-tools.mjs --check
+          node scripts/generate-chrome-icons.mjs --check
       - name: Vite build
         run: npx vite build
       - uses: actions/upload-artifact@v6

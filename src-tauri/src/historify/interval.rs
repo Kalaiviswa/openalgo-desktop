@@ -85,12 +85,15 @@ pub fn is_custom(interval: &str) -> bool {
     matches!(parse(interval), Some(p) if p.kind == Kind::Intraday)
 }
 
-/// Web `is_daily_aggregated_interval`: W, M, Q, Y and their multiples.
+/// Web `is_daily_aggregated_interval`: day multiples (`2D`, and `1D`), W,
+/// M, Q, Y and their multiples, all aggregated from stored D candles. Only
+/// the literal `D` is read as stored.
 pub fn is_daily_aggregated(interval: &str) -> bool {
-    matches!(
-        parse(interval).map(|p| p.kind),
-        Some(Kind::Weekly | Kind::Monthly | Kind::Quarterly | Kind::Yearly)
-    )
+    interval != "D"
+        && matches!(
+            parse(interval).map(|p| p.kind),
+            Some(Kind::Daily | Kind::Weekly | Kind::Monthly | Kind::Quarterly | Kind::Yearly)
+        )
 }
 
 /// Intraday computed (standard or custom).
@@ -135,7 +138,11 @@ mod tests {
         assert!(!is_custom("D"));
         assert!(is_daily_aggregated("W"));
         assert!(is_daily_aggregated("2Y"));
-        assert!(!is_daily_aggregated("2D"));
+        // Web b193606a5: day multiples come from D storage; only `D` is stored.
+        assert!(is_daily_aggregated("2D"));
+        assert!(is_daily_aggregated("1D"));
+        assert!(!is_daily_aggregated("D"));
+        assert!(!is_daily_aggregated("7m"));
         assert_eq!(sorted(COMPUTED_INTERVALS), vec!["15m", "1h", "30m", "5m"]);
     }
 }
