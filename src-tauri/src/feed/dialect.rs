@@ -36,8 +36,9 @@ enum DepthAck {
     /// otherwise (Angel, Dhan, Definedge, the XTS family, Motilal, Nubra,
     /// Pocketful, Samco, Tradejini; the default for a broker not listed).
     Fallback,
-    /// The level it falls back to in Depth mode, `null` otherwise: Arrow
-    /// and both HDFC adapters send `actual_depth=None` outside Depth mode.
+    /// The level it falls back to in Depth mode, `null` otherwise: Arrow,
+    /// both HDFC adapters and Rupeezy send `actual_depth=None` outside
+    /// Depth mode.
     FallbackElseNull,
     /// Always 5, in every mode (IIFL Capital).
     Five,
@@ -48,7 +49,7 @@ fn depth_ack(broker: &str) -> DepthAck {
         "zerodha" | "fyers" | "upstox" | "kotak" | "groww" | "aliceblue" | "shoonya"
         | "flattrade" | "zebu" | "tradesmart" | "firstock" | "fivepaisa" | "indmoney"
         | "mstock" | "paytm" | "deltaexchange" => DepthAck::Echo,
-        "arrow" | "hdfcsecurities" | "hdfcsky" => DepthAck::FallbackElseNull,
+        "arrow" | "hdfcsecurities" | "hdfcsky" | "rupeezy" => DepthAck::FallbackElseNull,
         "iiflcapital" => DepthAck::Five,
         _ => DepthAck::Fallback,
     }
@@ -107,14 +108,14 @@ pub(crate) struct Aliases {
     /// `average_price` (Fyers).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_trade_price: Option<f64>,
-    /// `price_change` (Fyers, Arrow, both HDFC, Tradejini, Samco).
+    /// `price_change` (Fyers, Arrow, both HDFC, Rupeezy, Tradejini, Samco).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change: Option<f64>,
     /// `price_change` (Paytm).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_absolute: Option<f64>,
     /// `price_change_percent` (Fyers, AliceBlue, Arrow, both HDFC,
-    /// Definedge, Paytm, Tradejini).
+    /// Definedge, Paytm, Rupeezy, Tradejini).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_percent: Option<f64>,
     /// `price_change_percent` (Shoonya, Flattrade, Zebu, TradeSmart).
@@ -200,7 +201,7 @@ fn dialect(broker: &str) -> Dialect {
             last_quantity: Some(Q::Ltq),
             ..CANONICAL
         },
-        "arrow" | "hdfcsecurities" | "hdfcsky" | "tradejini" => Dialect {
+        "arrow" | "hdfcsecurities" | "hdfcsky" | "rupeezy" | "tradejini" => Dialect {
             change: Some(C::Change),
             change_percent: Some(P::ChangePercent),
             ..CANONICAL
@@ -338,6 +339,8 @@ mod tests {
             ("fyers", "avg_trade_price", "average_price"),
             ("fyers", "change", "price_change"),
             ("tradejini", "change", "price_change"),
+            ("rupeezy", "change", "price_change"),
+            ("rupeezy", "change_percent", "price_change_percent"),
             ("paytm", "change_absolute", "price_change"),
             ("fyers", "change_percent", "price_change_percent"),
             ("aliceblue", "change_percent", "price_change_percent"),
@@ -444,12 +447,12 @@ mod tests {
         assert_eq!(subscribe_depth("angel", Mode::Depth, 5, &[]), None);
     }
 
-    /// Arrow and both HDFC adapters send `actual_depth=None` outside Depth
-    /// mode, so the web answers `"depth": null` there; IIFL Capital always
-    /// names 5.
+    /// Arrow, both HDFC adapters and Rupeezy send `actual_depth=None`
+    /// outside Depth mode, so the web answers `"depth": null` there; IIFL
+    /// Capital always names 5.
     #[test]
     fn arrow_and_hdfc_name_no_depth_outside_depth_mode_and_iifl_capital_five() {
-        for broker in ["arrow", "hdfcsecurities", "hdfcsky"] {
+        for broker in ["arrow", "hdfcsecurities", "hdfcsky", "rupeezy"] {
             for mode in [Mode::Ltp, Mode::Quote] {
                 assert_eq!(subscribe_depth(broker, mode, 5, &[5]), Some((5, None)));
             }

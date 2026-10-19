@@ -39,6 +39,7 @@ pub mod nubra;
 pub mod paytm;
 pub mod pocketful;
 pub mod rmoney;
+pub mod rupeezy;
 pub mod samco;
 pub mod setup_guide;
 pub mod shoonya;
@@ -140,6 +141,19 @@ pub trait Broker: Send + Sync {
     // ---- orders ----
 
     async fn place_order(&self, auth: &AuthToken, order: &ResolvedOrder) -> Result<OrderResponse>;
+
+    /// A live order with the request's `strategy`, for an adapter whose web
+    /// plugin sends it to the broker (Rupeezy's `order_identifier`). The
+    /// order service's live placement calls this; the default sends the
+    /// order without it.
+    async fn place_order_with_strategy(
+        &self,
+        auth: &AuthToken,
+        order: &ResolvedOrder,
+        _strategy: &str,
+    ) -> Result<OrderResponse> {
+        self.place_order(auth, order).await
+    }
 
     async fn modify_order(&self, auth: &AuthToken, order: &ResolvedModify)
         -> Result<OrderResponse>;
@@ -629,6 +643,7 @@ impl BrokerRegistry {
             Arc::new(paytm::PaytmBroker::new(symbols.clone())),
             Arc::new(hdfcsky::HdfcSkyBroker::new(symbols.clone())),
             Arc::new(hdfcsecurities::HdfcSecuritiesBroker::new(symbols.clone())),
+            Arc::new(rupeezy::RupeezyBroker::new(symbols.clone())),
             Arc::new(samco::SamcoBroker::new(symbols.clone())),
             Arc::new(aliceblue::AliceBlueBroker::new(symbols.clone())),
             Arc::new(definedge::DefinedgeBroker::new(symbols.clone())),
@@ -728,6 +743,7 @@ mod tests {
                 "paytm",
                 "pocketful",
                 "rmoney",
+                "rupeezy",
                 "samco",
                 "shoonya",
                 "tradejini",

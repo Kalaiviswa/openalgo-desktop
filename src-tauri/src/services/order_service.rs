@@ -314,7 +314,11 @@ pub async fn place_live(h: &BrokerHandle, ctx: &AppState, req: &Value) -> Reply 
     let placed = outcome::placing(broker_call(&h.id, async {
         match &crypto {
             Some(q) => h.broker.place_order_exact(&h.auth, &order, q).await,
-            None => h.broker.place_order(&h.auth, &order).await,
+            None => {
+                h.broker
+                    .place_order_with_strategy(&h.auth, &order, &s(req, "strategy"))
+                    .await
+            }
         }
     }))
     .await;

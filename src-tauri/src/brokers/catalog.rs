@@ -44,6 +44,7 @@ pub const ALL_BROKERS: &[&str] = &[
     "paytm",
     "pocketful",
     "rmoney",
+    "rupeezy",
     "samco",
     "shoonya",
     "tradejini",
@@ -76,7 +77,7 @@ pub fn auth_type(broker: &str) -> AuthType {
     match broker {
         "zerodha" | "fyers" | "upstox" | "dhan" | "arrow" | "paytm" | "pocketful" | "hdfcsky"
         | "hdfcsecurities" | "flattrade" | "compositedge" | "iiflcapital" | "rmoney"
-        | "shoonya" | "zebu" | "tradesmart" | "aliceblue" => AuthType::OAuth,
+        | "shoonya" | "zebu" | "tradesmart" | "aliceblue" | "rupeezy" => AuthType::OAuth,
         _ => AuthType::Form,
     }
 }
@@ -136,7 +137,7 @@ pub struct AuthorizeUrl {
 /// Whether the broker's redirect reliably carries the `state` OpenAlgo
 /// sent. Dhan's consent redirect returns only `tokenId`, and the Noren
 /// OAuth pages (shoonya, zebu, tradesmart, flattrade), Arrow, the HDFC
-/// pair and AliceBlue may drop it; a callback from these without `state` is
+/// pair, AliceBlue and Rupeezy may drop it; a callback from these without `state` is
 /// matched to the newest pending sign-in of that broker started from the
 /// same browser session (single use, 3 minutes) and bound to the
 /// configured account.
@@ -152,13 +153,15 @@ pub fn callback_carries_state(broker: &str) -> bool {
             | "hdfcsky"
             | "hdfcsecurities"
             | "aliceblue"
+            | "rupeezy"
     )
 }
 
 /// Brokers whose sign-in is bound to a client id the trader enters
 /// separately (the Profile broker form shows the field for these): their
 /// redirect may drop `state` and their API key does not carry the account.
-pub const CLIENT_ID_BROKERS: &[&str] = &["arrow", "hdfcsky", "hdfcsecurities", "aliceblue"];
+pub const CLIENT_ID_BROKERS: &[&str] =
+    &["arrow", "hdfcsky", "hdfcsecurities", "aliceblue", "rupeezy"];
 
 /// The trading account the stored credentials name, for brokers whose
 /// configuration carries it: Dhan and the Noren family take
@@ -177,7 +180,8 @@ pub fn configured_account(broker: &str, api_key: &str, client_id: Option<&str>) 
         .map(str::trim)
         .filter(|c| !c.is_empty())
         .map(str::to_string);
-    // Arrow and the HDFC pair: the client id, when the trader entered one.
+    // Arrow, the HDFC pair, AliceBlue and Rupeezy: the client id, when the
+    // trader entered one.
     if CLIENT_ID_BROKERS.contains(&broker) {
         return client;
     }
@@ -364,6 +368,14 @@ fn authorize_url_string(
         "aliceblue" => Some(format!(
             "https://ant.aliceblueonline.com/?appcode={}",
             enc(api_key)
+        )),
+        // Rupeezy Vortex SSO: the application id, and `state` so the
+        // callback can match it when Rupeezy echoes it (the web's address
+        // has none; the redirect carries the code as `auth`).
+        "rupeezy" => Some(format!(
+            "https://flow.rupeezy.in?applicationId={}&state={}",
+            enc(api_key),
+            enc(state)
         )),
         _ => None,
     }
@@ -594,6 +606,9 @@ pub fn extract_code(broker: &str, params: &HashMap<String, String>) -> Option<St
             (Some(user), Some(code)) => Some(format!("{}:{}", user, code)),
             _ => None,
         },
+        // Rupeezy Vortex SSO returns the code as `auth` (web brlogin also
+        // accepts `code`).
+        "rupeezy" => get("auth").or_else(|| get("code")),
         _ => get("code").or_else(|| get("request_token")),
     }
 }
@@ -1049,8 +1064,34 @@ mod tests {
     }
 
     #[test]
+    fn rupeezy_login_url_and_auth_code() {
+        assert_eq!(auth_type("rupeezy"), AuthType::OAuth);
+        assert_eq!(sign_in("rupeezy"), SignIn::Redirect);
+        let u = authorize_url("rupeezy", "app 1", "r", "st5").unwrap().url;
+        assert_eq!(u, "https://flow.rupeezy.in?applicationId=app%201&state=st5");
+        // The code comes back as `auth`; `code` is the web's fallback.
+        let p = q(&[("auth", "a9"), ("code", "c1"), ("state", "st5")]);
+        assert_eq!(extract_code("rupeezy", &p).as_deref(), Some("a9"));
+        assert_eq!(
+            extract_code("rupeezy", &q(&[("code", "c2")])).as_deref(),
+            Some("c2")
+        );
+        assert_eq!(extract_code("rupeezy", &q(&[("request_token", "x")])), None);
+        // The redirect may drop `state`: a state-less sign-in is bound to
+        // the client id saved on Broker Configuration.
+        assert!(!callback_carries_state("rupeezy"));
+        assert!(CLIENT_ID_BROKERS.contains(&"rupeezy"));
+        assert_eq!(
+            configured_account("rupeezy", "app", Some(" RZ1 ")).as_deref(),
+            Some("RZ1")
+        );
+        assert_eq!(configured_account("rupeezy", "app", None), None);
+        assert!(login_fields("rupeezy").is_empty());
+    }
+
+    #[test]
     fn catalogue_has_all_web_brokers() {
-        assert_eq!(ALL_BROKERS.len(), 36);
+        assert_eq!(ALL_BROKERS.len(), 37);
         assert_eq!(auth_type("angel"), AuthType::Form);
         assert_eq!(auth_type("zerodha"), AuthType::OAuth);
     }

@@ -195,14 +195,14 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
 
 ### Brokers
 
-All 36 web brokers are in scope, Delta Exchange (crypto) among them. They are built by
+All 37 web brokers are in scope, Delta Exchange (crypto) among them. They are built by
 **auth family**, not one by one:
 
 | Family | Implementation | Members |
 | --- | --- | --- |
 | Noren / Finvasia | generic `NorenBroker<Config>` with hooks | shoonya, flattrade, tradesmart, zebu (firstock is separate: own JSON transport) |
 | Symphony XTS | generic `XtsBroker<Config>` | fivepaisaxts, jainamxts, compositedge, rmoney, ibulls, wisdom, and others per the audit |
-| OAuth redirect | per broker | zerodha, upstox, fyers, dhan, groww, arrow, paytm, aliceblue, definedge, pocketful, hdfcsky, hdfcsecurities |
+| OAuth redirect | per broker | zerodha, upstox, fyers, dhan, groww, arrow, paytm, aliceblue, definedge, pocketful, hdfcsky, hdfcsecurities, rupeezy |
 | Direct login + TOTP | per broker | angel, kotak, mstock, motilal, samco, tradejini, fivepaisa, nubra, indmoney |
 | Bespoke | per broker | iiflcapital (REST + MQTT), deltaexchange (HMAC, `CRYPTO` exchange, leverage) |
 

@@ -1,0 +1,156 @@
+{
+  "_source": "Rupeezy Vortex API answers, shaped from the web plugin (openalgo 9aa6f2e30 broker/rupeezy, test/test_rupeezy_broker.py) and the Vortex docs (vortex.rupeezy.in/docs/latest). Placeholders only: no real account, token or key.",
+  "session_ok": {
+    "status": "success",
+    "data": {
+      "access_token": "<TOKEN>",
+      "user_name": "TEST TRADER",
+      "login_time": "2026-Oct-19 09:10:50",
+      "email": "<EMAIL>",
+      "mobile": "9999999999",
+      "exchanges": ["NSE_EQ", "NSE_FO", "MCX_FO"],
+      "product_types": ["INTRADAY", "DELIVERY", "MTF"],
+      "others": {"userCode": "<USER_ID>", "POA": 2},
+      "user_id": "<USER_ID>",
+      "tradingActive": true
+    }
+  },
+  "session_refused": {"status": "error", "code": "e-101", "message": "Invalid checksum"},
+  "place_ok": {"status": "success", "code": "", "message": "Order placed successfully", "data": {"order_id": "NXAAE00002K3"}},
+  "place_refused": {"status": "error", "code": "e-103", "message": "Insufficient funds to place this order"},
+  "modify_ok": {"status": "success", "code": "", "message": "Order modified successfully", "data": {"order_id": "OFPIM00003?:"}},
+  "cancel_ok": {"status": "success", "code": "", "message": "Order cancelled successfully", "data": {"order_id": "OFPIM00003?:"}},
+  "cancel_refused": {"status": "error", "code": "e-104", "message": "Order is already in a final state"},
+  "order_history_live": {
+    "status": "success",
+    "metadata": {"total_records": 2},
+    "orders": [
+      {"order_id": "OFPIM00003?:", "ticker": "NSE:IDEA", "exchange": "NSE_EQ", "status": "PENDING", "transaction_type": "BUY", "product": "INTRADAY", "variety": "RL", "total_quantity": 10, "pending_quantity": 7, "traded_quantity": 3, "order_price": 11.4, "trigger_price": 0, "validity": "DAY", "order_created_at": "2026-10-19 10:02:11"},
+      {"order_id": "OFPIM00003?:", "ticker": "NSE:IDEA", "exchange": "NSE_EQ", "status": "OMSXMITTED", "transaction_type": "BUY", "product": "INTRADAY", "variety": "RL", "total_quantity": 10, "pending_quantity": 10, "traded_quantity": 0, "order_price": 11.4, "trigger_price": 0, "validity": "DAY", "order_created_at": "2026-10-19 10:02:10"}
+    ]
+  },
+  "orders": {
+    "status": "success",
+    "orders": [
+      {"order_id": "NXAAE00002K3", "ticker": "NSE:SBIN", "exchange": "NSE_EQ", "token": 3045, "order_number": "1100000012345678", "status": "PENDING", "error_reason": "", "transaction_type": "BUY", "product": "INTRADAY", "variety": "RL", "total_quantity": 10, "pending_quantity": 10, "traded_quantity": 0, "disclosed_quantity": 0, "order_price": 801.5, "trigger_price": 0, "traded_price": 0, "validity": "DAY", "symbol": "SBIN", "lot_size": 1, "order_created_at": "2026-10-19 09:20:01", "is_amo": false, "order_identifier": "openalgo"},
+      {"order_id": "NXAAE00003K3", "ticker": "MCX:CRUDEOIL28MARFUT", "exchange": "MCX_FO", "token": 585909, "order_number": "", "status": "EXECUTED", "error_reason": null, "transaction_type": "SELL", "product": "DELIVERY", "variety": "RL-MKT", "total_quantity": 2, "pending_quantity": 0, "traded_quantity": 2, "order_price": 0, "trigger_price": 0, "traded_price": 6500.0, "validity": "DAY", "symbol": "CRUDEOIL", "lot_size": 100, "order_created_at": "2026-10-19 09:21:30"},
+      {"order_id": "NXAAE00004K3", "ticker": "NSE:NIFTY26OCT25000CE", "exchange": "NSE_FO", "token": 51440, "status": "REJECTED", "error_reason": "RMS: margin exceeds available funds", "transaction_type": "BUY", "product": "INTRADAY", "variety": "SL", "total_quantity": 65, "pending_quantity": 0, "traded_quantity": 0, "order_price": 101.0, "trigger_price": 100.5, "traded_price": 0, "validity": "DAY", "symbol": "NIFTY", "lot_size": 65, "order_created_at": "2026-10-19 09:25:00"},
+      {"order_id": "OFPIM00001?:", "ticker": "NSE:INFY", "exchange": "NSE_EQ", "token": 1594, "status": "TRIGGER PENDING", "transaction_type": "SELL", "product": "DELIVERY", "variety": "SL-MKT", "total_quantity": 4, "pending_quantity": 4, "traded_quantity": 0, "order_price": 0, "trigger_price": 1450.0, "traded_price": 0, "validity": "DAY", "symbol": "INFY", "lot_size": 1, "order_created_at": "2026-10-19 09:30:00"}
+    ],
+    "metadata": {"total_records": 4, "all_records": 4, "completed_records": 2, "open_records": 2}
+  },
+  "trades": {
+    "status": "success",
+    "trades": [
+      {"order_id": "NXAAE00002@6", "ticker": "NSE:ACC", "exchange": "NSE_EQ", "token": 22, "trade_no": "240151701", "exchange_order_no": "1100000012345600", "transaction_type": "SELL", "product": "INTRADAY", "variety": "RL", "trade_quantity": 1, "trade_price": 1856.75, "symbol": "ACC", "traded_at": "2026-10-19 13:06:43"},
+      {"order_id": "NXAAE00003@6", "ticker": "MCX:CRUDEOIL28MARFUT", "exchange": "MCX_FO", "token": 585909, "trade_no": "240151702", "transaction_type": "BUY", "product": "DELIVERY", "variety": "RL", "trade_quantity": 2, "trade_price": 6500, "symbol": "CRUDEOIL", "traded_at": "2026-10-19 13:07:00"},
+      {"order_id": "NXAAE00005@6", "ticker": "MCX:GOLDM26NOVFUT", "exchange": "MCX_FO", "token": 487655, "trade_no": "240151703", "transaction_type": "BUY", "product": "DELIVERY", "variety": "RL", "trade_quantity": 1, "trade_price": 7000, "symbol": "GOLDM", "traded_at": "2026-10-19 13:08:00"}
+    ]
+  },
+  "trades_bare": {
+    "status": "success",
+    "trades": [
+      {"order_id": "NXAAE000027:", "trade_no": "240151710", "trade_price": 14929, "trade_quantity": 1, "traded_at": "2026-10-07 17:41:25"}
+    ]
+  },
+  "orders_for_bare_trade": {
+    "status": "success",
+    "orders": [
+      {"order_id": "NXAAE000027:", "ticker": "MCX:GOLDPETAL26OCTFUT", "exchange": "MCX_FO", "status": "EXECUTED", "transaction_type": "SELL", "product": "DELIVERY", "variety": "RL", "total_quantity": 1, "traded_quantity": 1, "lot_size": 1}
+    ]
+  },
+  "positions": {
+    "status": "success",
+    "data": {
+      "net": [
+        {"ticker": "NSE:SBIN", "exchange": "NSE_EQ", "symbol": "SBIN", "token": 3045, "product": "INTRADAY", "quantity": 10, "buy_quantity": 10, "sell_quantity": 0, "buy_value": 9500, "sell_value": 0, "average_price": 950, "lot_size": 1, "multiplier": 1},
+        {"ticker": "NSE:INFY", "exchange": "NSE_EQ", "symbol": "INFY", "token": 1594, "product": "INTRADAY", "quantity": 0, "buy_quantity": 1, "sell_quantity": 1, "buy_value": 1000, "sell_value": 1025, "average_price": 0, "lot_size": 1, "multiplier": 1},
+        {"ticker": "MCX:GOLDPETAL26OCTFUT", "exchange": "MCX_FO", "symbol": "GOLDPETAL", "token": 487819, "product": "DELIVERY", "quantity": 2, "buy_quantity": 2, "sell_quantity": 0, "buy_value": 29860, "sell_value": 0, "average_price": 14930, "lot_size": 1, "multiplier": 1},
+        {"ticker": "MCX:CRUDEOIL28MARFUT", "exchange": "MCX_FO", "symbol": "CRUDEOIL", "token": 585909, "product": "DELIVERY", "quantity": -2, "buy_quantity": 0, "sell_quantity": 2, "buy_value": 0, "sell_value": 1300000, "average_price": 6500, "lot_size": 100, "multiplier": 1}
+      ],
+      "day": []
+    }
+  },
+  "positions_empty": {"status": "success", "data": {"net": [], "day": []}},
+  "holdings": {
+    "status": "Success",
+    "data": [
+      {"isin": "INE669E01016", "nse": {"ticker": "NSE:IDEA", "token": 14366, "exchange": "NSE_EQ", "symbol": "IDEA"}, "bse": {}, "total_free": 3, "dp_free": 3, "pool_free": 0, "t1_quantity": 0, "average_price": 12.7, "last_price": 13.21, "collateral_quantity": 0, "collateral_value": 0},
+      {"isin": "INE002A01018", "nse": null, "bse": {"ticker": "BSE:RELIANCE", "token": 500325, "exchange": "BSE_EQ", "symbol": "RELIANCE"}, "total_free": 2, "t1_quantity": 1, "average_price": 1400, "collateral_quantity": 0, "collateral_value": 0}
+    ]
+  },
+  "funds": {
+    "nse": {"deposit": 0, "funds_transferred": 0, "collateral": 100, "credit_for_sale": 0, "option_credit_for_sale": 0, "limit_utilization": 0, "mtm_and_booked_loss": -10, "booked_profit": 30, "total_trading_power": 1050, "total_utilization": -50, "net_available": 1000},
+    "mcx": {"deposit": 0, "funds_transferred": 0, "collateral": 100, "credit_for_sale": 0, "option_credit_for_sale": 0, "limit_utilization": 0, "mtm_and_booked_loss": -10, "booked_profit": 30, "total_trading_power": 1050, "total_utilization": -50, "net_available": 1000}
+  },
+  "funds_combined": {
+    "nse": {"net_available": 1000, "collateral": 0, "total_utilization": 0},
+    "mcx": {"net_available": 1000, "collateral": 0, "total_utilization": 0},
+    "exchange_combined": {"net_available": 1500, "collateral": 25, "total_utilization": -120.5, "booked_profit": 999}
+  },
+  "quote_full": {
+    "status": "success",
+    "data": {
+      "NSE:SBIN": {
+        "ticker": "NSE:SBIN", "exchange": "NSE_EQ", "token": 3045,
+        "last_trade_time": 1791279000, "last_trade_price": 954.0, "last_trade_quantity": 5,
+        "volume": 4823170, "average_trade_price": 952.4, "total_buy_quantity": 512633, "total_sell_quantity": 689415,
+        "open_interest": 0, "open_price": 950.0, "high_price": 957.35, "low_price": 948.1, "close_price": 958.75,
+        "depth": {
+          "buy": [{"price": 953.95, "quantity": 54, "orders": 3}, {"price": 953.9, "quantity": 120, "orders": 4}, {}, {}, {}],
+          "sell": [{"price": 954.0, "quantity": 2827, "orders": 9}, {"price": 954.05, "quantity": 10, "orders": 1}]
+        },
+        "dpr_high": 105460, "dpr_low": 86290
+      },
+      "NSE:NIFTYIDX": {
+        "ticker": "NSE:NIFTYIDX", "exchange": "NSE_EQ", "token": 26000,
+        "last_trade_price": 25140.15, "open_price": 25090.0, "high_price": 25190.4, "low_price": 25060.2, "close_price": 25110.0,
+        "volume": 0, "open_interest": 0, "depth": {"buy": [], "sell": []}
+      }
+    }
+  },
+  "quotes_ltp": {
+    "status": "success",
+    "data": {
+      "NSE:SBIN": {"last_trade_price": 954.0},
+      "MCX:GOLDPETAL26OCTFUT": {"last_trade_price": 14935.0},
+      "MCX:CRUDEOIL28MARFUT": {"last_trade_price": 6450.0},
+      "NSE:IDEA": {"last_trade_price": 13.21},
+      "BSE:RELIANCE": {"last_trade_price": 1410.0}
+    }
+  },
+  "history_day": {"s": "ok", "t": [1791138600, 1791052200], "o": [2, 1], "h": [2.5, 1.5], "l": [1.5, 0.5], "c": [2, 1], "v": [20, 10]},
+  "history_minute": {"s": "ok", "t": [1791178200, 1791178260], "o": [950.0, 951.0], "h": [951.5, 952.0], "l": [949.5, 950.5], "c": [951.0, 951.8], "v": [1200, 900]},
+  "history_no_data": {"s": "no_data"},
+  "history_error": {"s": "error", "errmsg": "Invalid resolution"},
+  "gtt_place_ok": {"status": "success", "code": "", "message": "GTT order placed", "data": {"order_id": "fc3e3201-8d34-4b1c-9b7a-0c1f5c3e2a10"}},
+  "gtt_book": {
+    "status": "success",
+    "data": [
+      {
+        "ticker": "NSE:SBIN", "exchange": "NSE_EQ", "id": "8f141670-59b3-4754-81c7-a072f3598475", "lot_size": 1, "product": "INTRADAY", "symbol": "SBIN", "token": 3045, "transaction_type": "SELL", "trigger_type": "oco",
+        "orders": [
+          {"id": 2, "price": 0, "quantity": 190, "status": "active", "trail": null, "transaction_type": "SELL", "trigger_price": 850, "variety": "RL-MKT", "created_at": "2026-10-19T12:24:32Z", "updated_at": "2026-10-19T12:24:32Z", "expires_at": "2027-10-19T12:24:32Z"},
+          {"id": 1, "price": 779, "quantity": 190, "status": "active", "trail": {"id": 9, "trail_jump_point": 2, "trail_jump_type": "Point", "trail_first_jump": 0, "trigger_trail": 0}, "transaction_type": "SELL", "trigger_price": 780, "variety": "RL", "created_at": "2026-10-19T12:24:32Z", "updated_at": "2026-10-19T12:24:32Z", "expires_at": "2027-10-19T12:24:32Z"}
+        ]
+      },
+      {
+        "ticker": "MCX:CRUDEOIL28MARFUT", "exchange": "MCX_FO", "id": "a1b2c3d4-0000-4000-8000-000000000001", "lot_size": 100, "product": "DELIVERY", "symbol": "CRUDEOIL", "token": 585909, "transaction_type": "SELL", "trigger_type": "single",
+        "orders": [
+          {"id": 5, "price": 6400, "quantity": 2, "status": "active", "trail": null, "transaction_type": "SELL", "trigger_price": 6410, "variety": "RL", "created_at": "2026-10-19T10:00:00Z", "updated_at": "2026-10-19T10:00:00Z", "expires_at": "2027-10-19T10:00:00Z"}
+        ]
+      },
+      {
+        "ticker": "NSE:IDEA", "exchange": "NSE_EQ", "id": "a1b2c3d4-0000-4000-8000-000000000002", "lot_size": 1, "product": "DELIVERY", "symbol": "IDEA", "token": 14366, "transaction_type": "BUY", "trigger_type": "oco",
+        "orders": [
+          {"id": 7, "price": 10, "quantity": 5, "status": "cancelled", "trail": null, "transaction_type": "BUY", "trigger_price": 10, "variety": "RL", "created_at": "2026-10-18T10:00:00Z", "updated_at": "2026-10-19T11:00:00Z", "expires_at": "2027-10-18T10:00:00Z"},
+          {"id": 8, "price": 15, "quantity": 5, "status": "triggered", "trail": null, "transaction_type": "BUY", "trigger_price": 15, "variety": "RL", "created_at": "2026-10-18T10:00:00Z", "updated_at": "2026-10-19T11:00:00Z", "expires_at": "2027-10-18T10:00:00Z"}
+        ]
+      }
+    ]
+  },
+  "gtt_modify_ok": {"status": "success", "message": "GTT order modified", "data": {"order_id": "8f141670-59b3-4754-81c7-a072f3598475"}},
+  "gtt_cancel_ok": {"status": "success", "message": "GTT order cancelled", "data": {"order_id": "8f141670-59b3-4754-81c7-a072f3598475"}},
+  "error_session": {"status": "error", "code": "e-101", "message": "Invalid session"},
+  "error_server": {"status": "error", "code": "e-500", "message": "Service unavailable"}
+}

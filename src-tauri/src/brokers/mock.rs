@@ -168,6 +168,8 @@ pub struct MockBroker {
     pub logouts: Mutex<u32>,
     /// Contract multipliers by token sent with the master.
     pub contract_values: Mutex<HashMap<String, f64>>,
+    /// The strategy of each live placement the order service sent.
+    pub strategies: Mutex<Vec<String>>,
     /// Holds `place_order` while set, so a test can act while an order is
     /// in flight.
     pub place_gate: Mutex<Option<std::sync::Arc<PlaceGate>>>,
@@ -245,6 +247,7 @@ impl MockBroker {
             next_id: Mutex::new(0),
             place_gate: Mutex::new(None),
             master_gate: Mutex::new(None),
+            strategies: Mutex::new(Vec::new()),
         }
     }
 
@@ -336,6 +339,16 @@ impl Broker for MockBroker {
             user_id: self.auth_user_id.lock().clone(),
             user_name: Some("Mock Trader".into()),
         })
+    }
+
+    async fn place_order_with_strategy(
+        &self,
+        auth: &AuthToken,
+        order: &ResolvedOrder,
+        strategy: &str,
+    ) -> Result<OrderResponse> {
+        self.strategies.lock().push(strategy.to_string());
+        self.place_order(auth, order).await
     }
 
     async fn place_order(&self, _: &AuthToken, order: &ResolvedOrder) -> Result<OrderResponse> {
