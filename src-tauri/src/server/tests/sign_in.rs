@@ -110,6 +110,7 @@ fn broker_redirect(broker: &str, authorize: &str, cookie: &str) -> Request<Body>
             ("userId".into(), ACCOUNT.into()),
         ],
         "compositedge" | "rmoney" => vec![],
+        "rupeezy" => vec![("auth".into(), "c1".into())],
         _ => vec![("code".into(), "c1".into())],
     };
     if catalog::callback_carries_state(broker) {
@@ -163,7 +164,7 @@ async fn every_broker_signs_in_the_way_the_server_tells_the_broker_page() {
     assert_eq!(mocks.len(), catalog::ALL_BROKERS.len());
     let mut seen = std::collections::BTreeMap::<&str, Vec<&str>>::new();
     for (i, (broker, mock)) in catalog::ALL_BROKERS.iter().zip(&mocks).enumerate() {
-        // A fresh sign-in attempt budget per broker: this drives 36.
+        // A fresh sign-in attempt budget per broker: this drives 37.
         ctx.limiter.freeze(Some(
             base + std::time::Duration::from_secs(7_200 * i as u64),
         ));

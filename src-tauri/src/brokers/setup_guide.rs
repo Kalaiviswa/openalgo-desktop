@@ -164,7 +164,8 @@ pub fn guide(broker: &str) -> SetupGuide {
     guide_a_to_d(broker)
         .or_else(|| guide_d_to_g(broker))
         .or_else(|| guide_h_to_m(broker))
-        .or_else(|| guide_m_to_t(broker))
+        .or_else(|| guide_m_to_p(broker))
+        .or_else(|| guide_r_to_t(broker))
         .or_else(|| guide_t_to_z(broker))
         .unwrap_or_else(|| generic_guide(broker))
 }
@@ -425,7 +426,7 @@ fn guide_h_to_m(broker: &str) -> Option<SetupGuide> {
     })
 }
 
-fn guide_m_to_t(broker: &str) -> Option<SetupGuide> {
+fn guide_m_to_p(broker: &str) -> Option<SetupGuide> {
     Some(match broker {
         "mstock" => SetupGuide {
             name: "mStock by Mirae Asset",
@@ -469,6 +470,12 @@ fn guide_m_to_t(broker: &str) -> Option<SetupGuide> {
             banner: "Login with Pocketful takes you to Pocketful's login page. Log in and approve, and Pocketful sends you back to OpenAlgo.",
             redirect_hint: REDIRECT_SENT,
         },
+        _ => return None,
+    })
+}
+
+fn guide_r_to_t(broker: &str) -> Option<SetupGuide> {
+    Some(match broker {
         "rmoney" => SetupGuide {
             name: "RMoney",
             fields: const { &[
@@ -481,6 +488,25 @@ fn guide_m_to_t(broker: &str) -> Option<SetupGuide> {
             ] },
             banner: "Login with RMoney takes you to RMoney's login page. Log in there and RMoney sends you back to OpenAlgo; your Market Data keys are then used for quotes and the live feed.",
             redirect_hint: REDIRECT_SENT,
+        },
+        "rupeezy" => SetupGuide {
+            name: "Rupeezy",
+            fields: const { &[
+                key(
+                    "Application ID",
+                    "The application ID of your Vortex app on the Rupeezy developer portal (vortex.rupeezy.in).",
+                ),
+                secret(
+                    "API Key",
+                    "The API key of that Vortex app. OpenAlgo sends it with every request and uses it to finish each login.",
+                ),
+                client_id(
+                    "Client ID",
+                    "Your Rupeezy client code. Each login is checked against it.",
+                ),
+            ] },
+            banner: "Login with Rupeezy takes you to Rupeezy's login page. Log in there and Rupeezy sends you back to OpenAlgo, which checks it is the client ID you saved.",
+            redirect_hint: REDIRECT_REGISTER,
         },
         "samco" => SetupGuide {
             name: "Samco",
@@ -627,7 +653,7 @@ mod tests {
     /// fit how it signs in.
     #[test]
     fn every_broker_has_help_consistent_with_its_sign_in() {
-        assert_eq!(ALL_BROKERS.len(), 36);
+        assert_eq!(ALL_BROKERS.len(), 37);
         let mut names = std::collections::HashSet::new();
         for b in ALL_BROKERS {
             let g = guide(b);

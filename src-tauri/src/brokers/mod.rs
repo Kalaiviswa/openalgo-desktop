@@ -39,6 +39,7 @@ pub mod nubra;
 pub mod paytm;
 pub mod pocketful;
 pub mod rmoney;
+pub mod rupeezy;
 pub mod samco;
 pub mod setup_guide;
 pub mod shoonya;
@@ -629,6 +630,7 @@ impl BrokerRegistry {
             Arc::new(paytm::PaytmBroker::new(symbols.clone())),
             Arc::new(hdfcsky::HdfcSkyBroker::new(symbols.clone())),
             Arc::new(hdfcsecurities::HdfcSecuritiesBroker::new(symbols.clone())),
+            Arc::new(rupeezy::RupeezyBroker::new(symbols.clone())),
             Arc::new(samco::SamcoBroker::new(symbols.clone())),
             Arc::new(aliceblue::AliceBlueBroker::new(symbols.clone())),
             Arc::new(definedge::DefinedgeBroker::new(symbols.clone())),
@@ -728,6 +730,7 @@ mod tests {
                 "paytm",
                 "pocketful",
                 "rmoney",
+                "rupeezy",
                 "samco",
                 "shoonya",
                 "tradejini",

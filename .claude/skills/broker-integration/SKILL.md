@@ -25,7 +25,7 @@ desktop's *mechanics*: where each piece goes in Rust and how it is tested.
 | --- | --- | --- | --- |
 | Noren / Finvasia | `families::noren::NorenBroker` holding a `&'static NorenConfig` (hosts, `Dialect`, `Login`, master files, `TickRule`, `IndexNaming`, `MppScope`, `FundsM2m`, ...) plus `NorenHooks` fn pointers. A member dir is one `mod.rs` with `pub static CONFIG`, `pub static HOOKS` and `pub fn broker(symbols) -> NorenBroker`. | shoonya, flattrade, tradesmart, zebu | `brokers/shoonya/mod.rs` |
 | Symphony XTS | `families::xts::XtsBroker` holding a `&'static XtsConfig` (`XtsLogin`, paths, `master_segments`, `stream_mode_codes`, `binary_decoder`, `XtsHooks`). Member dir is one `mod.rs` with `CONFIG` and `pub fn broker`. | fivepaisaxts, jainamxts, compositedge, rmoney, ibulls, wisdom, iifl | `brokers/fivepaisaxts/mod.rs` |
-| OAuth redirect | Own module | zerodha, upstox, fyers, dhan, groww, arrow, paytm, aliceblue, definedge, pocketful, hdfcsky, hdfcsecurities | `brokers/zerodha/` |
+| OAuth redirect | Own module | zerodha, upstox, fyers, dhan, groww, arrow, paytm, aliceblue, definedge, pocketful, hdfcsky, hdfcsecurities, rupeezy | `brokers/zerodha/` |
 | Direct login + TOTP | Own module | angel, kotak, mstock, motilal, samco, tradejini, fivepaisa, nubra, indmoney, firstock | `brokers/angel/` |
 | Bespoke | Own module | iiflcapital (REST + MQTT via the relay), deltaexchange (HMAC, `CRYPTO`, leverage) | as named |
 
@@ -103,8 +103,8 @@ holds a `Secret`; read it with `expose()` only where the request is built.
      bound to an account.
    - `configured_account` and `CLIENT_ID_BROKERS`: the account a sign-in
      must come back for. Dhan and the Noren family take `client_id:::key` or
-     a client id; Arrow, HDFC Sky, HDFC Securities and AliceBlue take the
-     Client ID entered on Broker Configuration. A state-less broker with no known
+     a client id; Arrow, HDFC Sky, HDFC Securities, AliceBlue and Rupeezy take
+     the Client ID entered on Broker Configuration. A state-less broker with no known
      account is refused, so a state-less broker must name its account here.
    - `login_binding` / `callback_binding` (Dhan's `consentAppId`),
      `posts_callback` (XTS `session=` form POST: compositedge, rmoney),
