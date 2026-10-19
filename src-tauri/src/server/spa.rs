@@ -101,6 +101,7 @@ pub const SPA_ROUTES: &[&str] = &[
     "/strategy/new",
     "/strategybuilder",
     "/strategybuilder/portfolio",
+    "/strikeprofile",
     "/telegram",
     "/telegram/analytics",
     "/telegram/config",

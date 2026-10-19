@@ -1,8 +1,8 @@
 //! Options and portfolio tools: every route the tool pages call (OI
 //! tracker, max pain, OI profile, IV chart, gamma density, straddles,
-//! vol surface, GEX, IV smile, arbitrage, Strategy Builder charts and the
-//! strategy portfolio), driven in-process against the full router with the
-//! mock broker connected; plus the bounded history fan-out.
+//! vol surface, GEX, Strike Profile, IV smile, arbitrage, Strategy Builder
+//! charts and the strategy portfolio), driven in-process against the full
+//! router with the mock broker connected; plus the bounded history fan-out.
 //!
 //! Self-contained (no shared support module) so it can be folded into the
 //! consolidated integration crate unchanged.
@@ -266,6 +266,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/straddlepnl/api/intervals"),
     ("POST", "/volsurface/api/surface-data"),
     ("POST", "/gex/api/gex-data"),
+    ("POST", "/strikeprofile/api/profile-data"),
     ("POST", "/ivsmile/api/iv-smile-data"),
     ("GET", "/arbitrage/api/universe"),
     ("POST", "/strategybuilder/api/strategy-chart"),
@@ -635,6 +636,7 @@ async fn tools_ask_for_a_broker_connection_first() {
             "/volsurface/api/surface-data",
             json!({"underlying": "NIFTY", "exchange": "NFO", "expiry_dates": ["30OCT26"]}),
         ),
+        ("/strikeprofile/api/profile-data", strike_profile_body()),
     ] {
         let (s, v) = h.post(p, body).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{}", p);
@@ -1371,6 +1373,185 @@ impl Probe {
         tokio::time::sleep(Duration::from_millis(ms)).await;
         self.now.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+// ------------------------------------------------------- strike profile
+
+fn strike_profile_body() -> Value {
+    json!({"underlying": "NIFTY", "exchange": "NFO", "expiry_dates": ["30OCT26", "27NOV26"]})
+}
+
+/// Web `strike_profile.py`: each refusal, in the blueprint's order, before
+/// any broker request.
+#[tokio::test]
+async fn strike_profile_validates_like_the_web() {
+    let h = H::new(true);
+    let with = |k: &str, v: Value| {
+        let mut b = strike_profile_body();
+        b[k] = v;
+        b
+    };
+    let cases = [
+        (
+            with("underlying", json!("")),
+            "underlying and exchange are required",
+        ),
+        (
+            with("exchange", json!(" ")),
+            "underlying and exchange are required",
+        ),
+        (with("underlying", json!("nifty")), "Invalid input format"),
+        // Python's str(None) is "None", which is not upper case.
+        (with("underlying", Value::Null), "Invalid input format"),
+        (with("exchange", json!("N-FO")), "Invalid input format"),
+        (
+            with("expiry_dates", json!([])),
+            "Select at least one expiry.",
+        ),
+        (
+            with("expiry_dates", json!("30OCT26")),
+            "Select at least one expiry.",
+        ),
+        (
+            with("expiry_dates", json!(["30OCT26", "30-OCT-26"])),
+            "Invalid expiry format. Expected DDMMMYY",
+        ),
+        (with("range_pct", json!(3)), "Invalid strike range"),
+        (with("range_pct", json!("wide")), "Invalid strike range"),
+    ];
+    for (body, msg) in cases {
+        let (s, v) = h
+            .post("/strikeprofile/api/profile-data", body.clone())
+            .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", body);
+        assert_eq!(v, json!({"status": "error", "message": msg}), "{}", body);
+    }
+    assert!(h.mock.calls().is_empty());
+}
+
+/// The Strike Profile over the mock chain: one option chain per expiry,
+/// the web's shape, and figures worked outside the kernels under test (a
+/// separate Black-76 in Python with `math.erf` and its own bisection).
+///
+/// Both expiries price the same: the 25000 call at 130 and put at 110 give
+/// the forward 25020; the call inverts to 4.56% on 30 Oct (25.229 days)
+/// and 3.14% on 27 Nov, with the same total variance, so gamma 0.001325
+/// and delta 0.529 on both. Call GEX = 0.001325 x 3000 OI x 25010^2 x 1% /
+/// 1e7 = 2.4864 crore, the put's the same negative; call DEX = 0.529 x
+/// 3000 x 25010 / 1e7 = 3.9691, put DEX -0.471 x ... = -3.5339. Summed
+/// over both expiries the call wall is 25100 and the put wall 25000; total
+/// GEX, re-priced over 241 prices from 24800 to 25200, turns positive at
+/// 24964.12.
+#[tokio::test]
+async fn strike_profile_by_strike_and_expiry() {
+    let h = H::new(true);
+    let (s, v) = h
+        .post("/strikeprofile/api/profile-data", strike_profile_body())
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(
+        keys(&v),
+        vec![
+            "as_of",
+            "call_wall",
+            "exchange",
+            "expiries",
+            "flip",
+            "put_wall",
+            "range_pct",
+            "spot_price",
+            "status",
+            "strikes",
+            "underlying"
+        ]
+    );
+    assert_eq!(v["underlying"], "NIFTY");
+    assert_eq!(v["exchange"], "NFO");
+    assert_eq!(v["spot_price"].to_string(), "25010.0");
+    assert_eq!(v["range_pct"].to_string(), "5.0");
+    assert_eq!(v["as_of"], json!(ist(5, 10, 0).timestamp()));
+    assert_eq!(
+        v["strikes"],
+        json!([24_800.0, 24_900.0, 25_000.0, 25_100.0, 25_200.0])
+    );
+    let near = &v["expiries"][0];
+    assert_eq!(near["expiry"], "30OCT26");
+    assert_eq!(near["expiry_ts"], json!(1_793_354_400));
+    assert_eq!(near["dte"], json!(25));
+    assert_eq!(near["years"], json!(0.069121));
+    assert_eq!(near["forward"].to_string(), "25020.0");
+    assert_eq!(near["lot_size"], json!(75));
+    assert_eq!(near["available"], json!(true));
+    assert_eq!(near["net_gex"], json!(0.2039));
+    assert_eq!(near["net_dex"], json!(1.5591));
+    assert_eq!(v["expiries"][1]["dte"], json!(53));
+    assert_eq!(v["expiries"][1]["years"], json!(0.145833));
+    assert_eq!(
+        near["cells"][2],
+        json!({
+            "ce_oi": 3000, "pe_oi": 3000,
+            "ce_gex": 2.4864, "pe_gex": -2.4864,
+            "ce_dex": 3.9691, "pe_dex": -3.5339,
+            "gex": 0.0, "dex": 0.4352,
+            "unpriced": false,
+        })
+    );
+    assert_eq!(v["call_wall"], json!(25_100.0));
+    assert_eq!(v["put_wall"], json!(25_000.0));
+    assert_eq!(v["flip"], json!(24_964.12));
+    // One option chain (one batched quote) per expiry; 5% of spot fits in
+    // the first chain's 20 strikes a side.
+    assert_eq!(h.calls(|c| matches!(c, MockCall::MultiQuotes(_))), 2);
+
+    // 10% needs 27 strikes a side over a 100 step: the first chain is
+    // fetched again with the wider count.
+    let mut b = strike_profile_body();
+    b["range_pct"] = json!(10);
+    let (s, v) = h.post("/strikeprofile/api/profile-data", b).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(h.calls(|c| matches!(c, MockCall::MultiQuotes(_))), 5);
+    assert_eq!(v["range_pct"].to_string(), "10.0");
+
+    // A later expiry with no listed strikes is marked unavailable; the
+    // grid stands. Lower case is upper-cased, as on the web.
+    let b = json!({"underlying": "NIFTY", "exchange": "NFO", "expiry_dates": ["30oct26", "24DEC26"], "range_pct": null});
+    let (s, v) = h.post("/strikeprofile/api/profile-data", b).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["range_pct"], Value::Null);
+    assert_eq!(v["expiries"][0]["expiry"], "30OCT26");
+    assert_eq!(v["expiries"][1]["available"], json!(false));
+    assert_eq!(
+        v["expiries"][1]["message"],
+        "No option data for this expiry."
+    );
+    assert_eq!(
+        v["expiries"][1]["cells"],
+        json!([null, null, null, null, null])
+    );
+}
+
+/// TOOLS-04, TOOLS-13: the first expiry's open interest gap refuses the
+/// profile as it refuses the GEX dashboard; a later expiry's gap marks
+/// that expiry unavailable.
+#[tokio::test]
+async fn strike_profile_does_not_total_an_open_interest_gap() {
+    let h = H::new(true);
+    h.mock.quotes.lock().remove("NFO:NIFTY27NOV2625100PE");
+    let (s, v) = h
+        .post("/strikeprofile/api/profile-data", strike_profile_body())
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["expiries"][0]["available"], json!(true));
+    assert_eq!(v["expiries"][1]["available"], json!(false));
+    h.mock.quotes.lock().remove("NFO:NIFTY30OCT2625100PE");
+    let (s, v) = h
+        .post("/strikeprofile/api/profile-data", strike_profile_body())
+        .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
+    assert_eq!(
+        v["message"],
+        "Open interest did not come back from your broker for 1 of 10 options of NIFTY 30OCT26, so the OI figures are not shown: a missing value would read as zero. Try again shortly."
+    );
 }
 
 #[tokio::test]

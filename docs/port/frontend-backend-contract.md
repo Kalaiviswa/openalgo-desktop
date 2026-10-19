@@ -158,6 +158,7 @@ Calls beyond the shell and shared modules.
 - **/straddlepnl**: `/straddlepnl/api/simulate` POST :21; lotsize GET :83; intervals GET :116 (custom_straddle.py)
 - **/volsurface**: `/volsurface/api/surface-data` POST :19 (vol_surface.py)
 - **/gex**: `/gex/api/gex-data` POST :24 (gex.py)
+- **/strikeprofile**: `/strikeprofile/api/profile-data` POST :30 (strike_profile.py, added 2026-10-18 in 2b2d73b5c)
 - **/ivsmile**: `/ivsmile/api/iv-smile-data` POST :24 (ivsmile.py)
 - **/arbitrage**: `/arbitrage/api/universe` GET :24 (arbitrage.py)
 - **/strategybuilder**: `/api/v1/margin` POST; `/strategybuilder/api/strategy-chart` POST :32; multi-strike-oi POST :107; intervals GET :182 (strategy_chart.py)

@@ -15,6 +15,7 @@
 //! | [`account_service`] | orderbook, tradebook, positionbook, holdings, funds, orderstatus, openposition, pnl/symbols |
 //! | [`market_data_service`] | quotes, multiquotes, depth, history, intervals, ticker, margin |
 //! | [`chain_tools_service`] | OI tracker, max pain, GEX, IV smile, gamma density, OI profile |
+//! | [`strike_profile_service`] | Strike Profile: GEX and DEX by strike and expiry |
 //! | [`history_tools_service`] | IV chart, straddle chart and simulation, vol surface, Strategy Builder charts |
 //! | [`tools_service`] | shared tool plumbing: references, nearest future, bounded history fan-out |
 //! | [`arbitrage_service`] | futures calendar-spread universe |
@@ -71,6 +72,7 @@ pub mod search_ui_service;
 pub mod security_service;
 pub mod settings_service;
 pub mod strategy_portfolio_service;
+pub mod strike_profile_service;
 pub mod symbol_service;
 pub mod system_info;
 pub mod telegram_admin_service;
