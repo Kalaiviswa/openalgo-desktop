@@ -3,7 +3,7 @@
 //! serialized mutation through [`crate::db::duckdb::HistorifyDb`]. Job rows
 //! are `jobs`, schedule rows `schedules`.
 
-use super::interval::{self, Kind};
+use super::interval::{self, Kind, Parsed};
 use super::time::{http_date, ist_date};
 use crate::brokers::types::Candle;
 use crate::db::duckdb::migrations::next_id;
@@ -392,36 +392,39 @@ pub fn aggregated_intraday(
     bars(c, &sql, params)
 }
 
-/// The group key for W/M/Q/Y over the IST calendar.
-fn daily_group(kind: Kind, value: u32) -> Option<String> {
+/// The group key for day multiples and W/M/Q/Y over the IST calendar.
+///
+/// Buckets run continuously from fixed anchors, as on the web (b193606a5):
+/// days from 1970-01-01, weeks from Monday 1970-01-05, months from month
+/// zero of year zero. Counting a multiple from the start of each year would
+/// split one 2-week or 7-month candle in two at 31 December.
+fn daily_group(p: Parsed) -> Option<String> {
     let t = format!(
         "make_timestamp(CAST(timestamp + {} AS BIGINT) * 1000000)",
         IST_OFFSET_SECS
     );
-    let n = i64::from(value);
-    Some(match kind {
-        Kind::Weekly if n == 1 => format!("DATE_TRUNC('week', {})", t),
-        Kind::Weekly => format!(
-            "DATE_TRUNC('week', {t}) - to_weeks(CAST((EXTRACT(WEEK FROM {t}) - 1) % {n} AS INTEGER))"
+    Some(match p.kind {
+        Kind::Daily | Kind::Weekly => {
+            // 1970-01-01 was a Thursday; day 4 is the first Monday.
+            let (days, anchor) = match p.kind {
+                Kind::Weekly => (i64::from(p.value) * 7, 4),
+                _ => (i64::from(p.value), 0),
+            };
+            format!(
+                "DATE_TRUNC('day', {t}) - to_days(CAST((FLOOR((timestamp + {o}) / 86400) - {anchor}) % {days} AS INTEGER))",
+                o = IST_OFFSET_SECS
+            )
+        }
+        Kind::Monthly | Kind::Quarterly | Kind::Yearly => format!(
+            "DATE_TRUNC('month', {t}) - to_months(CAST((EXTRACT(YEAR FROM {t}) * 12 + EXTRACT(MONTH FROM {t}) - 1) % {n} AS INTEGER))",
+            n = p.months
         ),
-        Kind::Monthly if n == 1 => format!("DATE_TRUNC('month', {})", t),
-        Kind::Monthly => format!(
-            "DATE_TRUNC('month', {t}) - to_months(CAST((EXTRACT(MONTH FROM {t}) - 1) % {n} AS INTEGER))"
-        ),
-        Kind::Quarterly if n == 1 => format!("DATE_TRUNC('quarter', {})", t),
-        Kind::Quarterly => format!(
-            "DATE_TRUNC('quarter', {t}) - to_months(CAST(3 * ((EXTRACT(QUARTER FROM {t}) - 1) % {n}) AS INTEGER))"
-        ),
-        Kind::Yearly if n == 1 => format!("DATE_TRUNC('year', {})", t),
-        Kind::Yearly => format!(
-            "DATE_TRUNC('year', {t}) - to_years(CAST(EXTRACT(YEAR FROM {t}) % {n} AS INTEGER))"
-        ),
-        _ => return None,
+        Kind::Intraday => return None,
     })
 }
 
-/// Web `_get_daily_aggregated_ohlcv`: W/M/Q/Y from stored D candles. The
-/// timestamp is the UTC epoch of the IST period start date.
+/// Web `_get_daily_aggregated_ohlcv`: day multiples and W/M/Q/Y from stored
+/// D candles. The timestamp is the UTC epoch of the IST period start date.
 pub fn aggregated_daily(
     c: &Connection,
     symbol: &str,
@@ -433,7 +436,7 @@ pub fn aggregated_daily(
     let Some(p) = interval::parse(target) else {
         return Ok(Vec::new());
     };
-    let Some(group) = daily_group(p.kind, p.value) else {
+    let Some(group) = daily_group(p) else {
         return Ok(Vec::new());
     };
     let mut params = vec![text(symbol.to_uppercase()), text(exchange.to_uppercase())];
@@ -471,7 +474,7 @@ pub fn stored(
 }
 
 /// Web `get_ohlcv`: stored intervals read directly, intraday intervals
-/// aggregated from 1m, W/M/Q/Y from D.
+/// aggregated from 1m, day multiples and W/M/Q/Y from D.
 pub fn ohlcv(
     c: &Connection,
     symbol: &str,
@@ -895,5 +898,126 @@ mod tests {
             .read(|c| ohlcv(c, "SBIN", "NSE", "2Y", None, None))
             .unwrap();
         assert_eq!(y.len(), 1);
+    }
+
+    // Web test/test_historify_custom_timeframes.py (b193606a5): stored-data
+    // aggregation keeps continuous buckets across calendar years.
+
+    fn utc(text: &str) -> i64 {
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_utc()
+            .timestamp()
+    }
+
+    /// Candles as the web fixture inserts them: open i+1, high i+3, low i,
+    /// close i+2, volume 10, oi i.
+    fn store(db: &HistorifyDb, interval: &str, times: &[i64]) {
+        let bars: Vec<Bar> = times
+            .iter()
+            .enumerate()
+            .map(|(i, &timestamp)| {
+                let n = i as f64;
+                Bar {
+                    timestamp,
+                    open: n + 1.0,
+                    high: n + 3.0,
+                    low: n,
+                    close: n + 2.0,
+                    volume: 10,
+                    oi: i as i64,
+                }
+            })
+            .collect();
+        db.mutate(|c| upsert_bars(c, "TEST", "NSE", interval, &bars, now()))
+            .unwrap();
+    }
+
+    fn read(db: &HistorifyDb, interval: &str) -> Vec<Bar> {
+        let interval = interval.to_string();
+        db.read(move |c| ohlcv(c, "TEST", "NSE", &interval, None, None))
+            .unwrap()
+    }
+
+    fn stamps(bars: &[Bar]) -> Vec<i64> {
+        bars.iter().map(|b| b.timestamp).collect()
+    }
+
+    /// Web `test_multiday_reads_daily_storage`.
+    #[test]
+    fn multiday_reads_daily_storage() {
+        let db = HistorifyDb::in_memory().unwrap();
+        store(
+            &db,
+            "D",
+            &[utc("2026-10-01T03:45:00"), utc("2026-10-02T03:45:00")],
+        );
+        let bars = read(&db, "2D");
+        assert!(!bars.is_empty());
+        assert_eq!(bars.iter().map(|b| b.volume).sum::<i64>(), 20);
+    }
+
+    /// Web `test_two_week_anchor_does_not_restart_at_new_year`: Monday
+    /// 1970-01-05 is the continuous multi-week anchor.
+    #[test]
+    fn two_week_candle_does_not_restart_at_new_year() {
+        let db = HistorifyDb::in_memory().unwrap();
+        store(
+            &db,
+            "D",
+            &[utc("2020-12-28T03:45:00"), utc("2021-01-04T03:45:00")],
+        );
+        assert_eq!(stamps(&read(&db, "2W")), vec![utc("2020-12-28T00:00:00")]);
+    }
+
+    /// Web `test_seven_month_bucket_crosses_the_year`: absolute month 24311
+    /// starts December 2025 and includes January 2026.
+    #[test]
+    fn seven_month_candle_crosses_the_year() {
+        let db = HistorifyDb::in_memory().unwrap();
+        store(
+            &db,
+            "D",
+            &[utc("2025-12-15T03:45:00"), utc("2026-01-15T03:45:00")],
+        );
+        let bars = read(&db, "7M");
+        assert_eq!(stamps(&bars), vec![utc("2025-12-01T00:00:00")]);
+        assert_eq!(bars[0].open, 1.0);
+        assert_eq!(bars[0].close, 3.0);
+        assert_eq!(bars[0].volume, 20);
+    }
+
+    /// The same anchor for quarters: a 3Q candle starting October 2025
+    /// (absolute month 24309) holds February 2026.
+    #[test]
+    fn multi_quarter_candle_crosses_the_year() {
+        let db = HistorifyDb::in_memory().unwrap();
+        store(
+            &db,
+            "D",
+            &[utc("2025-11-14T03:45:00"), utc("2026-02-16T03:45:00")],
+        );
+        assert_eq!(stamps(&read(&db, "3Q")), vec![utc("2025-10-01T00:00:00")]);
+    }
+
+    /// Web `test_intraday_aggregation_resets_at_each_session` (7m, 2h).
+    #[test]
+    fn intraday_aggregation_resets_at_each_session() {
+        for (interval, seconds) in [("7m", 420), ("2h", 7200)] {
+            let db = HistorifyDb::in_memory().unwrap();
+            let opening = utc("2026-10-01T03:45:00");
+            store(
+                &db,
+                "1m",
+                &[opening, opening + 60, opening + seconds, opening + 86_400],
+            );
+            let bars = read(&db, interval);
+            assert_eq!(
+                stamps(&bars),
+                vec![opening, opening + seconds, opening + 86_400],
+                "{interval}"
+            );
+            assert_eq!(bars[0].volume, 20, "{interval}");
+        }
     }
 }

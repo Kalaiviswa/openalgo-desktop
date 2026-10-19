@@ -22,7 +22,7 @@ runtime; that path exists only on the web).
 
 This skill is the web repository's `chart-indicator` skill, carried over for
 OpenAlgo Desktop. The desktop pins the same `openalgo-charts` version as the
-web (`package.json` at the repository root, currently 2.6.6) and loads custom
+web (`package.json` at the repository root, currently 2.6.7) and loads custom
 indicators with the same loader (`src/lib/trading/customIndicators.ts`, the
 same file as the web's `frontend/src/lib/trading/customIndicators.ts`), so the
 contract, pitfalls, cookbook and examples apply unchanged. What differs:
@@ -92,6 +92,16 @@ when the indicator loads. Do not silently skip validation.
 The descriptor contract has only gained optional fields since this skill was
 written, so an existing indicator keeps working on the pinned build. What
 changed, newest first:
+
+- **2.6.7: independent confirmed study history.** `/trading` and Historify
+  attach `createTimeframeProvider`, so built-in higher-timeframe studies fetch
+  their own warmup, including daily EMA 200 on a five-minute chart. Custom
+  requested descriptors can declare `historyBars`; consume snapshot availability
+  rather than assuming the last source candle is closed. A live-only provider
+  is not a historical replay snapshot. Hosts derive custom intervals through
+  `withTimeframes` using real source capabilities and exchange sessions. Shared
+  favorites are UI preferences, not proof that a broker supplies an interval.
+  Existing descriptors and legacy providers remain supported.
 
 - **2.6.6: nothing for a descriptor to change.** Legend actions now sit
   before changing readings, so crosshair movement and live ticks keep the
