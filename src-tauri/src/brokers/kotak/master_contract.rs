@@ -14,6 +14,8 @@
 //! * F&O: expiry from the `lExpiryDate` epoch (+315513000 on NSE F&O and
 //!   CDS, not on MCX and BSE F&O), strike in paise, `XX` is FUT; a
 //!   non-positive `lExpiryDate` is a reference row with no expiry and no type.
+//!   Currency (`cde_fo`) prices are 10^7 times the rupee value
+//!   ([`CDS_PRICE_DIVISOR`]); the futures placeholder strike -1 stays -0.01.
 //!   Symbol `<name><DDMMMYY>FUT` / `<name><DDMMMYY><strike><CE|PE>`.
 //! * `bcs_fo` (BCD) is never fetched and `nse_com` has no processor, as on
 //!   the web.
@@ -38,8 +40,16 @@ use std::time::Duration;
 /// Epoch offset Kotak's NSE F&O and CDS expiries carry (1980-01-01).
 pub const EXPIRY_OFFSET: i64 = 315_513_000;
 
-/// The files processed, in the web's order.
+/// The files processed, in the web's order. Every one is required (web
+/// `REQUIRED_SEGMENTS`, #2235): a refresh missing one would replace the
+/// stored master without that segment's symbols.
 pub const SEGMENT_FILES: &[&str] = &["NSE_CM", "NSE_FO", "BSE_CM", "CDE_FO", "MCX_FO", "BSE_FO"];
+
+/// Scale of every price in the `cde_fo` file: lPrecision 4 x lMultiplier
+/// 1000, so `USDINR26DEC101.75PE` carries dStrikePrice 1017500000 and
+/// USDINR's 0.0025 tick is dTickSize 25000 (web `CDS_PRICE_DIVISOR`). Every
+/// other segment is in paise.
+pub const CDS_PRICE_DIVISOR: f64 = 10_000_000.0;
 
 /// Bucket a file URL by its basename (web `get_kotak_master_filepaths`).
 pub fn file_key(url: &str) -> Option<&'static str> {
@@ -223,6 +233,11 @@ pub fn parse_cash(csv: &str, nse: bool) -> Result<Vec<SymToken>> {
 pub fn parse_derivatives(csv: &str, file: &str, exchange: &str) -> Result<Vec<SymToken>> {
     let offset = matches!(exchange, "NFO" | "CDS");
     let drop_no_type = matches!(exchange, "MCX" | "BFO");
+    let divisor = if exchange == "CDS" {
+        CDS_PRICE_DIVISOR
+    } else {
+        100.0
+    };
     let mut lines = csv.lines();
     let Some(head) = lines.next() else {
         return Ok(Vec::new());
@@ -257,7 +272,10 @@ pub fn parse_derivatives(csv: &str, file: &str, exchange: &str) -> Result<Vec<Sy
         }
         let name = get(c_name).to_string();
         let raw_exp = f(get(c_exp)).unwrap_or(0.0) as i64;
-        let strike = f(get(c_strike)).map(|v| v / 100.0).unwrap_or(0.0);
+        // The futures placeholder (-1) stays -0.01, as in the other segments.
+        let strike = f(get(c_strike))
+            .map(|v| if v > 0.0 { v / divisor } else { v / 100.0 })
+            .unwrap_or(0.0);
         let (expiry, itype) = match expiry_from_epoch(raw_exp, offset) {
             Some(e) => (e, opt_raw.replace("XX", "FUT").trim().to_string()),
             // A row that never expires is no contract: no expiry, no type.
@@ -274,7 +292,7 @@ pub fn parse_derivatives(csv: &str, file: &str, exchange: &str) -> Result<Vec<Sy
             strike,
             lot_size: f(get(c_lot)).map(|v| v as i32).unwrap_or(1),
             instrument_type: itype,
-            tick_size: f(get(c_tick)).map(|v| v / 100.0).unwrap_or(0.0),
+            tick_size: f(get(c_tick)).map(|v| v / divisor).unwrap_or(0.0),
         });
     }
     Ok(out)
@@ -385,19 +403,14 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
                 .into(),
         ));
     }
-    // All or nothing (MC-02, a hardening over the web, which keeps whatever
-    // segments it got): a partial master would replace a complete one and
-    // the smart rule would then skip the download for the rest of the day.
+    // All or nothing (MC-02; the web too since #2235): a partial master
+    // would replace a complete one and the smart rule would then skip the
+    // download for the rest of the day.
     let mut rows = Vec::new();
     for key in SEGMENT_FILES {
         let Some((_, url)) = paths.iter().find(|(k, _)| k == key) else {
-            if REQUIRED_SEGMENTS.contains(key) {
-                tracing::warn!("Kotak scrip master file missing: {}", key);
-                return Err(part_missing("Kotak", key));
-            }
-            // Kotak lists no currency or commodity file on some days.
-            tracing::info!("Kotak lists no {} file today; skipped", key);
-            continue;
+            tracing::warn!("Kotak scrip master file missing: {}", key);
+            return Err(part_missing("Kotak", key));
         };
         let resp = match b.http.get(url).timeout(DOWNLOAD_TIMEOUT).send().await {
             Ok(r) if r.status().is_success() => r,
@@ -444,7 +457,3 @@ pub async fn download(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<SymToken>
     tracing::info!("Kotak master contract parsed: {} instruments", rows.len());
     Ok(rows)
 }
-
-/// Segments every Kotak master must have; CDE_FO and MCX_FO may be absent
-/// from the day's listing, but once listed they must download and parse.
-pub const REQUIRED_SEGMENTS: &[&str] = &["NSE_CM", "NSE_FO", "BSE_CM", "BSE_FO"];
