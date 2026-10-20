@@ -128,7 +128,8 @@ pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
     }
 }
 
-/// GET /logs/export: every matching entry as CSV (web column set).
+/// GET /logs/export: every matching entry as CSV (web column set), read
+/// and formatted on the blocking pool.
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     let Some((from, to)) = range(&ctx, &q) else {
         return bad_date();
@@ -137,22 +138,19 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
         .get("search")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let rows = match order_log_service::all(&ctx, &from, &to, search.as_deref()) {
-        Ok(rows) => rows,
-        Err(e) => {
-            return failed(
-                "Exporting order logs",
-                e,
-                "An error occurred while exporting logs",
-            )
-        }
-    };
-    let out = export_csv(&rows);
     let stamp = ctx.now().with_timezone(&Kolkata).format("%Y%m%d_%H%M%S");
-    download(out, "text/csv", &format!("openalgo_logs_{}.csv", stamp))
+    match order_log_service::export(&ctx, from, to, search, export_csv).await {
+        Ok(out) => download(out, "text/csv", &format!("openalgo_logs_{}.csv", stamp)),
+        Err(e) => failed(
+            "Exporting order logs",
+            e,
+            "An error occurred while exporting logs",
+        ),
+    }
 }
 
-/// The web's CSV columns for the order log, one line per entry.
+/// The web's CSV columns for the order log, one line per entry; run on the
+/// blocking pool (`order_log_service::export`).
 fn export_csv(rows: &[OrderLogRow]) -> String {
     let mut out = csv_row(
         &[

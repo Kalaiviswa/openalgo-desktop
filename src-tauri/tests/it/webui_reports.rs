@@ -221,6 +221,56 @@ async fn traffic_export_of_a_full_log_does_not_hold_the_runtime() {
     );
 }
 
+/// Order log entries for the export test, all on the harness's day.
+const ORDER_LOG_ROWS: i64 = 50_000;
+
+/// `ORDER_LOG_ROWS` placed orders in one statement, within the last 8 hours.
+fn seed_order_logs(h: &H) {
+    h.ctx
+        .logs
+        .conn()
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO order_logs (api_type, request_data, response_data, created_at)
+             SELECT 'placeorder',
+                 json_object('strategy', 's1', 'exchange', 'NSE', 'symbol', 'SBIN',
+                     'action', 'BUY', 'product', 'MIS', 'pricetype', 'MARKET', 'quantity', '1'),
+                 json_object('status', 'success', 'orderid', 'ord' || i),
+                 strftime('%Y-%m-%dT%H:%M:%SZ', '2026-10-05 04:00:00',
+                     '-' || (i % 30000) || ' seconds')
+             FROM n",
+            [ORDER_LOG_ROWS],
+        )
+        .unwrap();
+}
+
+/// DB-01: the Logs page's export of a large day is read and formatted off
+/// the async workers. Both ran on the async worker before (each entry's
+/// request and response parsed there), keeping the runtime busy for
+/// seconds in a debug build.
+#[tokio::test]
+async fn order_log_export_of_a_large_day_does_not_hold_the_runtime() {
+    let (h, c, _) = signed_in();
+    seed_order_logs(&h);
+    let app = app(&h);
+    let path = "/logs/export?start_date=2026-10-05&end_date=2026-10-05";
+    let ((s, csv), busy) = crate::runtime_busy(fetch(&h, &app, &c, path)).await;
+    assert_eq!(s, StatusCode::OK);
+    let csv = String::from_utf8(csv).unwrap();
+    assert!(csv.starts_with("ID,Timestamp,API Type,Strategy"));
+    assert_eq!(
+        csv.lines().count() as i64,
+        ORDER_LOG_ROWS + 1,
+        "header and every entry"
+    );
+    assert!(
+        busy < Duration::from_millis(500),
+        "the export kept the runtime busy for {:?}",
+        busy
+    );
+}
+
 /// OBS-05: the Analyzer page's day statistics count every request of the
 /// last 24 hours, not only the newest 10,000 the page lists.
 #[tokio::test]
