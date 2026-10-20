@@ -54,8 +54,15 @@ where
 }
 
 /// `GET /traffic/api/stats`: totals, errors and average duration overall,
-/// for `/api/v1` and per endpoint.
-pub fn stats(ctx: &AppState) -> Result<Value> {
+/// for `/api/v1` and per endpoint, read off the async workers (19 scans
+/// of a log of up to 100,000 requests). A refresh that arrives while the
+/// statistics are computed waits for them and answers with them
+/// (`ReportFlight`).
+pub async fn stats(ctx: &Arc<AppState>) -> Result<Value> {
+    ctx.traffic_reports.share(ctx, stats_now).await
+}
+
+fn stats_now(ctx: &AppState) -> Result<Value> {
     ctx.monitor.drain_now(ctx);
     let (all, api, endpoints) = {
         let c = ctx.logs.conn()?;

@@ -7,7 +7,7 @@
 use crate::db::sqlite::market_calendar::{self as cal, OpenWindow};
 use crate::db::sqlite::webui;
 use crate::server::envelope::error;
-use crate::server::routes::webui::{download, failed, no_store, ok, JsonBody};
+use crate::server::routes::webui::{download, failed, json_text, no_store, ok, ok_text, JsonBody};
 use crate::services::freeze_qty_service;
 use crate::services::market_calendar_service as cal_service;
 use crate::services::system_info;
@@ -462,7 +462,8 @@ pub async fn timing_check(State(ctx): Ctx, body: JsonBody) -> Response {
 
 // --------------------------------------------------------------- errors
 
-/// GET /admin/api/errors?limit=&level=&q=
+/// GET /admin/api/errors?limit=&level=&q=, read and serialized on the
+/// blocking pool (the error log's whole window is read and filtered).
 pub async fn errors(State(ctx): Ctx, Query(q): Q) -> Response {
     let limit = q
         .get("limit")
@@ -482,8 +483,16 @@ pub async fn errors(State(ctx): Ctx, Query(q): Q) -> Response {
         .get("q")
         .map(|s| s.trim().chars().take(200).collect())
         .filter(|s: &String| !s.is_empty());
-    match system_info::errors_list(&ctx, limit, level.as_deref(), search.as_deref()) {
-        Ok(v) => no_store(ok(v)),
+    let read = ctx.blocking(move |c| {
+        json_text(system_info::errors_list(
+            c,
+            limit,
+            level.as_deref(),
+            search.as_deref(),
+        )?)
+    });
+    match read.await {
+        Ok(body) => no_store(ok_text(body)),
         Err(e) => failed("Reading error log", e, "Failed to read error log"),
     }
 }
@@ -498,23 +507,27 @@ pub async fn errors_client(State(ctx): Ctx, body: JsonBody) -> Response {
     }
 }
 
-/// GET /admin/api/errors/stats
+/// GET /admin/api/errors/stats, read on the blocking pool.
 pub async fn errors_stats(State(ctx): Ctx) -> Response {
-    match system_info::errors_stats(&ctx) {
+    match ctx.blocking(system_info::errors_stats).await {
         Ok(v) => no_store(ok(v)),
         Err(e) => failed("Reading error stats", e, "Failed to read error log"),
     }
 }
 
-/// GET /admin/api/errors/groups?limit=
+/// GET /admin/api/errors/groups?limit=, grouped and serialized on the
+/// blocking pool.
 pub async fn errors_groups(State(ctx): Ctx, Query(q): Q) -> Response {
     let limit = q
         .get("limit")
         .and_then(|l| l.parse::<i64>().ok())
         .unwrap_or(50)
         .clamp(1, system_info::MAX_LIMIT);
-    match system_info::errors_groups(&ctx, limit) {
-        Ok(v) => no_store(ok(v)),
+    match ctx
+        .blocking(move |c| json_text(system_info::errors_groups(c, limit)?))
+        .await
+    {
+        Ok(body) => no_store(ok_text(body)),
         Err(e) => failed("Grouping errors", e, "Failed to group errors"),
     }
 }

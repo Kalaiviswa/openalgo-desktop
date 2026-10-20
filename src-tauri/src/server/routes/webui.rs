@@ -87,6 +87,27 @@ pub fn ok(v: Value) -> Response {
     json_response(StatusCode::OK, v)
 }
 
+/// A large report's answer as JSON text, made where the report was read
+/// (the blocking pool): serializing and freeing a `Value` of thousands of
+/// rows on the async worker held it for tens of milliseconds in a debug
+/// build. Answered with [`ok_text`].
+pub fn json_text(v: Value) -> crate::error::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&v)?)
+}
+
+/// [`ok`] for an answer already serialized by [`json_text`]: the same
+/// bytes and content type.
+pub fn ok_text(body: Vec<u8>) -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response()
+}
+
 /// The web's no-store header on diagnostics responses.
 pub fn no_store(mut r: Response) -> Response {
     r.headers_mut().insert(

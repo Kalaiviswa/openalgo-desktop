@@ -4,7 +4,7 @@
 
 use crate::db::sqlite::monitor as store;
 use crate::server::envelope::json_response;
-use crate::server::routes::webui::{csv_row, download, failed, ok};
+use crate::server::routes::webui::{csv_row, download, failed, json_text, ok, ok_text};
 use crate::services::health_service as health;
 use crate::services::security_service::web_time;
 use crate::state::AppState;
@@ -159,11 +159,14 @@ pub async fn current(State(ctx): Ctx) -> Response {
     }
 }
 
-/// GET /health/api/history?hours=
+/// GET /health/api/history?hours=, read, shaped and serialized on the
+/// blocking pool (a week is 10,080 samples).
 pub async fn history(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    match health::samples_since(&ctx, hours) {
-        Ok(rows) => ok(health::history_json(&rows)),
+    let read =
+        ctx.blocking(move |c| json_text(health::history_json(&health::samples_since(c, hours)?)));
+    match read.await {
+        Ok(body) => ok_text(body),
         Err(e) => failed(
             "Health history",
             e,
@@ -172,11 +175,13 @@ pub async fn history(State(ctx): Ctx, Query(q): Q) -> Response {
     }
 }
 
-/// GET /health/api/stats?hours=
+/// GET /health/api/stats?hours=, read and summed on the blocking pool.
 pub async fn stats(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    match health::samples_since(&ctx, hours) {
-        Ok(rows) => ok(health::stats_json(&rows, hours)),
+    let read =
+        ctx.blocking(move |c| Ok(health::stats_json(&health::samples_since(c, hours)?, hours)));
+    match read.await {
+        Ok(v) => ok(v),
         Err(e) => failed(
             "Health stats",
             e,
@@ -185,10 +190,12 @@ pub async fn stats(State(ctx): Ctx, Query(q): Q) -> Response {
     }
 }
 
-/// GET /health/api/alerts (unresolved, newest first)
+/// GET /health/api/alerts (unresolved, newest first), read on the blocking
+/// pool.
 pub async fn alerts(State(ctx): Ctx) -> Response {
-    match health::active_alerts(&ctx) {
-        Ok(rows) => ok(health::alerts_json(&rows)),
+    let read = ctx.blocking(|c| Ok(health::alerts_json(&health::active_alerts(c)?)));
+    match read.await {
+        Ok(v) => ok(v),
         Err(e) => failed("Health alerts", e, "Could not read alerts. Try again."),
     }
 }
@@ -266,19 +273,26 @@ pub async fn held_not_placed(State(ctx): Ctx, axum::Json(body): axum::Json<NotPl
     }
 }
 
-/// GET /health/export?hours=
+/// GET /health/export?hours=: the samples as CSV, read and formatted on the
+/// blocking pool.
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     let hours = health::clamp_hours(q.get("hours").map(|s| s.as_str()));
-    let rows = match health::samples_since(&ctx, hours) {
-        Ok(r) => r,
-        Err(e) => {
-            return failed(
-                "Health export",
-                e,
-                "Could not export health metrics. Try again.",
-            )
-        }
-    };
+    match ctx
+        .blocking(move |c| Ok(export_csv(&health::samples_since(c, hours)?)))
+        .await
+    {
+        Ok(out) => download(out, "text/csv", "health_metrics.csv"),
+        Err(e) => failed(
+            "Health export",
+            e,
+            "Could not export health metrics. Try again.",
+        ),
+    }
+}
+
+/// The web's CSV columns for the health samples, one line per sample; run
+/// on the blocking pool (`export`).
+fn export_csv(rows: &[store::HealthRow]) -> String {
     let mut out = csv_row(
         &[
             "Date & Time (IST)",
@@ -299,7 +313,7 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     );
     let s = |v: &Option<String>| v.clone().unwrap_or_else(|| "unknown".into());
     let n = |v: Option<i64>| v.unwrap_or(0).to_string();
-    for m in &rows {
+    for m in rows {
         out.push_str(&csv_row(&[
             web_time(&m.timestamp),
             n(m.fd_count),
@@ -318,5 +332,5 @@ pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
             s(&m.overall_status),
         ]));
     }
-    download(out, "text/csv", "health_metrics.csv")
+    out
 }

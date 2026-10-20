@@ -237,8 +237,15 @@ fn issue_kind(lowercase_message: &str) -> usize {
 
 /// The Analyzer page's data: the requests in `from..to` (newest
 /// `MAX_ROWS`) and the last 24 hours' statistics, read off the async
-/// workers. Statistics that cannot be read are empty, as on the web.
-pub async fn page(ctx: &Arc<AppState>, from: String, to: String) -> Result<(Vec<Value>, Value)> {
+/// workers and handed to `render` there (which answers with the page's
+/// JSON text, so up to 10,000 requests are not serialized on the async
+/// worker either). Statistics that cannot be read are empty, as on the
+/// web.
+pub async fn page<T, F>(ctx: &Arc<AppState>, from: String, to: String, render: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Vec<Value>, Value) -> Result<T> + Send + 'static,
+{
     ctx.blocking(move |c| {
         let requests = rows_between(c, &from, &to)?
             .iter()
@@ -248,18 +255,20 @@ pub async fn page(ctx: &Arc<AppState>, from: String, to: String) -> Result<(Vec<
             tracing::error!("Analyzer stats failed: {}", e);
             StatsAcc::default().into_json()
         });
-        Ok((requests, stats))
+        render(requests, stats)
     })
     .await
 }
 
-/// The requests in `from..to` for the export, read off the async workers.
-pub async fn requests(ctx: &Arc<AppState>, from: String, to: String) -> Result<Vec<Value>> {
+/// The requests in `from..to` as the export's CSV, read and formatted off
+/// the async workers.
+pub async fn export(ctx: &Arc<AppState>, from: String, to: String) -> Result<String> {
     ctx.blocking(move |c| {
-        Ok(rows_between(c, &from, &to)?
+        let requests: Vec<Value> = rows_between(c, &from, &to)?
             .iter()
             .map(format_request)
-            .collect())
+            .collect();
+        Ok(csv(&requests))
     })
     .await
 }
@@ -292,7 +301,7 @@ fn csv_row(fields: &[String]) -> String {
 }
 
 /// Web `generate_csv`.
-pub fn csv(requests: &[Value]) -> String {
+fn csv(requests: &[Value]) -> String {
     let headers = [
         "Timestamp",
         "API Type",

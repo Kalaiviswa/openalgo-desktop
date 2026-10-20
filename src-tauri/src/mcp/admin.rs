@@ -72,9 +72,13 @@ pub async fn audit(State(ctx): Ctx, Query(q): Query<HashMap<String, String>>) ->
         scope: cut("scope", 50),
         outcome: cut("outcome", 50),
     };
-    match ctx.logs.conn().and_then(|c| store::audit_tail(&c, &query)) {
-        Ok((rows, scanned, total)) => {
-            let data: Vec<Value> = rows.iter().map(|r| r.to_json()).collect();
+    let read = ctx.blocking(move |c| {
+        let (rows, scanned, total) = store::audit_tail(&*c.logs.conn()?, &query)?;
+        let data: Vec<Value> = rows.iter().map(|r| r.to_json()).collect();
+        Ok((data, scanned, total))
+    });
+    match read.await {
+        Ok((data, scanned, total)) => {
             let mut r = ok(json!({
                 "status": "success",
                 "mcp_enabled": true,

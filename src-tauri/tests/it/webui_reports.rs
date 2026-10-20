@@ -1,7 +1,9 @@
-//! The Latency, Traffic, Logs and Analyzer reports over a large log
-//! (DB-03, DB-01, OBS-05): computed in SQL off the async workers, the
-//! exports read and formatted off them (the latency export streamed), and
-//! the analyzer's day statistics over every request of the day.
+//! The Latency, Traffic, Logs, Health and Analyzer reports over a large log
+//! (DB-03, DB-01, OBS-05, async-worker DB reads): computed in SQL off the
+//! async workers, the exports read and formatted off them (the latency
+//! export streamed), the polled statistics computed once for concurrent
+//! refreshes, and the analyzer's day statistics over every request of the
+//! day.
 
 use crate::webui_support;
 
@@ -221,6 +223,44 @@ async fn traffic_export_of_a_full_log_does_not_hold_the_runtime() {
     );
 }
 
+/// The most logs connections in use at once, sampled every 100 µs on a
+/// thread of its own until `stop`.
+fn logs_in_use_probe(ctx: Arc<AppState>, stop: Arc<AtomicBool>) -> JoinHandle<u32> {
+    std::thread::spawn(move || {
+        let mut most = 0;
+        while !stop.load(Ordering::Relaxed) {
+            let (open, idle) = ctx.logs.pool_state();
+            most = most.max(open - idle);
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        most
+    })
+}
+
+/// Four Traffic page refreshes at once share one computation of the
+/// statistics (single flight), which holds one logs connection. Computed
+/// apiece on the blocking pool, the four held all four of the logs pool's
+/// connections for 19 scans of a full log each, leaving none to the
+/// traffic, latency, error and order log writers.
+#[tokio::test]
+async fn traffic_stats_refreshes_share_one_computation() {
+    let (h, c, _) = signed_in();
+    seed_traffic(&h);
+    let app = app(&h);
+    let stop = Arc::new(AtomicBool::new(false));
+    let probe = logs_in_use_probe(h.ctx.clone(), stop.clone());
+    let stats = || fetch(&h, &app, &c, "/traffic/api/stats");
+    let (a, b, d, e) = tokio::join!(stats(), stats(), stats(), stats());
+    stop.store(true, Ordering::Relaxed);
+    let most = probe.join().unwrap();
+    for (s, body) in [a, b, d, e] {
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert_eq!(v["overall"]["total_requests"], TRAFFIC_ROWS);
+    }
+    assert_eq!(most, 1, "logs connections held at once by the refreshes");
+}
+
 /// Order log entries for the export test, all on the harness's day.
 const ORDER_LOG_ROWS: i64 = 50_000;
 
@@ -267,6 +307,131 @@ async fn order_log_export_of_a_large_day_does_not_hold_the_runtime() {
     assert!(
         busy < Duration::from_millis(500),
         "the export kept the runtime busy for {:?}",
+        busy
+    );
+}
+
+/// A week of health samples, one a minute (`health_service::SAMPLE_EVERY`).
+const HEALTH_SAMPLES: i64 = 7 * 24 * 60;
+
+fn seed_health(h: &H) {
+    h.ctx
+        .logs
+        .conn()
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO health_metrics (timestamp, fd_count, fd_limit, fd_usage_percent,
+                 fd_status, memory_rss_mb, memory_status, db_connections_total, db_status,
+                 ws_connections_total, ws_status, thread_count, thread_status, db_sizes,
+                 overall_status)
+             SELECT datetime('2026-10-05 04:00:00', '-' || i || ' minutes'), 40 + i % 9, 10240,
+                 0.4, 'pass', 180.0 + i % 50, 'pass', 3, 'pass', 1, 'pass', 30 + i % 5, 'pass',
+                 json_object('openalgo', 2.5, 'logs', 40.0 + i * 0.001, 'sandbox', 1.0,
+                     'historify', 8.0),
+                 'pass'
+             FROM n",
+            [HEALTH_SAMPLES],
+        )
+        .unwrap();
+}
+
+/// Requests the Analyzer page lists at most (`analyzer_log_service::MAX_ROWS`).
+const ANALYZER_ROWS: i64 = 10_000;
+
+/// `ANALYZER_ROWS` sandbox requests in one statement, on the harness's day.
+fn seed_analyzer(h: &H) {
+    h.ctx
+        .logs
+        .conn()
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO analyzer_logs (api_type, request_data, response_data, created_at)
+             SELECT 'placeorder',
+                 json_object('strategy', 's1', 'exchange', 'NSE', 'symbol', 'SBIN',
+                     'action', 'BUY', 'quantity', '1'),
+                 json_object('status', 'success', 'orderid', 'sb' || i),
+                 strftime('%Y-%m-%dT%H:%M:%SZ', '2026-10-05 03:30:00', '-' || i || ' seconds')
+             FROM n",
+            [ANALYZER_ROWS],
+        )
+        .unwrap();
+}
+
+/// The report pages a trader keeps open, as their pages call them: the
+/// Traffic page (refreshed every 30 s), the Logs page (a page and a search
+/// over every entry), the Health page's week of history and statistics,
+/// and the Analyzer page and its export.
+const REPORT_PAGES: &[&str] = &[
+    "/traffic/api/logs?limit=1000",
+    "/traffic/api/stats",
+    "/logs?page=1",
+    "/logs?page=1&search=ord4",
+    "/health/api/history?hours=168",
+    "/health/api/stats?hours=168",
+    "/analyzer/api/data",
+    "/analyzer/export",
+];
+
+/// Async-worker DB reads (roadmap): the report pages over a large log never
+/// hold the runtime, two of each at once. Each read SQLite and shaped its
+/// answer on the async worker, so a full traffic log, a large order log or
+/// a week of health samples held the runtime that carries the market data
+/// feed and the risk owners for the length of the query (2.1-2.9 s at once
+/// in a debug build). Serializing the largest answers there (a week of
+/// samples, 10,000 analyzer requests) still held it for up to 0.46 s on a
+/// loaded machine, so they are serialized where they are read.
+#[tokio::test]
+async fn report_pages_over_a_large_log_do_not_hold_the_runtime() {
+    let (h, c, _) = signed_in();
+    seed_traffic(&h);
+    seed_order_logs(&h);
+    seed_health(&h);
+    seed_analyzer(&h);
+    let app = app(&h);
+    let all = REPORT_PAGES
+        .iter()
+        .chain(REPORT_PAGES)
+        .map(|p| fetch(&h, &app, &c, p));
+    let ((replies, busy), worst) =
+        crate::runtime_stall(crate::runtime_busy(futures_util::future::join_all(all))).await;
+    for (p, (s, body)) in REPORT_PAGES.iter().chain(REPORT_PAGES).zip(&replies) {
+        assert_eq!(
+            *s,
+            StatusCode::OK,
+            "{}: {}",
+            p,
+            String::from_utf8_lossy(body)
+        );
+    }
+    let json = |i: usize| -> serde_json::Value { serde_json::from_slice(&replies[i].1).unwrap() };
+    assert_eq!(json(0).as_array().unwrap().len(), 1000);
+    assert_eq!(json(1)["overall"]["total_requests"], TRAFFIC_ROWS);
+    assert_eq!(json(2)["logs"].as_array().unwrap().len(), 20);
+    assert!(json(3)["logs"].as_array().is_some_and(|l| !l.is_empty()));
+    assert!(json(4).as_array().unwrap().len() as i64 >= HEALTH_SAMPLES - 60);
+    assert!(json(5)["total_samples"].as_i64().unwrap() >= HEALTH_SAMPLES - 60);
+    let listed = json(6)["data"]["requests"].as_array().unwrap().len();
+    assert_eq!(listed as i64, ANALYZER_ROWS);
+    let csv = String::from_utf8_lossy(&replies[7].1).into_owned();
+    assert_eq!(
+        csv.lines().count() as i64,
+        ANALYZER_ROWS + 1,
+        "header and every request"
+    );
+    eprintln!(
+        "report pages: the runtime was held for {:?} at most, busy {:?} in all",
+        worst, busy
+    );
+    assert!(
+        worst < Duration::from_millis(200),
+        "the runtime was held for {:?} at once",
+        worst
+    );
+    assert!(
+        busy < Duration::from_secs(1),
+        "the pages kept the runtime busy for {:?} in all",
         busy
     );
 }

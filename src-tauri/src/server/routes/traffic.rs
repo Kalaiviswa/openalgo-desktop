@@ -2,7 +2,7 @@
 //! middleware (`services::monitor`).
 
 use crate::db::sqlite::monitor::TrafficRow;
-use crate::server::routes::webui::{csv_row, download, failed, ok};
+use crate::server::routes::webui::{csv_row, download, failed, json_text, ok, ok_text};
 use crate::services::security_service::web_time;
 use crate::services::traffic_service::{self, r2};
 use crate::state::AppState;
@@ -29,15 +29,20 @@ fn row_json(t: &TrafficRow) -> Value {
     })
 }
 
-/// GET /traffic/api/logs?limit= (newest first, at most 1000)
+/// GET /traffic/api/logs?limit= (newest first, at most 1000), read and
+/// shaped on the blocking pool.
 pub async fn logs(State(ctx): Ctx, Query(q): Query<HashMap<String, String>>) -> Response {
     let limit = q
         .get("limit")
         .and_then(|l| l.parse::<i64>().ok())
         .unwrap_or(100)
         .clamp(1, 1000);
-    match traffic_service::recent(&ctx, Some(limit)) {
-        Ok(rows) => ok(Value::Array(rows.iter().map(row_json).collect())),
+    let read = ctx.blocking(move |c| {
+        let rows = traffic_service::recent(c, Some(limit))?;
+        json_text(Value::Array(rows.iter().map(row_json).collect()))
+    });
+    match read.await {
+        Ok(body) => ok_text(body),
         Err(e) => failed(
             "Reading traffic logs",
             e,
@@ -48,7 +53,7 @@ pub async fn logs(State(ctx): Ctx, Query(q): Query<HashMap<String, String>>) -> 
 
 /// GET /traffic/api/stats
 pub async fn stats(State(ctx): Ctx) -> Response {
-    match traffic_service::stats(&ctx) {
+    match traffic_service::stats(&ctx).await {
         Ok(v) => ok(v),
         Err(e) => failed(
             "Traffic stats",

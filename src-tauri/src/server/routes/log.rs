@@ -4,7 +4,7 @@
 
 use crate::db::sqlite::monitor::OrderLogRow;
 use crate::server::envelope::error;
-use crate::server::routes::webui::{csv_row, download, failed, ok};
+use crate::server::routes::webui::{csv_row, download, failed, json_text, ok_text};
 use crate::services::order_log_service::{self, PER_PAGE};
 use crate::state::AppState;
 use axum::{
@@ -97,7 +97,8 @@ fn entry(row: &OrderLogRow) -> Value {
     })
 }
 
-/// GET /logs (JSON request): `{logs, total_pages, current_page}`.
+/// GET /logs (JSON request): `{logs, total_pages, current_page}`, read and
+/// shaped on the blocking pool (a search reads every entry in the range).
 pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
     let Some((from, to)) = range(&ctx, &q) else {
         return bad_date();
@@ -111,15 +112,16 @@ pub async fn view(State(ctx): Ctx, Query(q): Q) -> Response {
         .get("search")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    match order_log_service::page(&ctx, &from, &to, search.as_deref(), page) {
-        Ok((rows, total)) => {
-            let total_pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
-            ok(json!({
-                "logs": rows.iter().map(entry).collect::<Vec<_>>(),
-                "total_pages": total_pages,
-                "current_page": page,
-            }))
-        }
+    let read = ctx.blocking(move |c| {
+        let (rows, total) = order_log_service::page(c, &from, &to, search.as_deref(), page)?;
+        json_text(json!({
+            "logs": rows.iter().map(entry).collect::<Vec<_>>(),
+            "total_pages": ((total + PER_PAGE - 1) / PER_PAGE).max(1),
+            "current_page": page,
+        }))
+    });
+    match read.await {
+        Ok(body) => ok_text(body),
         Err(e) => failed(
             "Reading order logs",
             e,

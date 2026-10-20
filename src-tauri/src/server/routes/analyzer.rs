@@ -2,7 +2,7 @@
 //! requests for a date range) and its CSV export.
 
 use crate::server::envelope::error;
-use crate::server::routes::webui::{download, failed, ok};
+use crate::server::routes::webui::{download, failed, json_text, ok_text};
 use crate::services::analyzer_log_service as svc;
 use crate::state::AppState;
 use axum::{
@@ -12,7 +12,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use chrono_tz::Asia::Kolkata;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -50,34 +50,32 @@ fn read_failed(e: crate::error::AppError) -> Response {
     )
 }
 
-/// GET /analyzer/api/data
+/// GET /analyzer/api/data, read, shaped and serialized on the blocking pool.
 pub async fn data(State(ctx): Ctx, Query(q): Q) -> Response {
     let (from, to) = match asked_range(&ctx, &q) {
         Ok(r) => r,
         Err(r) => return *r,
     };
-    match svc::page(&ctx, from, to).await {
-        Ok((reqs, stats)) => {
-            ok(json!({"status": "success", "data": {"stats": stats, "requests": reqs}}))
-        }
+    let render = |reqs: Vec<Value>, stats: Value| {
+        json_text(json!({"status": "success", "data": {"stats": stats, "requests": reqs}}))
+    };
+    match svc::page(&ctx, from, to, render).await {
+        Ok(body) => ok_text(body),
         Err(e) => read_failed(e),
     }
 }
 
-/// GET /analyzer/export
+/// GET /analyzer/export: the requests as CSV, read and formatted on the
+/// blocking pool.
 pub async fn export(State(ctx): Ctx, Query(q): Q) -> Response {
     let (from, to) = match asked_range(&ctx, &q) {
         Ok(r) => r,
         Err(r) => return *r,
     };
-    let reqs = match svc::requests(&ctx, from, to).await {
-        Ok(r) => r,
+    let out = match svc::export(&ctx, from, to).await {
+        Ok(out) => out,
         Err(e) => return read_failed(e),
     };
     let stamp = ctx.now().with_timezone(&Kolkata).format("%Y%m%d_%H%M%S");
-    download(
-        svc::csv(&reqs),
-        "text/csv",
-        &format!("analyzer_logs_{}.csv", stamp),
-    )
+    download(out, "text/csv", &format!("analyzer_logs_{}.csv", stamp))
 }

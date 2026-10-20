@@ -140,7 +140,12 @@ pub async fn ban_host(State(ctx): Ctx, body: JsonBody) -> Response {
     if !valid_hostname(&host) {
         return err(StatusCode::BAD_REQUEST, "Invalid hostname format");
     }
-    match security_service::ban_host_addresses(&ctx, &host, &reason, hours, permanent) {
+    // Reads every address the request log has for the host: on the
+    // blocking pool.
+    let h = host.clone();
+    let read = ctx
+        .blocking(move |c| security_service::ban_host_addresses(c, &h, &reason, hours, permanent));
+    match read.await {
         Ok((0, _)) => json_response(
             StatusCode::NOT_FOUND,
             json!({
@@ -170,10 +175,13 @@ pub async fn clear_404(State(ctx): Ctx, body: JsonBody) -> Response {
     }
 }
 
-/// GET /security/api/data
+/// GET /security/api/data, read on the blocking pool.
 pub async fn data(State(ctx): Ctx) -> Response {
-    ctx.monitor.drain_now(&ctx);
-    match security_service::dashboard_data(&ctx) {
+    let read = ctx.blocking(|c| {
+        c.monitor.drain_now(c);
+        security_service::dashboard_data(c)
+    });
+    match read.await {
         Ok(v) => ok(v),
         Err(e) => {
             tracing::error!("Security data failed: {}", e);
@@ -185,10 +193,13 @@ pub async fn data(State(ctx): Ctx) -> Response {
     }
 }
 
-/// GET /security/stats
+/// GET /security/stats, read on the blocking pool.
 pub async fn stats(State(ctx): Ctx) -> Response {
-    ctx.monitor.drain_now(&ctx);
-    match security_service::stats(&ctx) {
+    let read = ctx.blocking(|c| {
+        c.monitor.drain_now(c);
+        security_service::stats(c)
+    });
+    match read.await {
         Ok(v) => ok(v),
         Err(e) => internal("Security stats", e),
     }
@@ -253,18 +264,17 @@ pub async fn settings(State(ctx): Ctx, body: JsonBody) -> Response {
     }
 }
 
-/// GET /security/api/login-activity?status=&limit=
+/// GET /security/api/login-activity?status=&limit=, read on the blocking
+/// pool.
 pub async fn login_activity(State(ctx): Ctx, Query(q): Query<HashMap<String, String>>) -> Response {
     let limit = q
         .get("limit")
         .and_then(|l| l.parse::<i64>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
-    let status = q
-        .get("status")
-        .map(|s| s.as_str())
-        .filter(|s| !s.is_empty());
-    match security_service::login_activity(&ctx, limit, status) {
+    let status = q.get("status").filter(|s| !s.is_empty()).cloned();
+    let read = ctx.blocking(move |c| security_service::login_activity(c, limit, status.as_deref()));
+    match read.await {
         Ok(v) => ok(json!({"status": "success", "attempts": v})),
         Err(e) => {
             tracing::error!("Login activity failed: {}", e);
