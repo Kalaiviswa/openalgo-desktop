@@ -6,6 +6,9 @@ name: CI
 #             \-> rust-coverage (line-coverage ratchet, a gate)           |
 #   frontend (biome, tsc, vite build) -----------------------------------+--> tauri-build (5 targets)
 #   frontend-test (node 20/22/24, coverage thresholds) ------------------+
+#   tauri-build --> install-smoke (install, start, sign in: Linux x64 and
+#               |   arm64, Windows Server 2022 and 2025, macOS)
+#               \-> native-e2e (the installed app's window by WebDriver)
 #   e2e (Playwright against vite preview)
 #   secret-scan (gitleaks, full history)
 #   code-health (size, dead code and suppression ratchet; CLAUDE.md "Code health")
@@ -445,6 +448,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # ------------------------------------------------------ Installed app
+  # The bundles above, installed and started on fresh runners
+  # (install-smoke.yml) and driven through the app's own window
+  # (native-e2e.yml). Each job takes about a minute once its bundle exists;
+  # release.yml requires them green on the tagged commit's master run.
+  install-smoke:
+    name: install-smoke
+    needs: tauri-build
+    uses: ./.github/workflows/install-smoke.yml
+
+  native-e2e:
+    name: native-e2e
+    needs: tauri-build
+    uses: ./.github/workflows/native-e2e.yml
+
   # -------------------------------------------------- Branch protection
   ci-ok:
     name: ci-ok
@@ -459,6 +477,8 @@ jobs:
       - secret-scan
       - code-health
       - tauri-build
+      - install-smoke
+      - native-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

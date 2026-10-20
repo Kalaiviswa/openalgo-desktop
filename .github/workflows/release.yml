@@ -11,10 +11,11 @@ name: Release
 #
 # Release gate (the `verify` job, which every other job waits for): the tag
 # must point at a commit on master, the CI workflow's `ci-ok` check must have
-# succeeded on that exact commit, the newest Install smoke run of that
-# commit's own bundles (install, start, first sign-in on Linux, Windows
-# Server 2022 and 2025 and macOS) must be green, and the tag must equal
-# v<version> with the
+# succeeded on that exact commit, the newest CI run of a push of that commit
+# to master that was not cancelled must have passed its installed-app jobs
+# (install, start and first sign-in on Linux, Windows Server 2022 and 2025
+# and macOS; the native end-to-end run) on that commit's own bundles, and
+# the tag must equal v<version> with the
 # same version in src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
 # package.json, both lockfiles and the newest CHANGELOG.md section
 # (.claude/skills/version-bump/check_versions.py). This workflow does not
@@ -155,11 +156,14 @@ jobs:
             exit 1
           fi
       - name: Install smoke passed on every platform for this commit's bundles
-        # Only Install smoke runs of this repository's install-smoke.yml on
-        # master count, named after a CI run that the API confirms is a
-        # successful push to master of this exact commit; the newest decides
-        # and needs every platform's job to have succeeded
-        # (scripts/ci/smoke_gate.py, tested by test_smoke_gate.py in CI).
+        # The installed-app jobs are part of CI (install-smoke.yml and
+        # native-e2e.yml, called by ci.yml). Only this repository's CI runs
+        # of a push of this exact commit to master count, not a pull
+        # request's; the newest that was not cancelled decides and needs
+        # every one of those jobs to have succeeded. A master run cancelled
+        # because its pull request was already tested has no verdict:
+        # re-run it before tagging (scripts/ci/smoke_gate.py, tested by
+        # test_smoke_gate.py in CI).
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}

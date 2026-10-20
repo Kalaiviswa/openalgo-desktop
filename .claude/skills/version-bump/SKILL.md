@@ -89,8 +89,12 @@ arm64 AppImage and `.deb`), signs when the secrets are configured, and
 attaches the installers and `SHA256SUMS.txt` to a **draft** GitHub release
 that the maintainer reviews and publishes by hand. It does not re-run the
 tests; its first job, `verify`, refuses to build unless the tag points at a
-commit on master whose `ci-ok` check succeeded and `check_versions.py --tag`
-passes (this script, run in CI). Run that gate alone before tagging for
+commit on master whose `ci-ok` check succeeded, whose newest CI run on
+master that was not cancelled passed the installed-app jobs (install smoke
+and native E2E on that commit's own bundles), and `check_versions.py --tag`
+passes (this script, run in CI). A master run cancelled because the same
+commit was already tested on its pull request has no verdict: re-run it
+and wait for it before tagging. Run that gate alone before tagging for
 real: Actions > Release > Run workflow, with the tag name. The release notes
 say per platform whether the installer was found signed; they are generated
 from a check of each installer, not from the presence of secrets. Branch and

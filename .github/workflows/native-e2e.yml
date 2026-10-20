@@ -21,87 +21,42 @@ name: Native E2E
 # macOS has no WebDriver for WKWebView; the install smoke's HTTP sign-in is
 # what covers it there.
 #
-# Runs after every successful CI push to master, or by hand with the id of
-# such a CI run. Like the install smoke, the `source` job checks that run
-# through the API before anything is downloaded. Not yet part of the release
-# gate or ci-ok: once it has stayed green, add its jobs to
-# scripts/ci/smoke_gate.py or make it a job of CI
-# (docs/release/branch-protection.md).
+# A job of every CI run (ci.yml calls this workflow after tauri-build, and
+# ci-ok needs it), on the .deb that run built, with this workflow and the
+# script from the same commit; the job names that commit in its summary.
 #
 # Next step (needs a Rust change): a test-only build with a scripted broker,
 # so one order can be placed in sandbox mode through the UI and seen in the
 # order book; the release app has no broker to quote from in CI.
 
-run-name: >-
-  Native E2E of ${{ github.event_name == 'workflow_dispatch'
-  && format('CI run {0}', inputs.run_id)
-  || format('{0} (CI run {1})', github.event.workflow_run.head_sha, github.event.workflow_run.id) }}
-
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [master]
-  workflow_dispatch:
-    inputs:
-      run_id:
-        description: "Id of a successful CI run on master whose bundles to test"
-        required: true
-        type: string
+  workflow_call:
 
 permissions:
   contents: read
-  actions: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.id || inputs.run_id }}
-  cancel-in-progress: false
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  source:
-    name: source (the CI run whose bundles are tested)
-    if: >-
-      github.event_name == 'workflow_dispatch' || (
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      sha: ${{ steps.check.outputs.sha }}
-      run_id: ${{ steps.check.outputs.run_id }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: The CI run is a successful push to master in this repository
-        id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
-        run: python3 scripts/ci/smoke_gate.py source "$RUN_ID"
-
   linux:
     name: native e2e (linux x86_64)
-    needs: source
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_run' && needs.source.outputs.sha || github.sha }}
           persist-credentials: false
+      - name: Commit under test
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
         uses: actions/download-artifact@v7
         with:
           name: bundles-linux-x86_64
           path: bundles
-          run-id: ${{ needs.source.outputs.run_id }}
-          github-token: ${{ github.token }}
       - name: Install the .deb, Xvfb and WebKitWebDriver
         run: |
           set -euo pipefail
@@ -118,7 +73,7 @@ jobs:
           command -v WebKitWebDriver
       - name: Install tauri-driver and selenium
         run: |
-          cargo install tauri-driver --locked
+          cargo install tauri-driver --locked --version 2.1.0
           python3 -m pip install --user selenium==4.27.1
       - name: Start a display
         run: |

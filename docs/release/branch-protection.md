@@ -23,9 +23,9 @@ job waits for. On a pushed `v*` tag it refuses to build unless:
 - the tag points at a commit reachable from `master`;
 - the newest `ci-ok` check run created by GitHub Actions on that exact commit
   is `completed` with conclusion `success`;
-- the newest Install smoke run on `master` that installed the bundles of a
-  successful CI push of that exact commit (see below) completed with
-  success, with every platform's job succeeded (none skipped);
+- the newest CI run of a push of that exact commit to `master` that was not
+  cancelled completed with success, with every installed-app job (see
+  below) succeeded, none skipped;
 - the tag equals `v<version>` and every version location agrees
   (`.claude/skills/version-bump/check_versions.py --tag <tag>`), including a
   `## <version>` section at the top of `CHANGELOG.md`.
@@ -72,7 +72,8 @@ Every other rule off. This keeps every commit that CI or a release checked on
 Only `ci-ok` is required: it is the aggregate job in `.github/workflows/ci.yml`
 that fails unless every other CI job (Rust lint, tests on four systems, Rust
 coverage ratchet, frontend checks and tests with coverage thresholds, e2e,
-secret scan, Tauri bundles) succeeded. Requiring the individual jobs instead
+secret scan, code health, Tauri bundles, and the installed-app jobs below)
+succeeded. Requiring the individual jobs instead
 would break whenever a matrix entry is renamed.
 
 The bypass list decides how work lands on `master`:
@@ -169,60 +170,49 @@ JSON
 `actor_id` 5 is the built-in `Repository admin` role; `integration_id` 15368
 is the GitHub Actions app, the source of the `ci-ok` check run.
 
-## Install smoke
+## Installed-app checks (install smoke and native E2E)
 
-`.github/workflows/install-smoke.yml` runs after every successful CI push to
-`master`, on the bundles that CI run built. On fresh runners it installs the
-`.deb` and the AppImage (Ubuntu 22.04, x64 and arm64), the NSIS setup
-(Windows Server 2022 and 2025) and the app from the `.dmg` (Apple Silicon
-macOS); starts each installed app with an empty data folder until it serves
-its HTTP API; creates the account and signs in through that HTTP on the
-shipped port, and checks that a wrong password is refused (not for the
-AppImage, which is started only); runs the packaged `mcp` subcommand over
-piped stdio, with no app and, after the sign-in, against the running app
-with a read-scope MCP token created on it (`launch_smoke.py --mcp-bridge`:
-protocol versions, the read scope's tools and no order tool, an order
-refused for its scope, two calls, a token revoked midway); and checks the
-`.deb` dependency list.
+Two workflows run as jobs of every CI run, pull requests included: `ci.yml`
+calls them once `tauri-build` has built the bundles, and `ci-ok` needs them.
+The bundles, the workflows and the scripts all come from the commit under
+test, and each job names that commit in its summary
+(`scripts/ci/tested_commit.sh`; on a pull request, its head and the merge
+commit the run built).
 
-Which bundles it may install, and which runs a release may rely on, is
-decided by `scripts/ci/smoke_gate.py`, never by a run's name alone:
+- `.github/workflows/install-smoke.yml`, on fresh runners: installs the
+  `.deb` and the AppImage (Ubuntu 22.04, x64 and arm64), the NSIS setup
+  (Windows Server 2022 and 2025) and the app from the `.dmg` (Apple Silicon
+  macOS); starts each installed app with an empty data folder until it
+  serves its HTTP API; creates the account and signs in through that HTTP
+  on the shipped port, and checks that a wrong password is refused (not for
+  the AppImage, which is started only); runs the packaged `mcp` subcommand
+  over piped stdio, with no app and, after the sign-in, against the running
+  app with a read-scope MCP token created on it (`launch_smoke.py
+  --mcp-bridge`: protocol versions, the read scope's tools and no order
+  tool, an order refused for its scope, two calls, a token revoked midway);
+  and checks the `.deb` dependency list.
+- `.github/workflows/native-e2e.yml`: the installed `.deb` driven through
+  its own window by WebDriver (tauri-driver and WebKitWebDriver under Xvfb):
+  account creation, a refused wrong password, sign-in, the signed-in shell
+  and sign-out, against the app's real server and session cookie.
 
-- Before anything is downloaded, the `source` job checks through the API
-  that the CI run is a successful run of `ci.yml` for a push to `master` of
-  this repository (digits-only id). A pull request's, another branch's or a
-  fork's bundles are refused, also for a run started by hand.
-- Each run is named "Install smoke of <sha> (CI run <id>)", or "Install
-  smoke of CI run <id>" when run by hand. The release gate takes only the
-  digits-only CI run id from the name, checks that CI run the same way and
-  that it built the tagged commit, considers only runs of `install-smoke.yml`
-  on `master`, and requires the newest such run to have succeeded with every
-  platform's job (Linux x64 and arm64, Windows Server 2022 and 2025, macOS)
-  succeeded.
+Cost: each job takes about a minute once its bundle exists (2026-10-20:
+25-45 s of steps per install smoke job, about 70 s for the native run), so
+a CI run ends about two minutes later than before, and uses one short
+macOS job more. They ran as separate workflows after CI on `master` until
+2026-10-20; a pull request was then merged before its installers were
+tried, and two that were each green broke the smoke on `master` (#125 and
+#111: the MCP tool list a read token sees).
 
-The security review of 2026-10-12 found a bypass in the first draft of this
-gate (never merged): it trusted the run's name, which a hand-run sets from
-free text, passed the id from it into an API path unchecked, and accepted
-any CI run with the right commit, a pull request's included.
-
-### Making it part of `ci-ok`
-
-Today the smoke is a separate workflow that starts when CI on `master`
-finishes, so it cannot be one of the jobs `ci-ok` waits for, and a pull
-request is merged before its installers are tried. To make it part of
-`ci-ok` (a maintainer decision: it adds about 15 minutes of runners to every
-CI run, pull requests included):
-
-1. In `install-smoke.yml`, add `workflow_call:` to `on:`, and download the
-   bundles from the calling run (drop `run-id` and `github-token` from the
-   download steps when called).
-2. In `ci.yml`, add a job
-   `install-smoke: { needs: tauri-build, uses: ./.github/workflows/install-smoke.yml }`
-   and add `install-smoke` to the `needs` of `ci-ok`.
-3. Drop the `workflow_run` trigger, and the release gate's separate Install
-   smoke step: `ci-ok` on the tagged commit then already includes it.
-
-Until then the release gate is what makes it required.
+The release gate (`scripts/ci/smoke_gate.py release`, run by `release.yml`)
+counts only this repository's CI runs of a push of the tagged commit to
+`master`; a pull request's run of the same commit built it merged into the
+`master` of its day, so it does not count. The newest such run that was
+not cancelled decides, and every installed-app job in it must have
+succeeded (a skipped or missing one fails). A `master` run cancelled because
+its pull request had already been tested has no verdict: re-run it (Re-run
+all jobs) before tagging. To try a run's bundles again, re-run its
+installed-app jobs; the bundles are kept 7 days.
 
 ## Checking that it holds
 
