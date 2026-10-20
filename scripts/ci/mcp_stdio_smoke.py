@@ -37,6 +37,33 @@ CLOSED_URL = "http://127.0.0.1:9"
 MISSING_TOKEN = "no token was given"
 TOKEN = "oamcp_ci_smoke_placeholder"
 WAIT_S = 30
+# A read token's tools/list (MCP-02, `mcp::tools_for_scopes`): what
+# against_app calls must be there, and none of the write:orders tools
+# (`mcp/catalog/orders.rs`).
+READ_TOOLS_CALLED = {"get_openalgo_version", "validate_order_constants", "get_funds"}
+ORDER_TOOLS = {
+    "analyzer_toggle",
+    "cancel_all_orders",
+    "cancel_order",
+    "close_all_positions",
+    "modify_order",
+    "place_basket_order",
+    "place_options_multi_order",
+    "place_options_order",
+    "place_order",
+    "place_smart_order",
+    "place_split_order",
+}
+# Refused for its scope before anything else is looked at; the app has no
+# broker signed in either.
+PLACE_ORDER = {
+    "symbol": "SBIN",
+    "exchange": "NSE",
+    "action": "BUY",
+    "quantity": 1,
+    "price_type": "MARKET",
+    "product": "MIS",
+}
 
 
 def isolated_env(home: str, token: str | None) -> dict[str, str]:
@@ -244,10 +271,13 @@ class Bridge:
 def against_app(exe: str, url: str, token: str, revoke) -> list[str]:
     """The packaged bridge against the running app (PLATFORM-07, MCP-04).
 
-    initialize answers with the server's own protocol version, also for one
-    it does not speak; tools/list lists the 49 tools; two tools that need no
-    broker answer through the app; after `revoke()` the next call says the
-    token was not accepted. Returns what went wrong.
+    `token` has the read scope (launch_smoke.py creates it so). initialize
+    answers with the server's own protocol version, also for one it does
+    not speak; tools/list lists what the read scope may call (the tools
+    called here) and no order tool, and an order tool called anyway is
+    refused for its scope (MCP-02); two tools that need no broker answer
+    through the app; after `revoke()` the next call says the token was not
+    accepted. Returns what went wrong.
     """
     problems: list[str] = []
     odd = Bridge(exe, url, token)
@@ -266,9 +296,17 @@ def against_app(exe: str, url: str, token: str, revoke) -> list[str]:
         if (init.get("serverInfo") or {}).get("name") != "openalgo" or not init.get("instructions"):
             problems.append(f"initialize did not come from openalgo with its instructions: {init}")
         tools = (b.request("tools/list", {}).get("result") or {}).get("tools") or []
-        print(f"tools/list through the packaged bridge: {len(tools)} tools")
-        if len(tools) != 49:
-            problems.append(f"tools/list gave {len(tools)} tools, not 49")
+        names = {t.get("name") for t in tools if isinstance(t, dict)}
+        print(f"tools/list through the packaged bridge (read scope): {len(names)} tools")
+        missing = sorted(READ_TOOLS_CALLED - names)
+        if missing:
+            problems.append(f"tools/list for a read token lacks {missing}")
+        listed = sorted(ORDER_TOOLS & names)
+        if listed:
+            problems.append(f"tools/list for a read token offers order tools {listed}")
+        error = b.request("tools/call", {"name": "place_order", "arguments": PLACE_ORDER}).get("error") or {}
+        if error.get("message") != "insufficient_scope":
+            problems.append(f"place_order with a read token was not refused for its scope: {error}")
         failed, text = b.call("get_openalgo_version", {})
         if failed or "OpenAlgo version" not in text:
             problems.append(f"get_openalgo_version was not answered by the app: {text[:300]}")
@@ -284,7 +322,10 @@ def against_app(exe: str, url: str, token: str, revoke) -> list[str]:
     finally:
         problems += b.close()
     if not problems:
-        print("OK: the packaged bridge served the running app: protocol versions, 49 tools, two calls, a revoked token.")
+        print(
+            "OK: the packaged bridge served the running app: protocol versions, the read scope's tools "
+            "and no order tool, an order refused for its scope, two calls, a revoked token."
+        )
     return problems
 
 

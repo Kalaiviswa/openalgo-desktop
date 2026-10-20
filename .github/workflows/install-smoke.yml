@@ -23,7 +23,8 @@ name: Install smoke
 # keys are locked until the sign-in and open after it.
 # Every job also runs the packaged `mcp` subcommand over piped stdio: with
 # no app (a closed port), and, after the sign-in, against the running app
-# with an MCP token created on it (protocol versions, the 49 tools, two
+# with a read-scope MCP token created on it (protocol versions, the read
+# scope's tools and no order tool, an order refused for its scope, two
 # calls, a token revoked midway; launch_smoke.py --mcp-bridge).
 #
 # Runs after every successful CI push to master, or by hand with the id of

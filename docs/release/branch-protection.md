@@ -180,8 +180,9 @@ its HTTP API; creates the account and signs in through that HTTP on the
 shipped port, and checks that a wrong password is refused (not for the
 AppImage, which is started only); runs the packaged `mcp` subcommand over
 piped stdio, with no app and, after the sign-in, against the running app
-with an MCP token created on it (`launch_smoke.py --mcp-bridge`: protocol
-versions, the 49 tools, two calls, a token revoked midway); and checks the
+with a read-scope MCP token created on it (`launch_smoke.py --mcp-bridge`:
+protocol versions, the read scope's tools and no order tool, an order
+refused for its scope, two calls, a token revoked midway); and checks the
 `.deb` dependency list.
 
 Which bundles it may install, and which runs a release may rely on, is
