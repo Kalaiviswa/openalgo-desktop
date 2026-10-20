@@ -175,6 +175,15 @@ pub struct Limits {
     pub per_day: Option<u32>,
 }
 
+/// Sends one request category of a broker counted against its daily cap
+/// on `day` (IST), saved so a restart keeps the day's count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyCount {
+    pub category: String,
+    pub day: NaiveDate,
+    pub sent: u32,
+}
+
 /// Why a send was not claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Denied {
@@ -274,6 +283,28 @@ impl Budget {
         } else {
             0
         }
+    }
+
+    /// Today (IST) and the sends counted on it.
+    pub fn day_count(&self) -> (NaiveDate, u32) {
+        let today = (self.today)();
+        let s = self.state.lock();
+        (today, if s.day == Some(today) { s.day_sent } else { 0 })
+    }
+
+    /// Count `sent` sends made earlier on `day` (saved before a restart).
+    /// A day other than today is over and counts nothing; today's count is
+    /// never lowered.
+    pub fn restore_day(&self, day: NaiveDate, sent: u32) {
+        if day != (self.today)() {
+            return;
+        }
+        let mut s = self.state.lock();
+        if s.day != Some(day) {
+            s.day = Some(day);
+            s.day_sent = 0;
+        }
+        s.day_sent = s.day_sent.max(sent);
     }
 
     /// The earliest instant at which every window, the daily cap and any
@@ -520,6 +551,28 @@ mod tests {
         assert_eq!(b.sent_today(), 0);
         b.acquire(far).await.unwrap();
         assert_eq!(b.sent_today(), 1);
+    }
+
+    /// A count saved earlier today survives a restart and still caps the
+    /// day; a count from another day restores nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_count_still_caps_the_day() {
+        use std::sync::atomic::AtomicU32;
+        let day = Arc::new(AtomicU32::new(15));
+        let d = day.clone();
+        let today = move || NaiveDate::from_ymd_opt(2026, 10, d.load(Ordering::SeqCst)).unwrap();
+        let b = Budget::new(limits(&[Rolling::per_second(100)], Some(3))).with_today(today.clone());
+        b.restore_day(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 3);
+        assert_eq!(b.day_count(), (today(), 0));
+        b.restore_day(today(), 2);
+        b.restore_day(today(), 1);
+        assert_eq!(b.day_count(), (today(), 2));
+        let soon = Instant::now() + Duration::from_secs(1);
+        b.acquire(soon).await.unwrap();
+        assert_eq!(b.acquire(soon).await, Err(Denied::Daily(3)));
+        day.store(16, Ordering::SeqCst);
+        assert_eq!(b.day_count(), (today(), 0));
+        b.acquire(soon).await.unwrap();
     }
 
     /// A broker's pause holds every caller of the budget; one that cannot

@@ -15,14 +15,15 @@
 //! queues an order behind it, and every send also passes the earlier
 //! app-wide ceiling of 10 a second (kept as a ceiling, it costs nothing
 //! the categories allow). Without a verified plan the Standard limits
-//! apply. Daily counts live in memory: a restart starts the day's count
-//! again, and Fyers' own throttle answers stay authoritative.
+//! apply. Daily counts are saved per category and day
+//! (`request_budget_service`), so a restart keeps the day's count; Fyers'
+//! own throttle answers stay authoritative.
 //!
 //! The web (`api/rate_limiter.py`) paces one lane at 8 a second with no
 //! category, minute or day accounting; this is a recorded deviation.
 
 use crate::brokers::common::outcome;
-use crate::brokers::common::ratelimit::{Budget, Denied, Limits, Rolling};
+use crate::brokers::common::ratelimit::{Budget, DailyCount, Denied, Limits, Rolling};
 use crate::error::AppError;
 use reqwest::Method;
 use std::time::{Duration, SystemTime};
@@ -83,7 +84,19 @@ pub enum Category {
     UserInfo,
 }
 
+/// Every category, in the order the daily counts are saved.
+const CATEGORIES: [Category; 3] = [Category::Data, Category::Transaction, Category::UserInfo];
+
 impl Category {
+    /// The name its daily count is saved under.
+    fn id(self) -> &'static str {
+        match self {
+            Category::Data => "data",
+            Category::Transaction => "transaction",
+            Category::UserInfo => "user_info",
+        }
+    }
+
     fn noun(self) -> &'static str {
         match self {
             Category::Data => "market data",
@@ -208,8 +221,32 @@ impl FyersLimiter {
     /// Switch plan, keeping what was sent today.
     pub fn set_plan(&self, plan: FyersPlan) {
         *self.plan.lock() = plan;
-        for c in [Category::Data, Category::Transaction, Category::UserInfo] {
+        for c in CATEGORIES {
             self.budget(c).set_limits(limits(plan, c));
+        }
+    }
+
+    /// Today's count of each category with a daily cap.
+    pub fn daily_counts(&self) -> Vec<DailyCount> {
+        CATEGORIES
+            .iter()
+            .map(|c| {
+                let (day, sent) = self.budget(*c).day_count();
+                DailyCount {
+                    category: c.id().to_string(),
+                    day,
+                    sent,
+                }
+            })
+            .collect()
+    }
+
+    /// Count what was saved earlier today as already sent.
+    pub fn restore_daily_counts(&self, counts: &[DailyCount]) {
+        for saved in counts {
+            if let Some(c) = CATEGORIES.iter().find(|c| c.id() == saved.category) {
+                self.budget(*c).restore_day(saved.day, saved.sent);
+            }
         }
     }
 

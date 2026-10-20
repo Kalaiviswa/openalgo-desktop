@@ -481,6 +481,8 @@ impl AppState {
         crate::services::order_reconciler::register(&ctx.bus, &ctx.reconciler);
         ctx.reconciler.start();
         crate::services::broker_config_service::BrokerConfigService::apply_rate_plans(ctx);
+        crate::services::request_budget_service::restore(ctx);
+        crate::services::request_budget_service::start(ctx);
         // Analyzer mode survives restarts: resume the sandbox engine.
         if ctx.sqlite.get_analyze_mode().unwrap_or(false) {
             crate::services::analyzer_service::AnalyzerService::spawn_resume(ctx);
@@ -552,6 +554,9 @@ impl AppState {
         self.bus.shutdown(Duration::from_secs(2)).await;
         // The monitor's writer saves what was queued when shutdown began.
         self.monitor.stop(Duration::from_secs(3)).await;
+        if let Err(e) = crate::services::request_budget_service::save(self) {
+            tracing::warn!("Broker request counts could not be saved at quit: {}", e);
+        }
         let mut tasks = std::mem::take(&mut *self.tasks.lock());
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}

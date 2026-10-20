@@ -972,9 +972,12 @@ and add each new one here.
   throttle answer is repeated, also for an order (it was not taken); a
   timeout or a dropped send never is. One request (a history in chunks)
   has one deadline and one retry budget, and a chunk that still fails
-  fails the history instead of leaving a gap. Daily counts are kept in
-  memory, so a restart starts the day's count again. The web paces one
-  8-a-second lane: a recorded deviation.
+  fails the history instead of leaving a gap. Daily counts are saved per
+  broker, category and IST day (`broker_daily_requests`, one row per
+  broker and category; `services::request_budget_service`, at most 15 s
+  apart and at quit), so a restart in the middle of the day keeps the
+  day's count. The web paces one 8-a-second lane and counts no day: a
+  recorded deviation.
 - **A broker request waits at most ten seconds for its turn.**
   `common::ratelimit::Pacer::acquire` (and the Upstox, AliceBlue and
   Noren window limiters, on `common::ratelimit::Budget`) refuse a request

@@ -27,6 +27,7 @@ mod tests;
 
 use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::ratelimit::DailyCount;
 use crate::brokers::common::streaming::{BrokerFeed, OrderFeed};
 use crate::brokers::common::symbols::{SymToken, SymbolResolver};
 use crate::brokers::types::*;
@@ -430,6 +431,14 @@ impl Broker for FyersBroker {
 
     fn rate_plan(&self) -> Option<&'static str> {
         Some(self.limiter.plan().id())
+    }
+
+    fn daily_request_counts(&self) -> Vec<DailyCount> {
+        self.limiter.daily_counts()
+    }
+
+    fn restore_daily_request_counts(&self, counts: &[DailyCount]) {
+        self.limiter.restore_daily_counts(counts);
     }
 
     async fn authenticate(&self, credentials: BrokerCredentials) -> Result<AuthResponse> {

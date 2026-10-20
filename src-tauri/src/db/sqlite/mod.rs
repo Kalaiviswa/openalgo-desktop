@@ -22,6 +22,7 @@ pub mod models;
 pub mod monitor;
 pub mod oauth_state;
 pub mod rate_plan;
+pub mod request_count;
 mod settings;
 pub mod strategy_portfolio;
 pub mod symbol;

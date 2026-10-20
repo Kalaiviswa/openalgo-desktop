@@ -115,6 +115,16 @@ pub trait Broker: Send + Sync {
         None
     }
 
+    /// Requests counted today against the broker's daily caps, per request
+    /// category, saved so a restart keeps the day's count (Fyers). Empty
+    /// when the broker has no daily cap.
+    fn daily_request_counts(&self) -> Vec<common::ratelimit::DailyCount> {
+        Vec::new()
+    }
+
+    /// Count requests saved earlier today as already sent.
+    fn restore_daily_request_counts(&self, _counts: &[common::ratelimit::DailyCount]) {}
+
     // ---- auth and session lifecycle ----
 
     /// Exchange login credentials (or an OAuth code) for a session token.

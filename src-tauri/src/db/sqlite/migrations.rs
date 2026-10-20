@@ -94,6 +94,7 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         "092_pending_orders_owner",
         super::action_center::migrate_owner,
     ),
+    ("093_broker_daily_requests", super::request_count::migrate),
 ];
 
 /// Run all database migrations
