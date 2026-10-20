@@ -247,6 +247,10 @@ jobs:
       - name: Coverage area floor tests
         # scripts/ci/coverage_areas.py, the rust-coverage job's area gate.
         run: python3 scripts/ci/test_coverage_areas.py
+      - name: Broker certification kit tests
+        # scripts/certify/broker_certify.py (BR-06) against a fake app on
+        # ephemeral loopback ports; it never reaches a broker.
+        run: python3 -I scripts/certify/test_broker_certify.py
       - name: Biome (lint, format, import order)
         run: npx biome ci --reporter=github ./src
       - name: Type check
