@@ -51,7 +51,7 @@ What a client sees: a burst of orders is queued, so the later ones take a little
 
 Nothing reached the broker, so it is safe to send that order again.
 
-Some brokers also count requests per minute or per day (Fyers counts orders, market data and account calls separately, by plan). A request refused for one of those limits gets the broker's own reason.
+Some brokers also count requests per minute or per day. Fyers counts orders, market data and account calls separately, by plan (Standard unless you pick Prime on Broker Configuration), and OpenAlgo keeps the day's count across restarts. A request refused for one of those limits is not sent, and the message names the limit, for example `Fyers' daily limit of 5,000 market data requests on the Standard plan is used up for today, so OpenAlgo has stopped sending them. It resets at midnight.`
 
 ## Invalid API Keys
 
