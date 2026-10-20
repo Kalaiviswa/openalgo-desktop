@@ -31,10 +31,17 @@ enum ModeChange {
 }
 
 impl AnalyzerService {
-    /// Current analyzer status.
-    pub fn get_status(state: &AppState) -> Result<AnalyzerStatus> {
+    /// Current analyzer status. The log count is a `COUNT(*)` over the
+    /// analyzer log, which is kept forever as on the web, so it runs on the
+    /// blocking pool, never on an async worker that carries the feed.
+    pub async fn get_status(state: &AppState) -> Result<AnalyzerStatus> {
         let analyze_mode = state.sqlite.get_analyze_mode()?;
-        let total_logs = state.logs.count_analyzer_logs().unwrap_or(0);
+        let logs = state.logs.clone();
+        let total_logs = tokio::task::spawn_blocking(move || logs.count_analyzer_logs())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(0);
         Ok(AnalyzerStatus {
             analyze_mode,
             mode: if analyze_mode { "analyze" } else { "live" }.to_string(),
@@ -82,7 +89,7 @@ impl AnalyzerService {
         drop(transition);
         written?;
         stored?;
-        Self::get_status(state)
+        Self::get_status(state).await
     }
 
     /// At startup: the engine follows the stored mode, on a task owned by
@@ -105,8 +112,8 @@ impl AnalyzerService {
     }
 
     /// `POST /api/v1/analyzer`.
-    pub fn status_reply(state: &AppState) -> Reply {
-        match Self::get_status(state) {
+    pub async fn status_reply(state: &AppState) -> Reply {
+        match Self::get_status(state).await {
             Ok(s) => Reply::ok(json!({"status": "success", "data": {
                 "analyze_mode": s.analyze_mode, "mode": s.mode, "total_logs": s.total_logs,
             }})),

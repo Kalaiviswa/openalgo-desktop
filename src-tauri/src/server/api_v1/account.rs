@@ -56,7 +56,7 @@ pub async fn analyzer(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request) -> 
     {
         return r;
     }
-    send(AnalyzerService::status_reply(&ctx))
+    send(AnalyzerService::status_reply(&ctx).await)
 }
 
 /// POST /api/v1/analyzer/toggle
