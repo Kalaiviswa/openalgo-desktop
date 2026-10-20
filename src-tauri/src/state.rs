@@ -107,6 +107,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Traffic, latency and security monitoring (bounded queue + writer).
     pub monitor: crate::services::monitor::Monitor,
+    /// The Latency page's report, one computation for concurrent requests.
+    pub latency_reports: crate::services::latency_service::ReportFlight,
     /// The sandbox (analyzer mode) engine, in its own `sandbox.db`.
     pub sandbox: crate::sandbox::Sandbox,
     /// Telegram and WhatsApp bots and their alerts.
@@ -421,6 +423,7 @@ impl AppState {
             tasks: Mutex::new(JoinSet::new()),
             data_dir: data_dir.to_path_buf(),
             monitor: crate::services::monitor::Monitor::new(),
+            latency_reports: Default::default(),
             messaging: crate::messaging::Messaging::new(),
             mcp: crate::mcp::McpRuntime::new(),
             updates: crate::services::update::UpdateService::new(env!("CARGO_PKG_VERSION")),

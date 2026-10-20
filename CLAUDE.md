@@ -766,6 +766,11 @@ Every flaky test found so far was a race, not a slow machine:
   checkpoints, and opening moves an unreplayable log aside, keeps it and
   raises a health alert. Do not remove any of the three.
 - Never hold a pooled SQLite connection across an `.await` on network I/O.
+- A report that holds a pooled connection for its whole computation starves
+  the pool when several run at once: four Latency refreshes took all four
+  `logs.db` connections, and the traffic, error and order log writers
+  waited behind them (and failed after the pool's 10 s wait). Concurrent
+  identical reports share one computation (`latency_service::ReportFlight`).
 - Durability is chosen per store in `db::sqlite::Durability`:
   `openalgo.db`, which holds the order and obligation journal, runs at
   `synchronous=FULL`; `logs.db` and `sandbox.db` at `NORMAL`. The web runs

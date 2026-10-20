@@ -7,9 +7,15 @@ use crate::webui_support;
 use axum::extract::ConnectInfo;
 use axum::http::StatusCode;
 use http_body_util::BodyExt;
+use openalgo_desktop_lib::db::sqlite::monitor::{self as monitor_store, TrafficRow};
+use openalgo_desktop_lib::services::monitor::Record;
+use openalgo_desktop_lib::state::AppState;
 use serde_json::json;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 use webui_support::*;
 
@@ -36,7 +42,37 @@ fn seed_latency(h: &H) {
         .unwrap();
 }
 
-/// DB-03, DB-01: three Latency page refreshes and an export over 200,000
+type App = tower_http::normalize_path::NormalizePath<axum::Router>;
+type Reply = (StatusCode, Vec<u8>);
+
+/// The whole router, built once before anything is measured: the harness
+/// builds the route table per request, which is the test's own work on the
+/// runtime thread, not the server's.
+fn app(h: &H) -> App {
+    openalgo_desktop_lib::server::app(h.ctx.clone())
+}
+
+/// GET `path` through `app` as the signed-in browser `c`, body collected.
+async fn fetch(h: &H, app: &App, c: &str, path: &str) -> Reply {
+    let mut r = with(get(path), c, None);
+    r.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+    crate::with_host(&mut r, &h.ctx);
+    let resp = app.clone().oneshot(r).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, body.to_vec())
+}
+
+/// Four Latency page refreshes and an export, all at once.
+async fn refreshes_and_export(h: &H, app: &App, c: &str) -> ([Reply; 4], Reply) {
+    let stats = || fetch(h, app, c, "/latency/api/stats");
+    let export = fetch(h, app, c, "/latency/export");
+    let (a, b, d, e, x) = tokio::join!(stats(), stats(), stats(), stats(), export);
+    ([a, b, d, e], x)
+}
+
+/// DB-03, DB-01: four Latency page refreshes and an export over 200,000
 /// rows never hold the runtime. Before DB-03, each report loaded every row
 /// and sorted it on the async worker (`runtime_stall` 7.5 s). Until the
 /// export formatted its pages on the blocking pool, it spent 17 ms of the
@@ -46,43 +82,12 @@ fn seed_latency(h: &H) {
 async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
     let (h, c, _) = signed_in();
     seed_latency(&h);
-    // The router is built once, outside the measured span: the harness
-    // builds the whole route table per request, which is the test's own
-    // work on the runtime thread, not the server's.
-    let app = openalgo_desktop_lib::server::app(h.ctx.clone());
-    let call = |path: &str| {
-        let mut r = with(get(path), &c, None);
-        r.extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
-        crate::with_host(&mut r, &h.ctx);
-        let app = app.clone();
-        async move {
-            let resp = app.oneshot(r).await.unwrap();
-            let status = resp.status();
-            let body = resp.into_body().collect().await.unwrap().to_bytes();
-            (status, body.to_vec())
-        }
-    };
-    // Three refreshes, not four: each report holds one of the logs pool's
-    // four connections for its whole computation, so with four the
-    // export's next page waits for one to finish, and on a loaded runner
-    // that outlasts the pool's 10 s wait and ends the export with a pool
-    // error. #143 makes concurrent refreshes share one report and puts
-    // the fourth back.
-    let stats = || call("/latency/api/stats");
-    let (((a, b, d, (s, csv)), busy), worst) = crate::runtime_stall(crate::runtime_busy(async {
-        tokio::join!(stats(), stats(), stats(), call("/latency/export"))
-    }))
-    .await;
-    let json = |r: (StatusCode, Vec<u8>)| {
-        (
-            r.0,
-            serde_json::from_slice::<serde_json::Value>(&r.1).unwrap(),
-        )
-    };
-    let (a, b, d) = (json(a), json(b), json(d));
-    for (s, v) in [&a, &b, &d] {
-        assert_eq!(*s, StatusCode::OK, "{}", v);
+    let app = app(&h);
+    let (((stats, (s, csv)), busy), worst) =
+        crate::runtime_stall(crate::runtime_busy(refreshes_and_export(&h, &app, &c))).await;
+    for (s, body) in stats {
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(s, StatusCode::OK, "{}", v);
         assert_eq!(v["total_orders"], ROWS);
         assert_eq!(v["failed_orders"], ROWS / 10);
         assert!(v["avg_overhead"].as_f64().unwrap() > 0.0);
@@ -101,6 +106,72 @@ async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
         busy < Duration::from_secs(1),
         "the reports kept the runtime busy for {:?} in all",
         busy
+    );
+}
+
+/// Queue a traffic record and save the queue every 20 ms until `stop`, on
+/// a thread of its own as the monitor's writer does; returns the slowest
+/// save and how many records were sent. The harness runs no writer task,
+/// so `drain_now` saves with the writer's own `save_batch`.
+fn traffic_probe(ctx: Arc<AppState>, stop: Arc<AtomicBool>) -> JoinHandle<(Duration, i64)> {
+    std::thread::spawn(move || {
+        let (mut slowest, mut sent) = (Duration::ZERO, 0);
+        while !stop.load(Ordering::Relaxed) {
+            ctx.monitor.send(Record::Traffic(TrafficRow {
+                timestamp: monitor_store::ts(ctx.now()),
+                client_ip: "127.0.0.1".into(),
+                method: "GET".into(),
+                path: "/probe".into(),
+                status_code: 200,
+                duration_ms: 1.0,
+                host: None,
+                error: None,
+            }));
+            sent += 1;
+            let t = Instant::now();
+            ctx.monitor.drain_now(&ctx);
+            slowest = slowest.max(t.elapsed());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        (slowest, sent)
+    })
+}
+
+/// Four Latency page refreshes and an export leave the logs database's
+/// writers a connection: every traffic record saved meanwhile is written,
+/// none waiting long. When each refresh computed its own report, the four
+/// held all four of the logs pool's connections for the whole report
+/// (seconds in a debug build): a save waited for one to finish, and failed
+/// once that outlasted the pool's 10 s wait.
+#[tokio::test]
+async fn traffic_is_logged_while_latency_reports_run() {
+    let (h, c, _) = signed_in();
+    seed_latency(&h);
+    let app = app(&h);
+    let stop = Arc::new(AtomicBool::new(false));
+    let probe = traffic_probe(h.ctx.clone(), stop.clone());
+    let (stats, (s, _)) = refreshes_and_export(&h, &app, &c).await;
+    stop.store(true, Ordering::Relaxed);
+    let (slowest, sent) = probe.join().unwrap();
+    assert!(stats.iter().all(|r| r.0 == StatusCode::OK));
+    assert_eq!(s, StatusCode::OK);
+    let saved: i64 = h
+        .ctx
+        .logs
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM traffic_logs WHERE path = '/probe'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(saved, sent, "every traffic record saved");
+    assert_eq!(h.ctx.monitor.lost(), 0);
+    assert!(
+        slowest < Duration::from_secs(1),
+        "a traffic save waited {:?} for the logs database",
+        slowest
     );
 }
 
