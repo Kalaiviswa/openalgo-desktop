@@ -8,6 +8,11 @@
 //! has a handful. A hard cap drops the oldest frame past [`MAX_PENDING`] as a
 //! last resort. A message leaves once the page has acknowledged it by asking
 //! for what comes after it.
+//!
+//! **One run's.** Every message carries the incarnation of the run whose
+//! inbox it is (NEW-TR-03), so a page drops anything meant for another
+//! engine; the runner only ever queues its own run's frames
+//! (`Runner::frame_to_page`).
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -32,13 +37,15 @@ pub enum Message {
 }
 
 impl Message {
-    fn json(&self, seq: u64) -> Value {
-        match self {
+    fn json(&self, seq: u64, incarnation: i64) -> Value {
+        let mut out = match self {
             Message::Bars(bars) => json!({"seq": seq, "kind": "bars", "bars": bars}),
             Message::Frame { frame, .. } => json!({"seq": seq, "kind": "frame", "frame": frame}),
             Message::Halt => json!({"seq": seq, "kind": "halt"}),
             Message::Resume => json!({"seq": seq, "kind": "resume"}),
-        }
+        };
+        out["incarnation"] = json!(incarnation);
+        out
     }
 }
 
@@ -49,8 +56,9 @@ struct State {
     closed: bool,
 }
 
-#[derive(Default)]
 pub struct Inbox {
+    /// The run this inbox belongs to.
+    incarnation: i64,
     state: Mutex<State>,
     notify: Notify,
 }
@@ -60,8 +68,12 @@ fn bar_time(b: &Value) -> i64 {
 }
 
 impl Inbox {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(incarnation: i64) -> Self {
+        Self {
+            incarnation,
+            state: Mutex::default(),
+            notify: Notify::new(),
+        }
     }
 
     /// Queue one message, folding it into the one it supersedes.
@@ -147,7 +159,11 @@ impl Inbox {
                 let mut s = self.state.lock();
                 s.items.retain(|(seq, _)| *seq > after);
                 if s.closed || !s.items.is_empty() {
-                    let out = s.items.iter().map(|(seq, m)| m.json(*seq)).collect();
+                    let out = s
+                        .items
+                        .iter()
+                        .map(|(seq, m)| m.json(*seq, self.incarnation))
+                        .collect();
                     return (out, s.closed);
                 }
             }
@@ -169,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn bars_and_frames_fold_into_what_they_supersede() {
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(7);
         inbox.push(Message::Bars(vec![bar(1, 1.0), bar(2, 2.0)]));
         inbox.push(Message::Frame {
             intent_id: 7,
@@ -189,6 +205,10 @@ mod tests {
             json!([bar(1, 1.0), bar(2, 2.5), bar(3, 3.0)])
         );
         assert_eq!(got[1]["frame"]["status"], "filled");
+        assert_eq!(
+            (got[0]["incarnation"].clone(), got[1]["incarnation"].clone()),
+            (json!(7), json!(7))
+        );
         let last = got[1]["seq"].as_u64().unwrap();
         let (got, _) = inbox.next(last, Duration::from_millis(10)).await;
         assert!(got.is_empty());
@@ -197,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_waiting_read_wakes_on_push_and_on_close() {
-        let inbox = std::sync::Arc::new(Inbox::new());
+        let inbox = std::sync::Arc::new(Inbox::new(7));
         let reader = {
             let inbox = inbox.clone();
             tokio::spawn(async move { inbox.next(0, Duration::from_secs(5)).await })
@@ -221,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_queue_is_capped() {
-        let inbox = Inbox::new();
+        let inbox = Inbox::new(7);
         for i in 0..(MAX_PENDING as i64 + 50) {
             inbox.push(Message::Frame {
                 intent_id: i,

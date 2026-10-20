@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::NaiveDate;
+use openalgo_desktop_lib::services::live_owner::LiveOwner;
 use openalgo_desktop_lib::services::order_reconciler::{
     BookSnapshot, EntryGate, OrderOwner, ENTRIES_PAUSED,
 };
@@ -363,6 +364,11 @@ impl RunnerServices for Fake {
     }
     fn signed_in(&self) -> bool {
         !self.nobody.load(Ordering::SeqCst)
+    }
+    fn live_owner(&self) -> Option<LiveOwner> {
+        self.broker
+            .load(Ordering::SeqCst)
+            .then(|| LiveOwner::new("zerodha", "AB1234"))
     }
     fn entry_refusal(&self, mode: RunMode) -> Option<String> {
         self.gate

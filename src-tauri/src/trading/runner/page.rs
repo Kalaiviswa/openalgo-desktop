@@ -5,7 +5,7 @@
 use super::inbox::Message;
 use super::orders::{Planned, Target};
 use super::{orders, store};
-use super::{Refusal, RunEntry, RunInfo, Runner, MAX_LOG_LINES};
+use super::{Refusal, RunEntry, Runner, MAX_LOG_LINES};
 use chrono::Duration as ChronoDuration;
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
@@ -104,11 +104,21 @@ impl Runner {
         Some(json!({"status": "success", "messages": messages, "stop": closed}))
     }
 
-    /// Lines the page writes into its run's log.
-    pub fn page_log(&self, run_id: &str, token: &str, lines: &[String]) -> bool {
+    /// Lines the page writes into its run's log, and whether it is waiting
+    /// for the app to confirm a batch whose answer it never got.
+    pub fn page_log(
+        &self,
+        run_id: &str,
+        token: &str,
+        lines: &[String],
+        waiting: Option<bool>,
+    ) -> bool {
         let Some(entry) = self.entry_for(run_id, token) else {
             return false;
         };
+        if let Some(waiting) = waiting {
+            entry.page_waiting.store(waiting, Ordering::SeqCst);
+        }
         let kept: Vec<String> = lines
             .iter()
             .take(MAX_LOG_LINES)
@@ -138,23 +148,77 @@ impl Runner {
         true
     }
 
-    /// Intents from a confirmed bar. Each answers with a frame in the inbox.
+    /// Intents from a confirmed bar of the run `incarnation`. Each answers
+    /// with a frame in the inbox.
+    ///
+    /// **The batch runs to its end even when the page's request does not**
+    /// (NEW-TR-04). A placement cut off between sending and saving its
+    /// answer is the hazard; a reply the page never reads is not, because
+    /// the page sends the same batch again and is answered from the record
+    /// (`repeats`). The task is one batch long and awaited here.
     pub async fn page_intents(
         &self,
         run_id: &str,
         token: &str,
-        intents: &[Value],
+        incarnation: Option<i64>,
+        intents: Vec<Value>,
     ) -> Option<Value> {
         let entry = self.entry_for(run_id, token)?;
+        let Some(runner) = self.me.upgrade() else {
+            return Some(json!({"status": "error", "message": "OpenAlgo is shutting down."}));
+        };
+        let batch = tokio::spawn(async move { runner.submit(&entry, incarnation, &intents).await });
+        Some(batch.await.unwrap_or_else(|e| {
+            tracing::error!("An OpenScript order batch did not finish: {}", e);
+            json!({"status": "error", "message": "The orders of this bar could not be handled."})
+        }))
+    }
+
+    /// One batch, under the run's order lock: an intent answered already is
+    /// answered the same again (`repeats`), the rest are checked and sent.
+    async fn submit(
+        &self,
+        entry: &Arc<RunEntry>,
+        incarnation: Option<i64>,
+        intents: &[Value],
+    ) -> Value {
+        let held = entry.order_lock.lock().await;
+        // The page's secret names its run; a batch that names another run
+        // (a request replayed across a restart) places nothing.
+        if let Some(other) = incarnation.filter(|n| *n != entry.info.incarnation) {
+            return self.answer_other_run(entry, other, intents);
+        }
+        let fresh = match self.answer_repeats(entry, intents) {
+            Ok(fresh) => fresh,
+            Err(why) => return json!({"status": "error", "message": why}),
+        };
+        let repeated = intents.len() - fresh.len();
+        let mut reply = if fresh.is_empty() {
+            json!({"status": "success", "sent": 0})
+        } else {
+            self.send_intents(entry, held, &fresh).await
+        };
+        if repeated > 0 {
+            reply["repeated"] = json!(repeated);
+        }
+        reply
+    }
+
+    /// Check a batch's new intents against the run and send what may go.
+    async fn send_intents(
+        &self,
+        entry: &Arc<RunEntry>,
+        held: tokio::sync::MutexGuard<'_, ()>,
+        intents: &[Value],
+    ) -> Value {
         let info = entry.info.clone();
-        let _held = entry.order_lock.lock().await;
-        let own = match self.bar_gate(&entry) {
+        let own = match self.bar_gate(entry) {
             Ok(own) => own,
             Err((text, flag)) => {
-                self.reject_intents(&entry, intents, text);
+                self.reject_intents(entry, intents, text);
                 let mut reply = json!({"status": "success", "sent": 0});
                 reply[flag] = json!(true);
-                return Some(reply);
+                return reply;
             }
         };
         let services = self.services();
@@ -165,7 +229,7 @@ impl Runner {
             .find(|p| matches!(p, Planned::Unroutable { .. }))
         {
             self.reject_intents(
-                &entry,
+                entry,
                 intents,
                 "this runner cannot send that order as one piece",
             );
@@ -173,9 +237,9 @@ impl Runner {
                 "{} asked for an order this runner cannot send as one piece ({}). Nothing was sent for this bar and the run has stopped.",
                 info.script, kind
             );
-            drop(_held);
-            self.end_run(run_id, &why);
-            return Some(json!({"status": "success", "sent": 0, "stopped": true}));
+            drop(held);
+            self.end_run(&info.run_id, &why);
+            return json!({"status": "success", "sent": 0, "stopped": true});
         }
         let product = orders::product_for(&info.product);
         let target = Target {
@@ -203,34 +267,37 @@ impl Runner {
                                     placement.action, placement.quantity, info.symbol, why
                                 )],
                             );
-                            self.reject_intent(&entry, placement.intent_id, why);
+                            self.reject_intent(entry, placement.intent_id, why);
                             continue;
                         }
                     }
                     match self
-                        .send(&info, &target, &placement, Some(&entry), false)
+                        .send(&info, &target, &placement, Some(entry), false)
                         .await
                     {
                         Ok((_, r)) => sent += usize::from(r.ok),
                         Err(e) => {
                             tracing::error!("Could not record an OpenScript order: {}", e);
                             self.reject_intent(
-                                &entry,
+                                entry,
                                 placement.intent_id,
                                 "the order could not be recorded",
                             );
                         }
                     }
                 }
-                Planned::Cancel { tag, .. } => self.cancel_tagged(&info, &tag).await,
+                Planned::Cancel { intent_id, tag } => {
+                    self.cancel_tagged(entry, &tag).await;
+                    self.remember(entry, intent_id, None);
+                }
                 Planned::Refuse { intent_id, reason } => {
                     self.write_log(&info, &[format!("An order was not sent: {}", reason)]);
-                    self.reject_intent(&entry, intent_id, &reason);
+                    self.reject_intent(entry, intent_id, &reason);
                 }
                 Planned::Unroutable { .. } => {}
             }
         }
-        Some(json!({"status": "success", "sent": sent}))
+        json!({"status": "success", "sent": sent})
     }
 
     /// Whether a bar's intents may be sent at all, under the run's order
@@ -273,12 +340,15 @@ impl Runner {
         Ok(own)
     }
 
-    /// Answer one intent with a rejected frame.
+    /// Answer one intent with a rejected frame, the answer it gets again if
+    /// its page asks again (`repeats`).
     fn reject_intent(&self, entry: &RunEntry, id: i64, text: &str) {
         let now_ms = self.clock.now().timestamp_millis();
+        let frame = orders::frame(id, "rejected", 0, None, None, Some(text), now_ms);
+        self.remember(entry, id, Some(frame.clone()));
         entry.inbox.push(Message::Frame {
             intent_id: id,
-            frame: orders::frame(id, "rejected", 0, None, None, Some(text), now_ms),
+            frame,
         });
     }
 
@@ -290,9 +360,11 @@ impl Runner {
         }
     }
 
-    /// Ask for every working order of this run tagged `tag` to be
-    /// cancelled, saying in the run's log what came of each.
-    async fn cancel_tagged(&self, info: &RunInfo, tag: &str) {
+    /// Ask for every working order this run's engine placed tagged `tag` to
+    /// be cancelled, saying in the run's log what came of each. An earlier
+    /// run's order of the same tag is not this engine's (NEW-TR-03).
+    async fn cancel_tagged(&self, entry: &RunEntry, tag: &str) {
+        let info = &entry.info;
         let rows = match self.read_own(info) {
             Ok(rows) => rows,
             Err(why) => {
@@ -306,13 +378,13 @@ impl Runner {
                 Vec::new()
             }
         };
-        let services = self.services();
-        for o in rows
-            .into_iter()
-            .filter(|o| o.tag == tag && !store::TERMINAL.contains(&o.status.as_str()))
-        {
+        for o in rows.into_iter().filter(|o| {
+            o.tag == tag
+                && o.incarnation == Some(info.incarnation)
+                && !store::TERMINAL.contains(&o.status.as_str())
+        }) {
             if let Some(oid) = o.orderid.as_deref() {
-                let r = services.cancel(info.mode, oid).await;
+                let r = self.cancel_own(info, oid).await;
                 self.write_log(
                     info,
                     &[if r.ok {

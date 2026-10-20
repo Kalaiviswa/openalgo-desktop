@@ -1,8 +1,8 @@
 {
   "status": "success",
   "messages": [
-    { "seq": 1, "kind": "halt" },
-    { "seq": 2, "kind": "resume" }
+    { "seq": 1, "kind": "halt", "incarnation": 1 },
+    { "seq": 2, "kind": "resume", "incarnation": 1 }
   ],
   "stop": false
 }

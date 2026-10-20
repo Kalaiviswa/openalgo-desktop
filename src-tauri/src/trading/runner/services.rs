@@ -86,10 +86,10 @@ pub trait RunnerServices: Send + Sync {
     fn instrument(&self, symbol: &str, exchange: &str, date: NaiveDate) -> Value;
     /// Whether the OpenAlgo user is signed in.
     fn signed_in(&self) -> bool;
-    /// The broker session Live orders go through now (LOG-07).
-    fn live_owner(&self) -> Option<LiveOwner> {
-        None
-    }
+    /// The broker session Live orders go through now (LOG-07): what a Live
+    /// run is bound to at start, and what its every order and read is
+    /// checked against (NEW-TR-01).
+    fn live_owner(&self) -> Option<LiveOwner>;
     /// Ask the order reconciler to read the order book now (an uncertain
     /// placement was just recorded).
     fn request_reconcile(&self) {}

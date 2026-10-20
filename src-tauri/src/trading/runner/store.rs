@@ -14,6 +14,7 @@
 //! transaction, which is this store's form of the web's write lock.
 
 use crate::error::Result;
+use crate::services::live_owner::Destination;
 use crate::trading::names::{
     is_deployment_id, is_input_key, is_run_field, is_script_name, not_a_script_name,
     DEPLOYMENT_PREFIX,
@@ -26,13 +27,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 mod approval;
+mod identity;
+pub use identity::{adopt, begin_incarnation, migrate_identity, order_of_intent};
 mod prune;
 pub use approval::{bind_approved, held_for_approval, migrate_pending_link, refuse_held};
 pub use prune::prune_orders;
 mod unconfirmed;
 pub use unconfirmed::{
-    bind, has_unconfirmed, migrate_unconfirmed, order_by_id, owns_orderid, release_unconfirmed,
-    unconfirm_leftovers, unconfirmed, unconfirmed_rows, UNCONFIRMED,
+    bind, migrate_unconfirmed, order_by_id, owns_orderid, release_unconfirmed, unconfirm_leftovers,
+    unconfirmed, unconfirmed_rows, UNCONFIRMED,
 };
 
 /// The products a deployment may name (web `PRODUCTS`).
@@ -697,6 +700,21 @@ pub struct OrderRow {
     pub trigger_price: Option<f64>,
     /// The Action Center order Semi-Auto held it as (LOG-04).
     pub pending_order_id: Option<i64>,
+    /// The run that placed it (`openscript_incarnations`), whose page alone
+    /// hears about it; `None` for a row from before runs were recorded.
+    pub incarnation: Option<i64>,
+    /// Where it went (NEW-TR-01): the broker (`sandbox` in Sandbox) and the
+    /// account; blank broker for a Live row from before they were recorded.
+    pub broker: String,
+    pub account: String,
+}
+
+impl OrderRow {
+    /// Where this order went, as recorded. A row with a side word this
+    /// store never writes belongs nowhere.
+    pub fn destination(&self) -> Option<Destination> {
+        Destination::recorded(&self.mode, &self.broker, &self.account)
+    }
 }
 
 /// What a new row records.
@@ -715,6 +733,10 @@ pub struct NewOrder {
     pub trigger_price: Option<f64>,
     pub product: String,
     pub is_exit: bool,
+    /// The run placing it, and where it goes (see [`OrderRow`]).
+    pub incarnation: Option<i64>,
+    pub broker: String,
+    pub account: String,
 }
 
 /// Engine words for an order that will not change again.
@@ -725,8 +747,10 @@ pub fn insert_order(conn: &Connection, o: &NewOrder, now: DateTime<Utc>) -> Resu
     conn.execute(
         "INSERT INTO openscript_orders
             (deployment, mode, intent_id, tag, symbol, exchange, action, quantity, pricetype,
-             product, status, is_exit, placed_at, updated_at, price, trigger_price)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'placed', ?11, ?12, ?12, ?13, ?14)",
+             product, status, is_exit, placed_at, updated_at, price, trigger_price, incarnation,
+             broker, account)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'placed', ?11, ?12, ?12, ?13, ?14, ?15,
+             ?16, ?17)",
         params![
             o.deployment,
             o.mode,
@@ -741,7 +765,10 @@ pub fn insert_order(conn: &Connection, o: &NewOrder, now: DateTime<Utc>) -> Resu
             o.is_exit,
             at,
             o.price,
-            o.trigger_price
+            o.trigger_price,
+            o.incarnation,
+            o.broker,
+            o.account
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -804,13 +831,16 @@ fn order_from_row(r: &rusqlite::Row) -> rusqlite::Result<OrderRow> {
         price: r.get(19)?,
         trigger_price: r.get(20)?,
         pending_order_id: r.get(21)?,
+        incarnation: r.get(22)?,
+        broker: r.get(23)?,
+        account: r.get(24)?,
     })
 }
 
 const ORDER_COLUMNS: &str =
     "id, deployment, mode, intent_id, tag, symbol, exchange, action, quantity, \
 pricetype, product, orderid, status, filled_quantity, average_price, message, is_exit, \
-client_tag, placed_at, price, trigger_price, pending_order_id";
+client_tag, placed_at, price, trigger_price, pending_order_id, incarnation, broker, account";
 
 /// Every order one deployment placed on one side (`live` or `sandbox`),
 /// oldest first.
@@ -915,6 +945,7 @@ mod tests {
         migrate_unconfirmed(&c).unwrap();
         migrate_pending_link(&c).unwrap();
         migrate_pending_link(&c).unwrap();
+        migrate_identity(&c).unwrap();
         c
     }
 
@@ -1090,7 +1121,7 @@ mod tests {
             placed_at: String::new(),
             price: None,
             trigger_price: None,
-            pending_order_id: None,
+            ..Default::default()
         }
     }
 

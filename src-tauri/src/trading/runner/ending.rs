@@ -97,7 +97,13 @@ impl Runner {
                     self.teardown(&e, "Closed and stopped");
                 }
                 tracing::info!("Closed and stopped the OpenScript run {}", run_id);
-                Ok(format!("{} closed and stopped", entry.info.script))
+                let mut answer = format!("{} closed and stopped", entry.info.script);
+                let elsewhere = self.held_elsewhere(&run_id, &entry.info.destination);
+                if !elsewhere.is_empty() {
+                    self.write_log(&entry.info, &elsewhere);
+                    answer = format!("{}. {}", answer, elsewhere.join(" "));
+                }
+                Ok(answer)
             }
             Err(failed) => {
                 drop(reg);
@@ -128,6 +134,12 @@ impl Runner {
             (o.close_wait, o.close_look)
         };
         let deadline = Instant::now() + wait;
+
+        // Through another broker or account nothing of this run is read,
+        // cancelled or sent (NEW-TR-01).
+        if let Some(why) = self.session_refusal(info) {
+            return Err(CloseFailure::resume(format!("{} {}", why, NOTHING_CLOSED)));
+        }
 
         // Nothing of this run may still be working when it measures itself.
         self.settle(entry, deadline, look).await?;
@@ -298,7 +310,6 @@ impl Runner {
         look: Duration,
     ) -> Result<(), CloseFailure> {
         let info = &entry.info;
-        let services = self.services();
         self.refresh_orders_until(entry, Some(deadline)).await;
         // An order whose answer is not saved cannot be followed, so its fill
         // could not be counted: nothing is measured until it is saved.
@@ -356,7 +367,7 @@ impl Runner {
         }
         for o in &working {
             if let Some(oid) = o.orderid.as_deref() {
-                let r = services.cancel(info.mode, oid).await;
+                let r = self.cancel_own(info, oid).await;
                 self.write_log(
                     info,
                     &[if r.ok {
@@ -427,6 +438,10 @@ impl Runner {
         let services = self.services();
         let delivery = held.iter().any(|h| h.product.eq_ignore_ascii_case("CNC"));
         loop {
+            // The books read are the session's connected now: only its own.
+            if let Some(why) = self.session_refusal(info) {
+                return Err(why);
+            }
             let read = async {
                 let positions = services
                     .book(info.mode, Book::Positions)

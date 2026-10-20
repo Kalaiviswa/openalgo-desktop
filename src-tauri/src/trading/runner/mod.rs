@@ -56,11 +56,13 @@ mod deployments;
 mod ending;
 mod follow;
 pub mod host;
+mod identity;
 pub mod inbox;
 mod launch;
 pub mod orders;
 mod page;
 pub mod reconcile;
+mod repeats;
 pub mod schedule;
 mod sending;
 pub mod services;
@@ -70,6 +72,7 @@ pub mod window;
 
 use crate::clock::Clock;
 use crate::db::sqlite::SqliteDb;
+use crate::services::live_owner::Destination;
 use crate::strategy::dispatch::RunMode;
 use crate::trading::names::is_script_name;
 use crate::trading::scripts::ScriptStore;
@@ -174,8 +177,17 @@ pub struct RunInfo {
     /// Open orders of this run with no number from the destination, which
     /// it cannot follow (a Stop does not go ahead while there are any).
     pub unresolved_orders: usize,
-    /// The broker session a Live run started on; its orders go nowhere else.
-    pub owner: Option<crate::services::live_owner::LiveOwner>,
+    /// The run's page has a batch of orders whose answer from the app never
+    /// reached it, and sends nothing new until the app confirms it
+    /// (NEW-TR-04; the page says so with its log lines).
+    pub awaiting_confirmation: bool,
+    /// Where its orders go, fixed at start: the side and, for Live, the
+    /// broker session (NEW-TR-01). Its ledger is the deployment's rows this
+    /// owns; its orders, cancels and reads go through nothing else.
+    pub destination: Destination,
+    /// This run's engine incarnation (`store::begin_incarnation`): its page
+    /// hears only about the orders this run placed (NEW-TR-03).
+    pub incarnation: i64,
 }
 
 impl RunInfo {
@@ -190,11 +202,13 @@ impl RunInfo {
             "state": if self.close_pending { "close_pending" } else { "running" },
             "unsaved_orders": self.unsaved_orders,
             "unresolved_orders": self.unresolved_orders,
+            "awaiting_confirmation": self.awaiting_confirmation,
             "symbol": self.symbol,
             "exchange": self.exchange,
             "interval": self.interval,
             "product": self.product,
             "mode": self.mode.as_str(),
+            "incarnation": self.incarnation,
             "pid": Value::Null,
             "started_at": self.started_at.with_timezone(&Kolkata).to_rfc3339(),
             "log": self.log_file.to_string_lossy(),
@@ -213,6 +227,8 @@ struct RunEntry {
     unsaved: Mutex<Vec<Unsaved>>,
     /// Open orders with no number, as of the last refresh.
     unresolved: AtomicUsize,
+    /// See [`RunInfo::awaiting_confirmation`].
+    page_waiting: AtomicBool,
     last_seen: Mutex<Instant>,
     /// Bars at or after this open time are pushed (set by the page's first
     /// history read), and the last bar pushed.
@@ -222,6 +238,10 @@ struct RunEntry {
     cancel: CancellationToken,
     /// Intents and a close never interleave for one run.
     order_lock: tokio::sync::Mutex<()>,
+    /// What each intent that left no order row was answered (a refusal, or
+    /// a cancel done), so a page asking again gets the same answer
+    /// (NEW-TR-04). Bounded: see `repeats`.
+    answered: Mutex<std::collections::BTreeMap<i64, Option<Value>>>,
 }
 
 impl RunEntry {
@@ -232,6 +252,7 @@ impl RunEntry {
         info.close_pending = self.close_pending.load(Ordering::SeqCst);
         info.unsaved_orders = self.unsaved.lock().len();
         info.unresolved_orders = self.unresolved.load(Ordering::SeqCst);
+        info.awaiting_confirmation = self.page_waiting.load(Ordering::SeqCst);
         info
     }
 }
@@ -487,7 +508,7 @@ impl Runner {
 
     /// The side a deployment's book is read from: the run's own while it
     /// runs, the side it last started on once stopped, else the platform's.
-    pub fn mode_for(&self, given: &str) -> RunMode {
+    fn mode_for(&self, given: &str) -> RunMode {
         if let Some(info) = self.status_of(given) {
             return info.mode;
         }
@@ -540,13 +561,19 @@ impl Runner {
 
     // ------------------------------------------------------------- orders
 
-    /// A deployment's own orders on one side, or the sentence saying they
-    /// could not be read. Never an empty list on a failure: a ledger that
-    /// cannot be read is not a flat one (LOG-04).
-    fn own_orders(&self, run_id: &str, mode: RunMode) -> Result<Vec<store::OrderRow>, String> {
+    /// A deployment's own orders at one destination, or the sentence saying
+    /// they could not be read. Never an empty list on a failure: a ledger
+    /// that cannot be read is not a flat one (LOG-04). Rows of another
+    /// broker or account are not its own (NEW-TR-01).
+    fn own_orders(
+        &self,
+        run_id: &str,
+        destination: &Destination,
+    ) -> Result<Vec<store::OrderRow>, String> {
         self.db
             .conn()
-            .and_then(|c| store::orders_of(&c, run_id, mode.as_str()))
+            .and_then(|c| store::orders_of(&c, run_id, destination.mode.as_str()))
+            .map(|rows| identity::owned_by(destination, rows))
             .map_err(|e| {
                 tracing::error!("Could not read the orders of {}: {}", run_id, e);
                 ORDERS_UNREADABLE.to_string()
@@ -554,12 +581,16 @@ impl Runner {
     }
 
     fn read_own(&self, info: &RunInfo) -> Result<Vec<store::OrderRow>, String> {
-        self.own_orders(&info.run_id, info.mode)
+        self.own_orders(&info.run_id, &info.destination)
     }
 
-    /// The orders a deployment placed on one side (for its books).
-    pub fn orders_of(&self, given: &str, mode: RunMode) -> Result<Vec<store::OrderRow>, String> {
-        self.own_orders(&self.as_run_id(given), mode)
+    /// The orders a deployment placed at one destination (for its books).
+    pub fn orders_of(
+        &self,
+        given: &str,
+        destination: &Destination,
+    ) -> Result<Vec<store::OrderRow>, String> {
+        self.own_orders(&self.as_run_id(given), destination)
     }
 
     /// Place one order for a run and record it. Answers the row id and the
@@ -620,7 +651,7 @@ impl Runner {
                 if entry.last_seen.lock().elapsed() > heartbeat {
                     runner.end_run(
                         &entry.info.run_id,
-                        "Stopped: the strategy page stopped answering. Its position was left as it is; start it again to resume",
+                        "Stopped: the strategy page stopped answering. Its position was left as it is. Started again, it begins holding nothing; Stop closes what this strategy holds",
                     );
                     return;
                 }

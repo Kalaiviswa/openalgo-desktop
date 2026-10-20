@@ -1,5 +1,5 @@
 {
   "status": "success",
-  "messages": [{ "seq": 1, "kind": "halt" }],
+  "messages": [{ "seq": 1, "kind": "halt", "incarnation": 1 }],
   "stop": false
 }

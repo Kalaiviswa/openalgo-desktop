@@ -3,7 +3,9 @@
 //!
 //! Every Live obligation records the broker, and the account at that broker,
 //! it was opened on: a strategy run (`sm_strategy_run.broker` and
-//! `broker_account`), an OpenScript run (`RunInfo::owner`), a scalping stop
+//! `broker_account`), an OpenScript run and every order it placed
+//! ([`Destination`], `openscript_incarnations` and `openscript_orders`), a
+//! scalping stop
 //! (`scalping_sl_state.broker` and `broker_account`) and an order a Live run
 //! queued in the Action Center (`pending_orders.broker` and
 //! `broker_account`). Before an order for it is sent, the dispatch layer
@@ -18,6 +20,12 @@
 //! One key set per broker (several accounts of one broker are out of scope),
 //! but the account is still compared, so a session that comes back on
 //! another account is caught too.
+//!
+//! [`Destination`] is the side plus, for Live, that session: the one
+//! identity a ledger row is bound to (NEW-TR-01). Its membership test is
+//! strict where [`LiveOwner::refusal`] is lenient: a row whose broker was
+//! never recorded belongs to no run, so a run started on another broker
+//! never counts, cancels or closes it.
 
 use crate::state::AppState;
 use crate::strategy::dispatch::{OrderGateway, RunMode};
@@ -84,19 +92,116 @@ impl LiveOwner {
     pub fn refusal(&self, active: Option<&LiveOwner>) -> Option<String> {
         let active = active?;
         let other_broker = self.knows_broker() && !self.broker.eq_ignore_ascii_case(&active.broker);
-        let other_account = !self.account.is_empty()
-            && !active.account.is_empty()
-            && !self.account.eq_ignore_ascii_case(&active.account);
-        if !other_broker && !other_account {
+        if !other_broker && self.same_account(active) {
             return None;
         }
+        Some(self.not_sent_through(active))
+    }
+
+    /// The account the same wherever both sides know it.
+    fn same_account(&self, other: &LiveOwner) -> bool {
+        self.account.is_empty()
+            || other.account.is_empty()
+            || self.account.eq_ignore_ascii_case(&other.account)
+    }
+
+    /// Whether an obligation recorded on `self` was opened on the session
+    /// `other` names: the broker known on both sides and the same, and the
+    /// account the same wherever both know it. Strict where
+    /// [`Self::refusal`] is lenient: an owner never recorded matches nothing.
+    pub fn same_session(&self, other: &LiveOwner) -> bool {
+        self.knows_broker()
+            && other.knows_broker()
+            && self.broker.eq_ignore_ascii_case(&other.broker)
+            && self.same_account(other)
+    }
+
+    /// What a trader reads when an order of `self` would have gone through
+    /// `active`, another session.
+    fn not_sent_through(&self, active: &LiveOwner) -> String {
         let mine = self.describe();
-        Some(format!(
+        format!(
             "This was opened on {}, but OpenAlgo is signed in to {} now, so the order was not sent. Sign in to {} to manage it.",
             mine,
             active.describe(),
             mine
-        ))
+        )
+    }
+}
+
+/// The broker a Sandbox destination records.
+pub const SANDBOX_BROKER: &str = "sandbox";
+
+/// Where an obligation's orders go (NEW-TR-01): the side, and for Live the
+/// broker session it was opened on. The OpenScript runner records it on
+/// every run (`openscript_incarnations`) and every order row; a run's
+/// ledger is the rows its destination [`owns`](Destination::owns), and its
+/// orders, cancels, status reads and book reads go only through that
+/// session ([`Destination::refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub mode: RunMode,
+    /// Live: the broker session. Sandbox: [`SANDBOX_BROKER`], no account.
+    pub owner: LiveOwner,
+}
+
+impl Destination {
+    pub fn sandbox() -> Self {
+        Self {
+            mode: RunMode::Sandbox,
+            owner: LiveOwner::new(SANDBOX_BROKER, ""),
+        }
+    }
+
+    pub fn live(owner: LiveOwner) -> Self {
+        Self {
+            mode: RunMode::Live,
+            owner,
+        }
+    }
+
+    /// A destination as a row records it: its side's word, broker and
+    /// account. `None` for a word that names neither side.
+    pub fn recorded(mode: &str, broker: &str, account: &str) -> Option<Self> {
+        Some(match RunMode::parse(mode)? {
+            RunMode::Sandbox => Self::sandbox(),
+            RunMode::Live => Self::live(LiveOwner::new(broker, account)),
+        })
+    }
+
+    /// Whether an order recorded at `row` belongs here: the same side and,
+    /// for Live, the same session ([`LiveOwner::same_session`]). A Live row
+    /// whose broker was never recorded belongs nowhere.
+    pub fn owns(&self, row: &Destination) -> bool {
+        self.mode == row.mode
+            && (self.mode == RunMode::Sandbox || self.owner.same_session(&row.owner))
+    }
+
+    /// Whether it says where its orders went: Sandbox always, Live when its
+    /// broker was recorded.
+    pub fn is_known(&self) -> bool {
+        self.mode == RunMode::Sandbox || self.owner.knows_broker()
+    }
+
+    /// Why an order, cancel or read for this destination must not go
+    /// through `active`, the live session now, in a trader's words; `None`
+    /// when it may (Sandbox, or the same session). No session at all is
+    /// refused by the caller's own session check.
+    pub fn refusal(&self, active: Option<&LiveOwner>) -> Option<String> {
+        if self.mode == RunMode::Sandbox {
+            return None;
+        }
+        let active = active?;
+        (!self.owner.same_session(active)).then(|| self.owner.not_sent_through(active))
+    }
+
+    /// Where it is, as a trader reads it.
+    pub fn describe(&self) -> String {
+        match self.mode {
+            RunMode::Sandbox => "sandbox mode".into(),
+            RunMode::Live if self.owner.knows_broker() => self.owner.describe(),
+            RunMode::Live => "your broker, on an account this version did not record".into(),
+        }
     }
 }
 
@@ -131,5 +236,40 @@ mod tests {
             zerodha.refusal(Some(&LiveOwner::new("ZERODHA", "ab1234"))),
             None
         );
+    }
+
+    /// NEW-TR-01: a ledger row belongs to a run only on the same side and,
+    /// for Live, the same broker session. Unlike `refusal`, a row whose
+    /// broker was never recorded belongs to no run.
+    #[test]
+    fn a_destination_owns_only_its_own_sessions_rows() {
+        let a = Destination::live(LiveOwner::new("zerodha", "AB1234"));
+        let row = |m: &str, b: &str, acc: &str| Destination::recorded(m, b, acc).unwrap();
+        assert!(a.owns(&row("live", "zerodha", "AB1234")));
+        assert!(a.owns(&row("live", "ZERODHA", "ab1234")));
+        assert!(a.owns(&row("live", "zerodha", "")), "account not reported");
+        assert!(!a.owns(&row("live", "angel", "AB1234")));
+        assert!(!a.owns(&row("live", "zerodha", "ZZ0001")));
+        assert!(!a.owns(&row("live", "", "")), "never recorded: nobody's");
+        assert!(!a.owns(&row("sandbox", "", "")));
+        let sandbox = Destination::sandbox();
+        assert!(sandbox.owns(&row("sandbox", "sandbox", "")));
+        assert!(sandbox.owns(&row("sandbox", "", "")));
+        assert!(!sandbox.owns(&row("live", "zerodha", "AB1234")));
+        assert!(Destination::recorded("paper", "zerodha", "").is_none());
+        assert!(!row("live", "", "").is_known());
+
+        let angel = LiveOwner::new("angel", "XY9876");
+        assert_eq!(a.refusal(Some(&LiveOwner::new("zerodha", "AB1234"))), None);
+        assert_eq!(a.refusal(None), None, "no session: the caller says");
+        assert_eq!(
+            a.refusal(Some(&angel)).unwrap(),
+            "This was opened on Zerodha (AB1234), but OpenAlgo is signed in to Angel One (XY9876) now, so the order was not sent. Sign in to Zerodha (AB1234) to manage it."
+        );
+        assert!(
+            row("live", "", "").refusal(Some(&angel)).is_some(),
+            "strict"
+        );
+        assert_eq!(sandbox.refusal(Some(&angel)), None);
     }
 }

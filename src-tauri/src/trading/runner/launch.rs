@@ -7,6 +7,7 @@ use super::store;
 use super::{
     random_token, Refusal, RunEntry, RunInfo, Runner, NO_HOST_MESSAGE, SHUTTING_DOWN_MESSAGE,
 };
+use crate::services::live_owner::Destination;
 use crate::strategy::dispatch::RunMode;
 use crate::trading::names::names_something;
 use chrono_tz::Asia::Kolkata;
@@ -129,6 +130,7 @@ impl Runner {
                 "The folder strategy logs are written to could not be created. Check that the app's data folder can be written to.",
             ));
         }
+        let (destination, incarnation) = self.begin_run(saved, mode)?;
         let info = RunInfo {
             run_id: run_id.clone(),
             script: saved.script.clone(),
@@ -142,25 +144,20 @@ impl Runner {
             close_pending: false,
             unsaved_orders: 0,
             unresolved_orders: 0,
-            owner: (mode == RunMode::Live)
-                .then(|| self.services().live_owner())
-                .flatten(),
+            awaiting_confirmation: false,
+            destination,
+            incarnation,
         };
         let entry = self.new_entry(&info);
-        self.write_log(
-            &info,
-            &[format!(
-                "=== Run started at {} on the {} side ===",
-                started
-                    .with_timezone(&Kolkata)
-                    .format("%Y-%m-%d %H:%M:%S IST"),
-                if mode == RunMode::Live {
-                    "live"
-                } else {
-                    "sandbox"
-                }
-            )],
-        );
+        let mut lines = vec![format!(
+            "=== Run started at {} on the {} side ===",
+            started
+                .with_timezone(&Kolkata)
+                .format("%Y-%m-%d %H:%M:%S IST"),
+            mode.as_str()
+        )];
+        lines.extend(self.start_lines(&info));
+        self.write_log(&info, &lines);
         self.reg.lock().runs.insert(run_id.clone(), entry.clone());
         let launch = Launch {
             run_id: run_id.clone(),
@@ -221,22 +218,68 @@ impl Runner {
         Ok(mode)
     }
 
+    /// Where a run starting now trades, and its incarnation, recorded before
+    /// it can send anything (NEW-TR-01, NEW-TR-03). A Live start whose
+    /// broker session cannot be named is refused: its orders could not be
+    /// bound to an account.
+    fn begin_run(
+        &self,
+        saved: &store::Deployment,
+        mode: RunMode,
+    ) -> Result<(Destination, i64), Refusal> {
+        let destination = match mode {
+            RunMode::Sandbox => Destination::sandbox(),
+            RunMode::Live => self
+                .services()
+                .live_owner()
+                .map(Destination::live)
+                .filter(Destination::is_known)
+                .ok_or_else(|| {
+                    Refusal::new(
+                        409,
+                        format!(
+                            "{} was not started, because OpenAlgo could not tell which broker account it would trade through. Log in to your broker again, then start it.",
+                            saved.script
+                        ),
+                    )
+                })?,
+        };
+        let recorded = self.db.conn().and_then(|c| {
+            store::begin_incarnation(&c, &saved.deployment, &destination, self.clock.now())
+        });
+        match recorded {
+            Ok(incarnation) => Ok((destination, incarnation)),
+            Err(e) => {
+                tracing::error!("Could not record the run of {}: {}", saved.deployment, e);
+                Err(Refusal::new(
+                    409,
+                    format!(
+                        "{} was not started, because its run could not be recorded. Try again in a moment.",
+                        saved.script
+                    ),
+                ))
+            }
+        }
+    }
+
     /// A new run's registry entry, with its page secret and an empty inbox.
     fn new_entry(&self, info: &RunInfo) -> Arc<RunEntry> {
         Arc::new(RunEntry {
             info: info.clone(),
             token: random_token(),
-            inbox: Inbox::new(),
+            inbox: Inbox::new(info.incarnation),
             halted: AtomicBool::new(false),
             close_pending: AtomicBool::new(false),
             unsaved: Mutex::new(Vec::new()),
             unresolved: AtomicUsize::new(0),
+            page_waiting: AtomicBool::new(false),
             last_seen: Mutex::new(Instant::now()),
             anchor: Mutex::new(None),
             last_bar: Mutex::new(None),
             pump: Mutex::new(None),
             cancel: self.cancel.child_token(),
             order_lock: tokio::sync::Mutex::new(()),
+            answered: Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 }

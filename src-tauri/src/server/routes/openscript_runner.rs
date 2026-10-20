@@ -286,6 +286,9 @@ pub async fn status_one(State(ctx): Ctx, Path(name): Path<String>) -> Response {
         "settings": saved.map(|d| d.answer(&name)),
         "logs": runner.logs_for(&run_id),
         "log_dir": log_dir(&ctx),
+        // Desktop (NEW-TR-01): what it holds through another account, or
+        // from before this version recorded the account.
+        "elsewhere": runner.held_elsewhere_of(&name),
     }))
 }
 
@@ -495,10 +498,15 @@ async fn book(ctx: &AppState, name: &str, which: &str) -> Response {
     } else {
         String::new()
     };
-    // One side, read once: the rows and the book it filters are the same side.
-    let mode: RunMode = runner.mode_for(name);
+    // One destination, read once: the rows and the book it filters are the
+    // same side and the same broker account (NEW-TR-01).
+    let destination = match runner.book_destination(name) {
+        Ok(at) => at,
+        Err(why) => return err(409, why),
+    };
+    let mode: RunMode = destination.mode;
     // A ledger that cannot be read is said so, never shown as an empty book.
-    let own = match runner.orders_of(name, mode) {
+    let own = match runner.orders_of(name, &destination) {
         Ok(own) => own,
         Err(why) => return err(500, why),
     };
@@ -597,10 +605,11 @@ pub async fn host_intents(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let incarnation = body.get("incarnation").and_then(Value::as_i64);
     match ctx
         .trading
         .runner
-        .page_intents(&run, &token(&headers), &intents)
+        .page_intents(&run, &token(&headers), incarnation, intents)
         .await
     {
         None => gone(),
@@ -614,13 +623,22 @@ pub async fn host_log(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let lines: Vec<String> = object(&body)
+    let body = object(&body);
+    let lines: Vec<String> = body
+        .as_ref()
         .and_then(|b| b.get("lines").and_then(Value::as_array).cloned())
         .unwrap_or_default()
         .iter()
         .filter_map(|l| l.as_str().map(str::to_string))
         .collect();
-    if ctx.trading.runner.page_log(&run, &token(&headers), &lines) {
+    let waiting = body
+        .as_ref()
+        .and_then(|b| b.get("waiting").and_then(Value::as_bool));
+    if ctx
+        .trading
+        .runner
+        .page_log(&run, &token(&headers), &lines, waiting)
+    {
         ok(json!({"status": "success"}))
     } else {
         gone()

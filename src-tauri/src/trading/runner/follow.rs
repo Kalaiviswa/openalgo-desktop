@@ -3,8 +3,7 @@
 //! cannot be, LOG-04), and every open order read back so the page hears what
 //! became of it.
 
-use super::inbox::Message;
-use super::{orders, store, RunEntry, Runner, Unsaved};
+use super::{identity, orders, store, RunEntry, Runner, Unsaved};
 use crate::strategy::dispatch::{OrderStatusResult, RunMode};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -122,7 +121,8 @@ impl Runner {
         let read = self
             .db
             .conn()
-            .and_then(|c| store::open_orders(&c, &entry.info.run_id, entry.info.mode.as_str()));
+            .and_then(|c| store::open_orders(&c, &entry.info.run_id, entry.info.mode.as_str()))
+            .map(|rows| identity::owned_by(&entry.info.destination, rows));
         let open = match read {
             Ok(rows) => rows,
             Err(e) => {
@@ -135,11 +135,20 @@ impl Runner {
                 return;
             }
         };
+        // The Action Center's record is the app's own, read whatever session
+        // is connected.
         let open = self.follow_approvals(entry, open);
         entry.unresolved.store(
             open.iter().filter(|o| o.orderid.is_none()).count(),
             Ordering::SeqCst,
         );
+        // Another broker or account is connected: nothing of this run is read
+        // through it (NEW-TR-01). Its orders are followed again once its own
+        // session is back.
+        if let Some(why) = self.session_refusal(&entry.info) {
+            tracing::debug!("{}: orders not read: {}", entry.info.run_id, why);
+            return;
+        }
         for o in open {
             let Some(oid) = o.orderid.clone() else {
                 continue;
@@ -154,53 +163,62 @@ impl Runner {
             if !read.ok {
                 continue;
             }
-            let Some(now) = orders::progress(&read.order, o.quantity) else {
-                continue;
-            };
-            if now.status == o.status
-                && now.filled == o.filled_quantity
-                && (now.average_price.is_none() || now.average_price == o.average_price)
-            {
-                continue;
+            if let Some(now) = orders::progress(&read.order, o.quantity) {
+                self.fold_progress(entry, &o, &oid, &now);
             }
-            if let Ok(conn) = self.db.conn() {
-                let _ = store::progressed(
-                    &conn,
-                    o.id,
-                    now.status,
+        }
+    }
+
+    /// Record what the destination now says about one open order, and tell
+    /// the page of the run that placed it.
+    fn fold_progress(
+        &self,
+        entry: &RunEntry,
+        o: &store::OrderRow,
+        oid: &str,
+        now: &orders::Progress,
+    ) {
+        if now.status == o.status
+            && now.filled == o.filled_quantity
+            && (now.average_price.is_none() || now.average_price == o.average_price)
+        {
+            return;
+        }
+        if let Ok(conn) = self.db.conn() {
+            let _ = store::progressed(
+                &conn,
+                o.id,
+                now.status,
+                now.filled,
+                now.average_price,
+                self.clock.now(),
+            );
+        }
+        if now.status == "filled" {
+            self.write_log(
+                &entry.info,
+                &[format!(
+                    "Order {} filled: {} {} at {}.",
+                    oid,
+                    o.action,
                     now.filled,
-                    now.average_price,
-                    self.clock.now(),
-                );
-            }
-            if now.status == "filled" {
-                self.write_log(
-                    &entry.info,
-                    &[format!(
-                        "Order {} filled: {} {} at {}.",
-                        oid,
-                        o.action,
-                        now.filled,
-                        now.average_price
-                            .map(|p| format!("{:.2}", p))
-                            .unwrap_or_else(|| "an unreported price".into())
-                    )],
-                );
-            }
-            if let Some(intent) = o.intent_id {
-                entry.inbox.push(Message::Frame {
-                    intent_id: intent,
-                    frame: orders::frame(
-                        intent,
-                        now.status,
-                        now.filled,
-                        now.average_price.or(o.average_price),
-                        Some(&oid),
-                        None,
-                        self.clock.now().timestamp_millis(),
-                    ),
-                });
-            }
+                    now.average_price
+                        .map(|p| format!("{:.2}", p))
+                        .unwrap_or_else(|| "an unreported price".into())
+                )],
+            );
+        }
+        if let Some(intent) = o.intent_id {
+            let frame = orders::frame(
+                intent,
+                now.status,
+                now.filled,
+                now.average_price.or(o.average_price),
+                Some(oid),
+                None,
+                self.clock.now().timestamp_millis(),
+            );
+            self.frame_to_page(entry, o, frame);
         }
     }
 }

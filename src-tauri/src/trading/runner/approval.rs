@@ -21,7 +21,6 @@
 //! it; following it is a desktop addition. The record is read, not pushed,
 //! so a restart or a missed refresh loses nothing.
 
-use super::inbox::Message;
 use super::{orders, store, RunEntry, Runner};
 use crate::db::sqlite::action_center::{self, PendingOrderRow, SUBMITTING};
 
@@ -228,18 +227,16 @@ impl Runner {
         let Some(intent) = o.intent_id else {
             return;
         };
-        entry.inbox.push(Message::Frame {
-            intent_id: intent,
-            frame: orders::frame(
-                intent,
-                status,
-                0,
-                None,
-                orderid,
-                text,
-                self.clock.now().timestamp_millis(),
-            ),
-        });
+        let frame = orders::frame(
+            intent,
+            status,
+            0,
+            None,
+            orderid,
+            text,
+            self.clock.now().timestamp_millis(),
+        );
+        self.frame_to_page(entry, o, frame);
     }
 }
 

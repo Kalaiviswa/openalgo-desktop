@@ -17,22 +17,31 @@ use std::collections::BTreeMap;
 /// one of them was finished (filled, cancelled, rejected or expired), older
 /// than the retention, and the contract was flat. A position still held, an
 /// order still working and everything after either stay, so what is left adds
-/// up to exactly what it did before. Read and delete are one immediate
-/// transaction.
+/// up to exactly what it did before. Each destination (side, broker and
+/// account) is its own ledger (NEW-TR-01), so flatness is judged per
+/// destination. Read and delete are one immediate transaction.
 pub fn prune_orders(conn: &Connection, now: DateTime<Utc>) -> Result<usize> {
-    type Key = (String, String, String, String, String);
+    type Key = (String, String, String, String, String, String, String);
     let cutoff = (now - chrono::Duration::days(ORDER_RETENTION_DAYS)).to_rfc3339();
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let mut groups: BTreeMap<Key, Vec<(i64, i64, bool)>> = BTreeMap::new();
     {
         let mut st = tx.prepare(
             "SELECT id, deployment, mode, symbol, exchange, product, action, filled_quantity,
-                    status, placed_at
+                    status, placed_at, lower(broker), lower(account)
              FROM openscript_orders ORDER BY id",
         )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
-            let key: Key = (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?);
+            let key: Key = (
+                r.get(1)?,
+                r.get(2)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            );
             let filled = r.get::<_, i64>(7)?.max(0);
             let signed = match r.get::<_, String>(6)?.as_str() {
                 "BUY" => filled,

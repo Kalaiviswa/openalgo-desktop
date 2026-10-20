@@ -115,14 +115,6 @@ pub fn unconfirmed_rows(conn: &Connection, mode: &str) -> Result<Vec<OrderRow>> 
     Ok(rows)
 }
 
-/// Whether one side has an unconfirmed row (the reconciler reads a book
-/// only while someone does).
-pub fn has_unconfirmed(conn: &Connection, mode: &str) -> Result<bool> {
-    Ok(conn
-        .prepare_cached("SELECT 1 FROM openscript_orders WHERE status = ?1 AND mode = ?2 LIMIT 1")?
-        .exists(params![UNCONFIRMED, mode])?)
-}
-
 /// Whether a destination order id is already one of the runner's rows,
 /// or the order an Action Center approval placed for a held row the run
 /// has not bound yet (LOG-04): no other owner may take it meanwhile.
@@ -149,6 +141,7 @@ mod tests {
         super::super::migrate(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
         super::super::migrate_pending_link(&c).unwrap();
+        super::super::migrate_identity(&c).unwrap();
         crate::db::sqlite::action_center::migrate(&c).unwrap();
         c
     }
@@ -183,8 +176,7 @@ mod tests {
         let rows = unconfirmed_rows(&c, "live").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].id, rows[0].price), (sent, Some(101.5)));
-        assert!(has_unconfirmed(&c, "live").unwrap());
-        assert!(!has_unconfirmed(&c, "sandbox").unwrap());
+        assert!(unconfirmed_rows(&c, "sandbox").unwrap().is_empty());
         assert!(bind(&c, sent, "OID10", now()).unwrap());
         assert!(!bind(&c, sent, "OID11", now()).unwrap(), "bound once");
         assert!(!release_unconfirmed(&c, sent, "not placed", now()).unwrap());
@@ -211,6 +203,7 @@ mod tests {
         migrate_unconfirmed(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
         super::super::migrate_pending_link(&c).unwrap();
+        super::super::migrate_identity(&c).unwrap();
         let rows = orders_of(&c, "d", "live").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].orderid.as_deref(), Some("OID1"));

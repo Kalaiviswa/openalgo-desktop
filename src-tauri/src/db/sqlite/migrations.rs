@@ -95,6 +95,10 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         super::action_center::migrate_owner,
     ),
     ("093_broker_daily_requests", super::request_count::migrate),
+    (
+        "094_openscript_identity",
+        crate::trading::runner::store::migrate_identity,
+    ),
 ];
 
 /// Run all database migrations

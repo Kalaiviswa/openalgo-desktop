@@ -23,9 +23,17 @@
 //!
 //! Every per-row map is pruned to the rows still unconfirmed.
 //!
+//! **Only rows of the session the book was read through** (NEW-TR-01): a
+//! Live row placed through another broker or account is neither searched
+//! for, judged absent nor bound here; it waits for its own session. A Live
+//! row from before owners were recorded is the exception: the broker switch
+//! guard kept it on the connected broker, and a book that finds it adopts
+//! it. A frame reaches a page only for its own run's row (NEW-TR-03).
+//!
 //! [`AbsenceTracker::judge`]: crate::services::order_reconciler::AbsenceTracker::judge
 
-use super::{orders, store, Message, RunEntry, Runner};
+use super::{orders, store, RunEntry, Runner};
+use crate::services::live_owner::{Destination, LiveOwner};
 use crate::services::order_reconciler::{
     held_message, Absence, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
 };
@@ -70,15 +78,43 @@ fn unconfirmed_of(o: &store::OrderRow) -> Unconfirmed<'_> {
     }
 }
 
+/// Whether a book read through `session` (Live) may settle row `o`: a row
+/// of that session, or a Live row whose owner was never recorded.
+fn settles_here(mode: RunMode, session: Option<&LiveOwner>, o: &store::OrderRow) -> bool {
+    let Some(at) = o.destination() else {
+        return false;
+    };
+    match (mode, session) {
+        (RunMode::Sandbox, _) => at.mode == RunMode::Sandbox,
+        (RunMode::Live, Some(owner)) => {
+            Destination::live(owner.clone()).owns(&at)
+                || (at.mode == RunMode::Live && !at.is_known())
+        }
+        (RunMode::Live, None) => false,
+    }
+}
+
 impl Runner {
-    /// Whether one side has an unconfirmed row (a quick read).
+    /// The unconfirmed rows of one side that the session connected now may
+    /// settle.
+    fn unconfirmed_here(&self, mode: RunMode) -> crate::error::Result<Vec<store::OrderRow>> {
+        let session = match mode {
+            RunMode::Live => self.services().live_owner(),
+            RunMode::Sandbox => None,
+        };
+        let conn = self.db.conn()?;
+        let rows = store::unconfirmed_rows(&conn, mode.as_str())?;
+        Ok(rows
+            .into_iter()
+            .filter(|o| settles_here(mode, session.as_ref(), o))
+            .collect())
+    }
+
+    /// Whether one side has an unconfirmed row the session connected now
+    /// may settle.
     pub fn has_unconfirmed(&self, mode: RunMode) -> bool {
-        match self
-            .db
-            .conn()
-            .and_then(|c| store::has_unconfirmed(&c, mode.as_str()))
-        {
-            Ok(has) => has,
+        match self.unconfirmed_here(mode) {
+            Ok(rows) => !rows.is_empty(),
             Err(e) => {
                 // Unknown: read the book rather than leave a row unsettled.
                 tracing::warn!("Could not check for unconfirmed OpenScript orders: {}", e);
@@ -116,11 +152,7 @@ impl Runner {
     /// Fold one book read for every unconfirmed row of `mode`. Returns how
     /// many stay unresolved.
     pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
-        let rows = match self
-            .db
-            .conn()
-            .and_then(|c| store::unconfirmed_rows(&c, mode.as_str()))
-        {
+        let rows = match self.unconfirmed_here(mode) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(
@@ -147,7 +179,7 @@ impl Runner {
                     self.absence.forget(&key);
                     self.ambiguous.lock().remove(&key);
                     claimed.insert(b.order_id.clone());
-                    self.bind_unconfirmed(o, b);
+                    self.bind_unconfirmed(mode, o, b);
                 }
                 Found::Absent => {
                     let id = o.id.to_string();
@@ -198,7 +230,7 @@ impl Runner {
         unresolved
     }
 
-    fn bind_unconfirmed(&self, o: &store::OrderRow, b: &BookOrder) {
+    fn bind_unconfirmed(&self, mode: RunMode, o: &store::OrderRow, b: &BookOrder) {
         let now = self.clock.now();
         let conn = match self.db.conn() {
             Ok(c) => c,
@@ -208,7 +240,7 @@ impl Runner {
             }
         };
         match store::bind(&conn, o.id, &b.order_id, now) {
-            Ok(true) => {}
+            Ok(true) => self.adopt_found(&conn, mode, o),
             Ok(false) => return,
             Err(e) => {
                 tracing::error!(
@@ -241,18 +273,34 @@ impl Runner {
             let (status, filled, average) = progress
                 .map(|p| (p.status, p.filled, p.average_price))
                 .unwrap_or(("working", 0, None));
-            e.inbox.push(Message::Frame {
-                intent_id: intent,
-                frame: orders::frame(
-                    intent,
-                    status,
-                    filled,
-                    average,
-                    Some(&b.order_id),
-                    None,
-                    now.timestamp_millis(),
-                ),
-            });
+            let frame = orders::frame(
+                intent,
+                status,
+                filled,
+                average,
+                Some(&b.order_id),
+                None,
+                now.timestamp_millis(),
+            );
+            self.frame_to_page(&e, o, frame);
+        }
+    }
+
+    /// A Live row whose owner was never recorded, found in the book of the
+    /// session connected now: it was that session's, and is recorded so.
+    fn adopt_found(&self, conn: &rusqlite::Connection, mode: RunMode, o: &store::OrderRow) {
+        if mode != RunMode::Live || o.destination().is_some_and(|d| d.is_known()) {
+            return;
+        }
+        let Some(owner) = self.services().live_owner() else {
+            return;
+        };
+        if let Err(e) = store::adopt(conn, o.id, &owner, self.clock.now()) {
+            tracing::warn!(
+                "Could not record the owner of OpenScript order row {}: {}",
+                o.id,
+                e
+            );
         }
     }
 
@@ -289,18 +337,16 @@ impl Runner {
         );
         if let Some(e) = self.running_entry(&o.deployment, &o.mode) {
             if let Some(intent) = o.intent_id {
-                e.inbox.push(Message::Frame {
-                    intent_id: intent,
-                    frame: orders::frame(
-                        intent,
-                        "rejected",
-                        0,
-                        None,
-                        None,
-                        Some(why),
-                        now.timestamp_millis(),
-                    ),
-                });
+                let frame = orders::frame(
+                    intent,
+                    "rejected",
+                    0,
+                    None,
+                    None,
+                    Some(why),
+                    now.timestamp_millis(),
+                );
+                self.frame_to_page(&e, o, frame);
             }
         }
         true
