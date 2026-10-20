@@ -7,13 +7,18 @@ the app start through `AppState::open_upgrading`.
 ## What happens at start
 
 `data-version.json` in the data folder records the version that last opened
-it, written only after an open succeeded.
+it. A version records itself after the backup and before it opens the
+stores (NEW-REL-06, 2026-10-20), so once a newer version may have changed
+the data an older one is refused, also after a crash mid-migration. A record
+that cannot be written stops the start with nothing opened or changed (the
+start-up page says so); a failed upgraded open puts the old record back with
+the stores.
 
 | Recorded | This copy | What happens |
 | --- | --- | --- |
-| nothing, no stores | any | a new folder: open, record |
-| nothing, stores present | any | from before versions were recorded: back up, open, record |
-| an older version | newer | back up every store, open (migrations run), record, delete the backup |
+| nothing, no stores | any | a new folder: record, open |
+| nothing, stores present | any | from before versions were recorded: back up, record, open |
+| an older version | newer | back up every store, record, open (migrations run), delete the backup |
 | the same version | same | open (any leftover backup is deleted) |
 | a newer version | older | refused: nothing is opened, migrated or written |
 

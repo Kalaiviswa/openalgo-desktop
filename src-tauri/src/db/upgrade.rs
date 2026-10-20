@@ -3,13 +3,18 @@
 //! refuse a folder written by a newer version.
 //!
 //! The folder records the version that last opened it, in
-//! `data-version.json`, written only after an open succeeded. At start:
+//! `data-version.json`. A version records itself before it opens the
+//! stores (after the backup, before any migration), so once a newer version
+//! may have changed the data an older one is refused, also after a crash
+//! mid-migration; a record that cannot be written stops the start with
+//! nothing changed, and a failed upgraded open puts the old record back with
+//! the stores (NEW-REL-06). At start:
 //!
 //! | Recorded | This copy | What happens |
 //! | --- | --- | --- |
-//! | nothing, no stores | any | a new folder: open, record |
-//! | nothing, stores present | any | from before versions were recorded: back up, open, record |
-//! | an older version | newer | back up every store to `backups/<old>-<UTC time>/`, open (migrations run), record |
+//! | nothing, no stores | any | a new folder: record, open |
+//! | nothing, stores present | any | from before versions were recorded: back up, record, open |
+//! | an older version | newer | back up every store to `backups/<old>-<UTC time>/`, record, open (migrations run) |
 //! | the same version | same | open |
 //! | a newer version | older | refused: nothing is opened, migrated or written |
 //!
@@ -194,6 +199,9 @@ pub enum Refusal {
     /// The upgraded open failed and the backup could not be put back; it
     /// is kept, as the one good copy.
     RestoreFailed { backup: PathBuf, detail: String },
+    /// This version could not be recorded in the folder before opening it,
+    /// so nothing was opened or changed (NEW-REL-06).
+    NotRecorded { detail: String },
 }
 
 impl Refusal {
@@ -213,6 +221,8 @@ Check that there is free disk space (about as much as your data folder) and that
                 "OpenAlgo Desktop {current} could not open your data ({cause}). So that nothing is lost, your data was put back exactly as it was before this version opened it. \
 Start OpenAlgo again to retry. If this happens again, install version {from} from the release page, which opens this data as before."
             ),
+            Refusal::NotRecorded { .. } => "OpenAlgo writes a small file in your data folder (data-version.json) before it opens your data, so that an older version never opens data a newer one has changed. It could not write that file, so nothing was opened or changed. \
+Check that there is free disk space and that the data folder and that file are not read-only, then start OpenAlgo again.".into(),
             Refusal::RestoreFailed { backup, .. } => format!(
                 "OpenAlgo could not open your data after the update, and could not put back the copy it made just before. That copy, your data exactly as the previous version left it, is safe in {}. \
 Close OpenAlgo; in the data folder delete data-version.json and every file ending in -wal, -shm or .wal; copy the files from that folder into the data folder, replacing the ones there; then start OpenAlgo again.",
@@ -224,9 +234,9 @@ Close OpenAlgo; in the data folder delete data-version.json and every file endin
     /// For the log.
     pub fn detail(&self) -> String {
         match self {
-            Refusal::BackupFailed { detail } | Refusal::RestoreFailed { detail, .. } => {
-                detail.clone()
-            }
+            Refusal::BackupFailed { detail }
+            | Refusal::RestoreFailed { detail, .. }
+            | Refusal::NotRecorded { detail } => detail.clone(),
             Refusal::Restored { cause, .. } => cause.clone(),
             other => format!("{:?}", other),
         }
@@ -254,8 +264,9 @@ fn cause_of(e: &AppError) -> String {
 
 /// Open the data folder in `dir` for version `current`: refuse a folder
 /// written by a newer version, back up one from an older version (or one
-/// with no recorded version), run `open`, put that backup back if `open`
-/// fails, record `current` once it succeeded, and delete the backups.
+/// with no recorded version), record `current`, run `open`, put that backup
+/// (and the old record) back if `open` fails, and delete the backups once
+/// it succeeded.
 pub fn open_data<T>(
     dir: &Path,
     current: &str,
@@ -270,16 +281,65 @@ pub fn open_data<T>(
         _ => "unknown".to_string(),
     };
     let backup = back_up_before_upgrade(dir, &recorded, &this, &from, current, now)?;
+    let prior = record_before_open(dir, &recorded, &this, current, now, backup.as_deref())?;
     match open() {
         Ok(t) => {
-            record_good_open(dir, current, now);
+            discard_backups(dir);
             Ok(t)
         }
         Err(e) => match backup {
-            Some(backup) => Err(put_back_after_failed_open(dir, backup, from, current, e)),
+            Some(backup) => Err(put_back_after_failed_open(
+                dir, backup, prior, from, current, e,
+            )),
             None => Err(OpenError::Open(e)),
         },
     }
+}
+
+/// What `data-version.json` held before this start recorded its own
+/// version, so a failed upgraded open puts it back with the stores.
+enum PriorMarker {
+    /// This start recorded nothing (the folder already named this version).
+    Unchanged,
+    Absent,
+    Held(Vec<u8>),
+}
+
+/// Record this version before the stores are opened, and so before any
+/// migration changes them (NEW-REL-06): from the moment a newer version may
+/// have touched the data, an older one is refused. A record that cannot be
+/// written stops the start with nothing changed (this start's backup is
+/// deleted: the data equals it).
+fn record_before_open(
+    dir: &Path,
+    recorded: &Recorded,
+    this: &semver::Version,
+    current: &str,
+    now: DateTime<Utc>,
+    backup: Option<&Path>,
+) -> Result<PriorMarker, OpenError> {
+    if matches!(recorded, Recorded::Version(v) if v == this) {
+        return Ok(PriorMarker::Unchanged);
+    }
+    let prior = match fs::read(dir.join(MARKER)) {
+        Ok(bytes) => PriorMarker::Held(bytes),
+        Err(_) => PriorMarker::Absent,
+    };
+    if let Err(e) = write_recorded(dir, current, now) {
+        tracing::error!(
+            "Could not record the data folder's version before opening it: {}",
+            e
+        );
+        if let Some(b) = backup {
+            if let Err(re) = fs::remove_dir_all(b) {
+                tracing::warn!("Could not remove the unused data backup: {}", re);
+            }
+        }
+        return Err(OpenError::Refused(Refusal::NotRecorded {
+            detail: e.to_string(),
+        }));
+    }
+    Ok(prior)
 }
 
 /// This build's version, which must be a semantic version.
@@ -352,21 +412,12 @@ fn back_up_before_upgrade(
     Ok(Some(b))
 }
 
-/// The open succeeded: record this version and keep no copy of the older
-/// state.
-fn record_good_open(dir: &Path, current: &str, now: DateTime<Utc>) {
-    if let Err(e) = write_recorded(dir, current, now) {
-        // The next start backs up again and records then.
-        tracing::warn!("Could not record the data folder's version: {}", e);
-    }
-    discard_backups(dir);
-}
-
 /// The open after this start's backup failed: put that backup back (never
 /// an older one) and say so on the start-up page.
 fn put_back_after_failed_open(
     dir: &Path,
     backup: PathBuf,
+    prior: PriorMarker,
     from: String,
     current: &str,
     e: AppError,
@@ -384,6 +435,7 @@ fn put_back_after_failed_open(
         });
     }
     tracing::info!("Put the data back from {}", backup.display());
+    put_back_marker(dir, prior);
     // The folder now equals this start's backup. A copy an earlier start
     // could not put back stays (bounded): no start has opened the folder
     // since it was made, and it may be the only good copy.
@@ -395,6 +447,24 @@ fn put_back_after_failed_open(
         current: current.to_string(),
         cause: cause_of(&e),
     })
+}
+
+/// The record as it was before this start, with the stores it describes.
+/// Should that fail, no record at all: the next start then treats the
+/// folder as older and backs it up again before migrating.
+fn put_back_marker(dir: &Path, prior: PriorMarker) {
+    let path = dir.join(MARKER);
+    let put = match &prior {
+        PriorMarker::Unchanged => return,
+        PriorMarker::Held(bytes) => crate::security::fsperm::write_private_file(&path, bytes),
+        PriorMarker::Absent => fs::remove_file(&path),
+    };
+    if let Err(e) = put {
+        tracing::error!("Could not put the data version record back: {}", e);
+        if let Err(e) = fs::remove_file(&path) {
+            tracing::error!("Could not remove the data version record either: {}", e);
+        }
+    }
 }
 
 fn discard_backups(dir: &Path) {
@@ -949,7 +1019,8 @@ mod tests {
                 fs::read(b.join("vault.json")).unwrap(),
                 b"{\"wrapped\":\"key\"}"
             );
-            assert_eq!(version_of(&dir), v("1.0.0"));
+            // NEW-REL-06: recorded before anything is opened or migrated.
+            assert_eq!(version_of(&dir), v("1.1.0"));
             Ok("opened")
         });
         assert_eq!(opened.unwrap(), "opened");
@@ -1081,6 +1152,92 @@ mod tests {
         assert_eq!(snapshot(&older), older_before);
         open_data(&dir, "1.0.0", at(9), || Ok(())).unwrap();
         assert!(backups(&dir).is_empty());
+    }
+
+    /// NEW-REL-06: once a newer version may have touched the data, an
+    /// older one is refused, at any point: here an older copy starts while
+    /// the newer one is migrating (as after a crash mid-migration). Before,
+    /// the record was written only after a successful open, so the older
+    /// copy found its own version and opened half-migrated data.
+    #[test]
+    fn an_older_version_is_refused_once_a_newer_one_may_have_migrated() {
+        let d = folder(Some("1.0.0"));
+        let dir = d.path().to_path_buf();
+        open_data(&dir, "1.1.0", at(5), || {
+            sqlite_store(&dir.join("openalgo.db"), &["migrated"]);
+            let older: Result<(), OpenError> = open_data(&dir, "1.0.0", at(6), || {
+                panic!("the older version opened data a newer one is migrating")
+            });
+            assert!(
+                matches!(
+                    older,
+                    Err(OpenError::Refused(Refusal::Downgrade { ref recorded, .. })) if recorded == "1.1.0"
+                ),
+                "{:?}",
+                older.err()
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(version_of(&dir), v("1.1.0"));
+    }
+
+    /// NEW-REL-06: a record that cannot be written stops the start before
+    /// anything is opened or migrated, visibly, and leaves the folder as it
+    /// was: the old record, the stores, no backup. The older version still
+    /// opens it. Before, the failure was only logged after the upgraded open
+    /// and the app ran on with the old record and no backup.
+    #[test]
+    fn a_record_that_cannot_be_written_stops_the_start_before_any_change() {
+        let d = folder(Some("1.0.0"));
+        let dir = d.path().to_path_buf();
+        // The record is written to a temporary file and renamed into place;
+        // a folder where that file goes makes the write fail.
+        let tmp = dir.join(MARKER).with_extension("tmp");
+        fs::create_dir_all(tmp.join("blocked")).unwrap();
+        let before = snapshot(&dir);
+        let got: Result<(), OpenError> = open_data(&dir, "1.1.0", at(5), || {
+            panic!("the stores were opened though the version was not recorded")
+        });
+        let refusal = match got {
+            Err(OpenError::Refused(r @ Refusal::NotRecorded { .. })) => r,
+            other => panic!("expected NotRecorded, got {:?}", other.err()),
+        };
+        let m = refusal.message();
+        assert!(m.contains("data-version.json"), "{}", m);
+        assert!(m.contains("nothing was opened or changed"), "{}", m);
+        assert_eq!(snapshot(&dir), before);
+        assert_eq!(version_of(&dir), v("1.0.0"));
+        assert!(
+            backups(&dir).is_empty(),
+            "this start's unused backup is deleted"
+        );
+        assert_eq!(rows(&dir.join("openalgo.db")), vec!["account"]);
+        // The version that owns the data still opens it.
+        open_data(&dir, "1.0.0", at(6), || Ok(())).unwrap();
+    }
+
+    /// A failed upgraded open of a folder that recorded no version puts the
+    /// folder back without a record, as it was: the next start backs it up
+    /// again before migrating.
+    #[test]
+    fn a_failed_open_of_an_unrecorded_folder_leaves_it_unrecorded() {
+        let d = folder(None);
+        let dir = d.path().to_path_buf();
+        let got: Result<(), OpenError> = open_data(&dir, "1.1.0", at(5), || {
+            assert_eq!(version_of(&dir), v("1.1.0"));
+            Err(AppError::Database(rusqlite::Error::InvalidQuery))
+        });
+        assert!(matches!(
+            got,
+            Err(OpenError::Refused(Refusal::Restored { .. }))
+        ));
+        assert_eq!(version_of(&dir), Recorded::Nothing);
+        open_data(&dir, "1.1.0", at(6), || {
+            assert_eq!(backups(&dir).len(), 1, "backed up again before migrating");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
