@@ -92,6 +92,73 @@ test.describe('Accessibility', () => {
   })
 })
 
+/**
+ * The signed-in pages a trader works in, with the signed-in shell (the
+ * session is stubbed; every other call fails, so lists show their empty or
+ * error states). Each must have no serious or critical finding beyond the
+ * ones in KNOWN for it, and every KNOWN one must still be there: fixing one
+ * means removing it here, and a new one fails.
+ */
+const SIGNED_IN_PAGES = [
+  '/dashboard',
+  '/orderbook',
+  '/tradebook',
+  '/positions',
+  '/holdings',
+  '/strategy',
+  '/sandbox',
+  '/logs',
+  '/profile',
+  '/tools',
+] as const
+
+/**
+ * Findings on the signed-in pages as carried over from OpenAlgo web, rule id
+ * per page, recorded 2026-10-20. The pages are kept close to the web's so
+ * web changes carry over by diff (CLAUDE.md); these are for the UI
+ * workstream to fix, here and upstream.
+ */
+const KNOWN: Readonly<Partial<Record<(typeof SIGNED_IN_PAGES)[number], readonly string[]>>> = {
+  // Low-contrast figures and badges on the dashboard cards.
+  '/dashboard': ['color-contrast'],
+  // A text input without a label, a link without a name, an unnamed
+  // progress bar and low-contrast step badges.
+  '/profile': ['aria-progressbar-name', 'color-contrast', 'label', 'link-name'],
+  // White initials on light tool tiles.
+  '/tools': ['color-contrast'],
+}
+
+async function signedIn(page: Page) {
+  await page.route('**/auth/session-status', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'success',
+        logged_in: true,
+        authenticated: true,
+        broker: 'angel',
+        username: 'e2e',
+        active_sessions: 1,
+      }),
+    })
+  )
+}
+
+test.describe('Accessibility - signed in', () => {
+  for (const path of SIGNED_IN_PAGES) {
+    test(`${path} accessibility scan`, async ({ page }) => {
+      await signedIn(page)
+      await page.goto(path)
+      await page.waitForLoadState('networkidle')
+      await expect(page.getByTestId('navbar-row')).toBeVisible()
+
+      const found = [...new Set((await scan(page, wcag)).map((f) => f.id))].sort()
+      expect(found).toEqual([...(KNOWN[path] ?? [])].sort())
+    })
+  }
+})
+
 test.describe('Accessibility - Mobile', () => {
   test.use({ viewport: { width: 375, height: 667 } })
 
