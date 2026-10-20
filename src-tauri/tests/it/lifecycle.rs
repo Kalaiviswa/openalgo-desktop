@@ -1,5 +1,7 @@
 //! Sleep and wake (ARCH-03, PLATFORM-05): a wall clock that moved further
-//! than the monotonic one is a wake, and a wake reconnects the broker feed
+//! than the monotonic one is a wake, and so are two looks far apart (a
+//! monotonic clock that counts the sleep, as on Windows: NEW-REL-03); a
+//! wake reconnects the broker feed
 //! at once (keeping its subscriptions) and asks the order reconciler for a
 //! pass, instead of waiting for the stall watchdog's awake time.
 
@@ -80,6 +82,25 @@ async fn the_watch_notices_the_wall_clock_running_ahead() {
     until("the reconnection", || connects(&h) == 2).await;
     h.ctx.websocket.disconnect().await.unwrap();
     srv.abort();
+}
+
+/// NEW-REL-03: on Windows the monotonic clock counts the sleep, so after
+/// an hour asleep both clocks moved an hour and they show no gap. The owned
+/// watch notices the hour between two looks a second apart and asks the
+/// order reconciler for a pass (and reconnects the feeds). Before, it saw
+/// no gap and did nothing.
+#[tokio::test(start_paused = true)]
+async fn the_watch_notices_a_sleep_the_monotonic_clock_counts() {
+    let h = H::new();
+    let asked = || h.ctx.reconciler.stats.requested.load(Ordering::Relaxed);
+    wake::start(&h.ctx);
+    // A few looks a second apart: no wake.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let before = asked();
+    // An hour asleep, Windows-style: both clocks move an hour.
+    h.clock.advance(chrono::Duration::hours(1));
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    until("the order pass after the sleep", || asked() > before).await;
 }
 
 /// ARCH-03: with nothing running, strategies that wait for alerts are still

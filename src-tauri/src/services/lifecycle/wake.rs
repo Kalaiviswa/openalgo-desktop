@@ -1,8 +1,15 @@
-//! Sleep and wake (ARCH-03, PLATFORM-05). While the computer sleeps the
-//! monotonic clock stands still and the wall clock does not, so after a
-//! sleep the wall clock has moved further than the monotonic one: that gap
-//! is how a wake is noticed (a wall clock set forward looks the same, and
-//! is handled the same).
+//! Sleep and wake (ARCH-03, PLATFORM-05). A wake is noticed two ways,
+//! because the monotonic clock behaves differently across systems:
+//!
+//! - on macOS and Linux it stands still while the computer sleeps and the
+//!   wall clock does not, so after a sleep the wall clock has moved further
+//!   than the monotonic one (a wall clock set forward looks the same, and
+//!   is handled the same);
+//! - on Windows it counts sleep and hibernation (QueryPerformanceCounter),
+//!   so both clocks move together and there is no gap (NEW-REL-03). There
+//!   the clocks are looked at once a second, and two looks far apart mean
+//!   the process did not run in between: the computer slept, or the app
+//!   was held up so long that the same checks are due anyway.
 //!
 //! The schedulers recalculate from the injected clock on their own: each
 //! acts on the slots that fell since its last look
@@ -19,7 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior};
 
-/// A wall clock this far ahead of the monotonic one is a wake.
+/// A wall clock this far ahead of the monotonic one is a wake, and so are
+/// two looks this far apart.
 pub const WAKE_GAP: Duration = Duration::from_secs(30);
 /// How often the clocks are compared.
 const LOOK_EVERY: Duration = Duration::from_secs(1);
@@ -36,14 +44,20 @@ impl GapWatch {
         Self { wall, mono }
     }
 
-    /// How far the wall clock moved beyond the monotonic one since the last
-    /// look, when that is more than [`WAKE_GAP`].
+    /// How long the app was away since the last look, when that is more
+    /// than [`WAKE_GAP`]: how far the wall clock moved beyond the monotonic
+    /// one (a monotonic clock that stood still in the sleep), else how far
+    /// the monotonic clock moved between two looks a second apart (one that
+    /// ran on: Windows, or a process held up).
     pub fn look(&mut self, wall: DateTime<Utc>, mono: Instant) -> Option<Duration> {
         let wall_moved = (wall - self.wall).to_std().unwrap_or_default();
         let mono_moved = mono.saturating_duration_since(self.mono);
         *self = Self::new(wall, mono);
         let gap = wall_moved.saturating_sub(mono_moved);
-        (gap > WAKE_GAP).then_some(gap)
+        if gap > WAKE_GAP {
+            return Some(gap);
+        }
+        (mono_moved > WAKE_GAP).then_some(mono_moved)
     }
 }
 
@@ -72,7 +86,7 @@ pub fn start(ctx: &Arc<AppState>) {
 /// Redo what a sleep of `slept` left stale.
 pub async fn woke(ctx: &AppState, slept: Duration) {
     tracing::info!(
-        "OpenAlgo was suspended for about {} min (the computer slept): reconnecting market data and checking orders",
+        "OpenAlgo was suspended for about {} min (the computer slept, or the app was held up): reconnecting market data and checking orders",
         slept.as_secs().div_ceil(60)
     );
     ctx.websocket.reconnect();
@@ -115,5 +129,50 @@ mod tests {
         );
         // A wall clock set back is not a wake.
         assert_eq!(w.look(start, mono + 5 * s), None);
+    }
+
+    /// NEW-REL-03: on Windows the monotonic clock counts the sleep
+    /// (QueryPerformanceCounter includes standby and hibernation), so the
+    /// two clocks move together and there is no gap between them. Two looks
+    /// an hour apart, where they come a second apart, are the wake. Before,
+    /// only the gap counted and this sleep went unnoticed.
+    #[test]
+    fn a_sleep_the_monotonic_clock_counts_is_a_wake_too() {
+        let start = Utc::now();
+        let mono = Instant::now();
+        let s = Duration::from_secs(1);
+        let hour = Duration::from_secs(3600);
+        let mut w = GapWatch::new(start, mono);
+        assert_eq!(w.look(start + chrono::Duration::seconds(1), mono + s), None);
+        // Sleep or hibernate for an hour: both clocks moved an hour.
+        let woke = start + chrono::Duration::seconds(1 + 3600);
+        assert_eq!(w.look(woke, mono + s + hour), Some(hour));
+        // Seen once; then looks a second apart again.
+        assert_eq!(
+            w.look(woke + chrono::Duration::seconds(1), mono + 2 * s + hour),
+            None
+        );
+        // A 20 s hold-up is not a wake; 40 s is treated as one.
+        let t = woke + chrono::Duration::seconds(21);
+        assert_eq!(w.look(t, mono + 22 * s + hour), None);
+        assert_eq!(
+            w.look(t + chrono::Duration::seconds(40), mono + 62 * s + hour),
+            Some(40 * s)
+        );
+    }
+
+    /// Both clock models, as the re-audit's probe runs them: an hour asleep
+    /// is a wake whether the monotonic clock stood still or ran on.
+    #[test]
+    fn an_hour_asleep_is_a_wake_under_either_clock_model() {
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let hour = Duration::from_secs(3600);
+        let later = wall + chrono::Duration::seconds(3600);
+        assert_eq!(GapWatch::new(wall, mono).look(later, mono), Some(hour));
+        assert_eq!(
+            GapWatch::new(wall, mono).look(later, mono + hour),
+            Some(hour)
+        );
     }
 }
