@@ -176,7 +176,10 @@ jobs:
           $os = Get-CimInstance Win32_OperatingSystem
           Write-Host "$($os.Caption) $($os.Version), $(Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' InstallationType)"
       - name: Launch the installed app, create the account and sign in
-        run: python scripts/ci/launch_smoke.py --first-sign-in --window --mcp-bridge "$APP_EXE"
+        # The runner's own profile (the runner is fresh): the app keeps its
+        # data in the roaming AppData known folder, which the ACL check
+        # below reads.
+        run: python scripts/ci/launch_smoke.py --first-sign-in --real-home --window --mcp-bridge "$APP_EXE"
       - name: The data folder is private to this user
         # PLATFORM-04: the app sets no ACL of its own on Windows and relies
         # on the profile's inherited one; check it on this system, after
