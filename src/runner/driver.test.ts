@@ -62,7 +62,7 @@ function harness() {
     spec: async () => spec,
     bars: async () => [],
     inbox: async () => ({ messages: [], stop: true }),
-    intents: async (i) => {
+    intents: async (_run, i) => {
       sent.push([...i])
     },
     log: async (l) => {
@@ -79,6 +79,7 @@ function harness() {
       symbol: 'SBIN',
       exchange: 'NSE',
       interval: '1m',
+      incarnation: 1,
     },
     program: compile(SOURCE),
     inputs: {},
@@ -155,12 +156,15 @@ describe('runner driver', () => {
       const h = harness()
       h.driver.load()
       await h.driver.begin([bar(0, false), bar(1, false), bar(2, false)])
-      const control: InboxMessage[] = [{ seq: 1, kind: 'halt' }]
-      if (resume) control.push({ seq: 2, kind: 'resume' })
+      const control: InboxMessage[] = [{ seq: 1, incarnation: 1, kind: 'halt' }]
+      if (resume) control.push({ seq: 2, incarnation: 1, kind: 'resume' })
       const answers: { messages: InboxMessage[]; stop: boolean }[] = [
         { messages: control, stop: false },
         // Bar 3 closes up as bar 4 begins: the script buys on bar 3.
-        { messages: [{ seq: 3, kind: 'bars', bars: [bar(3, true), bar(4, false)] }], stop: false },
+        {
+          messages: [{ seq: 3, incarnation: 1, kind: 'bars', bars: [bar(3, true), bar(4, false)] }],
+          stop: false,
+        },
         { messages: [], stop: true },
       ]
       h.transport.inbox = async () => answers.shift() ?? { messages: [], stop: true }
@@ -186,7 +190,14 @@ describe('runner driver', () => {
       },
       loadText,
       {
-        run: { id: 'x', file: 'x.oscript', symbol: 'A', exchange: 'NSE', interval: '1m' },
+        run: {
+          id: 'x',
+          file: 'x.oscript',
+          symbol: 'A',
+          exchange: 'NSE',
+          interval: '1m',
+          incarnation: 1,
+        },
         program: '{}',
         inputs: {},
         facts: null,

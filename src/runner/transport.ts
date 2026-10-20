@@ -2,11 +2,13 @@
  * Desktop: the runner page's channel to the app. Every call names the run and
  * carries the run's own secret, which the app put in this page's URL fragment
  * (a fragment never reaches a server or a log). A 403 means the app no longer
- * knows the run, and the page stops.
+ * knows the run, and the page stops. Any other refusal from the app (4xx with
+ * its reason) is a definite no; no answer, an answer that cannot be read, or
+ * a server error says nothing about what the app did (NEW-TR-04).
  */
 
 import type { HostBar, OrderIntent } from 'openalgo-script'
-import { type InboxMessage, RunGone, type RunSpec, type Transport } from './driver'
+import { type InboxMessage, Refused, RunGone, type RunSpec, type Transport } from './driver'
 
 /** The run and its secret, from `#run=<id>&token=<secret>`. */
 export function readFragment(hash: string): { run: string; token: string } | null {
@@ -35,7 +37,14 @@ export function httpTransport(
       cache: 'no-store',
     })
     if (response.status === 403) throw new RunGone()
-    const body = (await response.json()) as { status?: string; message?: string }
+    let body: { status?: string; message?: string } | null
+    try {
+      body = (await response.json()) as { status?: string; message?: string }
+    } catch {
+      throw new Error("The app's answer could not be read.")
+    }
+    const refused = response.status >= 400 && response.status < 500 && response.status !== 429
+    if (refused) throw new Refused(body?.message || 'The app refused this.')
     if (!response.ok || body?.status !== 'success') {
       throw new Error(body?.message || 'The app did not answer.')
     }
@@ -59,11 +68,11 @@ export function httpTransport(
       }
       return { messages: body.messages ?? [], stop: body.stop === true }
     },
-    async intents(intents: readonly OrderIntent[]) {
-      await post('/intents', { confirmed: true, intents })
+    async intents(incarnation: number, intents: readonly OrderIntent[]) {
+      await post('/intents', { confirmed: true, incarnation, intents })
     },
-    async log(lines: readonly string[]) {
-      await post('/log', { lines })
+    async log(lines: readonly string[], waiting: boolean) {
+      await post('/log', { lines, waiting })
     },
     async ended(message: string) {
       await post('/ended', { message })

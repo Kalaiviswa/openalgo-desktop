@@ -19,6 +19,15 @@
  *   it hands each confirmed bar's intents to the app, which turns them into
  *   orders on the run's own side, tags them with the deployment and reports
  *   every order back as a frame. A Stop's closing order is the app's own.
+ * - **A lost answer is not a refusal** (NEW-TR-04). When the app's answer to
+ *   a batch does not come back, or cannot be read, the order may have been
+ *   placed: the batch stays pending, nothing new is sent, and the same batch
+ *   is sent again until the app answers. The app answers an intent it has
+ *   handled already from its record and never places it twice. Only the app
+ *   saying no rejects a batch here.
+ * - **Only this run's frames** (NEW-TR-03). Each start of a deployment is a
+ *   new engine whose intents are numbered from 1 again; every message from
+ *   the app names the run it is for, and one for another run is dropped.
  */
 
 import type {
@@ -34,7 +43,15 @@ import { languageInterval } from '@/lib/trading/openscriptIntervals'
 
 /** What the app serves the page about its run. */
 export interface RunSpec {
-  run: { id: string; file: string; symbol: string; exchange: string; interval: string }
+  run: {
+    id: string
+    file: string
+    symbol: string
+    exchange: string
+    interval: string
+    /** This run's engine incarnation: the app's messages name it. */
+    incarnation: number
+  }
   program: string
   inputs: Record<string, unknown>
   facts: { instrument?: Record<string, unknown> } | null
@@ -49,19 +66,26 @@ export interface RunSpec {
  * that left an order working sends no resume: the run stays halted (close
  * pending) until Stop is pressed again or the run is paused.
  */
-export type InboxMessage =
-  | { seq: number; kind: 'bars'; bars: HostBar[] }
-  | { seq: number; kind: 'frame'; frame: OrderFrame }
-  | { seq: number; kind: 'halt' }
-  | { seq: number; kind: 'resume' }
+export type InboxMessage = { seq: number; incarnation: number } & (
+  | { kind: 'bars'; bars: HostBar[] }
+  | { kind: 'frame'; frame: OrderFrame }
+  | { kind: 'halt' }
+  | { kind: 'resume' }
+)
 
-/** The page's channel to the app. Every call is the run's own. */
+/**
+ * The page's channel to the app. Every call is the run's own. A call that
+ * fails throws: {@link RunGone} when the app no longer knows the run,
+ * {@link Refused} when the app answered no, anything else when no readable
+ * answer came back (which says nothing about what the app did).
+ */
 export interface Transport {
   spec(): Promise<RunSpec>
   bars(): Promise<HostBar[]>
   inbox(after: number): Promise<{ messages: InboxMessage[]; stop: boolean }>
-  intents(intents: readonly OrderIntent[]): Promise<void>
-  log(lines: readonly string[]): Promise<void>
+  intents(incarnation: number, intents: readonly OrderIntent[]): Promise<void>
+  /** `waiting`: a batch is pending an answer from the app (run status shows it). */
+  log(lines: readonly string[], waiting: boolean): Promise<void>
   ended(message: string): Promise<void>
 }
 
@@ -92,6 +116,11 @@ export const REPLAY_REFUSAL = 'replayed from history, so it was not sent'
 export const MOVING_REFUSAL =
   'orders are sent when a bar closes, which is what its backtest did, so an intrabar call is not sent'
 export const HALTED_REFUSAL = 'this run is stopping, so nothing further is sent'
+export const WAITING_REFUSAL =
+  'an earlier order of this run has not been confirmed by the app yet, so nothing new is sent'
+/** How long the page waits before asking the app again about a batch it
+ * has no answer for, attempt by attempt; the last delay repeats. */
+export const RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000]
 
 export class Driver {
   private engine: Engine | null = null
@@ -101,6 +130,11 @@ export class Driver {
   private sending = false
   private halted = false
   private stopped = false
+  /** A batch the app has not answered: it may have been placed. */
+  private waiting: OrderIntent[] | null = null
+  private retries = 0
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
+  private asking = false
   private currentTime = 0
   private readonly lines: string[] = []
   private readonly barMs: number | null
@@ -130,6 +164,11 @@ export class Driver {
     return this.sending
   }
 
+  /** Whether a batch is pending an answer from the app. */
+  get isWaiting(): boolean {
+    return this.waiting !== null
+  }
+
   say(line: string): void {
     this.lines.push(line)
   }
@@ -138,7 +177,7 @@ export class Driver {
     if (this.lines.length === 0) return
     const out = this.lines.splice(0, this.lines.length)
     try {
-      await this.transport.log(out)
+      await this.transport.log(out, this.isWaiting)
     } catch {
       // The log is a convenience; a failed write is not worth stopping for.
     }
@@ -178,6 +217,7 @@ export class Driver {
 
   private stop(message: string): void {
     if (this.stopped) return
+    this.stopRetrying()
     this.stopped = true
     this.say(message)
     void this.flush().then(() => this.transport.ended(message).catch(() => undefined))
@@ -219,11 +259,77 @@ export class Driver {
     if (!this.sending) return this.reject(routed, REPLAY_REFUSAL)
     if (!confirmed) return this.reject(routed, MOVING_REFUSAL)
     if (this.halted) return this.reject(routed, HALTED_REFUSAL)
+    if (this.waiting !== null) return this.reject(routed, WAITING_REFUSAL)
+    await this.submit(routed)
+  }
+
+  /**
+   * Hand a batch to the app. The app saying no rejects it; no readable
+   * answer at all leaves it pending, because the app may have placed it.
+   */
+  private async submit(batch: OrderIntent[]): Promise<void> {
     try {
-      await this.transport.intents(routed)
-    } catch {
-      this.reject(routed, 'the app could not be reached, so the order was not sent')
+      await this.transport.intents(this.spec.run.incarnation, batch)
+    } catch (e) {
+      if (e instanceof RunGone) return this.gone()
+      if (e instanceof Refused) return this.reject(batch, e.message)
+      this.waiting = batch
+      this.retries = 0
+      this.say(
+        `The app's answer to ${batchName(batch)} did not come back (${e instanceof Error ? e.message : String(e)}). It may have been placed, so nothing new is sent until the app confirms it. Asking again.`
+      )
+      void this.flush()
+      this.scheduleRetry()
     }
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped || this.waiting === null || this.retryTimer !== null) return
+    const delay = RETRY_DELAYS_MS[Math.min(this.retries, RETRY_DELAYS_MS.length - 1)]
+    this.retries += 1
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      void this.askAgain()
+    }, delay)
+  }
+
+  private stopRetrying(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+  }
+
+  /**
+   * Send the pending batch again, unchanged. The app answers each intent it
+   * handled already from its record and places nothing twice; its frames
+   * follow in the inbox.
+   */
+  async askAgain(): Promise<void> {
+    const batch = this.waiting
+    if (batch === null || this.stopped || this.asking) return
+    this.asking = true
+    try {
+      await this.transport.intents(this.spec.run.incarnation, batch)
+      this.waiting = null
+      this.say(`The app confirmed it has ${batchName(batch)}. This run sends orders again.`)
+    } catch (e) {
+      if (e instanceof RunGone) return this.gone()
+      if (e instanceof Refused) {
+        this.waiting = null
+        this.reject(batch, e.message)
+        this.say(`The app refused ${batchName(batch)}: ${e.message}. This run sends orders again.`)
+      } else {
+        this.scheduleRetry()
+      }
+    } finally {
+      this.asking = false
+    }
+    await this.flush()
+  }
+
+  /** The app no longer knows this run: its work, and what it was waiting on, is the app's. */
+  private gone(): void {
+    this.stopRetrying()
+    this.stopped = true
   }
 
   /** Replay history, then begin. */
@@ -314,7 +420,7 @@ export class Driver {
         answer = await this.transport.inbox(after)
       } catch (e) {
         if (e instanceof RunGone) {
-          this.stopped = true
+          this.gone()
           return
         }
         await new Promise((r) => setTimeout(r, 2000))
@@ -322,6 +428,8 @@ export class Driver {
       }
       for (const m of answer.messages) {
         after = Math.max(after, m.seq)
+        // Another run's message: never this engine's, whatever its number.
+        if (m.incarnation !== this.spec.run.incarnation) continue
         if (m.kind === 'bars') await this.onBars(m.bars)
         else if (m.kind === 'frame') this.deliver(m.frame)
         else if (m.kind === 'halt') this.halt()
@@ -330,7 +438,7 @@ export class Driver {
       await this.onClock()
       await this.flush()
       if (answer.stop) {
-        this.stopped = true
+        this.gone()
         return
       }
     }
@@ -343,4 +451,18 @@ export class RunGone extends Error {
     super('This strategy page is not running any more.')
     this.name = 'RunGone'
   }
+}
+
+/** The app answered a request with a refusal: nothing of it was done. */
+export class Refused extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'Refused'
+  }
+}
+
+/** A batch as the run's log names it. */
+function batchName(batch: readonly OrderIntent[]): string {
+  const ids = batch.map((i) => i.intentId).join(', ')
+  return batch.length === 1 ? `order intent ${ids}` : `order intents ${ids}`
 }

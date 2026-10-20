@@ -72,7 +72,7 @@ function app(afterStop: unknown) {
     // Bar 3 closes up as bar 4 begins: the script buys on bar 3.
     {
       status: 'success',
-      messages: [{ seq: 3, kind: 'bars', bars: [bar(3, true), bar(4, false)] }],
+      messages: [{ seq: 3, incarnation: 1, kind: 'bars', bars: [bar(3, true), bar(4, false)] }],
       stop: false,
     },
     { status: 'success', messages: [], stop: true },
@@ -105,6 +105,7 @@ async function runAfter(fixture: string) {
       symbol: 'SBIN',
       exchange: 'NSE',
       interval: '1m',
+      incarnation: 1,
     },
     program: compile(SOURCE),
     inputs: {},
@@ -132,6 +133,7 @@ describe('the Stop handshake, as the app answers it', () => {
     expect(intents).toHaveLength(1)
     expect(intents[0]).toMatchObject({
       confirmed: true,
+      incarnation: 1,
       intents: [{ kind: 'place', side: 'buy' }],
     })
   })
