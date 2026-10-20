@@ -28,7 +28,8 @@
 //! for, judged absent nor bound here; it waits for its own session. A Live
 //! row from before owners were recorded is the exception: the broker switch
 //! guard kept it on the connected broker, and a book that finds it adopts
-//! it. A frame reaches a page only for its own run's row (NEW-TR-03).
+//! it; one it does not find is never settled or held as absent. A frame
+//! reaches a page only for its own run's row (NEW-TR-03).
 //!
 //! [`AbsenceTracker::judge`]: crate::services::order_reconciler::AbsenceTracker::judge
 
@@ -189,6 +190,12 @@ impl Runner {
                     claimed.insert(b.order_id.clone());
                     self.bind_unconfirmed(book.session.as_ref(), o, b);
                 }
+                // A row from before accounts were recorded may belong to
+                // another broker's session: its absence from this book says
+                // nothing. Found, it is adopted; absent, it stays unconfirmed
+                // and is told as such (`elsewhere`), never released or held
+                // for a "not placed" judged against this book.
+                Found::Absent if o.mode == "live" && o.broker.is_empty() => unresolved += 1,
                 Found::Absent => {
                     let id = o.id.to_string();
                     match self.absence.judge(&key, &id, mode, book, &u).await {

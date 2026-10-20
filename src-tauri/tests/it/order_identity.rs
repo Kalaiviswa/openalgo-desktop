@@ -1159,6 +1159,9 @@ async fn a_book_without_a_known_account_is_unavailable_not_empty() {
             v
         );
     }
+    // Its status says so too, never an empty list.
+    let elsewhere = t.status(&id).await["elsewhere"].to_string();
+    assert!(elsewhere.contains("cannot be read"), "{}", elsewhere);
 }
 
 /// Review 4: a batch at the broker is a task the runner owns. Shutdown
@@ -1331,6 +1334,22 @@ async fn a_page_waiting_too_long_tells_the_trader_once() {
     assert_eq!(alerts, 1);
     log(&["answered"], false, false).await;
     assert_eq!(t.status(&id).await["run"]["awaiting_confirmation"], false);
+    let open: i64 = t
+        .h
+        .ctx
+        .logs
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM health_alerts WHERE alert_type = 'openscript_orders' AND resolved = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        open, 0,
+        "the alert is resolved once the page has its answer"
+    );
 }
 
 /// Review 9: a book read through Angel One, folded after Zerodha (AB1234)
@@ -1388,4 +1407,98 @@ async fn an_unconfirmed_row_from_before_accounts_is_adopted_by_the_book_that_fin
             })
             .unwrap();
     assert_eq!((broker.as_str(), account.as_str()), ("zerodha", "AB1234"));
+}
+
+/// Re-review 3: a Live order still unconfirmed from before accounts were
+/// recorded, absent from the connected session's book, is never released or
+/// held as absent: that book may not be its broker's. It stays unconfirmed
+/// and the status tells the trader to check their broker.
+#[tokio::test]
+async fn an_unconfirmed_row_from_before_accounts_is_never_judged_absent() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    t.sql(&format!(
+        "INSERT INTO openscript_orders (deployment, mode, intent_id, symbol, exchange, action,
+            quantity, pricetype, product, status, filled_quantity, placed_at, updated_at)
+         VALUES ('{}', 'live', 1, 'SBIN', 'NSE', 'BUY', 3, 'MARKET', 'MIS', 'unconfirmed', 0,
+            '2026-10-05T04:30:00+00:00', '2026-10-05T04:30:00+00:00')",
+        id
+    ));
+    for _ in 0..8 {
+        t.h.ctx.reconciler.pass().await;
+        t.h.clock
+            .set(t.h.ctx.now() + chrono::Duration::seconds(120));
+    }
+    assert_eq!(t.rows()[0], ("unconfirmed".into(), None, 0));
+    assert!(
+        t.h.ctx.trading.runner.held_orders().is_empty(),
+        "never offered as not placed against this book"
+    );
+    let elsewhere = t.status(&id).await["elsewhere"].to_string();
+    assert!(
+        elsewhere.contains("may have been placed at your broker before this version recorded"),
+        "{}",
+        elsewhere
+    );
+}
+
+/// Coordinator (Paytm Money): a broker whose login names no account. The
+/// run is owned by the saved keys the session was made from: it starts and
+/// trades; with other keys saved for that broker, the session owns none of
+/// its orders (nothing sent, Stop refused); with the first keys back, Stop
+/// closes exactly the 3. Before, an empty account refused the start.
+#[tokio::test]
+async fn a_broker_that_names_no_account_is_owned_by_its_saved_keys() {
+    use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let save_keys = |key: &str| {
+        credentials::save(
+            &t.h.ctx.sqlite.conn().unwrap(),
+            &t.h.ctx.security,
+            "zerodha",
+            CredentialUpdate {
+                api_key: Some(key.into()),
+                api_secret: Some("secret".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    save_keys("first-key");
+    t.sign_in("zerodha", "");
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    assert_eq!(t.buy(&id, run, 1, 3).await["sent"], 1);
+    *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-1", "BUY", 3, 3, "complete")]));
+    *t.zerodha.positions.lock() = Some(Ok(vec![long(3)]));
+    runner.pump_once(&id).await;
+    assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-1".into()), 3));
+
+    save_keys("second-key");
+    assert_eq!(t.buy(&id, run, 2, 1).await["sent"], 0);
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("saved keys"),
+        "{}",
+        v
+    );
+    assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3)]));
+
+    save_keys("first-key");
+    t.zerodha
+        .order_book
+        .lock()
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .push(order("MOCK-2", "SELL", 3, 3, "complete"));
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3), ("SELL", 3)]));
 }

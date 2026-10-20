@@ -145,6 +145,8 @@ export class Driver {
   private waiting: OrderIntent[] | null = null
   private retries = 0
   private stuckTold = false
+  /** The state the app last heard (see `flush`). */
+  private reported: PageState = { waiting: false, stuck: false }
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private asking = false
   private currentTime = 0
@@ -185,13 +187,21 @@ export class Driver {
     this.lines.push(line)
   }
 
+  /**
+   * Send the run's log lines, and the page's state whenever it changed: the
+   * app shows a pending batch in the run status and raises the Health alert
+   * from it, so a change goes out even with nothing to log.
+   */
   async flush(): Promise<void> {
-    if (this.lines.length === 0) return
+    const state: PageState = { waiting: this.isWaiting, stuck: this.stuckTold }
+    const changed = state.waiting !== this.reported.waiting || state.stuck !== this.reported.stuck
+    if (this.lines.length === 0 && !changed) return
     const out = this.lines.splice(0, this.lines.length)
     try {
-      await this.transport.log(out, { waiting: this.isWaiting, stuck: this.stuckTold })
+      await this.transport.log(out, state)
+      this.reported = state
     } catch {
-      // The log is a convenience; a failed write is not worth stopping for.
+      // Lines are a convenience; the state is sent again with the next flush.
     }
   }
 

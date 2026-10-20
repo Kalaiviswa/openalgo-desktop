@@ -200,6 +200,20 @@ describe('a lost answer is not a refusal (NEW-TR-04)', () => {
     expect(h.asked.every((a) => a.ids.join() === '1')).toBe(true)
   })
 
+  it('tells the app it is stuck even with no line to log', async () => {
+    vi.useFakeTimers()
+    const h = harness(() => new Error('no answer'))
+    h.driver.load()
+    // A page that logs nothing still reports its state.
+    h.driver.say = () => undefined
+    await h.driver.begin([])
+    await h.driver.onBars([bar(0, true)])
+    expect(h.waiting).toContain(true)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(h.stuck).toContain(true)
+    expect(h.logs).toEqual([])
+  })
+
   it('a page that stops asks nothing more', async () => {
     vi.useFakeTimers()
     const h = harness(() => new Error('no answer'))

@@ -20,6 +20,8 @@ impl Runner {
     /// Close the page, stop the pump, and say so in the run's log.
     fn teardown(&self, entry: &RunEntry, why: &str) {
         entry.halted.store(true, Ordering::SeqCst);
+        // The page is gone: it waits for nothing any more.
+        self.stuck_over(entry);
         entry.inbox.push(Message::Halt);
         entry.inbox.close();
         entry.cancel.cancel();

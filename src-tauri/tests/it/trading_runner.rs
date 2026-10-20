@@ -374,6 +374,7 @@ impl RunnerServices for Fake {
             .then(|| LiveOwner::new("zerodha", "AB1234"))
     }
     fn alert(&self, _message: String) {}
+    fn alert_cleared(&self) {}
     fn entry_refusal(&self, mode: RunMode) -> Option<String> {
         self.gate
             .lock()

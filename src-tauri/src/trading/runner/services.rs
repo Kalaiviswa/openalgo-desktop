@@ -92,6 +92,8 @@ pub trait RunnerServices: Send + Sync {
     fn live_owner(&self) -> Option<LiveOwner>;
     /// Tell the trader on the Health page (a run whose exits are held back).
     fn alert(&self, message: String);
+    /// That alert is over: no run is held back any more.
+    fn alert_cleared(&self);
     /// Ask the order reconciler to read the order book now (an uncertain
     /// placement was just recorded).
     fn request_reconcile(&self) {}
@@ -320,6 +322,12 @@ impl RunnerServices for AppServices {
     fn alert(&self, message: String) {
         if let Some(ctx) = self.ctx.upgrade() {
             crate::services::health_service::openscript_alert(&ctx, message);
+        }
+    }
+
+    fn alert_cleared(&self) {
+        if let Some(ctx) = self.ctx.upgrade() {
+            crate::services::health_service::openscript_alert_resolved(&ctx);
         }
     }
 

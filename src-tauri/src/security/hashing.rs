@@ -216,6 +216,25 @@ pub fn lookup_hmac(pepper: &[u8], api_key: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Deterministic identity of a broker's saved keys (NEW-TR-01): HMAC-SHA256
+/// keyed with the pepper, in a namespace of its own. It names the key set a
+/// broker session was made from, for brokers whose login names no account,
+/// without storing or revealing any part of the keys. Each part is length
+/// prefixed, so two different sets never run together into one input.
+pub fn broker_keys_hmac(pepper: &[u8], parts: &[&str]) -> String {
+    // HMAC accepts any key length, so this cannot fail.
+    let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(pepper) {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    mac.update(b"openalgo-broker-keys:");
+    for part in parts {
+        mac.update(&(part.len() as u64).to_le_bytes());
+        mac.update(part.as_bytes());
+    }
+    hex::encode(mac.finalize().into_bytes())
+}
+
 /// Raw 32-byte key derived from a password, used to wrap the key vault
 /// (KEY-01).
 pub fn derive_kek(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -605,5 +624,26 @@ mod tests {
         assert_eq!(a, derive_kek("pw", b"0123456789abcdef").unwrap());
         assert_ne!(a, derive_kek("pw2", b"0123456789abcdef").unwrap());
         assert_ne!(a, derive_kek("pw", b"fedcba9876543210").unwrap());
+    }
+
+    /// NEW-TR-01: the identity of a broker's saved keys is stable for the
+    /// same keys, changes with any part of them or the pepper, never runs
+    /// two parts together, and is not the API-key index's digest.
+    #[test]
+    fn broker_keys_identity_is_stable_and_separated() {
+        let pepper = b"pepper";
+        let id = broker_keys_hmac(pepper, &["paytm", "key1", ""]);
+        assert_eq!(id, broker_keys_hmac(pepper, &["paytm", "key1", ""]));
+        assert_eq!(id.len(), 64);
+        assert_ne!(id, broker_keys_hmac(pepper, &["paytm", "key2", ""]));
+        assert_ne!(id, broker_keys_hmac(b"other", &["paytm", "key1", ""]));
+        assert_ne!(
+            broker_keys_hmac(pepper, &["ab", "c"]),
+            broker_keys_hmac(pepper, &["a", "bc"])
+        );
+        assert_ne!(
+            broker_keys_hmac(pepper, &["key1"]),
+            lookup_hmac(pepper, "key1")
+        );
     }
 }

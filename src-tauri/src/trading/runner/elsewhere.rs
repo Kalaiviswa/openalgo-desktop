@@ -50,7 +50,14 @@ fn working_line(at: &Destination, o: &store::OrderRow) -> String {
             .map(|id| format!(" (order {})", id))
             .unwrap_or_default()
     );
-    if at.is_known() {
+    if o.status == store::UNCONFIRMED && !at.is_known() {
+        // Never settled as absent from a book of a session it may not
+        // belong to (`reconcile`): only the trader can.
+        format!(
+            "An order of this strategy may have been placed at your broker before this version recorded which account it went through: {}. Its outcome is not known. Check your broker's order book.",
+            what
+        )
+    } else if at.is_known() {
         format!(
             "An order of this strategy may still be working through {}: {}. It is not followed or cancelled from here: cancel it there if it should not fill.",
             at.describe(),
@@ -113,11 +120,28 @@ impl Runner {
     }
 
     /// [`Self::held_elsewhere`] for a deployment by name, as its status
-    /// reports it.
+    /// reports it. When where it trades cannot be told (no broker login, an
+    /// account OpenAlgo does not know, or a run on another session than the
+    /// one connected), that is said first: it is when exposure is hardest
+    /// to see, never a time to show nothing.
     pub fn held_elsewhere_of(&self, given: &str) -> Vec<String> {
+        if let Some(info) = self.status_of(given) {
+            let mut lines = self.held_elsewhere(&info.run_id, &info.destination);
+            if self.session_refusal(&info).is_some() {
+                lines.insert(
+                    0,
+                    format!(
+                        "This strategy trades through {}, but OpenAlgo is signed in elsewhere now, so nothing of it is read or sent until you sign in to {} again.",
+                        info.destination.describe(),
+                        info.destination.describe()
+                    ),
+                );
+            }
+            return lines;
+        }
         match self.book_destination(given) {
             Ok(at) => self.held_elsewhere(&self.as_run_id(given), &at),
-            Err(_) => Vec::new(),
+            Err(why) => vec![why],
         }
     }
 

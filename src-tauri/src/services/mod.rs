@@ -72,6 +72,7 @@ pub mod schema;
 pub mod schemas;
 pub mod search_ui_service;
 pub mod security_service;
+pub mod session_account;
 pub mod settings_service;
 pub mod strategy_portfolio_service;
 pub mod strategy_ticks;

@@ -357,6 +357,14 @@ impl SecurityManager {
     pub fn api_key_lookup(&self, api_key: &str) -> Result<String> {
         Ok(hashing::lookup_hmac(self.keys()?.pepper.expose(), api_key))
     }
+
+    /// The identity of a broker's saved keys ([`hashing::broker_keys_hmac`]).
+    pub fn broker_keys_identity(&self, parts: &[&str]) -> Result<String> {
+        Ok(hashing::broker_keys_hmac(
+            self.keys()?.pepper.expose(),
+            parts,
+        ))
+    }
 }
 
 /// The test harness's keys, kept in its in-memory store (made on first

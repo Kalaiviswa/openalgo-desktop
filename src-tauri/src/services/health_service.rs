@@ -443,6 +443,17 @@ pub fn openscript_alert(ctx: &AppState, message: String) {
     raise_fail(ctx, OPENSCRIPT_ALERT, OPENSCRIPT_ALERT, message);
 }
 
+/// The OpenScript order alert is over: no run's page waits any more.
+pub fn openscript_alert_resolved(ctx: &AppState) {
+    let r = ctx
+        .logs
+        .conn()
+        .and_then(|c| store::auto_resolve(&c, OPENSCRIPT_ALERT, ctx.now()));
+    if let Err(e) = r {
+        tracing::warn!("The {} alert was not resolved: {}", OPENSCRIPT_ALERT, e);
+    }
+}
+
 /// Record one failing alert on the Health page.
 fn raise_fail(ctx: &AppState, alert_type: &str, metric: &str, message: String) {
     let now = ctx.now();

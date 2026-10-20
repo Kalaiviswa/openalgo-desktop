@@ -114,7 +114,7 @@ impl Runner {
         if let Some(waiting) = state.waiting {
             entry.page_waiting.store(waiting, Ordering::SeqCst);
             if !waiting {
-                entry.stuck_told.store(false, Ordering::SeqCst);
+                self.stuck_over(&entry);
             }
         }
         if state.stuck && !entry.stuck_told.swap(true, Ordering::SeqCst) {
@@ -146,6 +146,23 @@ impl Runner {
         tracing::error!("{}", message);
         self.write_log(&entry.info, std::slice::from_ref(&message));
         self.services().alert(message);
+    }
+
+    /// A run's wait is over (its page has its answer, or the run ended):
+    /// the Health alert goes once no run waits any more.
+    pub(super) fn stuck_over(&self, entry: &RunEntry) {
+        if !entry.stuck_told.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let others = self
+            .reg
+            .lock()
+            .runs
+            .values()
+            .any(|e| e.stuck_told.load(Ordering::SeqCst));
+        if !others {
+            self.services().alert_cleared();
+        }
     }
 
     /// The page says its script stopped.

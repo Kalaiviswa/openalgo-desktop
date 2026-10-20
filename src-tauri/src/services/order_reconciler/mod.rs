@@ -56,6 +56,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 mod matching;
+mod session;
 mod shape;
 
 pub use matching::*;
@@ -239,11 +240,6 @@ impl BookSnapshot {
             held_alert: None,
             session: None,
         }
-    }
-
-    /// The Live session the book was read through.
-    pub fn with_session(self, session: Option<crate::services::live_owner::LiveOwner>) -> Self {
-        Self { session, ..self }
     }
 
     /// A read from a broker that reports every order's client tag.
@@ -450,6 +446,9 @@ pub struct ReconcileStats {
     pub passes: AtomicU64,
     pub book_reads: AtomicU64,
     pub book_read_failures: AtomicU64,
+    /// Books read while the Live session changed, so whose they were is not
+    /// known: nothing was settled from them.
+    pub book_reads_discarded: AtomicU64,
     pub gaps_opened: AtomicU64,
     pub gaps_closed: AtomicU64,
     pub unresolved: AtomicU64,
@@ -509,13 +508,6 @@ impl OrderReconciler {
             gaps_seen: AtomicU64::new(0),
             relays_seen: AtomicU64::new(0),
         })
-    }
-
-    /// The Live session `mode`'s book is read through now.
-    fn session_of(&self, mode: RunMode) -> Option<crate::services::live_owner::LiveOwner> {
-        (mode == RunMode::Live)
-            .then(|| crate::services::live_owner::LiveOwner::active(self.gateway.as_ref()))
-            .flatten()
     }
 
     /// The held-order alert a pass hands its owners.
@@ -727,7 +719,7 @@ impl OrderReconciler {
                 match self.gateway.order_book_rows(mode).await {
                     // The session changed during the read: whose book it is
                     // is not known, so nothing is settled from it.
-                    Ok(_) if self.session_of(mode) != session => false,
+                    Ok(_) if self.session_changed(mode, &session) => false,
                     Ok(rows) => {
                         let mut book = BookSnapshot::new(rows, self.clock.now())
                             .with_tags(tags)
@@ -817,6 +809,7 @@ impl OrderReconciler {
             "passes": s.passes.load(Ordering::Relaxed),
             "book_reads": s.book_reads.load(Ordering::Relaxed),
             "book_read_failures": s.book_read_failures.load(Ordering::Relaxed),
+            "book_reads_discarded": s.book_reads_discarded.load(Ordering::Relaxed),
             "gaps_opened": s.gaps_opened.load(Ordering::Relaxed),
             "gaps_closed": s.gaps_closed.load(Ordering::Relaxed),
             "unconfirmed_orders": s.unresolved.load(Ordering::Relaxed),

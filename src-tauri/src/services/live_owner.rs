@@ -47,10 +47,13 @@ impl LiveOwner {
         }
     }
 
-    /// The session connected now, if any.
+    /// The session connected now, if any, with the account it trades
+    /// through (`services::session_account`).
     pub fn of_session(ctx: &AppState) -> Option<Self> {
-        ctx.get_broker_session()
-            .map(|s| Self::new(s.broker_id, s.user_id))
+        ctx.get_broker_session().map(|s| {
+            let account = crate::services::session_account::account_of(ctx, &s);
+            Self::new(s.broker_id, account)
+        })
     }
 
     /// The session `gateway` sends `mode` orders through now: what a new
@@ -70,6 +73,12 @@ impl LiveOwner {
         let name = crate::brokers::setup_guide::display_name(&self.broker);
         if self.account.is_empty() {
             name
+        } else if let Some(keys) = self
+            .account
+            .strip_prefix(crate::services::session_account::KEYS_ACCOUNT)
+        {
+            // The broker names no account: the saved keys stand for it.
+            format!("{} (saved keys {})", name, &keys[..keys.len().min(6)])
         } else {
             format!("{} ({})", name, self.account)
         }

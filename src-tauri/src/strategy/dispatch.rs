@@ -552,11 +552,15 @@ impl OrderGateway for AppGateway {
     fn broker_account(&self, mode: RunMode) -> String {
         match mode {
             RunMode::Sandbox => String::new(),
+            // The account it trades through, or its saved keys' identity
+            // where the broker names none (NEW-TR-01).
             RunMode::Live => self
                 .ctx
                 .upgrade()
-                .and_then(|c| c.get_broker_session())
-                .map(|s| s.user_id)
+                .and_then(|c| {
+                    c.get_broker_session()
+                        .map(|s| crate::services::session_account::account_of(&c, &s))
+                })
                 .unwrap_or_default(),
         }
     }
