@@ -488,6 +488,7 @@ impl StrategyModule {
         self.release_unactionable(run_id);
         self.feed.remove_run(run_id).await;
         self.state.clear(run_id);
+        self.tick_contexts.forget(run_id);
         // Every stop arms the webhook cooling-off window.
         self.webhook
             .note_run_stopped(strategy_id, std::time::Instant::now());

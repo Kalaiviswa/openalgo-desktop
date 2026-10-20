@@ -237,7 +237,7 @@ fn leg_id_of(leg: &Value, index: usize) -> i64 {
 }
 
 impl StrategyModule {
-    fn mode_of(&self, mode: &str) -> RunMode {
+    pub(crate) fn mode_of(&self, mode: &str) -> RunMode {
         RunMode::parse(mode).unwrap_or(RunMode::Sandbox)
     }
 }

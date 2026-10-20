@@ -72,8 +72,8 @@ async fn the_app_shutdown_stops_the_strategy_module() {
     let a = app();
     a.ctx.strategy.start().await;
     assert!(
-        a.ctx.strategy.task_count() >= 3,
-        "tick consumer, checkpoint, scheduler"
+        a.ctx.strategy.task_count() >= 4,
+        "tick reader and evaluator, checkpoint, scheduler"
     );
     a.ctx.shutdown().await;
     assert_eq!(a.ctx.strategy.task_count(), 0);
@@ -95,6 +95,10 @@ async fn a_hundred_runs_leave_no_state_locks_or_throttle_entries() {
         t.m.webhook.advance(std::time::Duration::from_secs(31));
     }
     assert!(t.m.state.is_empty());
+    assert!(
+        t.m.tick_contexts.is_empty(),
+        "every run's tick context forgotten"
+    );
     assert_eq!(t.m.broadcast.tracked(), 0);
     assert_eq!(t.m.feed.runs_tracked(), 0);
     assert!(t.m.order_events.is_empty());

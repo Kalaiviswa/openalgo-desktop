@@ -212,22 +212,17 @@ impl StrategyModule {
     }
 
     async fn process_tick_for_run(&self, run_id: i64, symbol: &str, exchange: &str, ltp: f64) {
-        let Ok(Some(run_row)) = self.store.get_run(run_id) else {
+        // In memory after the run's first tick: no tick waits on the
+        // database (`strategy::tick_context`).
+        let Some(ctx) = self.tick_context(run_id).await else {
             return;
         };
-        if run_row.stopped_at.is_some() {
-            return;
-        }
-        let strategy_id = run_row.strategy_id;
-        let mode = self.mode_of(&run_row.mode);
-        let Ok(Some(strategy)) = self.store.get_strategy_unscoped(strategy_id) else {
-            return;
-        };
-        let strategy_dict = strategy.to_dict(false);
+        let (strategy, strategy_dict, mode) = (&ctx.strategy, &ctx.strategy_dict, ctx.mode);
+        let strategy_id = strategy.id;
         let user_id = strategy.user_id.clone();
 
         // Read before the lock, never inside it.
-        let (limit, banked) = self.session_loss(&strategy, run_id);
+        let (limit, banked) = self.session_loss(&ctx, run_id).await;
 
         // In-memory arithmetic only.
         let evaluated = self.state.with_run(run_id, |run| {
@@ -239,7 +234,7 @@ impl StrategyModule {
             );
             let stop_reason = run_breach(
                 run,
-                (&strategy, &strategy_dict),
+                (strategy, strategy_dict),
                 (limit, banked),
                 (run_id, symbol, exchange, ltp),
                 &mut events,
@@ -251,42 +246,18 @@ impl StrategyModule {
         };
 
         // Lock released: everything below reaches the database or broker.
-        self.broadcast
-            .push_delta(self.state.snapshot(run_id), false)
-            .await;
+        // The run's state is copied only for a page that watches it.
+        if self.broadcast.has_subscribers(strategy_id) {
+            self.broadcast
+                .push_delta(self.state.snapshot(run_id), false)
+                .await;
+        }
         for (kind, message, fields) in events {
             self.emit(strategy_id, &user_id, kind, &message, fields)
                 .await;
         }
-        self.act_on_risk(run_id, (&strategy, mode), stop_reason, leg_exits)
+        self.act_on_risk(run_id, (strategy, mode), stop_reason, leg_exits)
             .await;
-    }
-
-    /// The strategy's daily loss limit and, when it has one, the realized
-    /// P&L banked earlier this session by its other runs (read before the
-    /// run's lock, never inside it).
-    fn session_loss(&self, strategy: &StrategyRow, run_id: i64) -> (Option<f64>, Option<f64>) {
-        let strategy_id = strategy.id;
-        let limit = strategy
-            .daily_loss_limit_inr
-            .map(f64::abs)
-            .filter(|l| *l > 0.0);
-        let banked = match limit {
-            Some(_) => {
-                let since = crate::strategy::session::session_started_at(
-                    self.clock.now(),
-                    self.session.0,
-                    self.session.1,
-                );
-                Some(
-                    self.store
-                        .realized_pnl_since(strategy_id, since, Some(run_id))
-                        .unwrap_or(0.0),
-                )
-            }
-            None => None,
-        };
-        (limit, banked)
     }
 
     /// What risk decided, once the lock is released: a strategy-level

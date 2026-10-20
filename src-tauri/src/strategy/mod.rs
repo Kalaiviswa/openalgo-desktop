@@ -57,6 +57,7 @@ pub mod signals;
 mod start_claim;
 pub mod state;
 pub mod store;
+pub mod tick_context;
 pub mod tick_feed;
 pub mod validate;
 pub mod views;
@@ -111,6 +112,8 @@ pub struct StrategyModule {
     pub webhook: webhook::WebhookState,
     pub order_events: order_events::Stash,
     pub feed: tick_feed::TickFeed,
+    /// What the tick path needs of each running run, read once.
+    pub tick_contexts: tick_context::TickContexts,
     pub scheduler: scheduler::Scheduler,
     /// The per-strategy position book fed by `order.placed` tags.
     pub book: Arc<book::StrategyBook>,
@@ -150,6 +153,7 @@ impl StrategyModule {
             webhook: webhook::WebhookState::new(),
             order_events: order_events::Stash::new(),
             feed: tick_feed::TickFeed::new(deps.prices),
+            tick_contexts: tick_context::TickContexts::default(),
             scheduler: scheduler::Scheduler::new(),
             book,
             session: (deps.session_hour, deps.session_minute),

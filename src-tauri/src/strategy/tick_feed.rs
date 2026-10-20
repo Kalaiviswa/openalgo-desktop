@@ -5,9 +5,17 @@
 //! streaming feed and the REST fallback drive `process_tick`: a leg that has
 //! fallen back to polling is risk-evaluated on polled prices too.
 //!
-//! One owned task consumes ticks (the market-data broadcast, `Lagged`
-//! handled) and polls stale symbols every 2 s (stale after 10 s without a
-//! streamed tick). It ends on module shutdown.
+//! Two owned tasks, ended on module shutdown:
+//!
+//! * the **reader** takes every tick of the market-data broadcast and keeps
+//!   the prices of held symbols in their paths (`pending`), never waiting
+//!   on an evaluation, so a slow decision cannot make the channel overrun it
+//!   and skip a deciding price. A tick it does miss is counted for health;
+//! * the **evaluator** takes the waiting paths and evaluates each price in
+//!   order, and polls stale symbols every 2 s (stale after 10 s without a
+//!   streamed tick).
+
+mod pending;
 
 use super::StrategyModule;
 use crate::brokers::common::streaming::{FeedEvent, FeedMode, FeedSubscription, MarketEvent};
@@ -44,10 +52,12 @@ struct Inner {
     last_tick: HashMap<Key, Instant>,
 }
 
-/// Refcounted run subscriptions over one price source.
+/// Refcounted run subscriptions over one price source, and the prices
+/// waiting for the evaluator.
 pub struct TickFeed {
     source: Option<Arc<dyn PriceSource>>,
     inner: Mutex<Inner>,
+    pending: pending::Pending,
 }
 
 impl TickFeed {
@@ -55,7 +65,19 @@ impl TickFeed {
         Self {
             source,
             inner: Mutex::new(Inner::default()),
+            pending: pending::Pending::default(),
         }
+    }
+
+    /// What the strategy tick path queued, folded and missed (health).
+    pub fn health(&self) -> serde_json::Value {
+        self.pending.health()
+    }
+
+    /// The count of ticks the reader missed since start, when it grew
+    /// since the last call (the health alert raises once per growth).
+    pub fn ticks_missed_unreported(&self) -> Option<u64> {
+        self.pending.missed_since_alert()
     }
 
     /// Add this run's instruments; subscribes only those newly referenced.
@@ -104,6 +126,9 @@ impl TickFeed {
             }
             gone
         };
+        if !gone.is_empty() {
+            self.pending.retain(|k| !gone.contains(k));
+        }
         if let (Some(src), false) = (&self.source, gone.is_empty()) {
             src.unsubscribe(&gone).await;
         }
@@ -117,6 +142,7 @@ impl TickFeed {
             inner.last_tick.clear();
             inner.refs.drain().map(|(k, _)| k).collect()
         };
+        self.pending.take();
         if let (Some(src), false) = (&self.source, all.is_empty()) {
             src.unsubscribe(&all).await;
         }
@@ -133,15 +159,17 @@ impl TickFeed {
         self.inner.lock().runs.len()
     }
 
-    /// Whether a tick for this instrument should be acted on (subscribed),
-    /// recording it as fresh.
-    fn note_tick(&self, key: &Key) -> bool {
-        let mut inner = self.inner.lock();
-        if !inner.refs.contains_key(key) {
-            return false;
+    /// Queue a streamed price of a held instrument for the evaluator,
+    /// recording the instrument as fresh; a price nobody holds is dropped.
+    fn queue_tick(&self, key: Key, price: f64) {
+        {
+            let mut inner = self.inner.lock();
+            if !inner.refs.contains_key(&key) {
+                return;
+            }
+            inner.last_tick.insert(key.clone(), Instant::now());
         }
-        inner.last_tick.insert(key.clone(), Instant::now());
-        true
+        self.pending.queue(key, price);
     }
 
     fn stale(&self) -> Vec<Key> {
@@ -163,37 +191,59 @@ impl TickFeed {
     }
 }
 
-/// Start the owned tick consumer (a no-op without a price source).
+/// Start the owned reader and evaluator (a no-op without a price source).
 pub fn start(module: &Arc<StrategyModule>) {
     let Some(source) = module.feed.source.clone() else {
         return;
     };
+    spawn_reader(module, source.ticks());
+    spawn_evaluator(module, source);
+}
+
+/// Read every tick as it comes and queue the held ones; nothing here
+/// waits on an evaluation.
+fn spawn_reader(module: &Arc<StrategyModule>, mut rx: broadcast::Receiver<MarketEvent>) {
     let weak = Arc::downgrade(module);
     let token = module.shutdown_token();
-    let mut rx = source.ticks();
+    module.spawn(async move {
+        loop {
+            let ev = tokio::select! {
+                _ = token.cancelled() => break,
+                ev = rx.recv() => ev,
+            };
+            let Some(m) = weak.upgrade() else { break };
+            match ev {
+                Ok(ev) => {
+                    if let FeedEvent::Tick(t) = ev.as_ref() {
+                        if t.ltp.is_finite() && t.ltp > 0.0 {
+                            m.feed
+                                .queue_tick((t.symbol.clone(), t.exchange.clone()), t.ltp);
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => m.feed.pending.note_lagged(n),
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Evaluate the waiting prices whenever the reader queues some, and price
+/// stale symbols over REST.
+fn spawn_evaluator(module: &Arc<StrategyModule>, source: Arc<dyn PriceSource>) {
+    let weak = Arc::downgrade(module);
+    let token = module.shutdown_token();
+    let wake = module.feed.pending.wake.clone();
     module.spawn(async move {
         let mut poll = tokio::time::interval(POLL_EVERY);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
-                ev = rx.recv() => match ev {
-                    Ok(ev) => {
-                        let FeedEvent::Tick(t) = ev.as_ref() else { continue };
-                        if !(t.ltp.is_finite() && t.ltp > 0.0) {
-                            continue;
-                        }
-                        let Some(m) = weak.upgrade() else { break };
-                        let key = (t.symbol.clone(), t.exchange.clone());
-                        if m.feed.note_tick(&key) {
-                            m.process_tick(&key.0, &key.1, t.ltp).await;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!("Strategy tick consumer lagged by {}", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
+                _ = wake.notified() => {
+                    let Some(m) = weak.upgrade() else { break };
+                    m.evaluate_waiting().await;
+                }
                 _ = poll.tick() => {
                     let Some(m) = weak.upgrade() else { break };
                     let stale = m.feed.stale();
@@ -209,6 +259,24 @@ pub fn start(module: &Arc<StrategyModule>) {
             }
         }
     });
+}
+
+impl StrategyModule {
+    /// Evaluate every price waiting, each symbol's in the order they came,
+    /// until none is left.
+    async fn evaluate_waiting(&self) {
+        loop {
+            let waiting = self.feed.pending.take();
+            if waiting.is_empty() {
+                return;
+            }
+            for ((symbol, exchange), prices) in waiting {
+                for ltp in prices {
+                    self.process_tick(&symbol, &exchange, ltp).await;
+                }
+            }
+        }
+    }
 }
 
 /// The production source: the market-data feed and broker multiquotes.

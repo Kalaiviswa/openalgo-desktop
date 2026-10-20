@@ -316,6 +316,7 @@ pub fn system_payload(
         },
         "databases": db_snapshot(ctx),
         "records": crate::services::record_loss::json(ctx),
+        "strategy_ticks": crate::services::strategy_ticks::json(ctx),
         "time": {
             "server_time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             "server_tz": chrono::Local::now().format("%:z").to_string(),

@@ -148,6 +148,8 @@ pub struct FakeGateway {
     pub delay_ms: AtomicU64,
     /// When set, every price request waits here.
     pub ltp_gate: Mutex<Option<Arc<Gate>>>,
+    /// When set, every placement waits here (after it is recorded).
+    pub place_gate: Mutex<Option<Arc<Gate>>>,
     /// The rows of the position book, whichever mode is read.
     pub position_rows: Mutex<Vec<Value>>,
     n: AtomicU64,
@@ -199,6 +201,13 @@ impl FakeGateway {
 impl OrderGateway for FakeGateway {
     async fn place(&self, mode: RunMode, order: &OrderPayload) -> DispatchResult {
         self.placed.lock().push((mode, order.clone()));
+        let gate = self.place_gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            if let Ok(p) = gate.release.acquire().await {
+                p.forget();
+            }
+        }
         let delay = self.delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -319,6 +328,14 @@ pub fn t() -> T {
 }
 
 pub fn t_at(now: DateTime<Utc>) -> T {
+    t_with(now, None)
+}
+
+/// The module with this price source behind its tick feed.
+pub fn t_with(
+    now: DateTime<Utc>,
+    prices: Option<Arc<dyn openalgo_desktop_lib::strategy::tick_feed::PriceSource>>,
+) -> T {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(SqliteDb::new(&dir.path().join("openalgo.db")).unwrap());
     let clock = ManualClock::new(now);
@@ -337,7 +354,7 @@ pub fn t_at(now: DateTime<Utc>) -> T {
         symbols: symbols.clone(),
         session_hour: 3,
         session_minute: 0,
-        prices: None,
+        prices,
     });
     T {
         m,
