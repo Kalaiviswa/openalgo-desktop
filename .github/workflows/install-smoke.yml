@@ -14,7 +14,9 @@ name: Install smoke
 #   Windows Server 2025     app (a GUI-subsystem executable), create the
 #                           account and sign in
 #   macOS Apple Silicon     the app copied out of the .dmg, started with its
-#                           window, account created and signed in
+#                           window, account created and signed in; the
+#                           Apple Silicon and Intel apps checked to start on
+#                           the oldest macOS they claim (check_macos_min.py)
 #
 # "Sign in" is the trader's first start through the app's own HTTP on the
 # shipped port: POST /setup, POST /auth/login, GET /auth/session-status,
@@ -175,6 +177,19 @@ jobs:
           Write-Host "$($os.Caption) $($os.Version), $(Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' InstallationType)"
       - name: Launch the installed app, create the account and sign in
         run: python scripts/ci/launch_smoke.py --first-sign-in --window --mcp-bridge "$APP_EXE"
+      - name: The data folder is private to this user
+        # PLATFORM-04: the app sets no ACL of its own on Windows and relies
+        # on the profile's inherited one; check it on this system, after
+        # showing that the check fails on a folder open to Everyone.
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'acl-probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          icacls $probe /grant '*S-1-1-0:(OI)(CI)R' | Out-Null
+          pwsh -NoProfile -File scripts/ci/check_windows_acl.ps1 -Folder $probe
+          if ($LASTEXITCODE -ne 1) { throw "The ACL check passed a folder open to Everyone." }
+          pwsh -NoProfile -File scripts/ci/check_windows_acl.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: MCP over piped stdio (installed GUI-subsystem executable)
         run: python scripts/ci/mcp_stdio_smoke.py "$APP_EXE"
 
@@ -217,6 +232,28 @@ jobs:
           bin="${RUNNER_TEMP}/Applications/$(basename "${apps[0]}")/Contents/MacOS/openalgo-desktop"
           test -x "$bin"
           echo "APP_BIN=${bin}" >> "$GITHUB_ENV"
+      - name: Download the Intel bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: bundles-macos-x86_64
+          path: bundles-x64
+      - name: Both apps start on the oldest macOS they claim
+        # PLATFORM-03: README "Supported systems" says macOS 10.15
+        # (tauri.conf.json minimumSystemVersion); Apple Silicon starts at
+        # 11.0. The Intel app is checked here though no Intel Mac runs it.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(bundles-x64/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::Expected one Intel .dmg, found ${#dmgs[@]}."
+            exit 1
+          fi
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "${dmgs[0]}"
+          trap 'hdiutil detach "$mnt" >/dev/null 2>&1 || true' EXIT
+          intel=("$mnt"/*.app)
+          python3 scripts/ci/check_macos_min.py "$(dirname "$(dirname "$(dirname "$APP_BIN")")")" "${intel[0]}"
       - name: Start the app (window and all), create the account and sign in
         # The runner's own home is kept (the runner is fresh, so the data
         # folder is empty). The app makes no keychain call (KEY-01): its keys
