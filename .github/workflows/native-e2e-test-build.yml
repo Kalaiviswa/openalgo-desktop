@@ -94,7 +94,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/linux-tauri-deps
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.92.0
           components: clippy
@@ -154,7 +154,7 @@ jobs:
       - run: npm ci
       - name: Build the frontend the binary embeds
         run: npx vite build
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.92.0
       - name: Build the E2E test binary (e2e-broker)
@@ -205,7 +205,7 @@ jobs:
           echo "OK: without OPENALGO_E2E_BUILD=1 the build stops on the guard."
       - name: What the window showed
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: native-e2e-linux-failure
           path: ${{ runner.temp }}/native-e2e-failure.png
@@ -232,7 +232,7 @@ jobs:
       - run: npm ci
       - name: Build the frontend the binary embeds
         run: npx vite build
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.92.0
           targets: x86_64-pc-windows-msvc
@@ -274,7 +274,7 @@ jobs:
         run: python scripts/ci/native_e2e.py --sandbox-order src-tauri/target/x86_64-pc-windows-msvc/e2e/openalgo-desktop.exe
       - name: What the window showed
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: native-e2e-windows-failure
           path: ${{ runner.temp }}/native-e2e-failure.png
