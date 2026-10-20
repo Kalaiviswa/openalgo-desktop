@@ -70,8 +70,10 @@ impl Runner {
         result: &DispatchResult,
     ) {
         // The engine's own word for an order sent and not yet acknowledged:
-        // the intent stays pending, never rejected.
-        let word = if status == store::UNCONFIRMED {
+        // the intent stays pending, never rejected. An order held for
+        // approval is not at the broker either: pending until it is placed
+        // there (LOG-04; `approval` tells the page what became of it).
+        let word = if status == store::UNCONFIRMED || held_for_approval(result).is_some() {
             "placed"
         } else {
             status

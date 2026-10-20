@@ -2223,7 +2223,10 @@ mod approvals {
         }
     }
 
-    pub(super) async fn setup_semi_auto() -> (T, Arc<MockBroker>) {
+    /// The run's services are the app's own; the mock broker is connected
+    /// as Zerodha (AB1234) and analyzer mode is off. `semi_auto`: the order
+    /// mode holds new orders in the Action Center.
+    pub(super) async fn setup_live(semi_auto: bool) -> (T, Arc<MockBroker>) {
         use openalgo_desktop_lib::brokers::common::symbols::{SymToken, SymbolResolver};
         use openalgo_desktop_lib::brokers::{Broker, BrokerRegistry};
         use openalgo_desktop_lib::services::apikey_service::ApiKeyService;
@@ -2272,7 +2275,9 @@ mod approvals {
         )
         .unwrap();
         h.ctx.sqlite.set_analyze_mode(false).unwrap();
-        ApiKeyService::set_order_mode(&h.ctx, "semi_auto").unwrap();
+        if semi_auto {
+            ApiKeyService::set_order_mode(&h.ctx, "semi_auto").unwrap();
+        }
         let (cookie, csrf) = h.session(true);
         let host = Arc::new(RecordingHost::new());
         let runner = &h.ctx.trading.runner;
@@ -2319,7 +2324,7 @@ mod approvals {
     /// meanwhile: the run decided its side when it started (`force_live`).
     #[tokio::test]
     async fn an_order_approved_in_the_action_center_is_followed_by_its_run() {
-        let (t, mock) = setup_semi_auto().await;
+        let (t, mock) = setup_live(true).await;
         let id = t.deploy("SBIN").await;
         let run = t.start(&id).await;
         assert_eq!(run["run"]["mode"], "live", "{}", run);
@@ -2329,6 +2334,10 @@ mod approvals {
         let (row, status, orderid, pending) = held_row(&t);
         assert_eq!((status.as_str(), orderid), ("working", None));
         let pending = pending.expect("linked to its Action Center order");
+        // Held for approval is not an acceptance: the script's order is
+        // pending, as for an order not yet acknowledged.
+        let frames = t.frames(&id, 1).await;
+        assert_eq!(frames.last().unwrap()["status"], "placed", "{:?}", frames);
 
         t.h.ctx.sqlite.set_analyze_mode(true).unwrap();
         *mock.order_book.lock() = Some(Ok(vec![
@@ -2353,6 +2362,15 @@ mod approvals {
             ("filled".to_string(), Some("MOCK-1".to_string()), 3),
             "bound to the approved order and its fill counted"
         );
+        let last = t.frames(&id, 1).await.last().cloned().unwrap();
+        assert_eq!(
+            (last["status"].clone(), last["filledQty"].clone()),
+            (json!("filled"), json!(3))
+        );
+        assert_eq!(
+            last["orderRef"], "MOCK-1",
+            "the script holds 3 under MOCK-1"
+        );
         let (s, v) = t.close(&id).await;
         assert_eq!(s, StatusCode::OK, "{}", v);
         assert_eq!(
@@ -2368,7 +2386,7 @@ mod approvals {
     /// stayed pending.
     #[tokio::test]
     async fn an_order_rejected_in_the_action_center_is_rejected_for_its_run() {
-        let (t, mock) = setup_semi_auto().await;
+        let (t, mock) = setup_live(true).await;
         let id = t.deploy("SBIN").await;
         t.start(&id).await;
         t.buy(&id, 1, 3).await;
@@ -2396,7 +2414,7 @@ mod approvals {
     #[tokio::test]
     async fn an_approval_without_an_answer_is_settled_from_the_order_book() {
         use openalgo_desktop_lib::brokers::mock::AfterSend;
-        let (t, mock) = setup_semi_auto().await;
+        let (t, mock) = setup_live(true).await;
         t.h.ctx.reconciler.stop();
         let id = t.deploy("SBIN").await;
         t.start(&id).await;
@@ -2426,5 +2444,102 @@ mod approvals {
         assert_eq!(orderid.as_deref(), Some("MOCK-1"), "settled from the book");
         assert_eq!((status.as_str(), filled), ("filled", 3));
         assert_eq!(placed(&mock).len(), 1, "never sent twice");
+    }
+
+    /// Approve the order held as `pending`; its BUY 3 fills as MOCK-1, and
+    /// the book and positions show it (and the exit after it).
+    pub(super) async fn approve_and_fill(t: &T, mock: &MockBroker, pending: i64) {
+        *mock.order_book.lock() = Some(Ok(vec![
+            sbin_order("MOCK-1", "BUY", 3),
+            sbin_order("MOCK-2", "SELL", 3),
+        ]));
+        *mock.positions.lock() = Some(Ok(vec![sbin_long(3)]));
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/approve/{}", pending),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+    }
+
+    /// LOG-04 (re-audit NEW-TR-02): the link to the Action Center order
+    /// cannot be saved. The answer is kept on the run: nothing new is sent,
+    /// Stop does not report closed; once saved, the approval is followed and
+    /// Stop closes exactly what it filled.
+    #[tokio::test]
+    async fn an_unsaved_approval_link_holds_the_run_until_it_is_saved() {
+        let (t, mock) = setup_live(true).await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        let sql = |s: &str| t.h.ctx.sqlite.conn().unwrap().execute_batch(s).unwrap();
+        sql(
+            "CREATE TRIGGER no_link BEFORE UPDATE OF pending_order_id ON openscript_orders
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        );
+        t.buy(&id, 1, 3).await;
+        let (row, _, _, link) = held_row(&t);
+        assert_eq!(link, None, "the link was not saved");
+        let runner = t.h.ctx.trading.runner.clone();
+        assert_eq!(runner.status_of(&id).unwrap().unsaved_orders, 1);
+        assert_eq!(t.buy(&id, 2, 1).await["sent"], 0, "nothing new meanwhile");
+        approve_and_fill(&t, &mock, 1).await;
+        let (s, v) = t.close(&id).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+        assert_eq!(placed(&mock), vec![("BUY".to_string(), 3)], "no exit");
+
+        sql("DROP TRIGGER no_link;");
+        runner.pump_once(&id).await;
+        assert_eq!(runner.status_of(&id).unwrap().unsaved_orders, 0);
+        assert_eq!(
+            t.row_status(row),
+            ("filled".to_string(), Some("MOCK-1".to_string()), 3)
+        );
+        let (s, v) = t.close(&id).await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert_eq!(
+            placed(&mock),
+            vec![("BUY".to_string(), 3), ("SELL".to_string(), 3)]
+        );
+    }
+
+    /// LOG-04 (re-audit NEW-TR-02): the app restarts while an order is held
+    /// for approval. The link is in the ledger, so the run started again
+    /// follows the approval made after the restart, and Stop closes exactly
+    /// what it filled.
+    #[tokio::test]
+    async fn a_held_order_is_followed_after_a_restart() {
+        use openalgo_desktop_lib::trading::runner::services::AppServices;
+        let (t, mock) = setup_live(true).await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        t.buy(&id, 1, 3).await;
+        let (row, _, _, pending) = held_row(&t);
+
+        t.h.ctx.trading.runner.shutdown().await;
+        let trading = Trading::new(
+            t.h.dir.path(),
+            t.h.ctx.sqlite.clone(),
+            t.h.clock.clone(),
+            Arc::new(AppServices::new(Arc::downgrade(&t.h.ctx))),
+        );
+        trading.runner.set_host(t.host.clone());
+        trading.runner.set_options(fast());
+        let runner = trading.runner.clone();
+        runner.start(&id).unwrap();
+        approve_and_fill(&t, &mock, pending.unwrap()).await;
+        runner.pump_once(&id).await;
+        assert_eq!(
+            t.row_status(row),
+            ("filled".to_string(), Some("MOCK-1".to_string()), 3),
+            "the row from before the restart, bound to the approved order"
+        );
+        runner.close(&id).await.unwrap();
+        assert_eq!(
+            placed(&mock),
+            vec![("BUY".to_string(), 3), ("SELL".to_string(), 3)]
+        );
+        trading.shutdown().await;
     }
 }
