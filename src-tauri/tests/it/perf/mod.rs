@@ -13,7 +13,8 @@
 //! cargo test --locked --test it perf:: -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! One benchmark: `perf::tick_to_risk`, `perf::reconnect`,
+//! One benchmark: `perf::tick_to_risk`, `perf::report_load` (tick to
+//! decision while the report pages read a large log), `perf::reconnect`,
 //! `perf::sqlite_wait`, `perf::event_burst`, `perf::disk_growth`; the
 //! endurance run is `perf::endurance` (15 minutes unless
 //! `OPENALGO_PERF_MINUTES` says otherwise). `.github/workflows/perf.yml`
@@ -37,6 +38,7 @@ mod event_burst;
 mod faults;
 mod lag_log;
 mod reconnect;
+mod report_load;
 mod rig;
 mod sqlite_wait;
 mod tick_to_risk;

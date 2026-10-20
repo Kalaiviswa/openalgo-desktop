@@ -58,7 +58,7 @@ const HIGH: f64 = BASE_PRICE + 50.0;
 const UNDER_TRAIL: f64 = HIGH - TRAIL_PTS - 5.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Kind {
+pub(super) enum Kind {
     Stop,
     Target,
     TrailMove,
@@ -67,7 +67,7 @@ enum Kind {
 
 /// The risk owner under test, and how to read a leg's current stop.
 #[derive(Clone)]
-enum Owner {
+pub(super) enum Owner {
     Scalping,
     /// Run id by symbol (leg 1 of each run).
     Strategy(Arc<HashMap<String, i64>>),
@@ -108,6 +108,11 @@ fn legs() -> Vec<(String, Kind)> {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| (1..=300).contains(n))
         .unwrap_or(LEGS_PER_KIND);
+    legs_per_kind(per_kind)
+}
+
+/// `per_kind` legs of each kind on SYM0000.., the kinds interleaved.
+pub(super) fn legs_per_kind(per_kind: usize) -> Vec<(String, Kind)> {
     (0..3 * per_kind)
         .map(|i| {
             let kind = [Kind::Stop, Kind::Target, Kind::TrailMove][i % 3];
@@ -264,7 +269,9 @@ async fn sdk_client(rig: &Rig) -> (Arc<AtomicU64>, tokio::task::JoinHandle<()>) 
 
 /// The rig with every symbol subscribed and the trailing legs left out of
 /// the noise (a noise tick after a trail moved would take the exit first).
-async fn loaded_rig(legs: &[(String, Kind)]) -> (Rig, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+pub(super) async fn loaded_rig(
+    legs: &[(String, Kind)],
+) -> (Rig, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
     let trailing: Vec<String> = legs
         .iter()
         .filter(|(_, k)| *k == Kind::TrailMove)
@@ -317,8 +324,27 @@ async fn health_block(rig: &Rig, key: &str) -> String {
     }
 }
 
-/// Ask for every leg's decision, one every `TRIGGER_EVERY`, and report.
-async fn measure(
+/// Live scalping stops on `legs`, each long one share at the broker, all
+/// managed and subscribed.
+pub(super) async fn manage_scalping_legs(rig: &Rig, legs: &[(String, Kind)]) {
+    let ctx = rig.ctx.clone();
+    let held: Vec<(String, i32)> = legs.iter().map(|(s, _)| (s.clone(), 1)).collect();
+    rig.set_positions(&held);
+    for (s, k) in legs {
+        ctx.scalping.store.upsert_sl(&scalping_leg(s, *k)).unwrap();
+    }
+    ctx.scalping.monitor.request_sync();
+    until_long("every leg managed", || {
+        ctx.scalping.monitor.leg_count() == legs.len()
+            && ctx.scalping.monitor.subscribed().len() == legs.len()
+    })
+    .await;
+}
+
+/// Ask for every leg's decision, one every `TRIGGER_EVERY`, and report it
+/// as `bench`; whether the target was met (p99 under 50 ms, none lost).
+pub(super) async fn measure(
+    bench: &'static str,
     skipped: &Skipped,
     rig: Rig,
     owner: Owner,
@@ -392,8 +418,9 @@ async fn measure(
     let events = ctx.websocket.stats().events.load(Ordering::Relaxed) - events_before;
     let generated = rig.market.generated.load(Ordering::Relaxed) - generated_before;
     let all: Vec<Duration> = by_kind.values().flatten().copied().collect();
-    let overall = Stats::of(&all);
-    let mut report = Report::new(owner.name())
+    // None when every decision was lost (the owner never saw its ticks).
+    let overall = (!all.is_empty()).then(|| Stats::of(&all));
+    let mut report = Report::new(bench)
         .field("symbols", SYMBOLS)
         .field("ticks_per_s_target", TICKS_PER_SECOND)
         .field("ticks_per_s_sent", format!("{:.0}", generated as f64 / ran))
@@ -402,8 +429,10 @@ async fn measure(
             format!("{:.0}", events as f64 / ran),
         )
         .field("legs", legs.len())
-        .field("lost_decisions", lost)
-        .stats("all", &overall);
+        .field("lost_decisions", lost);
+    if let Some(o) = &overall {
+        report = report.stats("all", o);
+    }
     for (name, kind) in [
         ("stop", Kind::Stop),
         ("target", Kind::Target),
@@ -428,11 +457,13 @@ async fn measure(
             "health_strategy_ticks",
             health_block(&rig, "strategy_ticks").await,
         )
-        .verdict("all_p99_ms<50", overall.p99 < TARGET_P99 && lost == 0);
+        .verdict(
+            "all_p99_ms<50",
+            overall.is_some_and(|o| o.p99 < TARGET_P99) && lost == 0,
+        );
     if let Ok(r) = Arc::try_unwrap(rig) {
         r.stop().await;
     }
-    assert_eq!(lost, 0, "{} decisions were never made", lost);
     met
 }
 
@@ -443,21 +474,21 @@ async fn scalping_monitor_tick_to_decision_p99_under_50ms() {
     let skipped = lag_log::install();
     let legs = legs();
     let (rig, frames, reader) = loaded_rig(&legs).await;
-    let ctx = rig.ctx.clone();
-    let held: Vec<(String, i32)> = legs.iter().map(|(s, _)| (s.clone(), 1)).collect();
-    rig.set_positions(&held);
-    for (s, k) in &legs {
-        ctx.scalping.store.upsert_sl(&scalping_leg(s, *k)).unwrap();
-    }
-    ctx.scalping.monitor.request_sync();
-    until_long("every leg managed", || {
-        ctx.scalping.monitor.leg_count() == legs.len()
-            && ctx.scalping.monitor.subscribed().len() == legs.len()
-    })
+    manage_scalping_legs(&rig, &legs).await;
+    let met = measure(
+        Owner::Scalping.name(),
+        &skipped,
+        rig,
+        Owner::Scalping,
+        legs,
+        frames,
+    )
     .await;
-    let met = measure(&skipped, rig, Owner::Scalping, legs, frames).await;
     reader.abort();
-    assert!(met, "scalping tick to decision p99 over 50 ms");
+    assert!(
+        met,
+        "scalping tick to decision p99 over 50 ms, or a decision lost"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -487,7 +518,11 @@ async fn strategy_module_tick_to_decision_p99_under_50ms() {
         "strategy: one tick's evaluation of a held leg takes {} ms on average",
         super::ms(cost)
     );
-    let met = measure(&skipped, rig, Owner::Strategy(Arc::new(runs)), legs, frames).await;
+    let owner = Owner::Strategy(Arc::new(runs));
+    let met = measure(owner.name(), &skipped, rig, owner, legs, frames).await;
     reader.abort();
-    assert!(met, "strategy tick to decision p99 over 50 ms");
+    assert!(
+        met,
+        "strategy tick to decision p99 over 50 ms, or a decision lost"
+    );
 }
