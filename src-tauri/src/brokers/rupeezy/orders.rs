@@ -37,19 +37,19 @@ pub(crate) fn lot_of(row: &SymToken) -> i64 {
 }
 
 /// The rows under the first of `keys` that holds a non-empty list (the
-/// web's `payload.get("orders") or payload.get("data")`); `null` there is
-/// no rows (the web's `or []`). `None` when none of the keys holds a list
-/// or `null`, or when a row does not read: a book that was not read, never
-/// an empty one (BR-03).
+/// web's `payload.get("orders") or payload.get("data")`). `None` when none
+/// of the keys holds a list, `null` included, or when a row does not read:
+/// a book that was not read, never an empty one (BR-03). The web's `or []`
+/// also reads `null` as no orders, but no recorded Vortex reply and no
+/// Vortex document sends `null` for an empty book (`[]` is the empty one),
+/// so a `null` list is not believed: cancel all would cancel nothing and
+/// call it done.
 pub(crate) fn rows_of<T: DeserializeOwned>(v: &Value, keys: &[&str]) -> Option<Vec<T>> {
     let lists: Vec<&Vec<Value>> = keys
         .iter()
         .filter_map(|k| v.get(*k).and_then(Value::as_array))
         .collect();
-    let Some(first) = lists.first() else {
-        let null = keys.iter().any(|k| v.get(*k).is_some_and(Value::is_null));
-        return null.then(Vec::new);
-    };
+    let first = lists.first()?;
     let list = lists.iter().find(|l| !l.is_empty()).unwrap_or(first);
     list.iter()
         .map(|r| {

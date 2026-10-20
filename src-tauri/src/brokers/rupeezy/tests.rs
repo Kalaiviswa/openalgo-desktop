@@ -464,6 +464,12 @@ fn rows_are_read_from_the_first_list_that_has_them() {
     let empty: Vec<VortexOrder> = rows_of(&json!({"orders": []}), &["orders", "data"]).unwrap();
     assert!(empty.is_empty());
     assert!(rows_of::<VortexOrder>(&json!({"status": "success"}), &["orders"]).is_none());
+    // `null` is no list: not an empty book (BR-03).
+    assert!(rows_of::<VortexOrder>(&json!({"orders": null}), &["orders", "data"]).is_none());
+    assert!(
+        rows_of::<VortexOrder>(&json!({"orders": null, "data": null}), &["orders", "data"])
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------

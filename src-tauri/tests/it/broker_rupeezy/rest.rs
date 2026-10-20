@@ -608,6 +608,35 @@ async fn cancel_all_cancels_open_orders_and_refuses_an_unread_book() {
     );
 }
 
+/// BR-03: a success whose order list is `null` is an order book that was
+/// not read. Cancel all refuses with nothing cancelled and the order book
+/// is an error; Vortex's empty book, `[]`, stays empty.
+#[tokio::test]
+async fn a_null_order_list_is_not_an_empty_book() {
+    let (b, fake) = setup().await;
+    let null = r#"{"status":"success","orders":null}"#;
+    for _ in 0..2 {
+        fake.script(Script::new("GET", "/trading/orders", 200, null).once());
+    }
+    let e = b.cancel_all_orders(&auth()).await.unwrap_err();
+    assert!(
+        e.client_message().contains("no order was cancelled"),
+        "{}",
+        e
+    );
+    assert!(fake.calls_under("/trading/orders/regular").is_empty());
+    assert!(b.get_order_book(&auth()).await.is_err());
+
+    let empty = r#"{"status":"success","orders":[]}"#;
+    for _ in 0..2 {
+        fake.script(Script::new("GET", "/trading/orders", 200, empty).once());
+    }
+    let r = b.cancel_all_orders(&auth()).await.unwrap();
+    assert!(r.cancelled.is_empty() && r.failed.is_empty(), "{:?}", r);
+    assert!(b.get_order_book(&auth()).await.unwrap().is_empty());
+    assert!(fake.calls_under("/trading/orders/regular").is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Funds
 // ---------------------------------------------------------------------------
