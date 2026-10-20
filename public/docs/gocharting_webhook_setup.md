@@ -13,56 +13,32 @@ GoCharting is a professional HTML5 charting platform optimized for Indian market
 - Subscribe at [GoCharting](https://gocharting.com) to access webhook features
 
 ### 2. OpenAlgo Setup
-- OpenAlgo instance running and accessible
-- API key configured in OpenAlgo
-- Broker connected and authenticated
+- OpenAlgo Desktop running, and you are signed in (after a restart the API stays locked until you sign in)
+- API key generated on the API Key page
+- Broker connected and logged in
 
 ### 3. Public URL Configuration
 
-#### Option A: Production/Custom Domain
-If you have a custom domain or server:
-1. Open your `.env` file
-2. Update the `HOST_SERVER` variable:
-   ```env
-   HOST_SERVER=https://yourdomain.com
-   ```
+GoCharting sends alerts from its own servers on the internet, so it has to
+reach OpenAlgo Desktop on your computer. OpenAlgo Desktop does not start a
+tunnel itself.
 
-#### Option B: Local Development with Tunneling
+1. Run a tunnel on the same computer, pointing at the app port (5000 unless you
+   changed it in Server Settings). For example:
+   - ngrok: `ngrok http 5000`
+   - Cloudflare Tunnel: `cloudflared tunnel --url http://localhost:5000`
+2. Copy the tunnel's `https://` address.
+3. In OpenAlgo Desktop, open **Profile**, **Broker** tab, **Server
+   Configuration**, enter that address as **Host Server URL**, and save. No
+   restart is needed.
 
-If you're running OpenAlgo locally (on your computer) and want to test webhooks, you'll need to expose your local server to the internet using a tunneling service.
-
-**Popular Tunneling Services:**
-- **DevTunnel** (Microsoft) - Good for Visual Studio users
-- **ngrok** - Popular cross-platform option
-- **localtunnel** - Free and simple alternative
-- **Cloudflare Tunnel** - Enterprise-grade option
-
-**How Tunneling Works:**
-1. Your local OpenAlgo runs on `http://localhost:5000`
-2. Tunneling service creates a public URL pointing to your local server
-3. GoCharting can send webhooks to this public URL
-4. The tunnel forwards requests to your local OpenAlgo
-
-**Typical URL Formats:**
-- DevTunnel: `https://abc123.devtunnels.ms`
-- ngrok: `https://abc123.ngrok.io`
-- localtunnel: `https://abc123.loca.lt`
-
-**Setup Steps:**
-1. Install and configure your chosen tunneling service
-2. Start the tunnel pointing to port 5000 (OpenAlgo's default port)
-3. Copy the public URL provided by the tunneling service
-4. Update your `.env` file:
-   ```env
-   HOST_SERVER=https://your-tunnel-url.com
-   ```
-5. Restart OpenAlgo application
-
-⚠️ **Important Notes:**
-- Tunnel URLs may change each time you restart (unless using paid plans)
-- Free tier tunnels may have bandwidth/time limitations
-- Update the webhook URL in GoCharting if your tunnel URL changes
-- For production use, consider a custom domain instead of tunneling
+Important notes:
+- Requests that arrive through a tunnel whose address is not entered as Host
+  Server URL are refused.
+- Free tunnel addresses usually change each time the tunnel restarts. When it
+  changes, update the Host Server URL and the webhook URL in GoCharting.
+- A connection on your local network, or port forwarding on your router, does
+  not work for GoCharting webhooks.
 
 ---
 
@@ -175,10 +151,10 @@ If you're running OpenAlgo locally (on your computer) and want to test webhooks,
 5. **Configure Delivery Methods**
 
    Enable/disable notification methods as needed:
-   - ☑️ **Popup**: Visual popup in GoCharting
-   - ☑️ **Sound**: Audio notification (select sound)
-   - ☑️ **In-app Push**: Mobile app notification
-   - ☑️ **Webhook**: Enable this for OpenAlgo integration
+   - **Popup**: Visual popup in GoCharting
+   - **Sound**: Audio notification (select sound)
+   - **In-app Push**: Mobile app notification
+   - **Webhook**: Enable this for OpenAlgo integration
 
    **Webhook URL**: Paste your OpenAlgo webhook URL
    ```
@@ -192,7 +168,7 @@ If you're running OpenAlgo locally (on your computer) and want to test webhooks,
 
 ---
 
-## ⚠️ IMPORTANT: Testing Workflow
+## IMPORTANT: Testing Workflow
 
 ### Before Testing - Enable Sandbox Mode
 
@@ -205,12 +181,12 @@ If you're running OpenAlgo locally (on your computer) and want to test webhooks,
    - Sandbox mode is now active
 
 2. **Why Use Sandbox Mode?**
-   - ✅ Test without risking real money
-   - ✅ Verify webhook configuration is correct
-   - ✅ Debug payload structure
-   - ✅ Check symbol mapping
-   - ✅ Validate alert triggers
-   - ✅ Ensure broker API connectivity
+   - Test without risking real money
+   - Verify webhook configuration is correct
+   - Debug payload structure
+   - Check symbol mapping
+   - Validate alert triggers
+   - Ensure broker API connectivity
 
 3. **Testing Progression**
    ```
@@ -219,7 +195,7 @@ If you're running OpenAlgo locally (on your computer) and want to test webhooks,
    Step 3: Live Mode    → Execute real trades (with small quantities)
    ```
 
-⚠️ **WARNING**: Never test directly in live mode. Always follow the testing progression above to avoid:
+**WARNING**: Never test directly in live mode. Always follow the testing progression above to avoid:
 - Accidental real trades
 - Financial losses during testing
 - Multiple unwanted orders
@@ -275,7 +251,7 @@ curl -X POST https://yourdomain.com/api/v1/placeorder \
 
 ### Method 5: Live Testing with Small Quantities
 
-⚠️ **Only after successful testing in Analyze and Sandbox modes:**
+**Only after successful testing in Analyze and Sandbox modes:**
 
 1. Disable Analyze Mode and Sandbox Mode
 2. Start with **minimal quantities** (e.g., 1 share)
@@ -401,18 +377,18 @@ curl -X POST https://yourdomain.com/api/v1/placeorder \
 1. **Check if tunnel is running**
    - Verify the tunneling service is active
    - Look for the forwarding/public URL in the terminal output
-   - Ensure the tunnel is pointing to port 5000
+   - Ensure the tunnel is pointing to the app port (5000 unless you changed it)
 
 2. **Verify tunnel URL is correct**
    - Copy the exact URL from the tunneling service output
    - Ensure URL starts with `https://` (not `http://`)
-   - Check that URL is updated in `.env` file
+   - Check that the same address is saved as Host Server URL (Profile, Broker tab, Server Configuration)
 
 3. **Restart tunnel if needed**
    - Stop the current tunnel
    - Start a new tunnel session
-   - Update `.env` with the new URL
-   - Restart OpenAlgo
+   - Save the new address as Host Server URL (no restart needed)
+   - Update the webhook URL in GoCharting
 
 4. **Test tunnel accessibility**
    - Open the tunnel URL in your browser
@@ -448,7 +424,7 @@ curl -X POST https://yourdomain.com/api/v1/placeorder \
 
 ### 4. Test in Sandbox/Sandbox Trading
 
-⚠️ **CRITICAL**: Always test in sandbox mode before live trading!
+**CRITICAL**: Always test in sandbox mode before live trading!
 
 **Recommended Testing Workflow:**
 1. **Analyze Mode**: Test payload structure without placing orders
@@ -457,12 +433,12 @@ curl -X POST https://yourdomain.com/api/v1/placeorder \
 4. **Full Trading**: Deploy with actual quantities
 
 **Never Skip Steps:**
-- ❌ Don't test directly in live mode
-- ❌ Don't use large quantities for initial testing
-- ❌ Don't deploy without monitoring first few trades
-- ✅ Always follow the testing progression
-- ✅ Monitor logs during initial deployment
-- ✅ Keep alerts paused until fully tested
+- Don't test directly in live mode
+- Don't use large quantities for initial testing
+- Don't deploy without monitoring first few trades
+- Always follow the testing progression
+- Monitor logs during initial deployment
+- Keep alerts paused until fully tested
 
 ---
 
@@ -514,14 +490,13 @@ Create separate alerts for entry, target, and stop loss:
 
 ## Rate Limits
 
-OpenAlgo has rate limiting to prevent abuse:
-- Default: 10 requests per second for placeorder API
-- Configurable via `ORDER_RATE_LIMIT` in .env file
+OpenAlgo Desktop has rate limiting to prevent abuse:
+- 10 requests per second for the order endpoints, including placeorder
+- The limits are fixed; there is no setting to change them
 
 If you hit rate limits:
 1. Space out your alerts
-2. Adjust rate limits in .env if needed
-3. Consider using basket orders for multiple symbols
+2. Consider using basket orders for multiple symbols
 
 ---
 
@@ -574,4 +549,4 @@ A: Currently, the GoCharting configuration generates MARKET orders. For other or
 
 ---
 
-**Happy Trading with GoCharting and OpenAlgo! 🚀**
+**Happy Trading with GoCharting and OpenAlgo! **

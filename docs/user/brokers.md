@@ -64,7 +64,7 @@ in. Brokers fall into three groups.
 
 Zerodha, Fyers, Upstox, Dhan, Arrow, Paytm Money, Pocketful, HDFC Sky, HDFC
 Securities, IIFL Capital, Alice Blue, CompositEdge, RMoney, Flattrade,
-Shoonya, Zebu and TradeSmart.
+Shoonya, Zebu, TradeSmart and Rupeezy.
 
 **Login with** takes you to the broker's login page. Log in there, approve
 access, and the broker sends you back to OpenAlgo, which finishes the sign-in
@@ -99,6 +99,7 @@ app. These brokers need your client ID:
 | Shoonya, Zebu, TradeSmart | In the first key, as `userid:::client_id` (your user ID, then the app's client ID or key) |
 | Arrow, HDFC Sky, HDFC Securities | The **Client ID** field Broker Configuration shows for these brokers |
 | Alice Blue | The **User ID** field Broker Configuration shows for it |
+| Rupeezy | The **Client ID** field Broker Configuration shows for it (your Rupeezy client code) |
 
 If the client ID is missing, the sign-in stops and names the field to fill in
 on the Broker Configuration page. If you log in to the broker with a

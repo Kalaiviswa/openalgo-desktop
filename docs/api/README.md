@@ -203,7 +203,7 @@ The desktop serves no `/api/v1` endpoint that OpenAlgo web lacks.
 
 ## WebSocket Streaming
 
-The feed is not under `/api/v1`. Connect to `ws://127.0.0.1:8765`, authenticate with your API key, then subscribe.
+The feed is not under `/api/v1`. Connect to `ws://127.0.0.1:8765`, authenticate with your API key, then subscribe. The shared protocol (authenticate, subscribe and its `depth` field, unsubscribe, ping, the error frame and close codes) is in [WebSocket protocol](./websocket-streaming/README.md).
 
 | Mode | Documentation |
 |---|---|

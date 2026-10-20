@@ -309,8 +309,9 @@ the simulation.
 
 By default OpenAlgo Desktop only accepts connections from this computer. To use
 it from another device on your network, turn on **Allow access from other
-devices** in Server Settings. New ports and addresses take effect after the app
-restarts.
+devices** in Server Settings. A new market data port or address takes effect
+within seconds; a new app port or address takes effect after the app restarts,
+and Server Settings says which of your changes is waiting for a restart.
 
 **Port 5000 already in use.** If another program holds port 5000, the app opens
 on a page saying so instead of the dashboard.
@@ -435,7 +436,7 @@ says so and changes nothing. Details:
 
 ## Supported brokers
 
-All 36 brokers of OpenAlgo web, including Delta Exchange for crypto:
+All 37 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto:
 
 | | | | |
 | --- | --- | --- | --- |
@@ -446,8 +447,9 @@ All 36 brokers of OpenAlgo web, including Delta Exchange for crypto:
 | Ibulls | IIFL | IIFL Capital | IndMoney |
 | JainamXts | Kotak Securities | Motilal Oswal | mStock by Mirae Asset |
 | Nubra | Paytm Money | Pocketful | RMoney |
-| Samco | Shoonya | Tradejini | TradeSmart |
-| Upstox | Wisdom Capital | Zebu | Zerodha |
+| Rupeezy | Samco | Shoonya | Tradejini |
+| TradeSmart | Upstox | Wisdom Capital | Zebu |
+| Zerodha | | | |
 
 ## What is included, and what is not
 

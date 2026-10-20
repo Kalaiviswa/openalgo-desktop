@@ -73,9 +73,9 @@ The `command` is the OpenAlgo Desktop program itself, started with `mcp`. The
 API Key page fills in the real path on this computer, so copy the
 configuration from there rather than typing the path.
 
-If you run the AppImage on Linux (x64 or ARM64), change that path to the
-location of your `.AppImage` file. The page shows a temporary path that
-changes every time the AppImage starts.
+If you run the AppImage on Linux (x64 or ARM64), the page fills in the
+location of your `.AppImage` file itself. If you later move the `.AppImage`,
+copy the configuration again.
 
 If you move or reinstall OpenAlgo Desktop somewhere else, create the
 configuration again from the API Key page.

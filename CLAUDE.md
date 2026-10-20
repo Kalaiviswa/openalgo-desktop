@@ -192,8 +192,9 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
   `analyzer_update`, `cache_loaded`, `master_contract_download`), alerts. The UI
   refreshes on those pushes; it does not poll. A new side effect is a new
   subscriber, never a line added to the order path.
-- **Databases**, mirroring the web's isolation: main SQLite, logs SQLite,
-  `sandbox.db` (fully isolated from live), latency, and DuckDB for Historify.
+- **Databases**, mirroring the web's isolation: main SQLite, logs SQLite
+  (which also holds the traffic, latency and health tables),
+  `sandbox.db` (fully isolated from live), and DuckDB for Historify.
   Column names follow the web schemas so fixtures and ported tests line up.
 
 ### Brokers
@@ -462,7 +463,9 @@ Decided:
 
 - **OpenScript** runs on the existing TypeScript engine (`openalgo-script`).
   Backtests already run in a Web Worker. Live runs use the same engine in a
-  hidden Tauri window fed by the event bus, so backtest and live cannot drift.
+  hidden Tauri window: the app reads new bars every 10 s (`bar_poll`) and
+  passes them, with order frames, through the run's inbox, so backtest and
+  live cannot drift.
   No Rust OpenScript engine until a cross-engine conformance corpus exists.
 - **MCP** is native Rust (`rmcp`): one tool registry mapping to services, served
   over stdio (the app binary with an `mcp` subcommand) and streamable HTTP at
@@ -795,6 +798,12 @@ Every flaky test found so far was a race, not a slow machine:
   a loaded runner stretched one page past 200 ms. Format with the read on
   the blocking pool, and assert the total with `runtime_busy` as well as
   the worst gap.
+- The reverse also happens: running many integration modules together in
+  one `cargo test` process with three or more test threads (strategy::,
+  webui2::, webui_monitoring::, webui_reports:: and the like) hits macOS's
+  limit of 2048 threads per process, and r2d2's scheduled thread pool fails
+  with WouldBlock. CI is not affected (nextest runs one process per test).
+  Locally, run those modules with `--test-threads=2`, or use nextest.
 
 ### Data and migrations
 
