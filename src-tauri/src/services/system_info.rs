@@ -178,27 +178,25 @@ pub fn errors_groups(ctx: &AppState, limit: i64) -> Result<Value> {
 }
 
 fn db_snapshot(ctx: &AppState) -> Vec<Value> {
-    [
-        ("openalgo", "openalgo.db"),
-        ("logs", "logs.db"),
-        ("historify", "historify.duckdb"),
-    ]
-    .iter()
-    .map(|(name, file)| {
-        let p = ctx.data_dir.join(file);
-        match std::fs::metadata(&p) {
-            Ok(md) => json!({
-                "name": name,
-                "exists": true,
-                "size_mb": (md.len() as f64 / (1024.0 * 1024.0) * 100.0).round() / 100.0,
-                "modified": md.modified().ok().map(|m| {
-                    DateTime::<Utc>::from(m).with_timezone(&Kolkata).format("%Y-%m-%d %H:%M:%S").to_string()
-                }),
+    crate::services::health_service::DATABASES
+        .iter()
+        .map(|(name, file)| db_entry(ctx, name, file))
+        .collect()
+}
+
+fn db_entry(ctx: &AppState, name: &str, file: &str) -> Value {
+    let p = ctx.data_dir.join(file);
+    match std::fs::metadata(&p) {
+        Ok(md) => json!({
+            "name": name,
+            "exists": true,
+            "size_mb": (md.len() as f64 / (1024.0 * 1024.0) * 100.0).round() / 100.0,
+            "modified": md.modified().ok().map(|m| {
+                DateTime::<Utc>::from(m).with_timezone(&Kolkata).format("%Y-%m-%d %H:%M:%S").to_string()
             }),
-            Err(_) => json!({"name": name, "exists": false, "size_mb": 0, "modified": Value::Null}),
-        }
-    })
-    .collect()
+        }),
+        Err(_) => json!({"name": name, "exists": false, "size_mb": 0, "modified": Value::Null}),
+    }
 }
 
 fn disk_for(path: &std::path::Path) -> Value {

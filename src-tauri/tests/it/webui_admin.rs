@@ -529,11 +529,18 @@ async fn system_info_diagnostics_and_report_have_no_secrets() {
     }
     assert_eq!(d["build"]["openalgo_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(d["host"]["machine"], std::env::consts::ARCH);
-    assert!(d["databases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|x| x["name"] == "openalgo" && x["exists"] == true));
+    for db in ["openalgo", "logs", "sandbox", "historify"] {
+        assert!(
+            d["databases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["name"] == db && x["exists"] == true),
+            "{}: {}",
+            db,
+            d["databases"]
+        );
+    }
     assert!(d["runtime"]["listeners"].is_array());
     assert!(d["config"]["secrets_present"].is_object());
     assert!(!v.to_string().contains(&key));

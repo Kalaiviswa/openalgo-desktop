@@ -636,6 +636,16 @@ async fn health_sampler_endpoints_and_alerts() {
     }
     assert!(v["memory"]["rss_mb"].as_f64().unwrap() > 0.0);
     assert!(v["database"]["total"].as_i64().unwrap() >= 1);
+    // Every database's size, the sandbox's included (it grows with the
+    // trader's analyzer history).
+    for db in ["openalgo", "logs", "sandbox", "historify"] {
+        assert!(
+            v["database"]["sizes_mb"][db].is_number(),
+            "{}: {}",
+            db,
+            v["database"]
+        );
+    }
     assert!(v["timestamp"].as_str().unwrap().ends_with("+05:30"));
     openalgo_desktop_lib::services::health_service::sample_once(&h.ctx).unwrap();
     let (_, v) = h

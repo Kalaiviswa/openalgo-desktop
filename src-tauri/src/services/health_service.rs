@@ -129,14 +129,20 @@ fn worst<'a>(statuses: &[&'a str]) -> &'a str {
     }
 }
 
+/// Every database in the data folder: the name health and the system
+/// report show, and its file. The sandbox's is as large as the trader's
+/// analyzer history and grows with it, so it is shown with the others.
+pub const DATABASES: &[(&str, &str)] = &[
+    ("openalgo", "openalgo.db"),
+    ("logs", "logs.db"),
+    ("sandbox", "sandbox.db"),
+    ("historify", "historify.duckdb"),
+];
+
 /// File sizes of each database, MB (including WAL).
 pub fn db_sizes(ctx: &AppState) -> Map<String, Value> {
     let mut m = Map::new();
-    for (name, file) in [
-        ("openalgo", "openalgo.db"),
-        ("logs", "logs.db"),
-        ("historify", "historify.duckdb"),
-    ] {
+    for &(name, file) in DATABASES {
         let base = ctx.data_dir.join(file);
         let mut bytes = 0u64;
         for suffix in ["", "-wal", "-shm"] {
