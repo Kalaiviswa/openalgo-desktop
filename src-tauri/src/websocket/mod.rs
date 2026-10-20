@@ -11,4 +11,6 @@ pub use crate::brokers::common::streaming::{
     BrokerFeed, FeedEvent, FeedMode, FeedSubscription, MarketEvent, NormalizedDepth,
     NormalizedTick, OrderUpdate,
 };
-pub use manager::{FeedConfig, FeedStats, FeedStatus, WebSocketManager, TICK_CHANNEL_CAP};
+pub use manager::{
+    FeedConfig, FeedStats, FeedStatus, Reader, SinceConnect, WebSocketManager, TICK_CHANNEL_CAP,
+};

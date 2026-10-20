@@ -260,6 +260,7 @@ impl Parts<'_> {
             prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
                 me.clone(),
                 self.websocket.clone(),
+                crate::websocket::Reader::Strategy,
             ))),
         })
     }
@@ -271,6 +272,7 @@ impl Parts<'_> {
             prices: Some(Arc::new(crate::strategy::tick_feed::FeedPrices::new(
                 me.clone(),
                 self.websocket.clone(),
+                crate::websocket::Reader::Scalping,
             ))),
             ui: self.ui.clone(),
             clock: self.opts.clock.clone(),

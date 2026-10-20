@@ -154,21 +154,15 @@ async fn reader(rig: &Rig, per_frame: Duration) -> (Arc<AtomicU64>, tokio::task:
     (frames, task)
 }
 
-/// Any health field that reports market data a feed client did not get.
-fn market_drops_shown(health: &Value) -> bool {
-    fn walk(v: &Value, path: &str) -> bool {
-        match v {
-            Value::Object(m) => m.iter().any(|(k, v)| {
-                let p = format!("{}.{}", path, k).to_lowercase();
-                ((p.contains("market") || p.contains("feed") || p.contains("tick"))
-                    && (p.contains("drop") || p.contains("coalesc") || p.contains("lag")))
-                    || walk(v, &p)
-            }),
-            Value::Array(a) => a.iter().any(|v| walk(v, path)),
-            _ => false,
-        }
-    }
-    walk(health, "")
+/// What health says the apps on the feed were not sent (folded into newer
+/// frames, dropped, skipped), when it says it.
+fn shown_in_health(health: &Value) -> Option<(u64, u64, u64)> {
+    let c = &health["market_data"]["feed_clients"];
+    Some((
+        c["coalesced"].as_u64()?,
+        c["dropped"].as_u64()?,
+        c["skipped"].as_u64()?,
+    ))
 }
 
 async fn health(rig: &Rig) -> Value {
@@ -297,7 +291,9 @@ async fn critical_events_have_zero_drops_under_a_10x_burst() {
 
     let health = health(&rig).await;
     let (fast_n, slow_n) = (fast.load(Ordering::Relaxed), slow.load(Ordering::Relaxed));
-    let shown = market_drops_shown(&health);
+    let reported = shown_in_health(&health);
+    // The slow client's folded frames are what health must show.
+    let shown = reported.is_some_and(|(folded, _, _)| folded > 0);
     let zero = critical_dropped == 0
         && critical_panics == 0
         && closed_sends == 0
@@ -338,7 +334,12 @@ async fn critical_events_have_zero_drops_under_a_10x_burst() {
             ),
         )
         .field("app_skipped", skipped.summary())
-        .field("shown_in_health", shown)
+        .field(
+            "health_feed_clients",
+            reported
+                .map(|(c, d, s)| format!("coalesced:{},dropped:{},skipped:{}", c, d, s))
+                .unwrap_or_else(|| "absent".into()),
+        )
         .verdict("counted_and_shown", shown);
 
     fast_task.abort();
@@ -349,7 +350,9 @@ async fn critical_events_have_zero_drops_under_a_10x_burst() {
         "critical delivery lost events: dropped {}, panics {}, closed {}, fact losses {}, probe {}/{}",
         critical_dropped, critical_panics, closed_sends, fact_losses, received, seq
     );
-    // Market-data drops are counted per feed connection but not shown in
-    // health yet (docs/audit/perf.md, follow-ups); the line above records
-    // it, and this run does not fail on it.
+    assert!(
+        shown,
+        "health does not show what the slow app was not sent: {}",
+        health["market_data"]
+    );
 }

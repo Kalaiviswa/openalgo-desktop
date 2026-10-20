@@ -178,7 +178,7 @@ pub fn errors_groups(ctx: &AppState, limit: i64) -> Result<Value> {
 }
 
 fn db_snapshot(ctx: &AppState) -> Vec<Value> {
-    crate::services::health_service::DATABASES
+    crate::services::store_sizes::DATABASES
         .iter()
         .map(|(name, file)| db_entry(ctx, name, file))
         .collect()

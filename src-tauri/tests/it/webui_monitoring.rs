@@ -737,6 +737,80 @@ async fn health_sampler_endpoints_and_alerts() {
         .starts_with("Date & Time (IST),FD Count"));
 }
 
+/// NEW-REL-05: health shows what the broker feed delivered since it
+/// connected and what each reader skipped, and what the apps on the market
+/// data feed were not sent; a skip makes the block a warning.
+#[tokio::test]
+async fn health_shows_market_data_its_readers_skipped() {
+    let (h, c, _) = signed_in();
+    let (s, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let md = &v["market_data"];
+    assert_eq!(md["status"], "pass", "{}", md);
+    assert_eq!(md["broker_feeds"][0]["name"], "market_data", "{}", md);
+    assert_eq!(
+        md["broker_feeds"][0]["skipped_total_since_connect"], 0,
+        "{}",
+        md
+    );
+    for k in ["coalesced", "dropped", "skipped"] {
+        assert_eq!(md["feed_clients"][k], 0, "{}: {}", k, md);
+    }
+    h.ctx
+        .websocket
+        .stats()
+        .note_skipped(openalgo_desktop_lib::websocket::Reader::Scalping, 7);
+    let (_, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    let md = &v["market_data"];
+    assert_eq!(md["status"], "warn", "{}", md);
+    let feed = &md["broker_feeds"][0];
+    assert_eq!(feed["skipped_since_connect"]["scalping"], 7, "{}", feed);
+    assert_eq!(feed["skipped_since_connect"]["strategy"], 0, "{}", feed);
+    assert_eq!(feed["skipped_total_since_connect"], 7, "{}", feed);
+}
+
+/// NEW-REL-05: health shows each database's size and how much it grew over
+/// the monitoring window (the oldest sample kept against the newest), the
+/// order and analyzer logs being kept forever as on the web.
+#[tokio::test]
+async fn health_shows_each_databases_growth_over_the_monitoring_window() {
+    let (h, c, _) = signed_in();
+    // Two days ago, when the stores were smaller.
+    let then = h.ctx.now() - chrono::Duration::hours(48);
+    {
+        let conn = h.ctx.logs.conn().unwrap();
+        store::insert_health(
+            &conn,
+            &store::HealthRow {
+                timestamp: store::ts(then),
+                db_sizes: Some(
+                    json!({"openalgo": 0.01, "logs": 0.01, "sandbox": 0.01, "historify": 0.01}),
+                ),
+                overall_status: Some("pass".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    openalgo_desktop_lib::services::health_service::sample_once(&h.ctx).unwrap();
+    let (s, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let g = &v["database"]["growth"];
+    assert_eq!(g["window_hours"], 48.0, "{}", g);
+    assert!(g["since"].as_str().unwrap().ends_with("+05:30"), "{}", g);
+    for db in ["openalgo", "logs", "sandbox", "historify"] {
+        let st = &g["stores"][db];
+        let size = st["size_mb"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{}: {}", db, g));
+        let growth = st["growth_mb"].as_f64().unwrap();
+        assert!((growth - (size - 0.01)).abs() < 0.011, "{}: {}", db, st);
+        let per_day = st["per_day_mb"].as_f64().unwrap();
+        assert!((per_day - growth / 2.0).abs() < 0.011, "{}: {}", db, st);
+    }
+    assert!(g["total"]["growth_mb"].as_f64().unwrap() > 0.0, "{}", g);
+}
+
 /// DIA-01: no sample, a stale one or an unreadable one used to answer
 /// "pass". Each is "unknown" (HTTP 200) with the sample's age and a reason;
 /// a fresh sample keeps its own status.

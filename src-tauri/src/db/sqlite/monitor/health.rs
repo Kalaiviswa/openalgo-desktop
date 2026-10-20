@@ -130,6 +130,20 @@ pub fn latest_health(conn: &Connection) -> Result<Option<HealthRow>> {
         .optional()?)
 }
 
+/// The oldest sample kept that recorded the database sizes: its timestamp
+/// and the sizes (MB by store).
+pub fn oldest_db_sizes(conn: &Connection) -> Result<Option<(String, Value)>> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT timestamp, db_sizes FROM health_metrics WHERE db_sizes IS NOT NULL
+             ORDER BY timestamp, id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(ts, sizes)| Some((ts, serde_json::from_str(&sizes).ok()?))))
+}
+
 pub fn health_since(conn: &Connection, since: DateTime<Utc>) -> Result<Vec<HealthRow>> {
     let mut st = conn.prepare(&format!(
         "SELECT {HEALTH_COLS} FROM health_metrics WHERE timestamp >= ?1 ORDER BY id"

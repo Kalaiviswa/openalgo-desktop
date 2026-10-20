@@ -413,7 +413,8 @@ impl RiskMonitor {
             let token = CancellationToken::new();
             *running = Some(token.clone());
             let weak = Arc::downgrade(self);
-            let mut rx = self.prices.as_ref().map(|p| p.ticks());
+            let prices = self.prices.clone();
+            let mut rx = prices.as_ref().map(|p| p.ticks());
             self.spawn(async move {
                 loop {
                     let wanted = {
@@ -437,6 +438,9 @@ impl RiskMonitor {
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::debug!("Scalping tick consumer lagged by {}", n);
+                                if let Some(p) = &prices {
+                                    p.note_skipped(n);
+                                }
                             }
                             Err(broadcast::error::RecvError::Closed) => {
                                 rx = None;

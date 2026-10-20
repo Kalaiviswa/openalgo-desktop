@@ -154,6 +154,49 @@ async fn refcount_matches_union_of_live_clients() {
 
 /// A client that stops reading never makes the server buffer more than one
 /// frame per subscription; when it reads again it gets the latest prices.
+/// NEW-REL-05: what a slow app was not sent is counted for health across
+/// clients, and stays counted after it leaves: market frames its queue
+/// folded into newer ones (it gets the latest price, by design). The
+/// counts lived in each connection's queue and went with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frames_a_slow_app_was_not_sent_are_counted_after_it_leaves() {
+    let h = start_with(FakeSource::permissive(), |_| {}).await;
+    let losses = openalgo_desktop_lib::feed::MarketDataSource::client_losses(&*h.source)
+        .expect("the source keeps the counts");
+    let mut slow = Client::connect(&h.url).await;
+    slow.auth().await;
+    let symbols: Vec<Value> = (0..5)
+        .map(|i| json!({"symbol": sym(i).symbol, "exchange": "NSE"}))
+        .collect();
+    let ack = slow
+        .request(json!({"action": "subscribe", "symbols": symbols, "mode": 3, "depth": 50}))
+        .await;
+    assert_eq!(ack["status"], "success");
+    // The client reads nothing while 20,000 deep books arrive: its socket
+    // fills and its queue keeps one frame per instrument.
+    for n in 0..20_000u64 {
+        h.source.publish(depth_update(
+            sym((n % 5) as usize),
+            100.0 + n as f64 / 100.0,
+            50,
+        ));
+        if n % 500 == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+    let folded = || losses.coalesced.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        eventually(Duration::from_secs(5), || folded() > 0).await,
+        "nothing counted as folded"
+    );
+    drop(slow);
+    assert!(eventually(Duration::from_secs(5), || h.handle.connections() == 0).await);
+    let after = folded();
+    assert!(after > 0, "the count went with the client");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(folded(), after);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_consumer_memory_is_bounded_and_gets_latest() {
     crate::isolated!(slow_consumer_memory_is_bounded_and_gets_latest);

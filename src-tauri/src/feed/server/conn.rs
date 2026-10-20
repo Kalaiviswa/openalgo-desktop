@@ -298,10 +298,13 @@ fn register(
     remote: Option<std::net::IpAddr>,
 ) -> (ClientId, Arc<Outbox>, ClientGuard) {
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
-    let outbox = Arc::new(Outbox::new(
-        shared.cfg.control_queue_cap,
-        shared.cfg.max_subscriptions_per_client * 3,
-    ));
+    let outbox = Arc::new(
+        Outbox::new(
+            shared.cfg.control_queue_cap,
+            shared.cfg.max_subscriptions_per_client * 3,
+        )
+        .with_totals(shared.losses.clone()),
+    );
     shared.registry.add_client(id, outbox.clone());
     let guard = ClientGuard {
         shared: shared.clone(),

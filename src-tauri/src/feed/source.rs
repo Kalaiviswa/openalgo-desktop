@@ -11,6 +11,7 @@
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -202,6 +203,24 @@ pub trait MarketDataSource: Send + Sync + 'static {
     fn unavailable(&self) -> Option<String> {
         None
     }
+
+    /// Where the feed server counts what it could not deliver to its
+    /// clients (NEW-REL-05); `None` when nobody reads the counts.
+    fn client_losses(&self) -> Option<Arc<ClientLosses>> {
+        None
+    }
+}
+
+/// What the feed server did not deliver to its clients since it started
+/// (NEW-REL-05): market frames a slow client's queue folded into a newer
+/// one for the same instrument and mode (that client gets the latest price,
+/// by design), frames its queue dropped past its cap, and updates the
+/// server's own loop skipped when it fell behind the source.
+#[derive(Debug, Default)]
+pub struct ClientLosses {
+    pub coalesced: AtomicU64,
+    pub dropped: AtomicU64,
+    pub lagged: AtomicU64,
 }
 
 /// A call the server made on a source (recorded by [`FakeSource`]).
@@ -224,6 +243,7 @@ pub struct FakeSource {
     calls: Mutex<Vec<SourceCall>>,
     violations: Mutex<Vec<String>>,
     record_calls: bool,
+    client_losses: Arc<ClientLosses>,
 }
 
 impl FakeSource {
@@ -249,6 +269,7 @@ impl FakeSource {
             calls: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
             record_calls,
+            client_losses: Arc::new(ClientLosses::default()),
         })
     }
 
@@ -329,5 +350,9 @@ impl MarketDataSource for FakeSource {
 
     fn supported_depths(&self, _exchange: &str) -> Vec<u8> {
         self.depths.lock().clone()
+    }
+
+    fn client_losses(&self) -> Option<Arc<ClientLosses>> {
+        Some(self.client_losses.clone())
     }
 }

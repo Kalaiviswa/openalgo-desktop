@@ -150,12 +150,13 @@ impl BrokerRuntime {
         // missed. Kite carries them on the market feed.
         let bus = ctx.bus.clone();
         let id = broker.id();
-        for rx in [
-            ctx.websocket.subscribe_ticks(),
-            self.order_ws.subscribe_ticks(),
-        ] {
+        for feed in [ctx.websocket.clone(), self.order_ws.clone()] {
+            let rx = feed.subscribe_ticks();
             let bus = bus.clone();
-            Self::spawn(&self.tasks, relay_socket_orders(rx, bus, id, generation));
+            Self::spawn(
+                &self.tasks,
+                relay_socket_orders(rx, feed, bus, (id, generation)),
+            );
         }
 
         let weak = Arc::downgrade(ctx);
@@ -294,9 +295,9 @@ pub fn order_event(u: &OrderUpdate, broker: &str, generation: u64) -> Event {
 
 async fn relay_socket_orders(
     mut rx: broadcast::Receiver<MarketEvent>,
+    feed: Arc<WebSocketManager>,
     bus: Arc<EventBus>,
-    broker: &'static str,
-    generation: u64,
+    (broker, generation): (&'static str, u64),
 ) {
     loop {
         match rx.recv().await {
@@ -310,6 +311,8 @@ async fn relay_socket_orders(
                 // reconciler repairs from the broker's book (ARCH-01).
                 tracing::warn!("Order update relay fell behind; skipped {} events", n);
                 bus.report_relay_lag(n);
+                feed.stats()
+                    .note_skipped(crate::websocket::Reader::OrderRelay, n);
             }
             Err(RecvError::Closed) => return,
         }

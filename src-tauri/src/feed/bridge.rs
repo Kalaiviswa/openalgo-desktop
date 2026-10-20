@@ -29,14 +29,14 @@
 //! Every map is bounded by what feed clients currently hold.
 
 use super::source::{
-    DepthBook, DepthLevel, InstrumentKey, MarketDataSource, MarketUpdate, Mode, QuoteFields,
-    DEFAULT_DEPTH,
+    ClientLosses, DepthBook, DepthLevel, InstrumentKey, MarketDataSource, MarketUpdate, Mode,
+    QuoteFields, DEFAULT_DEPTH,
 };
 use crate::brokers::common::streaming::{
     FeedEvent, FeedMode, FeedSubscription, MarketEvent, NormalizedDepth, NormalizedTick,
 };
 use crate::brokers::common::symbols::SymbolResolver;
-use crate::websocket::{FeedStatus, WebSocketManager};
+use crate::websocket::{FeedStatus, Reader, WebSocketManager};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -111,6 +111,8 @@ pub struct BrokerBridge {
     /// start); cleared by `reset`.
     unavailable: Mutex<Option<&'static str>>,
     tasks: Mutex<Option<JoinSet<()>>>,
+    /// What the feed server did not deliver to apps (NEW-REL-05).
+    client_losses: Arc<ClientLosses>,
 }
 
 fn mode_of(m: Mode) -> FeedMode {
@@ -144,6 +146,7 @@ impl BrokerBridge {
             depths: Mutex::new(Arc::new(|_| vec![DEFAULT_DEPTH])),
             unavailable: Mutex::new(None),
             tasks: Mutex::new(None),
+            client_losses: Arc::new(ClientLosses::default()),
         })
     }
 
@@ -223,12 +226,11 @@ impl BrokerBridge {
                 me.changed.notified().await;
             }
         });
-        let me = self.clone();
-        let rx = self.manager.subscribe_ticks();
-        set.spawn(async move { me.relay(rx).await });
-        let me = self.clone();
-        let rx = self.depth_manager.subscribe_ticks();
-        set.spawn(async move { me.relay(rx).await });
+        for feed in [self.manager.clone(), self.depth_manager.clone()] {
+            let me = self.clone();
+            let rx = feed.subscribe_ticks();
+            set.spawn(async move { me.relay(rx, &feed).await });
+        }
         *tasks = Some(set);
     }
 
@@ -378,7 +380,7 @@ impl BrokerBridge {
         }
     }
 
-    async fn relay(&self, mut rx: broadcast::Receiver<MarketEvent>) {
+    async fn relay(&self, mut rx: broadcast::Receiver<MarketEvent>, from: &WebSocketManager) {
         let mut skipped: u64 = 0;
         loop {
             match rx.recv().await {
@@ -389,6 +391,7 @@ impl BrokerBridge {
                 }
                 Err(RecvError::Lagged(n)) => {
                     skipped += n;
+                    from.stats().note_skipped(Reader::FeedClients, n);
                     tracing::warn!(
                         "Market data relay fell behind the broker feed; skipped {} events ({} total)",
                         n,
@@ -552,6 +555,10 @@ impl MarketDataSource for BrokerBridge {
         }
         self.unavailable.lock().map(String::from)
     }
+
+    fn client_losses(&self) -> Option<Arc<ClientLosses>> {
+        Some(self.client_losses.clone())
+    }
 }
 
 #[cfg(test)]
@@ -572,6 +579,23 @@ mod tests {
             timestamp_ms: 1_791_000_000_100,
             ..Default::default()
         }
+    }
+
+    /// NEW-REL-05: what the relay to the apps' feed skipped because it fell
+    /// behind is counted against the broker feed it reads (it was a log
+    /// line only).
+    #[tokio::test]
+    async fn events_the_relay_skips_are_counted_against_its_feed() {
+        let manager = Arc::new(WebSocketManager::new());
+        let bridge = BrokerBridge::new(manager.clone(), SymbolResolver::new());
+        let (tx, rx) = broadcast::channel::<MarketEvent>(2);
+        for _ in 0..5 {
+            let _ = tx.send(Arc::new(FeedEvent::Tick(full_tick("SBIN", "NSE"))));
+        }
+        drop(tx);
+        bridge.relay(rx, &manager).await;
+        let s = manager.stats().since_connect();
+        assert!(s.skipped.contains(&(Reader::FeedClients, 3)), "{:?}", s);
     }
 
     #[test]

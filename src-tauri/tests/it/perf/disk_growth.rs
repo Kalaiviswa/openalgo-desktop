@@ -172,7 +172,9 @@ async fn monitoring_tables_stay_bounded_and_growth_is_reported() {
         .filter(|s| !reported.contains_key(**s))
         .copied()
         .collect();
-    let growth_shown = !v["database"]["growth_mb_24h"].is_null();
+    let growth_shown = v["database"]["growth"]["stores"]
+        .as_object()
+        .is_some_and(|m| stores.iter().all(|s| m.contains_key(*s)));
 
     let plateau_base = sizes[2];
     let end = sizes[CYCLES - 1];
@@ -185,10 +187,9 @@ async fn monitoring_tables_stay_bounded_and_growth_is_reported() {
         .field("logs_db_kib_end", end / 1024)
         .field("tables_over_cap", over_cap.len())
         .verdict("monitoring_tables_capped_and_logs_db_flat", bounded);
-    // Reported in health: every store's size, and the folder's growth.
-    // The growth figure is a follow-up (docs/audit/perf.md); this line
-    // records it without failing the run.
-    Report::new("disk_growth_reported")
+    // Reported in health: every store's size, and its growth over the
+    // monitoring window (NEW-REL-05).
+    let shown = Report::new("disk_growth_reported")
         .field(
             "health_sizes_missing",
             if missing.is_empty() {
@@ -205,9 +206,8 @@ async fn monitoring_tables_stay_bounded_and_growth_is_reported() {
     assert!(over_cap.is_empty(), "tables over their cap: {:?}", over_cap);
     assert!(met, "logs.db kept growing: {:?}", sizes);
     assert!(
-        missing.is_empty(),
-        "health does not report the size of {:?}: {}",
-        missing,
-        v["database"]
+        shown,
+        "health does not report every store's size and growth (missing {:?}): {}",
+        missing, v["database"]
     );
 }

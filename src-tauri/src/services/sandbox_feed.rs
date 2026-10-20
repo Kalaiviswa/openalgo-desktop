@@ -240,6 +240,7 @@ async fn forward(
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::debug!("Sandbox tick forwarder lagged by {}", n);
+                    feed.stats().note_skipped(crate::websocket::Reader::Sandbox, n);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
