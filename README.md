@@ -479,6 +479,8 @@ connected at a time.
 
 ## Guides
 
+- [Documentation map](docs/INDEX.md): every guide, the API reference and the developer docs
+- [User guide](docs/userguide/README.md)
 - [Moving from OpenAlgo web](docs/user/moving-from-openalgo-web.md)
 - [Broker sign-in](docs/user/brokers.md)
 - [Sandbox mode (analyzer mode)](docs/user/sandbox.md)

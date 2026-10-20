@@ -1,0 +1,279 @@
+# Health monitoring
+
+OpenAlgo Desktop watches its own process while it runs: open files, memory,
+database connections, the broker feeds, orders whose outcome is not known,
+and records it meant to save. This page says where to look, what each figure
+means in the desktop, and what to do when something is flagged.
+
+In the desktop, health is about one app on your own computer. OpenAlgo web's
+health monitor is built for a server (load balancer, Kubernetes and Docker
+health checks, thresholds set in `.env`); none of that applies here, and the
+health pages are open only to you, signed in.
+
+- [Where to find it](#where-to-find-it)
+- [The Health page](#the-health-page)
+- [Unconfirmed orders](#unconfirmed-orders)
+- [Alerts](#alerts)
+- [Run checks (Diagnostics)](#run-checks-diagnostics)
+- [Market data: freshness and skips](#market-data-freshness-and-skips)
+- [Database growth](#database-growth)
+- [Thresholds](#thresholds)
+- [How it works (contributors)](#how-it-works-contributors)
+- [Differences from OpenAlgo web](#differences-from-openalgo-web)
+- [Known gaps](#known-gaps)
+
+## Where to find it
+
+| Page | How to open it | What it is for |
+| --- | --- | --- |
+| **Health Monitor** (`/health`) | **Logs**, then the **Health Monitor** card | The running figures, alerts and orders waiting for your decision |
+| **Diagnostics** (`/admin/diagnostics`) | **Admin**, then the **Diagnostics** card | System information, the **Run checks** probes, recent errors and a report to download when you ask for help |
+
+## The Health page
+
+The page title is "System Health Monitor". It refreshes itself every 10
+seconds while it is on screen (**Auto: ON**; choose it to pause), and
+**Refresh** reloads at once. **Export CSV** downloads the samples as
+`health_metrics.csv`.
+
+OpenAlgo takes one sample a minute, so a figure can be up to a minute old.
+The banner at the top shows **System Status** (PASS, WARN, FAIL or UNKNOWN)
+and when the last sample was taken. A sample older than two minutes shows
+UNKNOWN, never PASS: it means OpenAlgo has not measured recently (it was
+asleep, or busy), not that all is well. The status is FAIL while an
+order-update gap is open (see [Alerts](#alerts)), whatever the other
+figures say. When there are no samples yet (just after the app starts) the
+page says so.
+
+The five cards, as the desktop measures them:
+
+| Card | What it counts in the desktop |
+| --- | --- |
+| **File Descriptors** ("Process Handles" on Windows, where there is no fixed limit) | Files, sockets and database files the app holds open |
+| **Memory Usage** | The app's resident memory, and its share of the computer's memory |
+| **Database Connections** | Pooled connections to `openalgo.db` and `logs.db` |
+| **WebSocket Connections** | Whether the broker's market data feed is connected (0 or 1), and how many instruments it streams. Apps connected to your feed on port 8765 are not counted here |
+| **Active Threads** | The app's threads. On Windows the count is not available |
+
+Below the cards: six-hour charts of open files and memory, minimum, average
+and maximum figures, a status summary, the app's own memory under **Top
+Memory Processes**, **Unconfirmed Orders**, **Active Alerts** and the last
+20 samples under **Recent Metrics**.
+
+## Unconfirmed orders
+
+An order is unconfirmed when OpenAlgo sent it to your broker and got no
+definite answer: the connection dropped after sending, the broker answered
+with a server error, or it said "success" without an order id. OpenAlgo
+never places such an order again, so it cannot be placed twice. It keeps
+looking for it in the broker's order book, by tag where the broker reports
+one, otherwise by symbol, side, quantity and type.
+
+In Live mode an order that never shows up is not released on its absence
+alone: the position it belongs to (a strategy, a scalping stop, an
+OpenScript run) stays held, a critical alert is raised once, and the order is
+listed under **Unconfirmed Orders** as "{action} {quantity} {symbol}
+({exchange})", with the time since it was sent.
+
+What to do:
+
+1. Check your broker's order book and trade book (in the broker's own app or
+   website) for that order.
+2. If the broker has it, wait: OpenAlgo finds it on its next look and the row
+   goes away.
+3. If the broker does not have it, choose **Not placed**, then **Confirm not
+   placed**. OpenAlgo reads the order book and trade book once more first,
+   and keeps the order held if either shows it (or cannot be read). Then:
+   "Marked as not placed. The position is managed again."
+
+Without your decision, OpenAlgo releases a Live order by itself only with
+corroboration: absent for 10 minutes, no matching trade, no unowned working
+order for the same instrument and side, and the position exactly what it was
+before the order was sent. In sandbox mode an order missing from four reads
+over at least 20 seconds is released. The rules and the per-broker details
+are in [Order placement outcomes](port/order-outcomes.md).
+
+## Alerts
+
+Each alert has a severity (warn or fail), a value and a message that names
+the cause. Raising the same kind again updates the open alert's time and
+value instead of adding a second one. **Acknowledge** marks an alert as seen;
+it stays listed until its cause clears.
+
+| Alert | Severity | Raised when | Clears |
+| --- | --- | --- | --- |
+| Open files, memory, database connections, threads (`fd_count_*`, `memory_rss_mb_*`, `db_connections_total_*`, `thread_count_*`) | warn or fail | A sample is over the level in [Thresholds](#thresholds) | When the figure drops back under the warning level |
+| `order_facts_gap` | fail | Order updates from the broker may have been missed | By itself, once the order book has been read again |
+| `order_unconfirmed_held` | fail | A Live order has no definite outcome (see [Unconfirmed orders](#unconfirmed-orders)) | When the order is found, or marked not placed |
+| `openscript_orders` | fail | A Live OpenScript run's orders have had no answer for over a minute | By itself, once the answer comes |
+| `scalping_protection` | fail | A scalping stop needs you: its exits could not be saved or read back, the position book does not show the position, or it was set on another broker account ([Scalping](scalping.md#the-protection-rules)) | Not by itself |
+| `market_data_port_in_use`, `market_data_feed_failed` | fail | The market data feed for your apps (port 8765) could not start | By itself, once it starts |
+| `master_contract_unavailable` | fail | The day's symbol list could not be loaded | By itself, once it loads |
+| `records_not_saved` | warn | Order, analyzer, traffic, latency or security records were not saved (a full queue or a failed write) | Not by itself: the counts only grow until OpenAlgo restarts |
+| `strategy_ticks_missed` | warn | Strategy risk management missed prices because the feed came faster than it was read. Stops and targets act on the next price | Not by itself |
+| `historify_wal_recovered` | warn | OpenAlgo did not close cleanly and some unsaved Historify changes could not be recovered ([Troubleshooting](user/troubleshooting.md#historify-says-some-changes-could-not-be-recovered)) | Not by itself |
+| `ban_list_full`, `banned_devices_on_network` | warning | The Security page's ban list is full, or devices on your network were banned | See **Logs**, **Security Logs** |
+
+Alerts are shown only on this page. There is no pop-up or Socket.IO push for
+them, so look at the page after anything unusual, and before you leave
+automation running.
+
+## Run checks (Diagnostics)
+
+On the Diagnostics page, **Run checks** under **Latency & Connectivity
+Probes** runs these and shows Status, Check, Latency and Detail for each:
+
+| Check | What it proves |
+| --- | --- |
+| Database read (openalgo.db), Database read (logs.db) | The two databases answer a read |
+| App and API listener | Port 5000 (or yours) accepts a connection |
+| Market data feed listener | Port 8765 (or yours) accepts a connection |
+| Broker session (`<broker>`) | A broker is signed in |
+| Market data from the broker | With a broker session: whether its feed is connected, how many instruments it streams, and how long ago the last update came |
+| Order updates from the broker | Only while the broker's order-update socket runs: the same for that socket |
+
+The page also shows the host, runtime, build, brokers, configuration, the
+databases with their sizes, and recent errors. **Download .md** and
+**Download .txt** save the same information as a report (at most 1 MB) to
+attach when you ask for help on Discord or GitHub; it includes the records
+not saved since start.
+
+## Market data: freshness and skips
+
+Added by PR #178 (`origin/pr/health-feed-losses`). For each broker feed (the
+market data feed, and the order-update socket while it runs), since its
+current connection began:
+
+- whether it is connected and for how long;
+- how long ago the last update arrived (freshness);
+- how many updates arrived;
+- how many updates each reader inside the app skipped because it had fallen
+  behind: strategies, scalping stops, sandbox orders, apps on the market data
+  feed, and order updates. Each reader acts on the next update; a skip is a
+  price it did not see, not a lost order.
+
+For the apps connected to port 8765 (your scripts, Amibroker, Excel), since
+OpenAlgo started: how many frames were folded (a slow app gets the newest
+price for an instrument instead of a backlog, by design), dropped (past a
+slow app's queue) or skipped (the feed server itself fell behind). How this
+works is in [WebSocket architecture](websocket-architecture.md).
+
+Where it shows:
+
+- **Run checks** adds a sentence to the broker stream lines, for example
+  "12345 updates since it connected, none missed." or "500 updates since it
+  connected; 40 reached a reader that had fallen behind and were skipped
+  (scalping stops 30, apps on the market data feed 10). Each acts on the next
+  update."
+- `GET /health/api/current` carries a `market_data` block: `broker_feeds`
+  (per feed: `connected`, `connected_for_s`, `last_update_age_s`,
+  `received_since_connect`, `skipped_since_connect` by reader) and
+  `feed_clients` (`coalesced`, `dropped`, `skipped`). Its `status` is `warn`
+  when anything was skipped or dropped; folded frames alone do not warn.
+  The Health page does not draw this block yet.
+
+What to do when skips keep appearing: subscribe fewer instruments (on the
+charts and watchlists, and in your scripts), close apps on port 8765 you do
+not use, and keep other heavy programs off the computer during market hours.
+Skips counted for one connection reset when the broker feed reconnects.
+
+## Database growth
+
+Added by PR #178. OpenAlgo keeps the order and analyzer logs forever, as
+OpenAlgo web does, so the data folder grows with your trading. Every sample
+records the size of each database, side files included:
+
+| Store | File |
+| --- | --- |
+| openalgo | `openalgo.db` (account, settings, strategies, the symbol master) |
+| logs | `logs.db` (order, analyzer, traffic, latency, security and health records) |
+| sandbox | `sandbox.db` (sandbox mode) |
+| historify | `historify.duckdb` (Historify market data) |
+
+`GET /health/api/current` reports `database.growth`: over the samples kept
+(up to seven days), each store's size, how much it grew and how much a day,
+and the total. The daily rate is left out over less than an hour, where it
+would mislead. There are no warning levels for growth. The Health page does
+not draw it yet; the database sizes are on the Diagnostics page under
+**Databases** and in the downloaded report.
+
+If the folder grows faster than your disk can take, export what you want to
+keep from **Logs** and from **Historify**, and delete Historify data you no
+longer use. Where the data folder is: README,
+[Where your data lives, and backups](../README.md#where-your-data-lives-and-backups).
+
+## Thresholds
+
+Fixed in the app (`services/health_service.rs`), not settings:
+
+| Figure | Warning | Critical |
+| --- | --- | --- |
+| Open files (macOS, Linux) | 700 | 900 |
+| Process handles (Windows) | 5,000 | 10,000 |
+| Memory | 500 MB | 1,000 MB |
+| Database connections | 10 | 20 |
+| WebSocket connections | 10 | 20 |
+| Threads | 200 | 400 |
+
+The thread levels are higher than the web's (50 and 100): the Rust runtime
+keeps a worker thread per processor core and a pool for blocking work.
+
+## How it works (contributors)
+
+- **Sampling.** `services/health_service.rs` takes a sample every 60 seconds
+  on a blocking thread, stores it in `logs.db` (`health_metrics`: kept seven
+  days, at most 20,000 rows) and raises or resolves the threshold alerts.
+  `GET /health/api/current` takes one at once when there is none yet.
+- **Alerts** live in `logs.db` (`health_alerts`). `db::sqlite::monitor`'s
+  `raise_alert` reuses the open alert of the same `alert_type`; a resolved
+  alert is deleted after seven days, with at most 1,000 rows. A new kind of
+  alert is a new `alert_type` raised where the condition is known, with its
+  own rule for clearing.
+- **Routes** (`server/routes/health.rs`): `/health/status`, `/health/check`,
+  `/health/api/current`, `/health/api/history` and `/health/api/stats`
+  (hours clamped to 1 to 168, default 24), `/health/api/alerts` with
+  `.../{id}/acknowledge` and `.../{id}/resolve`, `/health/api/held-orders`
+  and `/health/api/held-orders/not-placed`, `/health/export`. All need the
+  signed-in session. `/health` and `/health/status` answer 503 only on fail.
+- **Diagnostics** (`services/system_info.rs`, `system_info/streams.rs`):
+  `POST /admin/api/system/diagnostics` runs the checks; `GET
+  /admin/api/system/report` renders the report.
+- **Records not saved** (`services/record_loss.rs`) and **strategy ticks**
+  (`services/strategy_ticks.rs`) count what the web loses silently: log
+  entries shed by the event bus's best-effort lane or the monitor's queue,
+  and prices the strategy tick reader missed.
+- With PR #178: `services/feed_losses.rs` (the `market_data` block and the
+  Run checks sentence), `websocket/manager/losses.rs` (skips per reader per
+  connection), the feed server's per-app counts in `feed/outbox.rs` and
+  `feed/source.rs`, and `services/store_sizes.rs` (sizes and growth).
+
+## Differences from OpenAlgo web
+
+| | OpenAlgo web | OpenAlgo Desktop |
+| --- | --- | --- |
+| Who can read it | `/health` and `/health/check` are open, for load balancers and probes | Every health route needs the signed-in session; no health endpoint is public |
+| Thresholds | Set in `.env` | Fixed in the app; threads 200/400 instead of 50/100 |
+| Sampling | Every 10 seconds into `db/health.db` | Every minute into `logs.db` |
+| WebSocket figure | Connections to the proxy | Whether the broker feed is connected |
+| Order outcomes | Not monitored | Unconfirmed orders, the order-update gap, held positions |
+| Lost records and missed prices | Not counted | Counted, with an alert |
+| Feed skips and database growth | Not reported | Reported (PR #178) |
+| Deployment health checks (ELB, Kubernetes, Docker) | Documented | Not applicable: there is no server to probe |
+
+## Known gaps
+
+As of this writing:
+
+- The Health page has no **Resolve** button, although the server has the
+  route. Alerts that do not clear by themselves (`records_not_saved`,
+  `strategy_ticks_missed`, `historify_wal_recovered`, `scalping_protection`)
+  stay listed after you acknowledge them; they go when OpenAlgo restarts and
+  the condition has not come back.
+- The page does not draw the database sizes, the records not saved, the
+  strategy tick counts, the order-update facts, or PR #178's market data and
+  growth blocks, although `/health/api/current` returns them.
+- **Active Threads** shows no stuck threads and **Thread Details** stays
+  empty: the desktop does not measure them. **Top Memory Processes** lists
+  OpenAlgo Desktop only.
+- The two ban alerts carry the severity "warning" instead of "warn", so the
+  page shows them without a colour.
