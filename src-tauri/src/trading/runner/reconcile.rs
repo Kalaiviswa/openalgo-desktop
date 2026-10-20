@@ -62,7 +62,7 @@ fn placed_at(o: &store::OrderRow) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// An unconfirmed row as the order book is searched for it.
-fn unconfirmed_of(o: &store::OrderRow) -> Unconfirmed<'_> {
+pub(super) fn unconfirmed_of(o: &store::OrderRow) -> Unconfirmed<'_> {
     Unconfirmed {
         symbol: &o.symbol,
         exchange: &o.exchange,
@@ -121,8 +121,11 @@ impl Runner {
             RunMode::Sandbox => None,
         };
         match self.unconfirmed_here(mode, session.as_ref()) {
-            // An unowned row alone never needs a book read (`unowned`).
-            Ok(rows) => rows.iter().any(|o| !unowned::is_unowned_live(o)),
+            // An unowned row alone needs one book read per session, no more
+            // (`unowned`).
+            Ok(rows) => rows.iter().any(|o| {
+                !unowned::is_unowned_live(o) || self.unowned_need_a_look(session.as_ref())
+            }),
             Err(e) => {
                 // Unknown: read the book rather than leave a row unsettled.
                 tracing::warn!("Could not check for unconfirmed OpenScript orders: {}", e);
@@ -237,6 +240,9 @@ impl Runner {
                 }
             }
         }
+        if rows.iter().any(unowned::is_unowned_live) {
+            self.unowned_looked(book.session.as_ref());
+        }
         // Bounded by the rows still unconfirmed on this side.
         self.absence.retain_scope(&scope, &live);
         self.ambiguous
@@ -245,7 +251,12 @@ impl Runner {
         unresolved
     }
 
-    fn bind_unconfirmed(&self, session: Option<&LiveOwner>, o: &store::OrderRow, b: &BookOrder) {
+    pub(super) fn bind_unconfirmed(
+        &self,
+        session: Option<&LiveOwner>,
+        o: &store::OrderRow,
+        b: &BookOrder,
+    ) {
         let now = self.clock.now();
         let conn = match self.db.conn() {
             Ok(c) => c,
@@ -391,7 +402,7 @@ impl Runner {
     /// order book and trade book once more.
     pub async fn confirm_not_placed(&self, id: &str) -> Result<bool, String> {
         let Some(key) = self.absence.held_key(id) else {
-            return self.dismiss_unowned(id);
+            return self.dismiss_unowned(id).await;
         };
         let Ok(row_id) = id.parse::<i64>() else {
             return Ok(false);

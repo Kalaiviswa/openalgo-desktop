@@ -363,6 +363,9 @@ pub struct Runner {
     /// Book reads that missed each unconfirmed row, and the Live rows held
     /// for the trader (the order reconciler; LOG-08).
     absence: crate::services::order_reconciler::AbsenceTracker,
+    /// The session whose order book was last read for unowned rows (one
+    /// read per session, `unowned`).
+    unowned_look: Mutex<Option<crate::services::live_owner::LiveOwner>>,
     /// Unconfirmed rows matching several book orders the trader was told of.
     ambiguous: Mutex<HashSet<String>>,
     cancel: CancellationToken,
@@ -416,6 +419,7 @@ impl Runner {
             scheduler: Mutex::new(None),
             last_tick: Mutex::new(None),
             absence: crate::services::order_reconciler::AbsenceTracker::new(),
+            unowned_look: Mutex::new(None),
             ambiguous: Mutex::new(HashSet::new()),
             cancel: CancellationToken::new(),
             batches: Mutex::new(tokio::task::JoinSet::new()),

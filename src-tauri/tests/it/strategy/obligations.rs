@@ -320,6 +320,48 @@ async fn a_run_recorded_with_a_placeholder_account_is_still_managed_by_its_broke
     assert_eq!(placed(), before + 1, "the exit went out");
 }
 
+/// Final review of #165: a run recorded with a real account (AB1234) is
+/// another account's to a session at the same broker whose login named
+/// none (told by its saved keys): its exit is refused, nothing is sent.
+/// Only a placeholder recorded then (the broker's name, a key value) is
+/// that session's.
+#[tokio::test]
+async fn a_run_recorded_with_a_real_account_is_not_exited_through_a_keys_session() {
+    use openalgo_desktop_lib::brokers::mock::MockCall;
+    use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+    use openalgo_desktop_lib::state::BrokerSession;
+    let a = app();
+    a.ctx.reconciler.stop();
+    let run = live_run(&a).await;
+    credentials::save(
+        &a.ctx.sqlite.conn().unwrap(),
+        &a.ctx.security,
+        "zerodha",
+        CredentialUpdate {
+            api_key: Some("kitekey".into()),
+            api_secret: Some("kitesecret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let own = a.ctx.get_broker_session().unwrap();
+    a.ctx.set_broker_session(Some(BrokerSession {
+        user_id: String::new(),
+        ..own
+    }));
+    let placed = || {
+        a.mock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::PlaceOrder(_)))
+            .count()
+    };
+    let before = placed();
+    let out = a.ctx.strategy.stop_run(run, USER, "manual").await;
+    assert!(!out.ok, "{:?}", out);
+    assert_eq!(placed(), before, "no exit through the other account");
+}
+
 /// Row 1: a running Live strategy refuses the switch, named, until it is
 /// stopped.
 #[tokio::test]

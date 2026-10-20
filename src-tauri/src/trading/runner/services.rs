@@ -17,7 +17,8 @@ use crate::services::live_owner::LiveOwner;
 use crate::services::order_service::{place_order, sandbox_order, Route};
 use crate::state::AppState;
 use crate::strategy::dispatch::{
-    AppGateway, Book, DispatchResult, OrderGateway, OrderStatusResult, RunMode, NO_BROKER_SESSION,
+    AppGateway, Book, BookOrder, DispatchResult, OrderGateway, OrderStatusResult, RunMode,
+    NO_BROKER_SESSION,
 };
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -74,6 +75,9 @@ pub trait RunnerServices: Send + Sync {
     async fn order_status(&self, mode: RunMode, orderid: &str) -> OrderStatusResult;
     /// One account book from the run's side, in the service's own envelope.
     async fn book(&self, mode: RunMode, book: Book) -> Result<Value, Value>;
+    /// The whole order book of the run's side, one read, as the order
+    /// reconciler reads it.
+    async fn order_book_rows(&self, mode: RunMode) -> Result<Vec<BookOrder>, String>;
     /// The holdings on the run's side, in the `/api/v1/holdings` envelope
     /// (`data.holdings`). A Stop reads it for a delivery position, which
     /// settles into holdings the next day.
@@ -241,6 +245,10 @@ impl RunnerServices for AppServices {
 
     async fn book(&self, mode: RunMode, book: Book) -> Result<Value, Value> {
         self.gateway.book(mode, book).await
+    }
+
+    async fn order_book_rows(&self, mode: RunMode) -> Result<Vec<BookOrder>, String> {
+        self.gateway.order_book_rows(mode).await
     }
 
     async fn holdings(&self, mode: RunMode) -> Result<Value, Value> {

@@ -1395,15 +1395,8 @@ async fn an_unconfirmed_row_from_before_accounts_is_adopted_by_the_book_that_fin
         id
     ));
     *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-9", "BUY", 3, 3, "complete")]));
-    // A book read through Zerodha (AB1234) for any reason finds it.
-    t.h.ctx
-        .trading
-        .runner
-        .reconcile_book(
-            RunMode::Live,
-            &book_of(&t.zerodha, t.h.ctx.now() + chrono::Duration::seconds(10)),
-        )
-        .await;
+    // The first pass of a session reads its book once for such a row.
+    t.h.ctx.reconciler.pass().await;
     assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-9".into()), 3));
     let (broker, account): (String, String) =
         t.h.ctx
@@ -1446,7 +1439,11 @@ async fn an_unconfirmed_row_from_before_accounts_is_never_judged_absent() {
         ("unconfirmed".into(), None, 0),
         "never released as absent"
     );
-    assert_eq!(touched(&t.zerodha), 0, "no book is read for it alone");
+    assert_eq!(
+        touched(&t.zerodha),
+        1,
+        "one book read for it in this session, not one per pass"
+    );
     let elsewhere = t.status(&id).await["elsewhere"].to_string();
     assert!(
         elsewhere.contains("may have been placed at your broker before this version recorded"),

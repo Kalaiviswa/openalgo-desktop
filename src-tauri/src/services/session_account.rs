@@ -21,14 +21,15 @@
 //!
 //! The account is worked out once per session ([`AccountCache`]): keys that
 //! cannot be read at that moment (a locked vault, a busy database) give a
-//! blank account, never a placeholder, and nothing is cached, so the next
-//! look tries again. A blank account owns nothing
+//! blank account, never a placeholder, and a blank account is never cached,
+//! so the next look tries again. A blank account owns nothing
 //! (`LiveOwner::same_session`).
 
 use crate::db::sqlite::credentials::{self, BrokerCredentialSet};
 use crate::state::{AppState, BrokerSession};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use std::sync::OnceLock;
 
 /// How an account derived from the saved keys is written.
 pub const KEYS_ACCOUNT: &str = "keys:";
@@ -49,67 +50,130 @@ const ALWAYS_BY_KEYS: &[&str] = &[
 /// The session an account was worked out for.
 type Stamp = (String, String, DateTime<Utc>);
 
+/// What a session's account was worked out to be. For a session told by its
+/// saved keys, `placeholders` are what its login could have named instead
+/// (the broker's name, a saved key value), as digests under a key of this
+/// process ([`placeholder_digest`]): an obligation recorded with one of
+/// them before accounts were derived is this session's
+/// (`LiveOwner::refusal`). Never shown or stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Told {
+    pub account: String,
+    pub placeholders: Vec<String>,
+}
+
 /// The account of the session connected now, worked out once for it.
 #[derive(Default)]
-pub struct AccountCache(Mutex<Option<(Stamp, String)>>);
+pub struct AccountCache(Mutex<Option<(Stamp, Told)>>);
 
 /// The account `session` trades through: the broker's own account id, or
 /// the identity of its saved keys where the broker names none, or only a
 /// placeholder. Blank when neither can be told.
 pub fn account_of(ctx: &AppState, session: &BrokerSession) -> String {
+    told(ctx, session).account
+}
+
+/// [`account_of`] with the placeholders of a session told by its keys.
+pub fn told(ctx: &AppState, session: &BrokerSession) -> Told {
     let stamp: Stamp = (
         session.broker_id.clone(),
         session.user_id.clone(),
         session.authenticated_at,
     );
-    if let Some((at, account)) = ctx.session_account.0.lock().as_ref() {
+    if let Some((at, told)) = ctx.session_account.0.lock().as_ref() {
         if *at == stamp {
-            return account.clone();
+            return told.clone();
         }
     }
     let saved = ctx
         .sqlite
         .conn()
         .and_then(|c| credentials::load(&c, &ctx.security, &session.broker_id));
-    let account = match saved {
+    let told = match saved {
         Ok(Some(keys)) if !keys.api_key.is_empty() => by_keys(ctx, session, &keys),
         // No saved keys at all (a session installed by a test): the broker's
         // own name for the account, unless it is none or a placeholder.
-        Ok(_) => real_account(session.user_id.trim(), &session.broker_id, None).unwrap_or_default(),
+        Ok(_) => Told {
+            account: real_account(session.user_id.trim(), &session.broker_id, None)
+                .unwrap_or_default(),
+            placeholders: Vec::new(),
+        },
         // The keys cannot be read now: whether the name is a placeholder
-        // cannot be told, so nothing is owned until it can. Not cached.
+        // cannot be told, so nothing is owned until it can.
         Err(e) => {
             tracing::warn!(
                 "The broker keys could not be read to tell the account: {}",
                 e
             );
-            return String::new();
+            Told::default()
         }
     };
-    *ctx.session_account.0.lock() = Some((stamp, account.clone()));
-    account
+    // A blank account is looked for again next time, never kept.
+    if !told.account.is_empty() {
+        *ctx.session_account.0.lock() = Some((stamp, told.clone()));
+    }
+    told
 }
 
 /// The account of a session whose saved keys could be read.
-fn by_keys(ctx: &AppState, session: &BrokerSession, keys: &BrokerCredentialSet) -> String {
+fn by_keys(ctx: &AppState, session: &BrokerSession, keys: &BrokerCredentialSet) -> Told {
     let broker = session.broker_id.to_ascii_lowercase();
     let client_id = keys.client_id.clone().unwrap_or_default();
     if !ALWAYS_BY_KEYS.contains(&broker.as_str()) {
         if let Some(account) =
             real_account(session.user_id.trim(), &broker, Some((keys, &client_id)))
         {
-            return account;
+            return Told {
+                account,
+                placeholders: Vec::new(),
+            };
         }
     }
-    match ctx
-        .security
-        .broker_keys_identity(&[&broker, keys.api_key.expose(), &client_id])
-    {
-        Ok(digest) if digest.len() >= KEYS_DIGEST_LEN => {
-            format!("{}{}", KEYS_ACCOUNT, &digest[..KEYS_DIGEST_LEN])
-        }
-        _ => String::new(),
+    let account =
+        match ctx
+            .security
+            .broker_keys_identity(&[&broker, keys.api_key.expose(), &client_id])
+        {
+            Ok(digest) if digest.len() >= KEYS_DIGEST_LEN => {
+                format!("{}{}", KEYS_ACCOUNT, &digest[..KEYS_DIGEST_LEN])
+            }
+            _ => return Told::default(),
+        };
+    let mut placeholders = vec![placeholder_digest(&broker)];
+    placeholders.extend(
+        key_values(keys.api_key.expose(), &client_id)
+            .iter()
+            .map(|v| placeholder_digest(v)),
+    );
+    Told {
+        account,
+        placeholders,
     }
+}
+
+/// A placeholder as a session keeps it: HMAC-SHA256 under a random key of
+/// this process, so a saved key value is compared without being kept.
+pub(crate) fn placeholder_digest(value: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use rand::RngCore;
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        k
+    });
+    let mut mac = match <Hmac<sha2::Sha256> as Mac>::new_from_slice(key) {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    mac.update(value.trim().as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Whether `value`, recorded on an obligation, is one of `placeholders`.
+pub fn is_placeholder(placeholders: &[String], value: &str) -> bool {
+    let digest = placeholder_digest(value);
+    !digest.is_empty() && placeholders.contains(&digest)
 }
 
 /// The values an adapter falls back to when the broker names no account:

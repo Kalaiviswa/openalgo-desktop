@@ -37,6 +37,10 @@ pub struct LiveOwner {
     pub broker: String,
     /// The account at the broker (its client id); blank when unknown.
     pub account: String,
+    /// For a live session told by its saved keys: what its login could have
+    /// named instead, as digests (`session_account::Told`). Empty otherwise,
+    /// and on a recorded owner.
+    pub placeholders: Vec<String>,
 }
 
 impl LiveOwner {
@@ -44,6 +48,7 @@ impl LiveOwner {
         Self {
             broker: broker.into().trim().to_string(),
             account: account.into().trim().to_string(),
+            placeholders: Vec::new(),
         }
     }
 
@@ -51,15 +56,21 @@ impl LiveOwner {
     /// through (`services::session_account`).
     pub fn of_session(ctx: &AppState) -> Option<Self> {
         ctx.get_broker_session().map(|s| {
-            let account = crate::services::session_account::account_of(ctx, &s);
-            Self::new(s.broker_id, account)
+            let told = crate::services::session_account::told(ctx, &s);
+            Self {
+                placeholders: told.placeholders,
+                ..Self::new(s.broker_id, told.account)
+            }
         })
     }
 
     /// The session `gateway` sends `mode` orders through now: what a new
     /// obligation records (Sandbox: `sandbox`, no account).
     pub fn of_gateway(gateway: &dyn OrderGateway, mode: RunMode) -> Self {
-        Self::new(gateway.broker_name(mode), gateway.broker_account(mode))
+        Self {
+            placeholders: gateway.broker_placeholders(mode),
+            ..Self::new(gateway.broker_name(mode), gateway.broker_account(mode))
+        }
     }
 
     /// The live session `gateway` sends through now, if there is one.
@@ -101,12 +112,18 @@ impl LiveOwner {
     pub fn refusal(&self, active: Option<&LiveOwner>) -> Option<String> {
         let active = active?;
         let other_broker = self.knows_broker() && !self.broker.eq_ignore_ascii_case(&active.broker);
-        // A session told by its saved keys means the broker names no real
-        // account: what an obligation recorded before accounts were derived
-        // so (the broker's name, a key value) was a placeholder of it.
+        // A session told by its saved keys: an obligation recorded before
+        // accounts were derived so carries what the login named then, the
+        // broker's name or a saved key value. Only such a placeholder is
+        // this session's; a real account id recorded then is another
+        // account's, whose exit must not go through this one.
         let keys = crate::services::session_account::KEYS_ACCOUNT;
-        let recorded_placeholder =
-            active.account.starts_with(keys) && !self.account.starts_with(keys);
+        let recorded_placeholder = active.account.starts_with(keys)
+            && !self.account.starts_with(keys)
+            && crate::services::session_account::is_placeholder(
+                &active.placeholders,
+                &self.account,
+            );
         if !other_broker && (self.same_account(active) || recorded_placeholder) {
             return None;
         }
@@ -303,19 +320,36 @@ mod tests {
         assert_eq!(sandbox.refusal(Some(&angel)), None);
     }
 
-    /// Lead's third review, P2-2: an obligation recorded before accounts
-    /// were derived from the saved keys carries the broker's placeholder
-    /// ("samco"). The same broker's session told by its keys still manages
-    /// it; other keys, or another broker, do not.
+    /// Lead's third review, P2-2, and its final review: an obligation
+    /// recorded before accounts were derived from the saved keys carries
+    /// the login's placeholder ("samco"). The same broker's session told by
+    /// its keys still manages it; a real account id recorded then (AB1234)
+    /// is another account's, and so are other keys or another broker.
     #[test]
-    fn a_recorded_placeholder_matches_its_brokers_keys_identity() {
-        let old = LiveOwner::new("samco", "samco");
-        let keys = LiveOwner::new("samco", "keys:new-set");
-        assert_eq!(old.refusal(Some(&keys)), None);
-        let by_old_keys = LiveOwner::new("samco", "keys:old-set");
-        assert!(by_old_keys.refusal(Some(&keys)).is_some(), "other keys");
-        assert!(old
-            .refusal(Some(&LiveOwner::new("angel", "keys:new-set")))
+    fn only_a_recorded_placeholder_matches_its_brokers_keys_identity() {
+        use crate::services::session_account::placeholder_digest;
+        let session = |broker: &str, keys: &str, said: &[&str]| LiveOwner {
+            placeholders: said.iter().map(|v| placeholder_digest(v)).collect(),
+            ..LiveOwner::new(broker, keys)
+        };
+        let samco = session("samco", "keys:new-set", &["samco", "samco-api-key"]);
+        assert_eq!(LiveOwner::new("samco", "samco").refusal(Some(&samco)), None);
+        assert_eq!(
+            LiveOwner::new("samco", "samco-api-key").refusal(Some(&samco)),
+            None
+        );
+        let zerodha = session("zerodha", "keys:new-set", &["zerodha", "kitekey"]);
+        assert!(
+            LiveOwner::new("zerodha", "AB1234")
+                .refusal(Some(&zerodha))
+                .is_some(),
+            "a real account recorded then is another account's"
+        );
+        assert!(LiveOwner::new("samco", "keys:old-set")
+            .refusal(Some(&samco))
+            .is_some());
+        assert!(LiveOwner::new("samco", "samco")
+            .refusal(Some(&session("angel", "keys:new-set", &["samco"])))
             .is_some());
     }
 }

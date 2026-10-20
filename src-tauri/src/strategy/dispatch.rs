@@ -315,6 +315,12 @@ pub trait OrderGateway: Send + Sync {
     fn broker_account(&self, _mode: RunMode) -> String {
         String::new()
     }
+    /// What that session's login could have named instead of an account,
+    /// as digests, when it is told by its saved keys (NEW-TR-01,
+    /// `services::session_account::Told`).
+    fn broker_placeholders(&self, _mode: RunMode) -> Vec<String> {
+        Vec::new()
+    }
     /// One account book through the run's pipe: the service's own envelope.
     async fn book(&self, mode: RunMode, book: Book) -> Result<Value, Value>;
     /// A last price for the underlying an ATM strike is measured against.
@@ -560,6 +566,20 @@ impl OrderGateway for AppGateway {
                 .and_then(|c| {
                     c.get_broker_session()
                         .map(|s| crate::services::session_account::account_of(&c, &s))
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn broker_placeholders(&self, mode: RunMode) -> Vec<String> {
+        match mode {
+            RunMode::Sandbox => Vec::new(),
+            RunMode::Live => self
+                .ctx
+                .upgrade()
+                .and_then(|c| {
+                    c.get_broker_session()
+                        .map(|s| crate::services::session_account::told(&c, &s).placeholders)
                 })
                 .unwrap_or_default(),
         }

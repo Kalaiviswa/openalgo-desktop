@@ -375,6 +375,9 @@ impl RunnerServices for Fake {
     }
     fn alert(&self, _message: String) {}
     fn alert_cleared(&self) {}
+    async fn order_book_rows(&self, _mode: RunMode) -> Result<Vec<BookOrder>, String> {
+        Ok(Vec::new())
+    }
     fn entry_refusal(&self, mode: RunMode) -> Option<String> {
         self.gate
             .lock()
