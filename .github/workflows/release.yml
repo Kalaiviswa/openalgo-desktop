@@ -16,7 +16,10 @@ name: Release
 # succeeded on that exact commit, the newest CI run of a push of that commit
 # to master that was not cancelled must have passed its installed-app jobs
 # (install, start and first sign-in on Linux, Windows Server 2022 and 2025
-# and macOS; the native end-to-end run) on that commit's own bundles, and
+# and macOS; the native end-to-end run) on that commit's own bundles, the
+# newest native order journey run of that commit on master
+# (native-e2e-test-build.yml: a sandbox order through the app's window on
+# Linux and Windows, not part of ci-ok) must have passed, and
 # the tag must equal v<version> with the
 # same version in src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
 # package.json, both lockfiles and the newest CHANGELOG.md section
@@ -98,7 +101,7 @@ env:
 
 jobs:
   verify:
-    name: verify (tag on master, ci-ok and install smoke green, version, fresh advisory scan)
+    name: verify (tag on master, ci-ok, install smoke and native order journey green, version, fresh advisory scan)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -158,14 +161,16 @@ jobs:
             echo "::error title=Release gate::ci-ok on ${SHA} is ${status}/${conclusion}, not completed/success: ${url}"
             exit 1
           fi
-      - name: Install smoke passed on every platform for this commit's bundles
+      - name: Install smoke and the native order journey passed for this commit
         # The installed-app jobs are part of CI (install-smoke.yml and
         # native-e2e.yml, called by ci.yml). Only this repository's CI runs
         # of a push of this exact commit to master count, not a pull
         # request's; the newest that was not cancelled decides and needs
         # every one of those jobs to have succeeded. A master run cancelled
         # because its pull request was already tested has no verdict:
-        # re-run it before tagging (scripts/ci/smoke_gate.py, tested by
+        # re-run it before tagging. The same holds for the native order
+        # journey (native-e2e-test-build.yml, outside ci-ok), whose run by
+        # hand on master also counts (scripts/ci/smoke_gate.py, tested by
         # test_smoke_gate.py in CI).
         env:
           GH_TOKEN: ${{ github.token }}

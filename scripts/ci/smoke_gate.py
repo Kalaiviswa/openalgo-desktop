@@ -3,20 +3,25 @@
 
     python3 scripts/ci/smoke_gate.py release <commit sha>
 
-The installed-app checks (the install smoke on every platform and the
-native end-to-end run) are jobs of the CI workflow: ci.yml calls
-install-smoke.yml and native-e2e.yml after tauri-build, and ci-ok needs
-them. A release (the `verify` job of release.yml) needs them green on the
-bundles of the tagged commit itself, so only this repository's CI runs for
-a push to master of <commit sha> count. A pull request's run of the same
-commit does not: it built the pull request merged into the master of its
-day.
+Two workflows' runs of the tagged commit on master decide:
 
-Among those runs the newest one that was not cancelled decides (a master
-run stopped because the same commit was already tested on its pull
-request has no verdict; re-run it). It must have completed with success,
-and every job in EXPECTED_JOBS must have succeeded; a skipped or missing
-job does not count.
+- CI (ci.yml): the install smoke on every platform and the native end-to-end
+  run of the .deb are jobs of it (ci.yml calls install-smoke.yml and
+  native-e2e.yml after tauri-build, and ci-ok needs them). Only runs for a
+  push to master count. A pull request's run of the same commit does not:
+  it built the pull request merged into the master of its day.
+- The native order journey (native-e2e-test-build.yml): a sandbox order
+  through the app's own window on Linux and Windows, on the E2E test build.
+  It is not part of ci-ok, so the release reads it here. Runs for a push to
+  master and runs by hand on master both count (by hand is how a cancelled
+  or missed commit gets its verdict); a pull request's does not.
+
+For each, among those runs the newest one that was not cancelled decides
+(a master run stopped because the same commit was already tested on its
+pull request, or because a newer push followed, has no verdict; re-run it).
+It must have completed with success, and every job the workflow must have
+(EXPECTED_JOBS, NATIVE_ORDER_JOBS) must have succeeded; a skipped or
+missing job does not count.
 
 It reads the GitHub API through `gh api` (GH_TOKEN, GITHUB_REPOSITORY).
 SMOKE_GATE_FIXTURES=<dir> answers each API path from <dir> instead, for
@@ -31,9 +36,9 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 
 DEFAULT_BRANCH = "master"
-CI_WORKFLOW = ".github/workflows/ci.yml"
 # The installed-app jobs as the API names them: the calling job in ci.yml,
 # then the job of install-smoke.yml or native-e2e.yml. Keep in step with
 # those three files.
@@ -45,7 +50,34 @@ EXPECTED_JOBS = (
     "install-smoke / macos (aarch64)",
     "native-e2e / native e2e (linux x86_64)",
 )
+# The jobs of native-e2e-test-build.yml.
+NATIVE_ORDER_JOBS = (
+    "clippy and catalogue tests (e2e-broker)",
+    "native e2e (linux x86_64, test build)",
+    "native e2e (windows-2025, test build)",
+)
 SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass(frozen=True)
+class Gate:
+    what: str
+    workflow: str
+    events: tuple[str, ...]
+    jobs: tuple[str, ...]
+    passed: str
+
+
+GATES = (
+    Gate("CI", "ci.yml", ("push",), EXPECTED_JOBS, "Installed-app checks of {sha}: every platform passed in {url}"),
+    Gate(
+        "native order journey",
+        "native-e2e-test-build.yml",
+        ("push", "workflow_dispatch"),
+        NATIVE_ORDER_JOBS,
+        "Native order journey of {sha}: a sandbox order through the window on Linux and Windows passed in {url}",
+    ),
+)
 
 
 class Refused(Exception):
@@ -74,11 +106,12 @@ def repo() -> str:
     return r
 
 
-def master_push_of(run: dict, r: str, sha: str) -> bool:
-    """The run is this repository's CI for a push of `sha` to master."""
+def master_run_of(run: dict, r: str, sha: str, gate: Gate) -> bool:
+    """The run is this repository's `gate` workflow on master for `sha`,
+    started by one of the gate's events."""
     return (
-        run.get("path") == CI_WORKFLOW
-        and run.get("event") == "push"
+        run.get("path") == f".github/workflows/{gate.workflow}"
+        and run.get("event") in gate.events
         and run.get("head_branch") == DEFAULT_BRANCH
         and (run.get("head_repository") or {}).get("full_name") == r
         and run.get("head_sha") == sha
@@ -86,27 +119,37 @@ def master_push_of(run: dict, r: str, sha: str) -> bool:
     )
 
 
+def check(gate: Gate, r: str, sha: str) -> str:
+    """The gate's verdict on `sha`: what passed, or Refused."""
+    event = f"&event={gate.events[0]}" if len(gate.events) == 1 else ""
+    listed = api(
+        f"repos/{r}/actions/workflows/{gate.workflow}/runs?branch={DEFAULT_BRANCH}{event}&head_sha={sha}&per_page=100"
+    )
+    runs = [run for run in listed.get("workflow_runs", []) if master_run_of(run, r, sha, gate)]
+    decided = [run for run in runs if run.get("conclusion") != "cancelled"]
+    if not decided:
+        what = "only cancelled ones; re-run one" if runs else "none"
+        raise Refused(f"no {gate.what} run of {sha} on {DEFAULT_BRANCH} has a verdict ({what})")
+    newest = max(decided, key=lambda run: (run.get("created_at") or "", run["id"]))
+    url = newest.get("html_url")
+    if newest.get("status") != "completed" or newest.get("conclusion") != "success":
+        raise Refused(
+            f"the newest {gate.what} run of {sha} on {DEFAULT_BRANCH} is "
+            f"{newest.get('status')}/{newest.get('conclusion')}: {url}"
+        )
+    jobs = {j.get("name"): j.get("conclusion") for j in api(f"repos/{r}/actions/runs/{newest['id']}/jobs?per_page=100").get("jobs", [])}
+    missing = [f"{name}: {jobs.get(name, 'absent')}" for name in gate.jobs if jobs.get(name) != "success"]
+    if missing:
+        raise Refused(f"the {gate.what} checks of {sha} did not all pass ({', '.join(missing)}): {url}")
+    return gate.passed.format(sha=sha, url=url)
+
+
 def release(sha: str) -> int:
     if not SHA.match(sha or ""):
         raise Refused(f"not a full commit sha: {sha!r}")
     r = repo()
-    listed = api(
-        f"repos/{r}/actions/workflows/ci.yml/runs?branch={DEFAULT_BRANCH}&event=push&head_sha={sha}&per_page=100"
-    )
-    runs = [run for run in listed.get("workflow_runs", []) if master_push_of(run, r, sha)]
-    decided = [run for run in runs if run.get("conclusion") != "cancelled"]
-    if not decided:
-        what = "only cancelled ones; re-run one" if runs else "none"
-        raise Refused(f"no CI run of a push of {sha} to {DEFAULT_BRANCH} has a verdict ({what})")
-    newest = max(decided, key=lambda run: (run.get("created_at") or "", run["id"]))
-    url = newest.get("html_url")
-    if newest.get("status") != "completed" or newest.get("conclusion") != "success":
-        raise Refused(f"the newest CI run of {sha} on {DEFAULT_BRANCH} is {newest.get('status')}/{newest.get('conclusion')}: {url}")
-    jobs = {j.get("name"): j.get("conclusion") for j in api(f"repos/{r}/actions/runs/{newest['id']}/jobs?per_page=100").get("jobs", [])}
-    missing = [f"{name}: {jobs.get(name, 'absent')}" for name in EXPECTED_JOBS if jobs.get(name) != "success"]
-    if missing:
-        raise Refused(f"the installed-app checks of {sha} did not all pass ({', '.join(missing)}): {url}")
-    print(f"Installed-app checks of {sha}: every platform passed in {url}")
+    for gate in GATES:
+        print(check(gate, r, sha))
     return 0
 
 

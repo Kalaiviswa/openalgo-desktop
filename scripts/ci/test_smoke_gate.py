@@ -27,6 +27,8 @@ SHA = "6c804e51853ac878b95d82c622faa5bb49f0cd69"
 OTHER_SHA = "aa73a473aec96ac273a5ed6a649f341a17e4d1f2"
 GREEN = {name: "success" for name in smoke_gate.EXPECTED_JOBS}
 RUNS = f"repos/{REPO}/actions/workflows/ci.yml/runs?branch=master&event=push&head_sha={SHA}&per_page=100"
+NATIVE_GREEN = {name: "success" for name in smoke_gate.NATIVE_ORDER_JOBS}
+NATIVE_RUNS = f"repos/{REPO}/actions/workflows/native-e2e-test-build.yml/runs?branch=master&head_sha={SHA}&per_page=100"
 
 
 def ci_run(run_id, created, sha=SHA, conclusion="success", **over):
@@ -46,11 +48,28 @@ def ci_run(run_id, created, sha=SHA, conclusion="success", **over):
     return run
 
 
+def native_run(run_id, created, event="push", conclusion="success", **over):
+    run = ci_run(run_id, created, conclusion=conclusion, event=event)
+    run["path"] = ".github/workflows/native-e2e-test-build.yml"
+    run.update(over)
+    return run
+
+
 class Gate(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         os.environ["SMOKE_GATE_FIXTURES"] = self.dir
         os.environ["GITHUB_REPOSITORY"] = REPO
+        # The native order journey passed, unless a test says otherwise.
+        self.put_native([native_run(900, "2026-10-20T02:00:00Z")], {900: NATIVE_GREEN})
+
+    def put_native(self, runs, jobs_by_run=None):
+        self.put(NATIVE_RUNS, {"workflow_runs": runs})
+        for run_id, jobs in (jobs_by_run or {}).items():
+            self.put(
+                f"repos/{REPO}/actions/runs/{run_id}/jobs?per_page=100",
+                {"jobs": [{"name": n, "conclusion": c} for n, c in jobs.items()]},
+            )
 
     def put(self, path, body):
         name = re.sub(r"[/?&=]", "_", path) + ".json"
@@ -76,6 +95,70 @@ class Gate(unittest.TestCase):
         code, out = self.run_gate("release", SHA)
         self.assertEqual(code, 0, out)
         self.assertIn("every platform passed", out)
+        self.assertIn("Native order journey of", out)
+
+    def test_refuses_without_a_native_order_journey_of_the_commit(self):
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        self.put_native([])
+        code, out = self.run_gate("release", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("no native order journey run of", out)
+        self.assertIn("has a verdict (none)", out)
+
+    def test_refuses_a_failed_or_missing_native_order_job(self):
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        for job, conclusion in (
+            ("native e2e (windows-2025, test build)", "failure"),
+            ("native e2e (linux x86_64, test build)", None),
+        ):
+            jobs = dict(NATIVE_GREEN)
+            if conclusion is None:
+                del jobs[job]
+            else:
+                jobs[job] = conclusion
+            self.put_native([native_run(901, "2026-10-20T02:00:00Z")], {901: jobs})
+            code, out = self.run_gate("release", SHA)
+            self.assertEqual(code, 1, job)
+            self.assertIn(f"{job}: {conclusion or 'absent'}", out)
+
+    def test_the_newest_native_run_decides_and_a_run_by_hand_counts(self):
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        # The push run failed; a later run by hand on master passed.
+        self.put_native(
+            [
+                native_run(902, "2026-10-20T02:00:00Z", conclusion="failure"),
+                native_run(903, "2026-10-20T04:00:00Z", event="workflow_dispatch"),
+                native_run(904, "2026-10-20T05:00:00Z", conclusion="cancelled"),
+            ],
+            {902: NATIVE_GREEN, 903: NATIVE_GREEN},
+        )
+        self.assertEqual(self.run_gate("release", SHA)[0], 0)
+        # The other way round, the failure is newest.
+        self.put_native(
+            [
+                native_run(903, "2026-10-20T02:00:00Z", event="workflow_dispatch"),
+                native_run(902, "2026-10-20T04:00:00Z", conclusion="failure"),
+            ],
+            {902: NATIVE_GREEN, 903: NATIVE_GREEN},
+        )
+        code, out = self.run_gate("release", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("native order journey run of", out)
+        self.assertIn("completed/failure", out)
+
+    def test_a_pull_request_native_run_does_not_count(self):
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        self.put_native(
+            [
+                native_run(905, "2026-10-20T02:00:00Z", event="pull_request"),
+                native_run(906, "2026-10-20T02:00:00Z", head_branch="pr/x"),
+                native_run(907, "2026-10-20T02:00:00Z", path=".github/workflows/ci.yml"),
+            ],
+            {905: NATIVE_GREEN, 906: NATIVE_GREEN, 907: NATIVE_GREEN},
+        )
+        code, out = self.run_gate("release", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("has a verdict (none)", out)
 
     def test_refuses_when_a_newer_run_failed(self):
         self.put_runs(
@@ -164,6 +247,30 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("has a verdict (none)", out)
 
+    def test_a_newer_green_run_of_a_later_commit_never_stands_in(self):
+        # The tagged commit's own run decides, however green a newer run of
+        # a later master commit is, in both workflows.
+        later = [ci_run(108, "2026-10-20T05:00:00Z", sha=OTHER_SHA)]
+        for own, want in (
+            ([ci_run(100, "2026-10-20T01:00:00Z", conclusion="failure")], "completed/failure"),
+            ([], "has a verdict (none)"),
+        ):
+            self.put_runs(own + later, {100: GREEN, 108: GREEN})
+            code, out = self.run_gate("release", SHA)
+            self.assertEqual(code, 1, want)
+            self.assertIn(want, out)
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        later = [native_run(911, "2026-10-20T05:00:00Z", head_sha=OTHER_SHA)]
+        for own, want in (
+            ([native_run(910, "2026-10-20T02:00:00Z", conclusion="failure")], "completed/failure"),
+            ([], "has a verdict (none)"),
+        ):
+            self.put_native(own + later, {910: NATIVE_GREEN, 911: NATIVE_GREEN})
+            code, out = self.run_gate("release", SHA)
+            self.assertEqual(code, 1, want)
+            self.assertIn(f"native order journey run of {SHA}", out)
+            self.assertIn(want, out)
+
     def test_refuses_a_short_or_odd_sha(self):
         # Green answers wait where an unchecked argument would lead; the
         # gate must refuse before it asks.
@@ -197,6 +304,12 @@ class Gate(unittest.TestCase):
         self.assertIn("name: windows (${{ matrix.os }})", smoke)
         self.assertIn("name: macos (aarch64)", smoke)
         self.assertIn("name: native e2e (linux x86_64)", native)
+        test_build = read("native-e2e-test-build.yml")
+        for job in smoke_gate.NATIVE_ORDER_JOBS:
+            self.assertIn(f"    name: {job}\n", test_build)
+        self.assertEqual(test_build.count("\n    name: "), len(smoke_gate.NATIVE_ORDER_JOBS))
+        self.assertIn("  push:\n    branches: [master]\n", test_build)
+        self.assertIn("  workflow_dispatch:\n", test_build)
 
 
 if __name__ == "__main__":

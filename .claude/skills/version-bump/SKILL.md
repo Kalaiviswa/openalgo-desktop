@@ -91,7 +91,10 @@ that the maintainer reviews and publishes by hand. It does not re-run the
 tests; its first job, `verify`, refuses to build unless the tag points at a
 commit on master whose `ci-ok` check succeeded, whose newest CI run on
 master that was not cancelled passed the installed-app jobs (install smoke
-and native E2E on that commit's own bundles), whose dependencies pass a
+and native E2E on that commit's own bundles), whose newest native order
+journey run on master (`native-e2e-test-build.yml`: a sandbox order through
+the app's window on Linux and Windows, outside `ci-ok`) passed, whose
+dependencies pass a
 fresh advisory scan (cargo-deny, cargo-audit, npm audit, run by the gate
 itself), and `check_versions.py --tag` passes (this script, run in CI). A master run cancelled because the same
 commit was already tested on its pull request has no verdict: re-run it
