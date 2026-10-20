@@ -43,7 +43,11 @@ pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// read beside it all go out on warm connections.
 pub const POOL_MAX_IDLE_PER_HOST: usize = 16;
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+
+/// What the trader reads when the broker client could not be configured
+/// (BR-04).
+pub const UNAVAILABLE: &str = "OpenAlgo could not set up secure connections to brokers on this computer, so it is not contacting your broker. Restart OpenAlgo; if this keeps happening, reinstall it.";
 
 /// The shared client's settings (tests build from them too).
 pub(super) fn builder() -> reqwest::ClientBuilder {
@@ -57,23 +61,37 @@ pub(super) fn builder() -> reqwest::ClientBuilder {
         .user_agent(concat!("openalgo-desktop/", env!("CARGO_PKG_VERSION")))
 }
 
-fn build() -> reqwest::Client {
-    builder()
-        .build()
-        // Fails only when the TLS backend cannot initialise, and
-        // `Client::new()` panics on that same failure, so this fallback is
-        // not reached in practice. If it were, the client would have none
-        // of the timeouts above: most adapters set no timeout per call and
-        // rely on the ones configured here (BR-04).
-        .unwrap_or_else(|e| {
-            tracing::error!("Broker HTTP client could not be configured: {}", e);
-            reqwest::Client::new()
-        })
+/// The client `settings` build, or none (BR-04: fail closed). Building
+/// fails only when the TLS backend cannot initialise; a client without the
+/// timeouts above is never used instead, since no adapter sets its own.
+fn configured(settings: reqwest::ClientBuilder) -> Option<reqwest::Client> {
+    match settings.build() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::error!(
+                "Broker HTTP client could not be configured; no broker will be contacted: {}",
+                e
+            );
+            None
+        }
+    }
 }
 
-/// The shared broker HTTP client.
+/// The shared broker HTTP client, or the trader-facing refusal when it
+/// could not be configured. `BrokerRegistry::new` asks first and builds no
+/// adapter on a refusal, so every broker call is refused.
+pub fn shared() -> Result<reqwest::Client> {
+    CLIENT
+        .get_or_init(|| configured(builder()))
+        .clone()
+        .ok_or_else(|| AppError::Broker(UNAVAILABLE.into()))
+}
+
+/// The shared client, for an adapter's constructor. The app builds
+/// adapters only in `BrokerRegistry::new`, after [`shared`] answered with
+/// a client, so it is there.
 pub fn client() -> reqwest::Client {
-    CLIENT.get_or_init(build).clone()
+    shared().unwrap_or_else(|_| unreachable!("broker adapter built without a broker HTTP client"))
 }
 
 /// Read a response body as JSON. A body that is not JSON (an HTML error
@@ -151,7 +169,40 @@ mod tests {
         // Clones share one pool; calling twice must not build a second.
         let _a = client();
         let _b = client();
-        assert!(CLIENT.get().is_some());
+        assert!(CLIENT.get().is_some_and(Option::is_some));
+    }
+
+    /// BR-04: settings that cannot be built give no client at all, never a
+    /// default client without the timeouts.
+    #[test]
+    fn settings_that_cannot_be_built_give_no_client() {
+        assert!(configured(builder().user_agent("openalgo\nbroken")).is_none());
+        assert!(configured(builder()).is_some());
+    }
+
+    /// BR-04: the shared client gives up on a broker that accepts the
+    /// connection and never answers, after `REQUEST_TIMEOUT`.
+    #[tokio::test(start_paused = true)]
+    async fn a_broker_that_never_answers_times_out() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/orders", l.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(s);
+        });
+        let started = tokio::time::Instant::now();
+        let e = builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(e.is_timeout(), "{:?}", e);
+        assert!(started.elapsed() >= REQUEST_TIMEOUT.min(READ_TIMEOUT));
+        held.abort();
     }
 
     #[test]

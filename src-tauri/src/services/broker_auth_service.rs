@@ -193,12 +193,7 @@ impl BrokerAuthService {
         broker: &str,
         session_id: Option<&str>,
     ) -> Result<String> {
-        let Some(adapter) = state.brokers.get(broker) else {
-            return Err(AppError::Validation(format!(
-                "Signing in to {} is not available in this version of OpenAlgo Desktop yet.",
-                crate::brokers::setup_guide::display_name(broker)
-            )));
-        };
+        let adapter = state.brokers.adapter(broker)?;
         let creds = Self::load_credentials(state, broker)?;
         // The redirect URL saved with this broker's keys, else the automatic
         // one (`BrokerConfigService::redirect_url`).
@@ -510,12 +505,7 @@ impl BrokerAuthService {
         keys: [u8; 32],
     ) -> Result<BrokerSession> {
         let name = crate::brokers::setup_guide::display_name(broker_id);
-        let broker = state.brokers.get(broker_id).ok_or_else(|| {
-            AppError::Validation(format!(
-                "Signing in to {} is not available in this version of OpenAlgo Desktop yet.",
-                name
-            ))
-        })?;
+        let broker = state.brokers.adapter(broker_id)?;
         // No database connection is held across this await.
         let resp = broker.authenticate(input).await?;
         if let Some(want) = expected {

@@ -605,13 +605,33 @@ impl std::fmt::Debug for AuthResponse {
 pub struct BrokerRegistry {
     brokers: HashMap<String, Arc<dyn Broker>>,
     symbols: SymbolResolver,
+    /// Why no adapter was built (BR-04: the broker HTTP client could not be
+    /// configured); every sign-in reads it.
+    refusal: Option<String>,
 }
 
 impl BrokerRegistry {
-    /// Every production adapter, sharing a fresh symbol master.
+    /// Every production adapter, sharing a fresh symbol master; none when
+    /// the broker HTTP client could not be configured (BR-04: fail closed).
     pub fn new() -> Self {
-        let symbols = SymbolResolver::new();
-        let brokers: Vec<Arc<dyn Broker>> = vec![
+        Self::built_for(SymbolResolver::new(), common::http::shared())
+    }
+
+    /// Every adapter when there is a client to share, else none and the
+    /// refusal every sign-in reads.
+    pub(crate) fn built_for(symbols: SymbolResolver, client: Result<reqwest::Client>) -> Self {
+        match client {
+            Ok(_) => Self::with_symbols(symbols.clone(), Self::adapters(&symbols)),
+            Err(e) => Self {
+                brokers: HashMap::new(),
+                symbols,
+                refusal: Some(e.client_message()),
+            },
+        }
+    }
+
+    fn adapters(symbols: &SymbolResolver) -> Vec<Arc<dyn Broker>> {
+        vec![
             Arc::new(angel::AngelBroker::new(symbols.clone())),
             Arc::new(zerodha::ZerodhaBroker::new(symbols.clone())),
             Arc::new(fyers::FyersBroker::new(symbols.clone())),
@@ -649,8 +669,7 @@ impl BrokerRegistry {
             Arc::new(definedge::DefinedgeBroker::new(symbols.clone())),
             Arc::new(mstock::MstockBroker::new(symbols.clone())),
             Arc::new(motilal::MotilalBroker::new(symbols.clone())),
-        ];
-        Self::with_symbols(symbols, brokers)
+        ]
     }
 
     /// Registry with exactly these adapters (tests use a mock broker).
@@ -666,6 +685,7 @@ impl BrokerRegistry {
                 .map(|b| (b.id().to_string(), b))
                 .collect(),
             symbols,
+            refusal: None,
         }
     }
 
@@ -684,6 +704,21 @@ impl BrokerRegistry {
     /// Get broker by ID
     pub fn get(&self, id: &str) -> Option<Arc<dyn Broker>> {
         self.brokers.get(id).cloned()
+    }
+
+    /// The adapter a sign-in uses, or what the trader reads when there is
+    /// none: why no adapter could be built, else that this broker is not in
+    /// this version.
+    pub fn adapter(&self, id: &str) -> Result<Arc<dyn Broker>> {
+        if let Some(why) = &self.refusal {
+            return Err(AppError::Broker(why.clone()));
+        }
+        self.get(id).ok_or_else(|| {
+            AppError::Validation(format!(
+                "Signing in to {} is not available in this version of OpenAlgo Desktop yet.",
+                setup_guide::display_name(id)
+            ))
+        })
     }
 
     /// List all available brokers
@@ -762,5 +797,35 @@ mod tests {
         assert_object_safe(z.as_ref());
         assert_eq!(z.symbols().unwrap().len(), 1);
         assert_eq!(reg.get("angel").unwrap().symbols().unwrap().len(), 1);
+    }
+
+    /// BR-04: when the broker HTTP client cannot be configured no adapter is
+    /// built, and a sign-in is refused with the reason, before any broker
+    /// is contacted.
+    #[tokio::test]
+    async fn without_a_broker_client_every_sign_in_is_refused() {
+        let unavailable = || Err(AppError::Broker(common::http::UNAVAILABLE.into()));
+        let reg = BrokerRegistry::built_for(SymbolResolver::new(), unavailable());
+        assert!(reg.ids().is_empty());
+        let refused = reg.adapter("zerodha").err().map(|e| e.client_message());
+        assert_eq!(refused.as_deref(), Some(common::http::UNAVAILABLE));
+        let now = chrono::Utc::now();
+        let t = crate::state::testing::build(
+            BrokerRegistry::built_for(SymbolResolver::new(), unavailable()),
+            now,
+        );
+        let e = crate::services::broker_auth_service::BrokerAuthService::start_oauth(
+            &t.ctx, "zerodha", None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.client_message(), common::http::UNAVAILABLE);
+        // With a client, an unknown broker still reads as not in this version.
+        let reg = BrokerRegistry::built_for(SymbolResolver::new(), common::http::shared());
+        let e = reg
+            .adapter("nosuchbroker")
+            .err()
+            .map(|e| e.client_message());
+        assert!(e.is_some_and(|m| m.contains("not available in this version")));
     }
 }
