@@ -19,7 +19,7 @@ analyzer logs are kept forever, so the disk bound is the monitoring tables.
 
 | Measure | Target | Benchmark |
 | --- | --- | --- |
-| Feed tick to risk decision (stop, target, trailing) | p99 under 50 ms at 1,000 subscribed symbols and 2,000 ticks/s | `perf::tick_to_risk` (scalping monitor and strategy module); `perf::report_load` (the scalping monitor while the report pages read a large log) |
+| Feed tick to risk decision (stop, target, trailing) | p99 under 50 ms at 1,000 subscribed symbols and 2,000 ticks/s | `perf::tick_to_risk` (scalping monitor and strategy module); `perf::report_load` and `perf::trading_pages` (the scalping monitor while the report pages read a large log, or the trading pages poll a long history) |
 | Order-socket reconnect to book reconciled | under 5 s | `perf::reconnect` |
 | Order-path SQLite wait while Historify imports | p99 under 20 ms | `perf::sqlite_wait` |
 | Critical event delivery (order, position, risk topics) | zero drops under a 10x burst; market-data drops counted and shown | `perf::event_burst` |
@@ -76,6 +76,8 @@ running install for the 8-hour run.
 | `tests/it/perf/rig.rs` | the app under load: synthetic broker market socket (paced ticks, stamped ticks, drops), broker order socket, running clock |
 | `tests/it/perf/tick_to_risk.rs` | tick to stop, target and trailing decisions |
 | `tests/it/perf/report_load.rs` | the same decisions while four browsers keep reloading the report pages over a large log |
+| `tests/it/perf/trading_pages.rs` | the same while four browsers keep reloading what the trading pages poll over a long history |
+| `tests/it/perf/browsers.rs` | the browsers those two run |
 | `tests/it/perf/reconnect.rs` | order-socket drop to order book reconciled |
 | `tests/it/perf/sqlite_wait.rs` | order-path writes and `/api/v1/placeorder` while Historify imports |
 | `tests/it/perf/event_burst.rs` | critical-lane delivery under a 10x burst; market-data drops |
@@ -161,6 +163,44 @@ before, 16-26 ms after at load 16-21) and
 refreshes held all four logs connections without the single flight, one
 with it).
 
+### 2026-10-20, trading pages under load, branch `pr/sync-reads-elsewhere` on `59a1fe1d`
+
+The reads outside the report pages (follow-up 6 below). `perf::trading_pages`
+runs the same scalping rig (90 legs, 120 decisions) over a year of history,
+every table kept forever as on the web: a strategy with 25,000 orders over
+250 runs, an OpenScript deployment with 25,000 orders, 10,000 Action Center
+orders, 500,000 analyzer log entries and 100,000 Telegram and WhatsApp
+commands. Four browsers keep reloading the strategy's three books, the
+deployment's positions and orders, the Action Center, `/api/v1/analyzer`,
+the Telegram page and the WhatsApp statistics. Debug build, load 3.6-5.6.
+
+| Run | Tick to decision | Ticks the app received | Pages |
+| --- | --- | --- | --- |
+| Before (`59a1fe1d`) | all 120 decisions lost | 207/s of 2,000 | p50 496 ms, p99 3.1 s |
+| After | p99 4.89 and 6.82 ms in two runs, none lost; a first run had p99 69.5 ms from one 240 ms decision 6.1 s in, not seen again | 2,013/s | p50 288-363 ms, p99 2.0-3.9 s |
+
+Each page alone over that history, after (debug): Action Center 710 ms,
+Telegram page 340 ms, a strategy book 280-330 ms, `/api/v1/analyzer` 270
+ms, a deployment book 220-240 ms, WhatsApp statistics 154 ms; all of it on
+the blocking pool now.
+
+The fix moves these reads off the async workers: the strategy module's
+books, orders, runs, events, webhook calls, checkpoints, list and detail and
+`/api/v1/strategy` list, runs, orders and events (`strategy::Store::blocking`);
+a deployment's books and status; the Action Center; the analyzer status's
+count; the Telegram page, `/api/v1/telegram/stats` and the WhatsApp
+statistics. The reads a page repeats while it polls are shared
+(`report_flight::KeyedFlight`): the Detail page's three books read the
+strategy's history once, a deployment's books its ledger once, and the
+Action Center's reloads that wait on a read share the next one (each answer
+read after its reload asked, so a reload after an approval shows it). Migration 095 adds an
+index on `whatsapp_command_logs.executed_at`, whose statistics scanned the
+whole log. Regressions in `polled_reads` (before: the runtime held 11.4 s
+by the strategy pages, 5.6 s by the Action Center, 4.5 s by the bots'
+statistics, 2.7 s by a deployment's books and 1.5 s by the analyzer status
+while the logs database was busy; with the single flight disabled, 3, 3 and
+4 reads where 1, 1 and 2 are expected).
+
 ### Follow-ups
 
 1. **Strategy tick path**: fixed on `pr/strategy-tick-path` (`cee33a75`,
@@ -185,11 +225,7 @@ with it).
 5. **The weekly soak's one-time memory step** (soak run 39090876797): the
    CI-and-evidence agent is tracing it in `docs/audit/soak.md`; the endurance
    run measures after its warm-up.
-6. **Synchronous reads outside the report pages**, still on the async
-   workers (other areas): the strategy module's order, trade and position
-   books (every order a strategy placed, polled every 5 s per open Detail
-   page), the Action Center data (every pending order, twice, on each
-   socket event), the OpenScript runner's books (polled every 15 s per
-   running deployment), `/api/v1/analyzer` and the analyzer toggles (a
-   `COUNT(*)` of the never-purged analyzer log), and the Telegram and
-   WhatsApp statistics (WhatsApp's `executed_at` has no index).
+6. **Synchronous reads outside the report pages**: done on
+   `pr/sync-reads-elsewhere` (measured above): the strategy module's books
+   and history, the OpenScript runner's books and status, the Action
+   Center, the analyzer status and the bots' statistics.
