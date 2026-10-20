@@ -603,6 +603,13 @@ pub fn reset_tracked(ctx: &AppState) -> Reply {
     Reply::ok(json!({"status": "success", "cleared": cleared}))
 }
 
+/// What the page reads when the saved stops cannot be read.
+pub const STOPS_UNAVAILABLE: &str = "The saved stop-losses could not be read just now, so this list is not complete. OpenAlgo keeps enforcing the stops it already holds. Try again; if it keeps happening, restart OpenAlgo.";
+
+/// `GET /scalping/api/sl`. A read that fails is an error, never an empty
+/// list: the web answers success with no stops, which reads as "nothing is
+/// protected" while the monitor keeps the stops it holds (re-audit
+/// NEW-TR-07). The page keeps what it last showed and says it is stale.
 pub fn get_sl(ctx: &AppState) -> Reply {
     let mode = match current_mode(ctx) {
         Ok(m) => m,
@@ -615,7 +622,7 @@ pub fn get_sl(ctx: &AppState) -> Reply {
         })),
         Err(e) => {
             tracing::error!("Scalping stops could not be read: {}", e);
-            Reply::ok(json!({"status": "success", "data": []}))
+            err(500, STOPS_UNAVAILABLE)
         }
     }
 }

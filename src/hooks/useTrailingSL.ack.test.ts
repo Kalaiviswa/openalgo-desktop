@@ -133,4 +133,28 @@ describe('useTrailingSL shows a stop only once the server acknowledged it', () =
     expect(api.getSLStates.mock.calls.length).toBe(reads + 1)
     await waitFor(() => expect(result.current.slMap[key]).toBeDefined())
   })
+
+  it('a list that could not be read keeps the stops shown and marks them out of date (NEW-TR-07)', async () => {
+    api.getSLStates.mockResolvedValue({ status: 'success', data: [savedRow] })
+    const { result, rerender } = renderHook(({ mode }) => useTrailingSL(mode), {
+      initialProps: { mode: 'live' },
+    })
+    await waitFor(() => expect(result.current.slMap[key]).toBeDefined())
+    expect(result.current.slUnavailable).toBe(false)
+
+    api.getSLStates.mockRejectedValue(new Error('Request failed with status code 500'))
+    rerender({ mode: 'reload' })
+    await waitFor(() => expect(result.current.slUnavailable).toBe(true))
+    expect(result.current.slMap[key]).toBeDefined()
+
+    api.getSLStates.mockResolvedValue({ status: 'error', message: 'unavailable' })
+    rerender({ mode: 'reload again' })
+    await waitFor(() => expect(api.getSLStates).toHaveBeenCalledTimes(3))
+    expect(result.current.slUnavailable).toBe(true)
+    expect(result.current.slMap[key]).toBeDefined()
+
+    api.getSLStates.mockResolvedValue({ status: 'success', data: [savedRow] })
+    rerender({ mode: 'readable' })
+    await waitFor(() => expect(result.current.slUnavailable).toBe(false))
+  })
 })

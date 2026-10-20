@@ -4,6 +4,7 @@ import { scalpingApi } from '@/api/scalping'
 import { type QuotesData, tradingApi } from '@/api/trading'
 import { ScalpChart } from '@/components/scalping/ScalpChart'
 import { SetSLDialog } from '@/components/scalping/SetSLDialog'
+import { StopsUnavailable } from '@/components/scalping/StopsUnavailable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -691,7 +692,7 @@ export default function Scalping() {
   // fires exits runs SERVER-SIDE (services/scalping_risk_monitor_service.py) so
   // stops keep working after you leave /scalping or close the browser. This hook
   // only persists the config and reflects the server's live updates/auto-clears.
-  const { slMap, setSL, clearSL } = useTrailingSL(appMode)
+  const { slMap, slUnavailable, setSL, clearSL } = useTrailingSL(appMode)
 
   // Position book: derived rows from positions + today's trades + SL,
   // with realtime LTP from the live feed (recomputes on each tick).
@@ -1549,6 +1550,7 @@ export default function Scalping() {
                 {predefinedIssue}
               </span>
             )}
+            <StopsUnavailable show={slUnavailable} />
 
             <div
               className="ml-auto flex items-center gap-6 font-mono"

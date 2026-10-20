@@ -145,6 +145,9 @@ export function evaluateTrail(
 // it changes, so the displayed SLs match the active trading mode.
 export function useTrailingSL(reloadSignal?: unknown) {
   const [slMap, setSlMap] = useState<Record<string, SLState>>({})
+  // Desktop change (re-audit NEW-TR-07): a list that could not be read keeps
+  // the stops last shown and is marked out of date, never shown as empty.
+  const [slUnavailable, setSlUnavailable] = useState(false)
 
   const warnedRef = useRef(false)
   // Load active SL states for display. Fully event-driven — refreshed when the
@@ -154,14 +157,19 @@ export function useTrailingSL(reloadSignal?: unknown) {
     scalpingApi
       .getSLStates()
       .then((resp) => {
-        if (resp.status !== 'success') return
+        if (resp.status !== 'success') {
+          setSlUnavailable(true)
+          return
+        }
         const restored: Record<string, SLState> = {}
         for (const s of resp.data) {
           restored[slKey(s.symbol, s.exchange, s.product)] = fromBackend(s)
         }
         setSlMap(restored)
+        setSlUnavailable(false)
       })
       .catch(() => {
+        setSlUnavailable(true)
         if (!warnedRef.current) {
           warnedRef.current = true
           showToast.error('Failed to load active stop-losses — verify manually', 'orders')
@@ -221,5 +229,5 @@ export function useTrailingSL(reloadSignal?: unknown) {
     [loadStates]
   )
 
-  return { slMap, setSL, clearSL }
+  return { slMap, slUnavailable, setSL, clearSL }
 }

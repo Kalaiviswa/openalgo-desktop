@@ -2335,3 +2335,49 @@ async fn a_live_stop_is_not_exited_through_another_accounts_session() {
     assert_eq!(placed(&h), vec![("SELL".to_string(), 65)]);
     h.shutdown().await;
 }
+
+/// Re-audit NEW-TR-07: the saved stops cannot be read. The list answers an
+/// error the page shows as out of date, never a successful empty list (which
+/// reads as "nothing is protected"), and the running monitor keeps the stop
+/// it holds. Readable again, the list shows the stop.
+#[tokio::test]
+async fn an_unreadable_stop_list_is_unavailable_not_empty() {
+    use openalgo_desktop_lib::scalping::service::STOPS_UNAVAILABLE;
+    let h = H::new().await;
+    let (cookie, _) = session(&h);
+    h.ctx.scalping.store.upsert_sl(&leg("live")).unwrap();
+    h.ctx.scalping.monitor.sync().await;
+    assert_eq!(h.ctx.scalping.monitor.leg_count(), 1);
+    let rename = |from: &str, to: &str| {
+        h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {} RENAME TO {}", from, to))
+            .unwrap()
+    };
+    rename("scalping_sl_state", "scalping_sl_state_unreadable");
+    let (s, v) = call(
+        &h,
+        req(Method::GET, "/scalping/api/sl", None, Some(&cookie), None),
+    )
+    .await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["message"], STOPS_UNAVAILABLE);
+    assert!(v.get("data").is_none(), "no list to read as empty: {}", v);
+    // The monitor keeps the stop it holds, through a sync that cannot read.
+    h.ctx.scalping.monitor.sync().await;
+    assert_eq!(h.ctx.scalping.monitor.leg_count(), 1, "still protected");
+
+    rename("scalping_sl_state_unreadable", "scalping_sl_state");
+    let (s, v) = call(
+        &h,
+        req(Method::GET, "/scalping/api/sl", None, Some(&cookie), None),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1, "{}", v);
+    assert_eq!(h.ctx.scalping.monitor.leg_count(), 1);
+    h.shutdown().await;
+}
