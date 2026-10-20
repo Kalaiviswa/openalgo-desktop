@@ -24,6 +24,7 @@ use crate::events::Event;
 use crate::state::AppState;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
 pub const ALREADY_HANDLED_MESSAGE: &str =
     "This order was already approved or rejected. Check the Action Center.";
@@ -316,9 +317,33 @@ pub fn statistics(orders: &[Value]) -> Value {
     Value::Object(st)
 }
 
+/// `{"status": "success", "data": data}` as the page reads it, serialized:
+/// read off the async workers (every pending order, kept forever as on the
+/// web) and shared by the reloads that wait on a read, since the page
+/// reloads on every order event and a basket sends many together. Every
+/// answer is read after its reload asked, so one that follows an approval
+/// shows it.
+pub async fn data_text(
+    ctx: &Arc<AppState>,
+    user: &str,
+    status: Option<&str>,
+) -> crate::error::Result<axum::body::Bytes> {
+    let (user, status) = (user.to_string(), status.map(String::from));
+    let key = (user.clone(), status.clone());
+    ctx.action_center_reads
+        .share(key, || {
+            ctx.blocking(move |c| {
+                let d = data(c, &user, status.as_deref())?;
+                let text = serde_json::to_vec(&json!({"status": "success", "data": d}))?;
+                Ok(axum::body::Bytes::from(text))
+            })
+        })
+        .await
+}
+
 /// Web `get_action_center_data`: statistics over every order, the list
 /// filtered by status (`None` = all).
-pub fn data(ctx: &AppState, user: &str, status: Option<&str>) -> crate::error::Result<Value> {
+fn data(ctx: &AppState, user: &str, status: Option<&str>) -> crate::error::Result<Value> {
     let now = ctx.now();
     let conn = ctx.sqlite.conn()?;
     let all: Vec<Value> = store::list(&conn, user, None)?

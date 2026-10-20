@@ -122,8 +122,8 @@ pub async fn data(
 ) -> Response {
     let status = q.get("status").map(String::as_str).unwrap_or("pending");
     let filter = (!status.is_empty() && status != "all").then_some(status);
-    match ac::data(&ctx, &u.username, filter) {
-        Ok(d) => json_response(StatusCode::OK, json!({"status": "success", "data": d})),
+    match ac::data_text(&ctx, &u.username, filter).await {
+        Ok(body) => crate::server::routes::webui::ok_text(body),
         Err(e) => {
             tracing::error!("Action Center data failed: {}", e);
             json_response(

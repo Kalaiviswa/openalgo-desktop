@@ -95,15 +95,15 @@ pub fn json_text(v: Value) -> crate::error::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&v)?)
 }
 
-/// [`ok`] for an answer already serialized by [`json_text`]: the same
-/// bytes and content type.
-pub fn ok_text(body: Vec<u8>) -> Response {
+/// [`ok`] for an answer already serialized by [`json_text`] (or shared
+/// as bytes): the same bytes and content type.
+pub fn ok_text(body: impl Into<Bytes>) -> Response {
     (
         [(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         )],
-        body,
+        body.into(),
     )
         .into_response()
 }

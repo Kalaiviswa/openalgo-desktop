@@ -114,6 +114,11 @@ pub struct AppState {
     pub latency_reports: crate::services::report_flight::ReportFlight,
     /// The Traffic page's statistics, one computation for concurrent requests.
     pub traffic_reports: crate::services::report_flight::ReportFlight,
+    /// The Action Center's answer per user and status, one read for the
+    /// reloads a burst of order events asks for at once (each answer read
+    /// after it was asked).
+    pub action_center_reads:
+        crate::services::report_flight::KeyedFlight<(String, Option<String>), axum::body::Bytes>,
     /// The sandbox (analyzer mode) engine, in its own `sandbox.db`.
     pub sandbox: crate::sandbox::Sandbox,
     /// Telegram and WhatsApp bots and their alerts.
@@ -433,6 +438,9 @@ impl AppState {
             monitor: crate::services::monitor::Monitor::new(),
             latency_reports: Default::default(),
             traffic_reports: Default::default(),
+            action_center_reads: crate::services::report_flight::KeyedFlight::fresh(
+                "the Action Center",
+            ),
             messaging: crate::messaging::Messaging::new(),
             mcp: crate::mcp::McpRuntime::new(),
             updates: crate::services::update::UpdateService::new(env!("CARGO_PKG_VERSION")),
