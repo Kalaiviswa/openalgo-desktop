@@ -41,6 +41,9 @@ pub mod pocketful;
 pub mod rmoney;
 pub mod rupeezy;
 pub mod samco;
+// CI's native E2E test build (src/e2e.rs) and the tests of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod scripted;
 pub mod setup_guide;
 pub mod shoonya;
 pub mod tradejini;

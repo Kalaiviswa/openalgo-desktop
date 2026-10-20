@@ -123,6 +123,7 @@ mod brokers_oauth_batch;
 mod brokers_xts;
 mod chartink;
 mod data_upgrade;
+mod e2e_scripted_broker;
 mod feed_app;
 mod feed_behaviour;
 mod feed_bridge;

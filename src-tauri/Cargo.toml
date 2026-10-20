@@ -186,10 +186,12 @@ custom-protocol = ["tauri/custom-protocol"]
 runner-window = []
 # Exposes brokers::mock (MockBroker, MockFeed) to integration test crates.
 test-support = []
-# CI's Windows native E2E only: the main window's WebView2 opens a debugging
-# port (src/e2e.rs). Does not build without OPENALGO_E2E_BUILD=1 outside a
-# debug build (build.rs); never in a release.
+# CI's native E2E test build only (src/e2e.rs). Neither builds without
+# OPENALGO_E2E_BUILD=1 outside a debug build (build.rs); never in a release.
+# Windows: the main window's WebView2 opens a debugging port.
 e2e-debug-port = []
+# A scripted broker (src/brokers/scripted.rs) in the place of Dhan (Sandbox).
+e2e-broker = ["test-support"]
 
 [profile.release]
 panic = "abort"
@@ -197,6 +199,16 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# CI's native E2E test build (.github/workflows/native-e2e-test-build.yml):
+# a release build (no debug assertions, the shipped ports) without the
+# link-time optimization that takes most of a release build's time. Never
+# shipped.
+[profile.e2e]
+inherits = "release"
+codegen-units = 16
+lto = false
+opt-level = 1
 
 # Dependencies without debug info keep target/ small (DuckDB alone is large).
 [profile.dev]

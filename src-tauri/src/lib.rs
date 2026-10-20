@@ -28,17 +28,18 @@ pub mod clock;
 pub mod commands;
 pub mod config;
 pub mod db;
-// CI's Windows native E2E build only; see src/e2e.rs. The feature does not
+// CI's native E2E test build only; see src/e2e.rs. Its features do not
 // build outside a debug build unless build.rs saw OPENALGO_E2E_BUILD=1.
 #[cfg(all(
-    feature = "e2e-debug-port",
+    any(feature = "e2e-debug-port", feature = "e2e-broker"),
     not(any(e2e_build_allowed, debug_assertions))
 ))]
 compile_error!(
-    "The e2e-debug-port feature opens a WebView2 debugging port and is only for CI's Windows \
-     native E2E: build it with OPENALGO_E2E_BUILD=1, never for a release."
+    "The e2e-debug-port and e2e-broker features (a WebView2 debugging port, a scripted broker) \
+     are only for CI's native E2E test build: build it with OPENALGO_E2E_BUILD=1, never for a \
+     release."
 );
-#[cfg(all(windows, feature = "e2e-debug-port"))]
+#[cfg(any(all(windows, feature = "e2e-debug-port"), feature = "e2e-broker"))]
 mod e2e;
 pub mod error;
 pub mod events;
@@ -116,11 +117,7 @@ fn open_data_folder(
     };
     // `AppState::open` spawns its subscribers, so it runs on the runtime.
     let opened = tauri::async_runtime::block_on(async {
-        AppState::open_upgrading(
-            &data_dir,
-            state::OpenOptions::production(),
-            env!("CARGO_PKG_VERSION"),
-        )
+        AppState::open_upgrading(&data_dir, open_options(), env!("CARGO_PKG_VERSION"))
     });
     match opened {
         Ok(ctx) => {
@@ -133,6 +130,19 @@ fn open_data_folder(
         }
         Err(db::upgrade::OpenError::Open(e)) => Err(e.into()),
     }
+}
+
+/// The stores and brokers the app opens with: the installed app's.
+fn open_options() -> state::OpenOptions {
+    with_test_brokers(state::OpenOptions::production())
+}
+
+/// `options` as they are, except in CI's native E2E test build, which puts
+/// its scripted broker in the Dhan (Sandbox) slot (src/e2e.rs).
+fn with_test_brokers(options: state::OpenOptions) -> state::OpenOptions {
+    #[cfg(feature = "e2e-broker")]
+    let options = e2e::with_scripted_broker(options);
+    options
 }
 
 fn init_logging() {
@@ -339,5 +349,37 @@ fn on_run_event(handle: &tauri::AppHandle, event: RunEvent) {
             tauri::async_runtime::block_on(commands::stop_app(handle));
             tracing::info!("OpenAlgo Desktop stopped");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::brokers::scripted;
+    use std::sync::Arc;
+
+    /// Only the e2e-broker test build changes an adapter, and only the one
+    /// in the Dhan (Sandbox) slot: every other build, the shipped one
+    /// included, opens with the very adapters it was given (the same
+    /// instances, not look-alikes).
+    #[test]
+    fn only_the_test_build_puts_the_scripted_broker_in_its_slot() {
+        let production = crate::state::OpenOptions::production();
+        let given = production.brokers.clone();
+        let opened = super::with_test_brokers(production).brokers;
+        assert_eq!(opened.ids(), given.ids());
+        let test_build = cfg!(feature = "e2e-broker");
+        for id in given.ids() {
+            let (got, was) = (opened.get(&id).unwrap(), given.get(&id).unwrap());
+            let replaced = test_build && id == scripted::SLOT;
+            assert_eq!(Arc::ptr_eq(&got, &was), !replaced, "{}", id);
+        }
+        let slot = opened.get(scripted::SLOT).unwrap();
+        assert_eq!(
+            slot.name(),
+            if test_build { "Mock" } else { "Dhan Sandbox" }
+        );
+        // The app opens with exactly these.
+        let app = super::open_options().brokers;
+        assert_eq!(app.ids(), given.ids());
     }
 }

@@ -13,6 +13,7 @@ pub mod broker_config;
 pub mod chartink;
 pub mod charts;
 pub mod custom_indicators;
+pub mod e2e;
 pub mod health;
 pub mod historify;
 pub mod latency;
@@ -117,6 +118,7 @@ pub fn table() -> Vec<RouteSpec> {
         scalping::table(),
         chartink::table(),
         update::table(),
+        e2e::table(),
     ]
     .into_iter()
     .flatten()

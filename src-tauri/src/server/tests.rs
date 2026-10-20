@@ -704,6 +704,71 @@ async fn public_route_list_is_exactly_the_reviewed_one() {
     );
 }
 
+/// The count of what reached the scripted broker (`routes::e2e`) exists
+/// only in CI's native E2E test build (the `e2e-broker` feature). In every
+/// other build no route answers at its path: the app's 404, signed in or
+/// not. In the test build it is for the signed-in user only: not public (the
+/// list above holds in that build too), and an API key does not open it.
+#[tokio::test]
+async fn the_scripted_broker_count_is_only_in_the_test_build_and_only_for_the_user() {
+    const PATH: &str = "/e2e/scripted-broker";
+    let h = H::new();
+    let key = h.setup();
+    let (cookie, csrf) = h.session(true);
+    let (anon, anon_csrf) = h.session(false);
+    let listed: Vec<Access> = routes::table()
+        .into_iter()
+        .filter(|r| r.path == PATH)
+        .map(|r| r.access)
+        .collect();
+    let json_get = |uri: String| {
+        Request::builder()
+            .uri(uri)
+            .header(header::ACCEPT, "application/json")
+            .body(Body::empty())
+            .unwrap()
+    };
+    // An API key, in the query and as a header, with no session.
+    let with_key = || {
+        let mut r = json_get(format!("{}?apikey={}", PATH, key));
+        r.headers_mut().insert("x-api-key", key.parse().unwrap());
+        r
+    };
+    if cfg!(feature = "e2e-broker") {
+        assert_eq!(listed, [Access::User]);
+        let (s, v) = h
+            .json(with_session(json_get(PATH.into()), &cookie, None))
+            .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert!(v["calls"].is_u64() && v["order_calls"].is_u64(), "{}", v);
+        let (s, _) = h.json(json_get(PATH.into())).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "no session");
+        for (who, req) in [
+            (
+                "anonymous",
+                with_session(json_get(PATH.into()), &anon, Some(&anon_csrf)),
+            ),
+            ("API key", with_key()),
+        ] {
+            let (s, _) = h.json(req).await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED, "{}", who);
+        }
+    } else {
+        assert!(listed.is_empty(), "{:?}", listed);
+        for (who, req) in [
+            (
+                "signed in",
+                with_session(json_get(PATH.into()), &cookie, Some(&csrf)),
+            ),
+            ("no session", json_get(PATH.into())),
+            ("API key", with_key()),
+        ] {
+            let (s, _, _) = h.send(req).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{}", who);
+        }
+    }
+}
+
 #[tokio::test]
 async fn apikey_page_navigation_gets_the_spa_but_json_needs_the_user() {
     let h = H::new();

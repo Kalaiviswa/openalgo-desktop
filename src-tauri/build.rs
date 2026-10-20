@@ -1,11 +1,12 @@
 fn main() {
-    // The e2e-debug-port feature (src/e2e.rs) builds only where CI asks for
-    // it in so many words; elsewhere src/e2e.rs stops the build.
+    // The E2E test build's features (src/e2e.rs) build only where CI asks
+    // for them in so many words; elsewhere lib.rs stops the build.
     println!("cargo::rustc-check-cfg=cfg(e2e_build_allowed)");
     println!("cargo:rerun-if-env-changed=OPENALGO_E2E_BUILD");
-    if std::env::var_os("CARGO_FEATURE_E2E_DEBUG_PORT").is_some()
-        && std::env::var("OPENALGO_E2E_BUILD").as_deref() == Ok("1")
-    {
+    let e2e_feature = ["CARGO_FEATURE_E2E_DEBUG_PORT", "CARGO_FEATURE_E2E_BROKER"]
+        .iter()
+        .any(|f| std::env::var_os(f).is_some());
+    if e2e_feature && std::env::var("OPENALGO_E2E_BUILD").as_deref() == Ok("1") {
         println!("cargo:rustc-cfg=e2e_build_allowed");
     }
     // App commands get explicit permissions (`allow-<command>`), so each one

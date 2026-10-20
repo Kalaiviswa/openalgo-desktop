@@ -195,6 +195,9 @@ pub struct MockBroker {
     /// `get_funds` waits for a permit here before it answers, so a test can
     /// hold a session check (a resume) while something else happens.
     pub funds_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Told of every call as it is recorded (the E2E test build's scripted
+    /// broker logs them, `brokers::scripted`).
+    pub on_call: Mutex<Option<fn(&MockCall)>>,
     next_id: Mutex<u64>,
 }
 
@@ -244,6 +247,7 @@ impl MockBroker {
             saved_keys_sign_in: Mutex::new(false),
             auth_gate: Mutex::new(None),
             funds_gate: Mutex::new(None),
+            on_call: Mutex::new(None),
             next_id: Mutex::new(0),
             place_gate: Mutex::new(None),
             master_gate: Mutex::new(None),
@@ -252,6 +256,10 @@ impl MockBroker {
     }
 
     fn record(&self, c: MockCall) {
+        let told = *self.on_call.lock();
+        if let Some(tell) = told {
+            tell(&c);
+        }
         self.calls.lock().push(c);
     }
 
