@@ -488,6 +488,17 @@ pub fn log_command(
     Ok(())
 }
 
+/// Migration 095: an index for the statistics' window
+/// (`executed_at >= ?`). Without it every statistics read scanned the
+/// whole command log, which is kept forever as on the web. Idempotent.
+pub fn migrate_executed_at(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS ix_whatsapp_command_logs_executed_at
+            ON whatsapp_command_logs(executed_at);",
+    )?;
+    Ok(())
+}
+
 /// Web `get_command_stats(days)`: `{total_commands, by_command, days}`.
 pub fn command_stats(conn: &Connection, days: i64, now: DateTime<Utc>) -> Result<Value> {
     let since = db_time(now - Duration::days(days));

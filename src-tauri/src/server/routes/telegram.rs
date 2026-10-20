@@ -251,26 +251,45 @@ pub async fn send_message(State(ctx): Ctx, User(u): User, body: JsonBody) -> Res
     }
 }
 
+/// A page's answer read on the blocking pool (the users and the command
+/// statistics, over a command log kept forever as on the web); `None`
+/// when the bot settings could not be read.
+async fn read_page(
+    ctx: &Arc<AppState>,
+    read: impl FnOnce(&AppState) -> Option<Value> + Send + 'static,
+) -> Response {
+    match ctx.blocking(move |c| Ok(read(c))).await {
+        Ok(Some(v)) => ok(v),
+        Ok(None) => config_unreadable(),
+        Err(e) => {
+            tracing::error!("Reading the Telegram page failed: {}", e);
+            config_unreadable()
+        }
+    }
+}
+
 /// GET /telegram/api/index
 pub async fn api_index(State(ctx): Ctx, User(u): User) -> Response {
-    let Some(cfg) = config(&ctx) else {
-        return config_unreadable();
-    };
-    let (stats7, total, active) = stats(&ctx, 7);
-    let me = page::user_by_username(&ctx, &u.username)
+    read_page(&ctx, move |c| index(c, &u.username)).await
+}
+
+fn index(ctx: &AppState, username: &str) -> Option<Value> {
+    let cfg = config(ctx)?;
+    let (stats7, total, active) = stats(ctx, 7);
+    let me = page::user_by_username(ctx, username)
         .ok()
         .flatten()
         .map(|x| x.full_json())
         .unwrap_or(Value::Null);
-    ok(json!({"status": "success", "data": {
-        "bot_status": bot_status_json(&ctx, &cfg),
+    Some(json!({"status": "success", "data": {
+        "bot_status": bot_status_json(ctx, &cfg),
         "config": {
             "bot_username": cfg.bot_username,
             "broadcast_enabled": cfg.broadcast_enabled,
             "rate_limit_per_minute": cfg.rate_limit_per_minute,
             "is_active": cfg.is_active,
         },
-        "users": users(&ctx, &UserFilter::default()),
+        "users": users(ctx, &UserFilter::default()),
         "stats": stats7,
         "total_commands": total,
         "active_users_7d": active,
@@ -294,25 +313,31 @@ pub async fn api_config(State(ctx): Ctx, _u: User) -> Response {
 
 /// GET /telegram/api/users
 pub async fn api_users(State(ctx): Ctx, _u: User) -> Response {
-    let (s, total, _) = stats(&ctx, 30);
-    ok(json!({"status": "success", "data": {
-        "users": users(&ctx, &UserFilter::default()),
-        "stats": s,
-        "total_commands": total,
-    }}))
+    read_page(&ctx, |c| {
+        let (s, total, _) = stats(c, 30);
+        Some(json!({"status": "success", "data": {
+            "users": users(c, &UserFilter::default()),
+            "stats": s,
+            "total_commands": total,
+        }}))
+    })
+    .await
 }
 
 /// GET /telegram/api/analytics
 pub async fn api_analytics(State(ctx): Ctx, _u: User) -> Response {
-    let (s7, _, _) = stats(&ctx, 7);
-    let (s30, _, _) = stats(&ctx, 30);
-    let list = page::users(&ctx, &UserFilter::default()).unwrap_or_default();
-    let active = list.iter().filter(|u| u.notifications_enabled).count();
-    ok(json!({"status": "success", "data": {
-        "stats_7d": s7,
-        "stats_30d": s30,
-        "total_users": list.len(),
-        "active_users": active,
-        "users": list.iter().map(db::TgUser::list_json).collect::<Vec<_>>(),
-    }}))
+    read_page(&ctx, |c| {
+        let (s7, _, _) = stats(c, 7);
+        let (s30, _, _) = stats(c, 30);
+        let list = page::users(c, &UserFilter::default()).unwrap_or_default();
+        let active = list.iter().filter(|u| u.notifications_enabled).count();
+        Some(json!({"status": "success", "data": {
+            "stats_7d": s7,
+            "stats_30d": s30,
+            "total_users": list.len(),
+            "active_users": active,
+            "users": list.iter().map(db::TgUser::list_json).collect::<Vec<_>>(),
+        }}))
+    })
+    .await
 }

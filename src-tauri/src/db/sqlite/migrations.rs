@@ -99,6 +99,10 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         "094_openscript_identity",
         crate::trading::runner::store::migrate_identity,
     ),
+    (
+        "095_whatsapp_command_logs_executed_at",
+        crate::messaging::whatsapp::db::migrate_executed_at,
+    ),
 ];
 
 /// Run all database migrations

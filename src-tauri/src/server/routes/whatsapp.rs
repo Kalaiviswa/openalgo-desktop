@@ -286,9 +286,14 @@ pub async fn stats(
         .and_then(|d| d.trim().parse::<i64>().ok())
         .map(|d| d.clamp(1, 365))
         .unwrap_or(7);
-    let data = page::command_stats(&ctx, days).unwrap_or_else(|e| {
-        tracing::error!("Reading WhatsApp stats failed: {}", e);
-        json!({"total_commands": 0, "by_command": {}, "days": days})
-    });
+    // Up to a year of the command log (kept forever as on the web), read on
+    // the blocking pool.
+    let data = ctx
+        .blocking(move |c| page::command_stats(c, days))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Reading WhatsApp stats failed: {}", e);
+            json!({"total_commands": 0, "by_command": {}, "days": days})
+        });
     ok(json!({"status": "success", "data": data}))
 }
