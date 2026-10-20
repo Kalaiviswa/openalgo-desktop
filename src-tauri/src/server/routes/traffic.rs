@@ -58,18 +58,22 @@ pub async fn stats(State(ctx): Ctx) -> Response {
     }
 }
 
-/// GET /traffic/export
+/// GET /traffic/export: every request as CSV, read and formatted on the
+/// blocking pool.
 pub async fn export(State(ctx): Ctx) -> Response {
-    let rows = match traffic_service::recent(&ctx, None) {
-        Ok(r) => r,
-        Err(e) => {
-            return failed(
-                "Exporting traffic logs",
-                e,
-                "Could not export the traffic log. Try again.",
-            )
-        }
-    };
+    match traffic_service::export(&ctx, export_csv).await {
+        Ok(out) => download(out, "text/csv", "traffic_logs.csv"),
+        Err(e) => failed(
+            "Exporting traffic logs",
+            e,
+            "Could not export the traffic log. Try again.",
+        ),
+    }
+}
+
+/// The web's CSV columns for the traffic log, one line per request; run on
+/// the blocking pool (`traffic_service::export`).
+fn export_csv(rows: &[TrafficRow]) -> String {
     let mut out = csv_row(
         &[
             "Timestamp",
@@ -83,7 +87,7 @@ pub async fn export(State(ctx): Ctx) -> Response {
         ]
         .map(String::from),
     );
-    for t in &rows {
+    for t in rows {
         out.push_str(&csv_row(&[
             web_time(&t.timestamp),
             t.client_ip.clone(),
@@ -95,5 +99,5 @@ pub async fn export(State(ctx): Ctx) -> Response {
             t.error.clone().unwrap_or_default(),
         ]));
     }
-    download(out, "text/csv", "traffic_logs.csv")
+    out
 }

@@ -1,6 +1,7 @@
-//! The Latency and Analyzer reports over a large log (DB-03, DB-01,
-//! OBS-05): computed in SQL off the async workers, the export streamed,
-//! and the analyzer's day statistics over every request of the day.
+//! The Latency, Traffic, Logs and Analyzer reports over a large log
+//! (DB-03, DB-01, OBS-05): computed in SQL off the async workers, the
+//! exports read and formatted off them (the latency export streamed), and
+//! the analyzer's day statistics over every request of the day.
 
 use crate::webui_support;
 
@@ -172,6 +173,51 @@ async fn traffic_is_logged_while_latency_reports_run() {
         slowest < Duration::from_secs(1),
         "a traffic save waited {:?} for the logs database",
         slowest
+    );
+}
+
+/// The requests the traffic log keeps at most (`monitor::RETENTION`).
+const TRAFFIC_ROWS: i64 = 100_000;
+
+/// `TRAFFIC_ROWS` requests in one statement, a second apart.
+fn seed_traffic(h: &H) {
+    h.ctx
+        .logs
+        .conn()
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO traffic_logs (timestamp, client_ip, method, path, status_code,
+                 duration_ms, host, error)
+             SELECT datetime('2026-10-05 04:00:00', '-' || i || ' seconds'), '127.0.0.1', 'POST',
+                 '/api/v1/placeorder', CASE WHEN i % 10 = 0 THEN 400 ELSE 200 END,
+                 (i % 97) * 1.5, '127.0.0.1:5500', NULL
+             FROM n",
+            [TRAFFIC_ROWS],
+        )
+        .unwrap();
+}
+
+/// DB-01: the Traffic page's export of a full log is read and formatted
+/// off the async workers. Both ran on the async worker before, keeping
+/// the runtime busy for seconds in a debug build.
+#[tokio::test]
+async fn traffic_export_of_a_full_log_does_not_hold_the_runtime() {
+    let (h, c, _) = signed_in();
+    seed_traffic(&h);
+    let app = app(&h);
+    let ((s, csv), busy) = crate::runtime_busy(fetch(&h, &app, &c, "/traffic/export")).await;
+    assert_eq!(s, StatusCode::OK);
+    let csv = String::from_utf8(csv).unwrap();
+    assert!(csv.starts_with("Timestamp,Client IP,Method,Path"));
+    assert!(
+        csv.lines().count() as i64 > TRAFFIC_ROWS,
+        "header and every request"
+    );
+    assert!(
+        busy < Duration::from_millis(500),
+        "the export kept the runtime busy for {:?}",
+        busy
     );
 }
 

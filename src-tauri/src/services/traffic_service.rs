@@ -7,6 +7,7 @@ use crate::db::sqlite::monitor::{self as store, TrafficRow};
 use crate::error::Result;
 use crate::state::AppState;
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
 /// The endpoints the web's stats break out.
 const ENDPOINTS: &[&str] = &[
@@ -39,6 +40,17 @@ pub fn recent(ctx: &AppState, limit: Option<i64>) -> Result<Vec<TrafficRow>> {
     ctx.monitor.drain_now(ctx);
     let c = ctx.logs.conn()?;
     store::recent_traffic(&c, limit)
+}
+
+/// Every request, newest first, turned into text by `render`, both off the
+/// async workers: the rows are read, the connection returned, then
+/// rendered. On the async worker a full log (100,000 requests) held the
+/// runtime for seconds.
+pub async fn export<F>(ctx: &Arc<AppState>, render: F) -> Result<String>
+where
+    F: FnOnce(&[TrafficRow]) -> String + Send + 'static,
+{
+    ctx.blocking(move |c| Ok(render(&recent(c, None)?))).await
 }
 
 /// `GET /traffic/api/stats`: totals, errors and average duration overall,
