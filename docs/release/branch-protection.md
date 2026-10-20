@@ -185,7 +185,11 @@ commit the run built).
   macOS); starts each installed app with an empty data folder until it
   serves its HTTP API; creates the account and signs in through that HTTP
   on the shipped port, and checks that a wrong password is refused (not for
-  the AppImage, which is started only); runs the packaged `mcp` subcommand
+  the AppImage, which is started only); checks that the app's own window
+  loaded its page from the app's server (the window's GET of `/` in the
+  app's request log, `launch_smoke.py --window`), so a GUI that fails to
+  start fails the job on every platform, macOS included; runs the packaged
+  `mcp` subcommand
   over piped stdio, with no app and, after the sign-in, against the running
   app with a read-scope MCP token created on it (`launch_smoke.py
   --mcp-bridge`: protocol versions, the read scope's tools and no order

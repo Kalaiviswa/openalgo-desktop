@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start an installed OpenAlgo Desktop and wait until it serves its HTTP API.
 
-    python3 scripts/ci/launch_smoke.py [--first-sign-in] [--real-home] [--mcp-bridge] <command> [args...]
+    python3 scripts/ci/launch_smoke.py [--first-sign-in] [--real-home] [--window] [--mcp-bridge] <command> [args...]
 
 For CI runners only (.github/workflows/install-smoke.yml): a release build
 binds the shipped ports 127.0.0.1:5000 and 8765, which on a developer's
@@ -23,6 +23,13 @@ password is refused, so the sign-in check can fail. The password is random
 per run and never printed. KEY-01: the keys are locked with the password
 in openalgo.db, so session-status must say "locked" at the start and after
 the account is created, and not once the trader signed in.
+
+With --window, once signed in, it checks that the app's own window
+loaded its page from the app's server (the GUI start, not only the
+server): the window opens http://127.0.0.1:5000/, and the app's request
+log (GET /traffic/api/logs, which the signed-in session may read) must
+show that GET of "/" answered. This script never requests "/" itself, so
+only the window's webview can have made it.
 
 With --mcp-bridge, once signed in, it creates an MCP token through the
 app's own HTTP (POST /api/mcp/tokens, as the API Key page does) and drives
@@ -130,6 +137,31 @@ class Client:
             return json.loads(r.read().decode("utf-8"))["csrf_token"]
 
 
+WINDOW_WAIT_S = 60
+
+
+def window_loaded(browser: Client) -> list[str]:
+    """The window's GET of "/" in the app's request log (--window)."""
+    deadline = time.monotonic() + WINDOW_WAIT_S
+    while True:
+        status, body = browser.call("GET", "/traffic/api/logs?limit=1000")
+        rows = [r for r in body.get("value", []) if isinstance(r, dict)] if status == 200 else []
+        pages = [r for r in rows if r.get("method") == "GET" and r.get("path") == "/"]
+        if pages:
+            codes = sorted({r.get("status_code") for r in pages}, key=str)
+            print(f"The app's window loaded its page: GET / answered {codes} ({len(rows)} requests logged)")
+            if any(isinstance(c, int) and c < 400 for c in codes):
+                return []
+            return [f"the window's GET / was answered {codes}"]
+        if time.monotonic() > deadline:
+            paths = sorted({f"{r.get('method')} {r.get('path')}" for r in rows})
+            return [
+                f"the app's window did not load its page within {WINDOW_WAIT_S} s: no GET / in the request "
+                f"log (GET /traffic/api/logs: {status}; logged: {paths[:20]})"
+            ]
+        time.sleep(1)
+
+
 def mcp_bridge(exe: str):
     """The check run with the signed-in session (--mcp-bridge)."""
 
@@ -204,6 +236,20 @@ def first_sign_in(then=None) -> list[str]:
     return problems
 
 
+def signed_in_checks(checks):
+    """One `then` for first_sign_in running each check in turn."""
+    if not checks:
+        return None
+
+    def run(browser: Client) -> list[str]:
+        problems: list[str] = []
+        for check in checks:
+            problems += check(browser)
+        return problems
+
+    return run
+
+
 def stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -216,9 +262,9 @@ def stop(proc: subprocess.Popen) -> None:
 
 def main(argv: list[str]) -> int:
     flags = set()
-    while argv and argv[0] in ("--first-sign-in", "--real-home", "--mcp-bridge"):
+    while argv and argv[0] in ("--first-sign-in", "--real-home", "--window", "--mcp-bridge"):
         flags.add(argv.pop(0))
-    sign_in = "--first-sign-in" in flags or "--mcp-bridge" in flags
+    sign_in = bool(flags & {"--first-sign-in", "--window", "--mcp-bridge"})
     if not argv:
         print(__doc__)
         return 2
@@ -245,7 +291,12 @@ def main(argv: list[str]) -> int:
                 time.sleep(1)
             answered_after = time.monotonic() - started
             if ok and sign_in:
-                problems = first_sign_in(mcp_bridge(argv[0]) if "--mcp-bridge" in flags else None)
+                checks = []
+                if "--window" in flags:
+                    checks.append(window_loaded)
+                if "--mcp-bridge" in flags:
+                    checks.append(mcp_bridge(argv[0]))
+                problems = first_sign_in(signed_in_checks(checks))
                 if proc.poll() is not None:
                     problems.append(f"the app exited with code {proc.poll()} during the sign-in")
         finally:

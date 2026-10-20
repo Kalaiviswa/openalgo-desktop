@@ -21,6 +21,9 @@ name: Install smoke
 # plus a wrong password that must be refused (scripts/ci/launch_smoke.py).
 # No OS keychain is used on any system (KEY-01): session-status must say the
 # keys are locked until the sign-in and open after it.
+# The GUI start: once signed in, the app's request log must show its own
+# window's GET of the page (launch_smoke.py --window), from WebKitGTK under
+# Xvfb, WebView2 and WKWebView. Only the AppImage run is start-only.
 # Every job also runs the packaged `mcp` subcommand over piped stdio: with
 # no app (a closed port), and, after the sign-in, against the running app
 # with a read-scope MCP token created on it (protocol versions, the read
@@ -111,7 +114,7 @@ jobs:
           fi
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
       - name: Launch the installed app, create the account and sign in
-        run: python3 scripts/ci/launch_smoke.py --first-sign-in --mcp-bridge /usr/bin/openalgo-desktop
+        run: python3 scripts/ci/launch_smoke.py --first-sign-in --window --mcp-bridge /usr/bin/openalgo-desktop
       - name: Launch the AppImage
         env:
           # No FUSE on the runner: the AppImage runtime extracts and runs.
@@ -171,7 +174,7 @@ jobs:
           $os = Get-CimInstance Win32_OperatingSystem
           Write-Host "$($os.Caption) $($os.Version), $(Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' InstallationType)"
       - name: Launch the installed app, create the account and sign in
-        run: python scripts/ci/launch_smoke.py --first-sign-in --mcp-bridge "$APP_EXE"
+        run: python scripts/ci/launch_smoke.py --first-sign-in --window --mcp-bridge "$APP_EXE"
       - name: MCP over piped stdio (installed GUI-subsystem executable)
         run: python scripts/ci/mcp_stdio_smoke.py "$APP_EXE"
 
@@ -218,6 +221,6 @@ jobs:
         # The runner's own home is kept (the runner is fresh, so the data
         # folder is empty). The app makes no keychain call (KEY-01): its keys
         # are locked with the password in openalgo.db.
-        run: python3 scripts/ci/launch_smoke.py --first-sign-in --real-home --mcp-bridge "$APP_BIN"
+        run: python3 scripts/ci/launch_smoke.py --first-sign-in --real-home --window --mcp-bridge "$APP_BIN"
       - name: MCP over piped stdio (installed binary)
         run: python3 scripts/ci/mcp_stdio_smoke.py "$APP_BIN"
