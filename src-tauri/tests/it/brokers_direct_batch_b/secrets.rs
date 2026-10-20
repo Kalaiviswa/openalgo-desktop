@@ -27,10 +27,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Text sentinel for keys, secrets, tokens and passwords.
+/// Text sentinel for keys, secrets, tokens and passwords: a marker,
+/// letters and digits, so no number a log line carries can spell it.
 const S: &str = "SENTINELq7Zx";
-/// Digit sentinel for TOTP / PIN fields that must be numeric.
-const D: &str = "918273";
+/// Digit sentinel for the TOTP / PIN fields that must be numeric. A short
+/// one collided with a log timestamp's microseconds (`04:36:48.918273`), so
+/// it is longer than any number a log line carries (microseconds, epoch
+/// milliseconds and nanoseconds), and it counts only as a whole run of
+/// digits: inside a longer number it is not this value.
+const D: &str = "739104628375910462837591";
 
 // ---------------------------------------------------------------------------
 // Capture
@@ -68,14 +73,42 @@ fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
     (c, tracing::subscriber::set_default(sub))
 }
 
+/// Which sentinel `text` carries, if any. `D` counts only as a whole
+/// number: no digit right before or after it.
+fn leaked(text: &str) -> Option<&'static str> {
+    if text.contains(S) {
+        return Some("the sentinel");
+    }
+    let digit_at = |i: usize| text.as_bytes().get(i).is_some_and(u8::is_ascii_digit);
+    let digit_before = |i: usize| i.checked_sub(1).is_some_and(digit_at);
+    text.match_indices(D)
+        .any(|(i, _)| !(digit_before(i) || digit_at(i + D.len())))
+        .then_some("the digit sentinel")
+}
+
 fn clean(what: &str, text: &str) {
-    assert!(!text.contains(S), "{} leaked the sentinel: {}", what, text);
-    assert!(
-        !text.contains(D),
-        "{} leaked the digit sentinel: {}",
-        what,
-        text
-    );
+    if let Some(which) = leaked(text) {
+        panic!("{} leaked {}: {}", what, which, text);
+    }
+}
+
+/// The check flags a credential, never a timestamp: a log line whose time
+/// carries the six digits the old digit sentinel had is clean, while
+/// either sentinel sent in a body or a query string is caught.
+#[test]
+fn a_timestamp_is_not_a_leaked_credential() {
+    let stamped = "2026-10-20T04:36:48.918273Z  WARN openalgo: INDmoney refused the sign-in \
+                   at 1792472208918 (1792472208918273645 ns)";
+    assert_eq!(leaked(stamped), None);
+    assert_eq!(leaked(&format!("id {}0 and 9{}", D, D)), None);
+    for leak in [
+        format!(r#"{{"mpin":"{}","totp":"x"}}"#, D),
+        format!("password={}&twoFa=x", D),
+        format!("PIN {}", D),
+    ] {
+        assert_eq!(leaked(&leak), Some("the digit sentinel"), "{}", leak);
+    }
+    assert_eq!(leaked(&format!("key {}:::x", S)), Some("the sentinel"));
 }
 
 /// The capture saw the adapter's logging (so the check is not vacuous)
