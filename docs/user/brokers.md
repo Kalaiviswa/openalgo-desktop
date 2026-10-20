@@ -209,6 +209,14 @@ any of the items refused above. The same rule applies to forgetting X and
 to saving new keys for X. The only ways to end a broker session yourself
 are logging out of OpenAlgo and **Forget this broker**.
 
+A second check sits where orders are sent. A Live strategy, an OpenScript
+run, scalping protection and an order a Live run queued in the Action Center
+each belong to the broker account they were started on. If OpenAlgo is ever
+connected to another broker or account while one of them is still open, its
+orders are not sent there: the strategy or stop says "This was opened on X
+(your client id), but OpenAlgo is signed in to ... now, so the order was not
+sent", stays managed, and acts again once you sign in to that account.
+
 Your keys for the broker you leave stay saved, so switching back needs only a
 login, not your keys again. No restart is needed.
 

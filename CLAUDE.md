@@ -261,6 +261,12 @@ unchanged:
   (`trading/runner/approval.rs`: bound, rejected or unconfirmed), never by a
   number it does not have (LOG-04; the web follows neither).
 - A stop whose exit orders were refused leaves the run open and managed.
+- **An obligation's order goes only through the session it was opened on**
+  (LOG-07, `services::live_owner`). A Live strategy run, OpenScript run,
+  scalping stop or order a Live run queued in the Action Center records its
+  broker and account; dispatch refuses through any other before sending (a
+  definite refusal), behind the broker switch guard. A new Live obligation
+  records its owner and checks it at dispatch.
 - **A placement has three outcomes, never two** (`brokers/common/outcome`):
   accepted (an order id), refused (provably never sent, or the broker said
   no), uncertain (sent, and no definite answer: a timeout or a dropped
