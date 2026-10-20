@@ -941,3 +941,15 @@
      be invalid under half of them. The editor already sets its own colour. */
   color: inherit;
 }
+
+/* Sonner's rich colours in the light theme: the library's text shades sit
+   below 4.5:1 on its own toast backgrounds (axe color-contrast,
+   2026-10-20). Same hues, darker text; the dark theme keeps sonner's own
+   (above 6:1). One more element than sonner's selector, so this wins
+   whatever the order the styles load in. */
+html [data-sonner-toaster][data-sonner-theme='light'] {
+  --success-text: hsl(140, 100%, 24%);
+  --info-text: hsl(210, 92%, 40%);
+  --warning-text: hsl(31, 92%, 32%);
+  --error-text: hsl(360, 100%, 40%);
+}

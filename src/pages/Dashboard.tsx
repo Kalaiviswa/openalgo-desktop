@@ -191,13 +191,13 @@ export default function Dashboard() {
   const getMasterContractTextColor = () => {
     switch (masterContract.status) {
       case 'success':
-        return 'text-green-600 dark:text-green-400'
+        return 'text-green-700 dark:text-green-400'
       case 'downloading':
-        return 'text-yellow-600 dark:text-yellow-400'
+        return 'text-yellow-800 dark:text-yellow-400'
       case 'error':
-        return 'text-red-600 dark:text-red-400'
+        return 'text-red-700 dark:text-red-400'
       default:
-        return 'text-muted-foreground'
+        return 'text-neutral-600 dark:text-muted-foreground'
     }
   }
 
@@ -426,7 +426,7 @@ export default function Dashboard() {
           <CardContent className="pt-6">
             <div className="space-y-1">
               <p className="text-sm text-muted-foreground">Utilised Margin</p>
-              <p className="text-2xl font-bold text-cyan-500 dark:text-cyan-400">
+              <p className="text-2xl font-bold text-cyan-700 dark:text-cyan-400">
                 {isLoading
                   ? '...'
                   : marginData
@@ -435,7 +435,7 @@ export default function Dashboard() {
               </p>
               <Badge
                 variant="outline"
-                className="mt-2 border-cyan-500/50 text-cyan-600 dark:text-cyan-400"
+                className="mt-2 border-cyan-500/50 text-cyan-700 dark:text-cyan-400"
               >
                 Used Margin
               </Badge>
@@ -448,7 +448,7 @@ export default function Dashboard() {
       {error && (
         <Card className="border-destructive bg-destructive/5">
           <CardContent className="pt-6">
-            <p className="text-destructive text-sm">{error}</p>
+            <p className="text-red-700 dark:text-destructive text-sm">{error}</p>
           </CardContent>
         </Card>
       )}

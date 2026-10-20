@@ -14,7 +14,7 @@ export function ProfileDesktopNote() {
     <p className="text-sm text-muted-foreground">
       OpenAlgo Desktop sends no email: a forgotten password is replaced from the sign-in page.
       Details about this computer and the app are on the{' '}
-      <Link to="/admin/diagnostics" className="text-primary hover:underline">
+      <Link to="/admin/diagnostics" className="text-primary underline underline-offset-4">
         Diagnostics
       </Link>{' '}
       page.

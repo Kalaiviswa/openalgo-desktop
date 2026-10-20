@@ -113,22 +113,24 @@ const SIGNED_IN_PAGES = [
 ] as const
 
 /**
- * Findings on the signed-in pages as carried over from OpenAlgo web, rule id
- * per page, recorded 2026-10-20. The pages are kept close to the web's so
- * web changes carry over by diff (CLAUDE.md); these are for the UI
- * workstream to fix, here and upstream.
+ * Findings on the signed-in pages still open, rule id per page. Empty: the
+ * ones carried over from OpenAlgo web (recorded 2026-10-20) are fixed here,
+ * and the same edits are listed for the web in docs/web-sync/a11y-2026-10-20.md.
+ * A new finding fails; one accepted for a reason goes here with that reason.
  */
-const KNOWN: Readonly<Partial<Record<(typeof SIGNED_IN_PAGES)[number], readonly string[]>>> = {
-  // Low-contrast figures and badges on the dashboard cards.
-  '/dashboard': ['color-contrast'],
-  // A text input without a label, a link without a name, an unnamed
-  // progress bar and low-contrast step badges.
-  '/profile': ['aria-progressbar-name', 'color-contrast', 'label', 'link-name'],
-  // White initials on light tool tiles.
-  '/tools': ['color-contrast'],
-}
+const KNOWN: Readonly<Partial<Record<(typeof SIGNED_IN_PAGES)[number], readonly string[]>>> = {}
 
-async function signedIn(page: Page) {
+async function signedIn(page: Page, theme: 'light' | 'dark' = 'light') {
+  if (theme === 'dark') {
+    // The theme store's persisted choice, as a trader who picked dark has it.
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.addInitScript(() =>
+      localStorage.setItem(
+        'openalgo-theme',
+        JSON.stringify({ state: { mode: 'dark', color: 'default', appMode: 'live' }, version: 0 })
+      )
+    )
+  }
   await page.route('**/auth/session-status', (route) =>
     route.fulfill({
       status: 200,
@@ -146,17 +148,47 @@ async function signedIn(page: Page) {
 }
 
 test.describe('Accessibility - signed in', () => {
-  for (const path of SIGNED_IN_PAGES) {
-    test(`${path} accessibility scan`, async ({ page }) => {
-      await signedIn(page)
-      await page.goto(path)
-      await page.waitForLoadState('networkidle')
-      await expect(page.getByTestId('navbar-row')).toBeVisible()
+  for (const theme of ['light', 'dark'] as const) {
+    for (const path of SIGNED_IN_PAGES) {
+      test(`${path} accessibility scan${theme === 'dark' ? ' (dark)' : ''}`, async ({ page }) => {
+        await signedIn(page, theme)
+        await page.goto(path)
+        await page.waitForLoadState('networkidle')
+        await expect(page.getByTestId('navbar-row')).toBeVisible()
 
-      const found = [...new Set((await scan(page, wcag)).map((f) => f.id))].sort()
-      expect(found).toEqual([...(KNOWN[path] ?? [])].sort())
+        const found = [...new Set((await scan(page, wcag)).map((f) => f.id))].sort()
+        expect(found).toEqual([...(KNOWN[path] ?? [])].sort())
+      })
+    }
+  }
+
+  // States the stub does not reach by itself: each master contract status
+  // the dashboard shows, and the password rules once some are met.
+  for (const status of ['success', 'downloading', 'pending']) {
+    test(`/dashboard with the master contract ${status}`, async ({ page }) => {
+      await signedIn(page)
+      await page.route('**/api/master-contract/status', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ status, message: `Master contract ${status}` }),
+        })
+      )
+      await page.goto('/dashboard')
+      await page.waitForLoadState('networkidle')
+
+      expect(await scan(page, wcag)).toEqual([])
     })
   }
+
+  test('/profile with a new password typed', async ({ page }) => {
+    await signedIn(page)
+    await page.goto('/profile')
+    await page.waitForLoadState('networkidle')
+    await page.getByLabel('New Password', { exact: true }).fill('abcDEF12')
+
+    expect(await scan(page, wcag)).toEqual([])
+  })
 })
 
 test.describe('Accessibility - Mobile', () => {

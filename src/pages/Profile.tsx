@@ -482,7 +482,11 @@ export default function ProfilePage() {
       {/* Header */}
       <div>
         <div className="flex items-center gap-2 mb-2">
-          <Link to="/dashboard" className="text-muted-foreground hover:text-foreground">
+          <Link
+            to="/dashboard"
+            className="text-muted-foreground hover:text-foreground"
+            aria-label="Back to Dashboard"
+          >
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -530,8 +534,12 @@ export default function ProfilePage() {
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>Username</Label>
-                <Input value={user?.username || profileData?.username || ''} disabled />
+                <Label htmlFor="profile-username">Username</Label>
+                <Input
+                  id="profile-username"
+                  value={user?.username || profileData?.username || ''}
+                  disabled
+                />
               </div>
               <div className="space-y-2">
                 <Label>Account Type</Label>
@@ -550,8 +558,9 @@ export default function ProfilePage() {
             <CardContent>
               <form onSubmit={handleChangePassword} className="space-y-4">
                 <div className="space-y-2">
-                  <Label>Current Password</Label>
+                  <Label htmlFor="profile-current-password">Current Password</Label>
                   <Input
+                    id="profile-current-password"
                     type="password"
                     placeholder="Enter your current password"
                     value={oldPassword}
@@ -560,8 +569,9 @@ export default function ProfilePage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>New Password</Label>
+                  <Label htmlFor="profile-new-password">New Password</Label>
                   <Input
+                    id="profile-new-password"
                     type="password"
                     placeholder="Enter your new password"
                     value={newPassword}
@@ -570,8 +580,9 @@ export default function ProfilePage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Confirm New Password</Label>
+                  <Label htmlFor="profile-confirm-password">Confirm New Password</Label>
                   <Input
+                    id="profile-confirm-password"
                     type="password"
                     placeholder="Confirm your new password"
                     value={confirmPassword}
@@ -590,7 +601,11 @@ export default function ProfilePage() {
                     <span>Strength</span>
                     <span className="font-medium">{strength.label}</span>
                   </div>
-                  <Progress value={strength.percentage} className={strength.color} />
+                  <Progress
+                    value={strength.percentage}
+                    className={strength.color}
+                    aria-label="Password strength"
+                  />
 
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     {Object.entries(passwordRequirements).map(([key, met]) => (
@@ -598,8 +613,8 @@ export default function ProfilePage() {
                         key={key}
                         className={`flex items-center gap-1 px-2 py-1 rounded-full border ${
                           met
-                            ? 'bg-green-500/10 border-green-500 text-green-600'
-                            : 'bg-muted border-border text-muted-foreground'
+                            ? 'bg-green-500/10 border-green-500 text-green-800 dark:text-green-400'
+                            : 'bg-background border-border text-muted-foreground'
                         }`}
                       >
                         {met ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
@@ -772,8 +787,9 @@ export default function ProfilePage() {
               </div>
 
               <div className="space-y-2">
-                <Label>Host Server URL</Label>
+                <Label htmlFor="profile-host-server">Host Server URL</Label>
                 <Input
+                  id="profile-host-server"
                   value={hostServer}
                   onChange={(e) => setHostServer(e.target.value)}
                   placeholder="https://your-domain.ngrok-free.app"
@@ -806,8 +822,9 @@ export default function ProfilePage() {
               </div>
 
               <div className="space-y-2">
-                <Label>WebSocket URL</Label>
+                <Label htmlFor="profile-websocket-url">WebSocket URL</Label>
                 <Input
+                  id="profile-websocket-url"
                   value={websocketUrl}
                   onChange={(e) => setWebsocketUrl(e.target.value)}
                   placeholder="ws://127.0.0.1:8765"
@@ -928,13 +945,13 @@ export default function ProfilePage() {
             <CardContent className="space-y-6">
               {/* Position */}
               <div className="space-y-2">
-                <Label>Toast Position</Label>
+                <Label htmlFor="profile-toast-position">Toast Position</Label>
                 <Select
                   value={alertStore.position}
                   onValueChange={(value) => alertStore.setPosition(value as ToastPosition)}
                   disabled={!alertStore.toastsEnabled}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="profile-toast-position">
                     <SelectValue placeholder="Select position" />
                   </SelectTrigger>
                   <SelectContent>
@@ -949,9 +966,10 @@ export default function ProfilePage() {
 
               {/* Max Visible Toasts */}
               <div className="space-y-2">
-                <Label>Maximum Visible Toasts</Label>
+                <Label htmlFor="profile-max-toasts">Maximum Visible Toasts</Label>
                 <div className="flex items-center gap-4">
                   <Input
+                    id="profile-max-toasts"
                     type="number"
                     min={1}
                     max={10}
@@ -968,9 +986,10 @@ export default function ProfilePage() {
 
               {/* Duration */}
               <div className="space-y-2">
-                <Label>Auto-dismiss Duration</Label>
+                <Label htmlFor="profile-toast-duration">Auto-dismiss Duration</Label>
                 <div className="flex items-center gap-4">
                   <Input
+                    id="profile-toast-duration"
                     type="number"
                     min={1}
                     max={15}
