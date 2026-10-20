@@ -13,6 +13,7 @@
 
 use crate::events::{Event, Mode};
 use crate::services::core::{meta, safe_request, Reply};
+use crate::services::live_owner::LiveOwner;
 use crate::services::order_service::{place_order, sandbox_order, Route};
 use crate::state::AppState;
 use crate::strategy::dispatch::{
@@ -85,6 +86,10 @@ pub trait RunnerServices: Send + Sync {
     fn instrument(&self, symbol: &str, exchange: &str, date: NaiveDate) -> Value;
     /// Whether the OpenAlgo user is signed in.
     fn signed_in(&self) -> bool;
+    /// The broker session Live orders go through now (LOG-07).
+    fn live_owner(&self) -> Option<LiveOwner> {
+        None
+    }
     /// Ask the order reconciler to read the order book now (an uncertain
     /// placement was just recorded).
     fn request_reconcile(&self) {}
@@ -304,6 +309,10 @@ impl RunnerServices for AppServices {
         self.ctx
             .upgrade()
             .is_some_and(|c| c.signed_in_user().is_some())
+    }
+
+    fn live_owner(&self) -> Option<LiveOwner> {
+        self.ctx.upgrade().and_then(|c| LiveOwner::of_session(&c))
     }
 
     fn request_reconcile(&self) {

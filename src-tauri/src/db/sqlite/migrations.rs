@@ -82,6 +82,18 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         "089_pending_orders_force_live",
         super::action_center::migrate_force_live,
     ),
+    (
+        "090_strategy_run_account",
+        crate::strategy::store::migrate_run_account,
+    ),
+    (
+        "091_scalping_stop_owner",
+        crate::scalping::store::migrate_stop_owner,
+    ),
+    (
+        "092_pending_orders_owner",
+        super::action_center::migrate_owner,
+    ),
 ];
 
 /// Run all database migrations

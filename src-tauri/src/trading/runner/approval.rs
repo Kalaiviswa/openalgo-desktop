@@ -9,8 +9,9 @@
 //! * **Placed** (approved, and the broker gave it a number): the row is
 //!   bound to that order, so the run polls it, counts its fills and cancels
 //!   it on Stop like any order it sent itself.
-//! * **Refused** (rejected by the trader, or approved and refused by the
-//!   broker): nothing was sent, so the row is rejected and the page told.
+//! * **Refused** (rejected by the trader, or approved and refused before
+//!   sending or by the broker): nothing was sent, so the row is rejected
+//!   and the page told.
 //! * **Unknown** (approved and sent with no definite answer, an acceptance
 //!   with no number, or the record is gone): the order may be at the broker,
 //!   so the row is unconfirmed and the order book settles it (LOG-08).
@@ -59,7 +60,7 @@ fn approval_of(record: Option<&PendingOrderRow>) -> Approval {
                 // Approved, not claimed for sending yet.
                 (None, None) => Approval::Waiting,
                 (None, Some("rejected")) => Approval::Refused(
-                    "Approved in the Action Center, but the broker refused it, so it was not placed"
+                    "Approved in the Action Center, but it was refused there or by the broker, so it was not placed"
                         .into(),
                 ),
                 (Some(id), Some(status)) if status != SUBMITTING => {
@@ -264,6 +265,8 @@ mod tests {
             broker_order_id: id.map(str::to_string),
             broker_status: broker_status.map(str::to_string),
             force_live: true,
+            broker: Some("zerodha".into()),
+            broker_account: Some("AB1234".into()),
         }
     }
 

@@ -37,7 +37,14 @@ fn filled_buy(t: &T, run: i64, symbol: &str, product: &str, broker_id: &str) {
 fn open_run(t: &T, sid: i64, mode: &str) -> i64 {
     let run =
         t.m.store
-            .create_run(sid, mode, mode, "manual", None, None)
+            .create_run(
+                sid,
+                mode,
+                &openalgo_desktop_lib::services::live_owner::LiveOwner::new(mode, ""),
+                "manual",
+                None,
+                None,
+            )
             .unwrap();
     assert!(t
         .m

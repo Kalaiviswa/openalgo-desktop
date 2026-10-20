@@ -143,7 +143,7 @@ impl StrategyModule {
         };
         let claim = ClaimId::Row(row_id);
 
-        let result = self.gateway.place(mode, &order).await;
+        let result = self.place_for_run(run_id, mode, &order).await;
         self.record_acknowledgement(row_id, &result, strategy.id, user_id, run_id, t.lid)
             .await;
         if result.uncertain {
@@ -389,7 +389,7 @@ impl StrategyModule {
             let Some(bid) = row.broker_order_id.clone().filter(|b| !b.is_empty()) else {
                 continue;
             };
-            let c = self.gateway.cancel(mode, &bid).await;
+            let c = self.cancel_for_run(run_id, mode, &bid).await;
             if !c.ok {
                 tracing::warn!(
                     "Working entry {} on run {} could not be cancelled: {}",

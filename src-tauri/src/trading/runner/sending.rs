@@ -9,6 +9,31 @@ use super::{store, RunEntry, RunInfo, Runner, Unsaved};
 use crate::strategy::dispatch::{DispatchResult, RunMode};
 
 impl Runner {
+    /// Send one placement to the run's side, unless the run is Live and the
+    /// session connected now is another broker or account than the one it
+    /// started on (LOG-07): then nothing is sent, a definite refusal, and
+    /// the row reads why.
+    pub(super) async fn dispatch(
+        &self,
+        info: &RunInfo,
+        request: &serde_json::Value,
+        internal: bool,
+    ) -> DispatchResult {
+        let services = self.services();
+        if info.mode == RunMode::Live {
+            let active = services.live_owner();
+            if let Some(why) = info.owner.as_ref().and_then(|o| o.refusal(active.as_ref())) {
+                tracing::warn!(
+                    "OpenScript run {}: an order was not sent: {}",
+                    info.run_id,
+                    why
+                );
+                return DispatchResult::refused(why);
+            }
+        }
+        services.place(info.mode, request, internal).await
+    }
+
     /// Write the order's row before it goes out, so a crash while it is at
     /// the destination still leaves a record to settle.
     pub(super) fn record_sent(

@@ -2277,3 +2277,61 @@ async fn a_trailing_stop_save_never_holds_the_runtime() {
     );
     assert_eq!(m.store.active_sl(None).unwrap()[0].current_sl, Some(105.0));
 }
+
+/// LOG-07 defence in depth: a Live stop set while Zerodha (AB1234) was
+/// connected is not exited through another account's session. Nothing is
+/// read or sent there, the stop stays and the trader is told; back on its
+/// own session the exit goes out. Before, the breach read the other
+/// account's position book and sent the exit through it.
+#[tokio::test]
+async fn a_live_stop_is_not_exited_through_another_accounts_session() {
+    let h = H::new().await;
+    *h.mock.positions.lock() = Some(Ok(vec![pos(OPT, "NFO", "MIS", 65)]));
+    let (cookie, csrf) = session(&h);
+    let body = json!({"symbol": OPT, "exchange": "NFO", "product": "MIS", "side": "BUY",
+        "quantity": 65, "entry_price": 100, "initial_sl": 95});
+    let (s, v) = call(
+        &h,
+        req(
+            Method::POST,
+            "/scalping/api/sl",
+            Some(body),
+            Some(&cookie),
+            Some(&csrf),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    h.ctx.scalping.monitor.sync().await;
+    let own = h.ctx.get_broker_session().unwrap();
+    h.ctx
+        .set_broker_session(Some(openalgo_desktop_lib::state::BrokerSession {
+            user_id: "XY9876".into(),
+            ..own.clone()
+        }));
+    let book_reads = || {
+        h.mock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::Positions))
+            .count()
+    };
+    let reads = book_reads();
+    h.ctx.scalping.monitor.process_tick(OPT, "NFO", 90.0).await;
+    h.ctx.scalping.monitor.wait_idle().await;
+    assert!(placed(&h).is_empty(), "nothing sent through XY9876");
+    assert_eq!(book_reads(), reads, "its position book was not read");
+    assert_eq!(h.ctx.scalping.monitor.leg_count(), 1, "still protected");
+    assert_eq!(
+        h.ctx.scalping.store.active_sl(Some("live")).unwrap().len(),
+        1
+    );
+
+    // Its own session again: after the retry cooldown the exit goes out.
+    h.ctx.set_broker_session(Some(own));
+    h.clock.advance(chrono::Duration::seconds(4));
+    h.ctx.scalping.monitor.process_tick(OPT, "NFO", 90.0).await;
+    h.ctx.scalping.monitor.wait_idle().await;
+    assert_eq!(placed(&h), vec![("SELL".to_string(), 65)]);
+    h.shutdown().await;
+}

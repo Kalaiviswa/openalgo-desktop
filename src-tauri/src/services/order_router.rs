@@ -78,15 +78,19 @@ pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value, force_live: bool
         m.remove("apikey");
         m.remove("api_key");
     }
+    // LOG-07: a live-destined order is approved only through the session
+    // it was queued on.
+    let owner = force_live
+        .then(|| crate::services::live_owner::LiveOwner::of_session(ctx))
+        .flatten();
+    let dest = action_center::Destination {
+        force_live,
+        owner: owner
+            .as_ref()
+            .map(|o| (o.broker.as_str(), o.account.as_str())),
+    };
     let created = ctx.sqlite.conn().and_then(|c| {
-        action_center::create(
-            &c,
-            &user_id,
-            api_type,
-            &clean.to_string(),
-            force_live,
-            ctx.now(),
-        )
+        action_center::create(&c, &user_id, api_type, &clean.to_string(), dest, ctx.now())
     });
     match created {
         Ok(id) => {

@@ -79,7 +79,7 @@ impl StrategyModule {
         };
         let still_held = snapshot.requires_management();
 
-        if let Err(e) = self.gateway.authorised(mode) {
+        if let Err(e) = self.authorised_for(run_id, mode) {
             return self
                 .stop_without_session(run_id, (strategy_id, user_id), &reason, still_held, e)
                 .await;
@@ -178,9 +178,9 @@ impl StrategyModule {
         Ok(reason)
     }
 
-    /// No broker session: a run with nothing held is finished; otherwise
-    /// the stop stays pending, the positions stay managed, and the trader
-    /// is told once.
+    /// No broker session, or not the one the run was opened on (LOG-07): a
+    /// run with nothing held is finished; otherwise the stop stays pending,
+    /// the positions stay managed, and the trader is told once.
     async fn stop_without_session(
         &self,
         run_id: i64,
@@ -196,13 +196,16 @@ impl StrategyModule {
         }
         if self.claim_unactionable(run_id) {
             self.emit(
-            strategy_id,
-            user_id,
-            "run_stop_failed",
-            "Stop remains pending because there is no broker session. Positions remain open and managed; log in to your broker and the stop is retried.",
-            ev(Some(run_id), None, "critical"),
-        )
-        .await;
+                strategy_id,
+                user_id,
+                "run_stop_failed",
+                &format!(
+                    "Stop remains pending: {} Positions remain open and managed, and the stop is retried once that session is back.",
+                    e
+                ),
+                ev(Some(run_id), None, "critical"),
+            )
+            .await;
         }
         StopOutcome::pending(format!("{} The run remains managed.", e), vec![])
     }
@@ -343,7 +346,7 @@ impl StrategyModule {
         };
         let strategy_id = run_row.strategy_id;
         let mode = self.mode_of(&run_row.mode);
-        if let Err(e) = self.gateway.authorised(mode) {
+        if let Err(e) = self.authorised_for(run_id, mode) {
             return StopOutcome::err(e);
         }
         let exits = self

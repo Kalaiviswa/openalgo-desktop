@@ -200,6 +200,77 @@ fn run_stopped(a: &App, run: i64) -> bool {
         .is_some()
 }
 
+/// Defence in depth (roadmap "Broker switching"): the dispatch layer
+/// refuses an exit for a Live run opened on Zerodha (AB1234) while another
+/// account's session is connected, however that session got there (here it
+/// is installed directly, past the switch guard). Nothing is sent, the run
+/// stays open and managed, and the trader is told once. Back on its own
+/// session, the stop exits it.
+#[tokio::test]
+async fn dispatch_refuses_an_a_owned_exit_while_b_is_active() {
+    use openalgo_desktop_lib::brokers::mock::MockCall;
+    use openalgo_desktop_lib::state::BrokerSession;
+    let a = app();
+    a.ctx.reconciler.stop();
+    let run = live_run(&a).await;
+    let placed = || {
+        a.mock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::PlaceOrder(_)))
+            .count()
+    };
+    let entry_only = placed();
+    let own = a.ctx.get_broker_session().unwrap();
+    a.ctx.set_broker_session(Some(BrokerSession {
+        user_id: "XY9876".into(),
+        ..own.clone()
+    }));
+    // The short call's stop is 20 points over its 100 entry.
+    a.ctx.strategy.process_tick(ATM_CE, "NFO", 121.0).await;
+    assert_eq!(placed(), entry_only, "no exit through XY9876");
+    let out = a.ctx.strategy.stop_run(run, USER, "manual").await;
+    assert!(!out.ok && out.stop_pending, "{:?}", out);
+    assert!(
+        out.error
+            .as_deref()
+            .is_some_and(|e| e.contains("opened on Zerodha (AB1234)")),
+        "{:?}",
+        out
+    );
+    assert_eq!(placed(), entry_only, "no stop exit through XY9876");
+    assert!(!run_stopped(&a, run), "still open and managed");
+    let sid = a
+        .ctx
+        .strategy
+        .store
+        .get_run(run)
+        .unwrap()
+        .unwrap()
+        .strategy_id;
+    let told = a
+        .ctx
+        .strategy
+        .store
+        .list_events(sid, Some(run), None, Some("critical"), 100)
+        .unwrap();
+    assert_eq!(
+        told.iter()
+            .filter(|e| e["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("signed in to Zerodha (XY9876)")))
+            .count(),
+        1,
+        "told once: {:?}",
+        told
+    );
+
+    a.ctx.set_broker_session(Some(own));
+    let out = a.ctx.strategy.stop_run(run, USER, "manual").await;
+    assert!(out.ok, "{:?}", out);
+    assert_eq!(placed(), entry_only + 1, "the exit went out through AB1234");
+}
+
 /// Row 1: a running Live strategy refuses the switch, named, until it is
 /// stopped.
 #[tokio::test]

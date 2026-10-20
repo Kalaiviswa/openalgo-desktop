@@ -310,6 +310,11 @@ pub trait OrderGateway: Send + Sync {
     fn authorised(&self, mode: RunMode) -> Result<(), String>;
     /// The broker a run is bound to, snapshotted at start.
     fn broker_name(&self, mode: RunMode) -> String;
+    /// The account at that broker (its client id), snapshotted with it
+    /// (LOG-07); blank when not known.
+    fn broker_account(&self, _mode: RunMode) -> String {
+        String::new()
+    }
     /// One account book through the run's pipe: the service's own envelope.
     async fn book(&self, mode: RunMode, book: Book) -> Result<Value, Value>;
     /// A last price for the underlying an ATM strike is measured against.
@@ -540,6 +545,18 @@ impl OrderGateway for AppGateway {
                 .upgrade()
                 .and_then(|c| c.get_broker_session())
                 .map(|s| s.broker_id)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn broker_account(&self, mode: RunMode) -> String {
+        match mode {
+            RunMode::Sandbox => String::new(),
+            RunMode::Live => self
+                .ctx
+                .upgrade()
+                .and_then(|c| c.get_broker_session())
+                .map(|s| s.user_id)
                 .unwrap_or_default(),
         }
     }

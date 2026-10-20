@@ -2542,4 +2542,73 @@ mod approvals {
         );
         trading.shutdown().await;
     }
+
+    /// Another account's session at the same broker, installed directly
+    /// (past the switch guard); answers the run's own session.
+    pub(super) fn switch_account(t: &T) -> openalgo_desktop_lib::state::BrokerSession {
+        let own = t.h.ctx.get_broker_session().unwrap();
+        t.h.ctx
+            .set_broker_session(Some(openalgo_desktop_lib::state::BrokerSession {
+                user_id: "XY9876".into(),
+                ..own.clone()
+            }));
+        own
+    }
+
+    /// LOG-07 defence in depth: a Live run started on Zerodha (AB1234)
+    /// sends nothing through another account's session. The order is
+    /// refused before it is sent, its row says why and the script is told;
+    /// back on its own session the run trades again.
+    #[tokio::test]
+    async fn a_live_run_sends_nothing_through_another_accounts_session() {
+        let (t, mock) = setup_live(false).await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        let own = switch_account(&t);
+        let v = t.buy(&id, 1, 3).await;
+        assert_eq!(v["sent"], 0, "{}", v);
+        assert!(placed(&mock).is_empty(), "nothing sent through XY9876");
+        let (row, status, _, _) = held_row(&t);
+        assert_eq!(status, "rejected");
+        let why = t.row_message(row).unwrap_or_default();
+        assert!(why.contains("opened on Zerodha (AB1234)"), "{}", why);
+        let frames = t.frames(&id, 1).await;
+        assert_eq!(frames.last().unwrap()["status"], "rejected");
+
+        t.h.ctx.set_broker_session(Some(own));
+        assert_eq!(t.buy(&id, 2, 3).await["sent"], 1);
+        assert_eq!(placed(&mock), vec![("BUY".to_string(), 3)]);
+    }
+
+    /// LOG-07: an order a Live run queued in the Action Center while
+    /// Zerodha (AB1234) was connected is not sent when it is approved under
+    /// another account's session: refused, nothing sent, and the run's row
+    /// is rejected.
+    #[tokio::test]
+    async fn an_approval_under_another_accounts_session_sends_nothing() {
+        let (t, mock) = setup_live(true).await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        t.buy(&id, 1, 3).await;
+        let (row, _, _, pending) = held_row(&t);
+        switch_account(&t);
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/approve/{}", pending.unwrap()),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{}", v);
+        assert!(
+            v["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("opened on Zerodha (AB1234)")),
+            "{}",
+            v
+        );
+        assert!(placed(&mock).is_empty(), "nothing sent through XY9876");
+        t.h.ctx.trading.runner.pump_once(&id).await;
+        assert_eq!(t.row_status(row).0, "rejected");
+    }
 }

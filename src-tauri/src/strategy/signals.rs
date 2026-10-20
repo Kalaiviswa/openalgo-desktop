@@ -27,6 +27,7 @@ use super::resolver::is_derivative_exchange;
 use super::state::ClaimId;
 use super::store::{EventFields, StrategyRow};
 use super::StrategyModule;
+use crate::services::live_owner::LiveOwner;
 use chrono::NaiveTime;
 use chrono_tz::Asia::Kolkata;
 use serde_json::Value;
@@ -302,10 +303,11 @@ impl StrategyModule {
                 b
             }
         };
+        let owner = LiveOwner::new(broker, self.gateway.broker_account(mode));
         let run_id =
             match self
                 .store
-                .create_run(strategy.id, mode.as_str(), &broker, "webhook", None, None)
+                .create_run(strategy.id, mode.as_str(), &owner, "webhook", None, None)
             {
                 Ok(id) => id,
                 Err(e) => {

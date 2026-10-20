@@ -150,7 +150,7 @@ impl StrategyModule {
     ) -> Result<(), (String, Option<ClaimId>)> {
         let mut claim = ClaimId::Token(exit.claim_token.to_string());
         let mode = self.run_mode(run_id);
-        if let Err(e) = self.gateway.authorised(mode) {
+        if let Err(e) = self.authorised_for(run_id, mode) {
             return Err((e, Some(claim)));
         }
         let action = exit_action(exit.position).map_err(|e| (e, Some(claim.clone())))?;
@@ -168,7 +168,7 @@ impl StrategyModule {
             .await
             .map_err(|e| (e, Some(claim.clone())))?;
         claim = ClaimId::Row(row_id);
-        let result = self.gateway.place(mode, &order).await;
+        let result = self.place_for_run(run_id, mode, &order).await;
         self.record_acknowledgement(
             row_id,
             &result,

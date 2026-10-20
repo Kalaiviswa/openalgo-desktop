@@ -172,6 +172,8 @@ pub struct RunInfo {
     /// Open orders of this run with no number from the destination, which
     /// it cannot follow (a Stop does not go ahead while there are any).
     pub unresolved_orders: usize,
+    /// The broker session a Live run started on; its orders go nowhere else.
+    pub owner: Option<crate::services::live_owner::LiveOwner>,
 }
 
 impl RunInfo {
@@ -573,10 +575,7 @@ impl Runner {
         internal: bool,
     ) -> Result<(i64, crate::strategy::dispatch::DispatchResult), String> {
         let row_id = self.record_sent(info, target, p, internal)?;
-        let result = self
-            .services()
-            .place(info.mode, &target.request(p), internal)
-            .await;
+        let result = self.dispatch(info, &target.request(p), internal).await;
         let status = sending::row_status(&result);
         let ack = Unsaved {
             row_id,

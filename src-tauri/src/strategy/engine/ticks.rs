@@ -331,6 +331,24 @@ impl StrategyModule {
             }
             return;
         }
+        if let Some(why) = self.owner_refusal(run_id, mode) {
+            // LOG-07: the session is another broker or account than the
+            // run's; its exits are not sent there. Said once per episode.
+            if self.claim_unactionable(run_id) {
+                self.emit(
+                    strategy_id,
+                    &user_id,
+                    "leg_exit_rejected",
+                    &format!(
+                        "Risk triggered, but nothing was exited. {} Positions are still open.",
+                        why
+                    ),
+                    ev(Some(run_id), None, "critical"),
+                )
+                .await;
+            }
+            return;
+        }
         self.note_actionable_again(strategy_id, &user_id, run_id)
             .await;
         for (leg_id, kind) in leg_exits {

@@ -43,6 +43,7 @@ pub use management::{
     migrate_revision, ClaimOutcome, StartClaim, ALREADY_RUNNING, CHANGED_WHILE_EDITING,
     CHANGED_WHILE_STARTING, LIVE_NOT_ENABLED, WEBHOOK_LOCKED,
 };
+pub use runs::migrate_run_account;
 pub use webhook_audit::WebhookEvent;
 
 pub const WEBHOOK_TOKEN_PREFIX: &str = "oaws_";
@@ -566,11 +567,14 @@ pub struct RunRow {
     pub trigger_source: String,
     pub webhook_event_id: Option<i64>,
     pub resolved_expiries: Value,
+    /// The account at `broker` the run was opened on (LOG-07); blank when
+    /// not known.
+    pub broker_account: String,
 }
 
 const RUN_COLS: &str = "id, strategy_id, mode, broker, started_at, stopped_at, stop_reason, \
     stop_requested_at, stop_requested_reason, pnl_realized, pnl_peak, pnl_trough, trigger_source, \
-    webhook_event_id, resolved_expiries";
+    webhook_event_id, resolved_expiries, broker_account";
 
 fn run_from(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     Ok(RunRow {
@@ -589,6 +593,7 @@ fn run_from(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         trigger_source: r.get(12)?,
         webhook_event_id: r.get(13)?,
         resolved_expiries: read_json(r.get(14)?),
+        broker_account: r.get(15)?,
     })
 }
 

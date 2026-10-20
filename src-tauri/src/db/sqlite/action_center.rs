@@ -95,6 +95,21 @@ pub fn migrate_force_live(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration `092_pending_orders_owner` (LOG-07): the broker and account an
+/// order queued for a live destination was queued on, so its approval is
+/// sent through no other session. Checks before altering.
+pub fn migrate_owner(conn: &Connection) -> Result<()> {
+    for column in ["broker", "broker_account"] {
+        if !super::migrations::column_exists(conn, "pending_orders", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE pending_orders ADD COLUMN {} TEXT",
+                column
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingOrderRow {
     pub id: i64,
@@ -114,11 +129,14 @@ pub struct PendingOrderRow {
     pub broker_status: Option<String>,
     /// Sent to the live broker on approval whatever analyzer mode says then.
     pub force_live: bool,
+    /// The broker and account a live-destined order was queued on (LOG-07).
+    pub broker: Option<String>,
+    pub broker_account: Option<String>,
 }
 
 const COLS: &str = "id, user_id, api_type, order_data, created_at, created_at_ist, status, \
     approved_at, approved_at_ist, approved_by, rejected_at_ist, rejected_by, rejected_reason, \
-    broker_order_id, broker_status, force_live";
+    broker_order_id, broker_status, force_live, broker, broker_account";
 
 fn map(r: &Row) -> rusqlite::Result<PendingOrderRow> {
     Ok(PendingOrderRow {
@@ -138,6 +156,8 @@ fn map(r: &Row) -> rusqlite::Result<PendingOrderRow> {
         broker_order_id: r.get(13)?,
         broker_status: r.get(14)?,
         force_live: r.get(15)?,
+        broker: r.get(16)?,
+        broker_account: r.get(17)?,
     })
 }
 
@@ -153,25 +173,39 @@ pub fn ist_text(now: DateTime<Utc>) -> String {
         .to_string()
 }
 
+/// Where an approved order goes, as the caller that queued it decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Destination<'a> {
+    /// The live broker whatever analyzer mode says at approval
+    /// (`Route::force_live`).
+    pub force_live: bool,
+    /// The broker and account of the session a live order was queued on;
+    /// its approval goes through no other (LOG-07).
+    pub owner: Option<(&'a str, &'a str)>,
+}
+
+/// Queue one order for approval.
 pub fn create(
     conn: &Connection,
     user_id: &str,
     api_type: &str,
     order_data: &str,
-    force_live: bool,
+    dest: Destination<'_>,
     now: DateTime<Utc>,
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO pending_orders (user_id, api_type, order_data, created_at, created_at_ist,
-                status, force_live)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+                status, force_live, broker, broker_account)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
         params![
             user_id,
             api_type,
             order_data,
             utc_text(now),
             ist_text(now),
-            force_live
+            dest.force_live,
+            dest.owner.map(|o| o.0),
+            dest.owner.map(|o| o.1)
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -298,6 +332,7 @@ mod tests {
             .unwrap();
         migrate(&c).unwrap();
         migrate_force_live(&c).unwrap();
+        migrate_owner(&c).unwrap();
         c
     }
 
@@ -308,7 +343,7 @@ mod tests {
     #[test]
     fn transitions_are_compare_and_set() {
         let c = db();
-        let id = create(&c, "u", "placeorder", "{}", false, now()).unwrap();
+        let id = create(&c, "u", "placeorder", "{}", Destination::default(), now()).unwrap();
         assert_eq!(pending_count(&c, "u").unwrap(), 1);
         assert!(
             !delete(&c, id, "u").unwrap(),
@@ -351,6 +386,7 @@ mod tests {
         migrate(&c).unwrap();
         migrate(&c).unwrap();
         migrate_force_live(&c).unwrap();
+        migrate_owner(&c).unwrap();
         let rows = list(&c, "trader", None).unwrap();
         assert_eq!(rows.len(), 1);
         let data: serde_json::Value = serde_json::from_str(&rows[0].order_data).unwrap();

@@ -7,8 +7,9 @@ use super::{
     LegPosition, RiskMonitor, BOOK_LAG_GRACE_MS, SCALPING_STRATEGY, SL_UPDATE_EVENT,
 };
 use crate::risk::BreachReason;
-use crate::scalping::store::SlState;
-use crate::strategy::dispatch::{DispatchResult, OrderPayload};
+use crate::scalping::store::{SlState, MODE_LIVE};
+use crate::services::live_owner::LiveOwner;
+use crate::strategy::dispatch::{DispatchResult, OrderPayload, RunMode};
 use crate::strategy::tick_feed::Key;
 use serde_json::json;
 use std::sync::Arc;
@@ -325,18 +326,46 @@ impl RiskMonitor {
         );
     }
 
+    /// Why this leg's exit cannot be attempted now, before anything is read
+    /// or sent: no session for its side, a Live stop set on another session
+    /// (LOG-07), or exit orders sent earlier that could not be read back.
+    fn exit_blocked(&self, key: &str, sl: &SlState, mode: RunMode) -> Option<String> {
+        if let Err(e) = self.gateway.authorised(mode) {
+            return Some(e);
+        }
+        if let Some(why) = self.owner_refusal(key, sl) {
+            return Some(why);
+        }
+        self.inner.lock().broken.contains(key).then(|| {
+            "The exit orders sent earlier for this stop could not be read back".to_string()
+        })
+    }
+
+    /// LOG-07: a Live stop set on another broker or account than the session
+    /// connected now is not exited through it; nothing is read or sent, the
+    /// stop stays, and the trader is told once.
+    fn owner_refusal(&self, key: &str, sl: &SlState) -> Option<String> {
+        if sl.mode != MODE_LIVE {
+            return None;
+        }
+        let why = sl
+            .owner
+            .refusal(LiveOwner::active(self.gateway.as_ref()).as_ref())?;
+        self.alert_once(
+            key,
+            "owner",
+            format!("Scalping stop for {}: {}", sl.symbol, why),
+        );
+        Some(why)
+    }
+
     /// Exit one leg in the mode it was opened in: read its net position,
     /// then send whole-lot, freeze-safe MARKET orders for what is neither
     /// filled nor still working from earlier exits of this leg.
     pub async fn execute_exit(&self, key: &str, gen: Gen, sl: &SlState) -> ExitOutcome {
         let mode = run_mode(&sl.mode);
-        if let Err(e) = self.gateway.authorised(mode) {
-            return ExitOutcome::Refused(e);
-        }
-        if self.inner.lock().broken.contains(key) {
-            return ExitOutcome::Refused(
-                "The exit orders sent earlier for this stop could not be read back".into(),
-            );
+        if let Some(why) = self.exit_blocked(key, sl, mode) {
+            return ExitOutcome::Refused(why);
         }
         let known = self.inner.lock().attempts.get(key).cloned();
         let (pos, flat) = match self.read_leg(mode, sl, known.as_ref()).await {

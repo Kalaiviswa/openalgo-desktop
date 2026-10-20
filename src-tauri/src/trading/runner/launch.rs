@@ -142,6 +142,9 @@ impl Runner {
             close_pending: false,
             unsaved_orders: 0,
             unresolved_orders: 0,
+            owner: (mode == RunMode::Live)
+                .then(|| self.services().live_owner())
+                .flatten(),
         };
         let entry = self.new_entry(&info);
         self.write_log(

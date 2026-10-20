@@ -17,6 +17,7 @@
 //! run), which goes to the live broker (LOG-04).
 
 use super::core::{publish, s, Reply};
+use super::live_owner::LiveOwner;
 use super::order_service::Route;
 use crate::db::sqlite::action_center::{self as store, PendingOrderRow, NO_ACTION, SUBMITTING};
 use crate::events::Event;
@@ -435,6 +436,11 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
         mark(ctx, id, None, "rejected");
         return Execution::fail(403, "Authentication failed");
     }
+    if let Some(why) = owner_refusal(ctx, &row) {
+        tracing::warn!("Pending order {} not sent: {}", id, why);
+        mark(ctx, id, None, "rejected");
+        return Execution::fail(403, &why);
+    }
     tracing::info!("Executing approved order {} ({})", id, row.api_type);
     let Some(reply) = dispatch(ctx, &row, &data).await else {
         mark(ctx, id, None, "rejected");
@@ -482,6 +488,14 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
     };
     mark(ctx, id, None, last);
     ex
+}
+
+/// LOG-07: an order a Live run queued goes only through the broker session
+/// it was queued on; through any other it is refused, nothing sent.
+fn owner_refusal(ctx: &AppState, row: &PendingOrderRow) -> Option<String> {
+    let broker = row.broker.as_deref()?;
+    LiveOwner::new(broker, row.broker_account.as_deref().unwrap_or_default())
+        .refusal(LiveOwner::of_session(ctx).as_ref())
 }
 
 /// Read an approved order and claim it, before anything can reach the
@@ -903,6 +917,8 @@ mod tests {
             broker_order_id: None,
             broker_status: None,
             force_live: false,
+            broker: None,
+            broker_account: None,
         }
     }
 

@@ -50,6 +50,7 @@ pub mod history_tools_service;
 pub mod latency_probe;
 pub mod latency_service;
 pub mod lifecycle;
+pub mod live_owner;
 pub mod market_calendar_service;
 pub mod market_data_service;
 pub mod master_contract_service;

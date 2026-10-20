@@ -4,6 +4,7 @@
 use super::{
     ev, leg_id_of, rejection_summary, StartResult, StrategyModule, ORDER_UNCONFIRMED, UNCONFIRMED,
 };
+use crate::services::live_owner::LiveOwner;
 use crate::strategy::dispatch::{build_order, entry_action, DispatchResult, OrderPayload, RunMode};
 use crate::strategy::resolver::{resolve_leg, Failure};
 use crate::strategy::start_claim::START_READ_FAILED;
@@ -134,7 +135,7 @@ impl StrategyModule {
         let run_id = match self.store.create_run(
             strategy_id,
             mode,
-            &self.gateway.broker_name(run_mode),
+            &LiveOwner::of_gateway(self.gateway.as_ref(), run_mode),
             trigger_source,
             webhook_event_id,
             Some(&Value::Object(expiries)),
@@ -394,7 +395,7 @@ impl StrategyModule {
                 }
             };
 
-            let result = self.gateway.place(mode, &order).await;
+            let result = self.place_for_run(run_id, mode, &order).await;
             let acknowledged = self
                 .record_acknowledgement(row_id, &result, strategy.id, user_id, run_id, leg.leg_id)
                 .await;

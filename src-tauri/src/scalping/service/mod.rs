@@ -12,6 +12,7 @@ use super::monitor::LEG_EXCHANGES;
 use super::store::{SlUpsert, MODE_ANALYZE, MODE_LIVE};
 use crate::brokers::common::symbols::SymToken;
 use crate::services::core::{analyze_mode, broker_handle, Reply};
+use crate::services::live_owner::LiveOwner;
 use crate::state::AppState;
 use chrono::{NaiveDate, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
@@ -658,16 +659,21 @@ pub fn upsert_sl(ctx: &AppState, body: &Map<String, Value>) -> Reply {
     if !(0..=MAX_ORDER_QUANTITY).contains(&quantity) {
         return err(400, "quantity out of range");
     }
+    let mode = match current_mode(ctx) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     let mut u = SlUpsert {
         symbol,
         exchange,
         product,
-        mode: match current_mode(ctx) {
-            Ok(m) => m.to_string(),
-            Err(r) => return r,
-        },
+        mode: mode.to_string(),
         side: Some(side),
         quantity: Some(quantity),
+        // LOG-07: a Live stop exits only through the session it is set on.
+        owner: (mode == MODE_LIVE)
+            .then(|| LiveOwner::of_session(ctx))
+            .flatten(),
         ..Default::default()
     };
     for field in SL_PRICE_FIELDS {

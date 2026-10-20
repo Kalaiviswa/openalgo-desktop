@@ -11,6 +11,7 @@
 
 use crate::db::sqlite::SqliteDb;
 use crate::error::Result;
+use crate::services::live_owner::LiveOwner;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -85,6 +86,21 @@ pub fn migrate_exit_attempts(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration `091_scalping_stop_owner` (LOG-07): the broker and account a
+/// Live stop was set on, so its exit goes nowhere else. Checks before
+/// altering; stops set before it have none and are not compared.
+pub fn migrate_stop_owner(conn: &Connection) -> Result<()> {
+    for column in ["broker", "broker_account"] {
+        if !crate::db::sqlite::migrations::column_exists(conn, "scalping_sl_state", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE scalping_sl_state ADD COLUMN {} TEXT NOT NULL DEFAULT ''",
+                column
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 /// One managed leg (the web's `_to_dict`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlState {
@@ -109,6 +125,8 @@ pub struct SlState {
     pub version: i64,
     /// The exit attempt in flight, as stored (JSON).
     pub exit_attempt: Option<String>,
+    /// The broker session a Live stop was set on (LOG-07).
+    pub owner: LiveOwner,
 }
 
 impl SlState {
@@ -154,6 +172,10 @@ impl SlState {
             id: r.get("id")?,
             version: r.get::<_, Option<i64>>("version")?.unwrap_or(0),
             exit_attempt: r.get("exit_attempt")?,
+            owner: LiveOwner::new(
+                r.get::<_, String>("broker")?,
+                r.get::<_, String>("broker_account")?,
+            ),
         })
     }
 }
@@ -177,6 +199,8 @@ pub struct SlUpsert {
     pub current_sl: Option<f64>,
     pub target: Option<f64>,
     pub is_active: Option<bool>,
+    /// The broker session a Live stop is set on (left as it is when `None`).
+    pub owner: Option<LiveOwner>,
 }
 
 /// One instrument on the scalping list.
@@ -201,7 +225,7 @@ impl Tracked {
 
 const SL_COLUMNS: &str = "symbol, exchange, product, mode, side, entry_price, quantity, \
      initial_sl, trailing_enabled, trailing_step, highest_price, lowest_price, current_sl, \
-     target, is_active, id, version, exit_attempt";
+     target, is_active, id, version, exit_attempt, broker, broker_account";
 
 #[derive(Clone)]
 pub struct Store {
@@ -249,6 +273,8 @@ impl Store {
                 current_sl = COALESCE(?10, current_sl),
                 target = COALESCE(?11, target),
                 is_active = COALESCE(?12, is_active),
+                broker = COALESCE(?13, broker),
+                broker_account = COALESCE(?14, broker_account),
                 version = version + 1,
                 updated_at = datetime('now')
              WHERE id = ?1",
@@ -265,6 +291,8 @@ impl Store {
                 u.current_sl,
                 u.target,
                 u.is_active,
+                u.owner.as_ref().map(|o| o.broker.as_str()),
+                u.owner.as_ref().map(|o| o.account.as_str()),
             ],
         )?;
         let row = tx.query_row(

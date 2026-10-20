@@ -130,7 +130,14 @@ async fn recovery_releases_an_empty_claim_when_a_process_dies_before_run_linkage
     );
     let run =
         t.m.store
-            .create_run(sid, "sandbox", "sandbox", "manual", None, None)
+            .create_run(
+                sid,
+                "sandbox",
+                &openalgo_desktop_lib::services::live_owner::LiveOwner::new("sandbox", ""),
+                "manual",
+                None,
+                None,
+            )
             .unwrap();
     let r = recover_run(&t.m, run).await;
     assert!(r.finalised);

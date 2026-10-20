@@ -3,28 +3,44 @@
 
 use super::{json_col, round_to, run_from, ts, RunRow, Store, RUN_COLS};
 use crate::error::Result;
+use crate::services::live_owner::LiveOwner;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 
+/// Migration `090_strategy_run_account` (LOG-07): the account at the broker
+/// a run was opened on, beside its broker. Checks before altering; runs
+/// opened before it have none, and are compared on their broker alone.
+pub fn migrate_run_account(conn: &Connection) -> Result<()> {
+    if !crate::db::sqlite::migrations::column_exists(conn, "sm_strategy_run", "broker_account")? {
+        conn.execute_batch(
+            "ALTER TABLE sm_strategy_run ADD COLUMN broker_account TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
+    /// A new run, with the broker session it is opened on (`owner`).
     pub fn create_run(
         &self,
         strategy_id: i64,
         mode: &str,
-        broker: &str,
+        owner: &LiveOwner,
         trigger_source: &str,
         webhook_event_id: Option<i64>,
         resolved_expiries: Option<&Value>,
     ) -> Result<i64> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO sm_strategy_run (strategy_id, mode, broker, started_at, trigger_source, \
-             webhook_event_id, resolved_expiries) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO sm_strategy_run (strategy_id, mode, broker, broker_account, started_at, \
+             trigger_source, webhook_event_id, resolved_expiries) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 strategy_id,
                 mode,
-                broker,
+                owner.broker,
+                owner.account,
                 self.utcnow(),
                 trigger_source,
                 webhook_event_id,

@@ -143,7 +143,7 @@ impl StrategyModule {
         claim: &crate::strategy::state::EntryClaim,
     ) -> Result<(), String> {
         let mode = self.run_mode(run_id);
-        self.gateway.authorised(mode)?;
+        self.authorised_for(run_id, mode)?;
         let action = entry_action(&spec.position);
         let order = build_order(
             &spec.symbol,
@@ -178,7 +178,7 @@ impl StrategyModule {
         }
         let symbols = vec![(spec.symbol.clone(), spec.exchange.clone())];
         self.feed.add_run(run_id, &symbols).await;
-        let result = self.gateway.place(mode, &order).await;
+        let result = self.place_for_run(run_id, mode, &order).await;
         self.record_acknowledgement(
             row_id,
             &result,
