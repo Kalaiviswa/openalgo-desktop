@@ -91,18 +91,22 @@ pub fn begin_incarnation(
     Ok(conn.last_insert_rowid())
 }
 
-/// The row one intent of one run became, if it became one.
+/// The row one intent of one run of `deployment` became, if it became
+/// one. A run of another deployment finds nothing: a page is answered only
+/// about its own deployment's orders, whatever number it names.
 pub fn order_of_intent(
     conn: &Connection,
+    deployment: &str,
     incarnation: i64,
     intent_id: i64,
 ) -> Result<Option<OrderRow>> {
     let mut st = conn.prepare_cached(&format!(
-        "SELECT {} FROM openscript_orders WHERE incarnation = ?1 AND intent_id = ?2",
+        "SELECT {} FROM openscript_orders
+         WHERE deployment = ?1 AND incarnation = ?2 AND intent_id = ?3",
         ORDER_COLUMNS
     ))?;
     Ok(st
-        .query_row(params![incarnation, intent_id], order_from_row)
+        .query_row(params![deployment, incarnation, intent_id], order_from_row)
         .optional()?)
 }
 
@@ -197,10 +201,14 @@ mod tests {
             ..order.clone()
         };
         insert_order(&c, &other_run, now()).unwrap();
-        let found = order_of_intent(&c, run, 1).unwrap().unwrap();
+        let found = order_of_intent(&c, "d", run, 1).unwrap().unwrap();
         assert_eq!(found.id, id);
         assert_eq!(found.destination(), Some(zerodha));
-        assert!(order_of_intent(&c, run, 2).unwrap().is_none());
+        assert!(order_of_intent(&c, "d", run, 2).unwrap().is_none());
+        assert!(
+            order_of_intent(&c, "other", run, 1).unwrap().is_none(),
+            "another deployment's page finds nothing"
+        );
     }
 
     /// A Live row with no recorded broker is adopted once, by the session

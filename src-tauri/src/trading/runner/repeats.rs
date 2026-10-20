@@ -14,7 +14,8 @@
 //!
 //! A batch naming another incarnation (a page of an earlier run, a request
 //! replayed after a restart) places nothing: each intent is answered from
-//! its record, or as not sent.
+//! its record, or as not sent. Records are read only within the page's own
+//! deployment: naming another deployment's run number reads none of it.
 
 use super::inbox::Message;
 use super::{orders, store, RunEntry, Runner};
@@ -97,10 +98,11 @@ impl Runner {
                 fresh.push(intent.clone());
                 continue;
             };
-            let row = store::order_of_intent(&conn, entry.info.incarnation, id).map_err(|e| {
-                tracing::error!("Could not read the orders of {}: {}", entry.info.run_id, e);
-                RECORDS_UNREADABLE.to_string()
-            })?;
+            let row = store::order_of_intent(&conn, &entry.info.run_id, entry.info.incarnation, id)
+                .map_err(|e| {
+                    tracing::error!("Could not read the orders of {}: {}", entry.info.run_id, e);
+                    RECORDS_UNREADABLE.to_string()
+                })?;
             if let Some(row) = row {
                 self.frame_to_page(entry, &row, row_frame(&row, now_ms));
                 repeated.push(id.to_string());
@@ -151,7 +153,9 @@ impl Runner {
         let mut outcomes = Vec::with_capacity(intents.len());
         for intent in intents {
             let id = intent_id(intent).unwrap_or(-1);
-            let row = match store::order_of_intent(&conn, incarnation, id) {
+            // Scoped to this page's deployment: another deployment's run
+            // number finds nothing and is answered "not sent".
+            let row = match store::order_of_intent(&conn, &entry.info.run_id, incarnation, id) {
                 Ok(row) => row,
                 Err(e) => {
                     tracing::error!("Could not read the orders of {}: {}", entry.info.run_id, e);

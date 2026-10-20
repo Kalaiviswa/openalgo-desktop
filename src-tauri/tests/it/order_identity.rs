@@ -224,12 +224,20 @@ impl Two {
 
     /// Save the script and deploy it on SBIN; answers the deployment.
     async fn deploy(&self) -> String {
-        let source = "version 1\nstrategy(\"t\", qty = 1)\nif close > open\n    buy()\n";
-        let program = json!({"source": {"hash": source_hash(source)}}).to_string();
+        self.deploy_script("t").await
+    }
+
+    /// [`Self::deploy`] for the script `name`.oscript.
+    async fn deploy_script(&self, name: &str) -> String {
+        let source = format!(
+            "version 1\nstrategy(\"{}\", qty = 1)\nif close > open\n    buy()\n",
+            name
+        );
+        let program = json!({"source": {"hash": source_hash(&source)}}).to_string();
         let (s, _) = self
             .call(
                 Method::POST,
-                "/openscript/t.oscript",
+                &format!("/openscript/{}.oscript", name),
                 Some(json!({"source": source, "program": program})),
             )
             .await;
@@ -237,7 +245,7 @@ impl Two {
         let (s, v) = self
             .call(
                 Method::POST,
-                "/openscript/runner/config/t.oscript",
+                &format!("/openscript/runner/config/{}.oscript", name),
                 Some(
                     json!({"symbol": SBIN, "exchange": "NSE", "interval": "1m", "product": "MIS"}),
                 ),
@@ -832,7 +840,10 @@ async fn a_held_order_sent_again_is_held_once_and_its_partial_fill_closed_exactl
     let again = t.buy(&id, run, 1, 3).await;
     assert_eq!(again["repeated"], 1, "{}", again);
     let last = t.frames(&id, 1).await.last().cloned().unwrap();
-    assert_eq!(last["status"], "placed", "held is pending, not an acceptance");
+    assert_eq!(
+        last["status"], "placed",
+        "held is pending, not an acceptance"
+    );
     let (pending, held): (i64, i64) = t
         .h
         .ctx
@@ -981,4 +992,30 @@ async fn an_unsaved_answer_then_a_crash_and_reopen_place_exactly_once() {
     runner.close(&id).await.unwrap();
     assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3), ("SELL", 3)]));
     reopened.shutdown().await;
+}
+
+/// Security review of #165: a page that names another deployment's run
+/// number with a real intent id is answered "not sent" and reads none of
+/// that deployment's orders. Before, the lookup took the run number alone
+/// and handed back the other deployment's order (its number and status).
+#[tokio::test]
+async fn a_page_naming_another_deployments_run_reads_none_of_its_orders() {
+    let t = two_accounts(false).await;
+    let mine = t.deploy_script("t").await;
+    let theirs = t.deploy_script("u").await;
+    t.start(&mine).await;
+    let their_run = t.start(&theirs).await;
+    assert_eq!(t.buy(&theirs, their_run, 1, 3).await["sent"], 1);
+    let (s, v) = t.post(&mine, their_run, json!([buy(1, 3)])).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(v["stale"], true, "{}", v);
+    let outcome = &v["outcomes"][0];
+    assert_eq!(outcome["status"], "rejected", "{}", v);
+    assert!(outcome["orderRef"].is_null(), "no order of theirs: {}", v);
+    assert_eq!(outcome["filledQty"], 0);
+    assert_eq!(
+        placed(&t.zerodha),
+        pairs(&[("BUY", 3)]),
+        "nothing placed for it"
+    );
 }
