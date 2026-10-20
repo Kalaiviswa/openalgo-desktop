@@ -13,3 +13,21 @@ describe('FAQ system requirements', () => {
     )
   })
 })
+
+describe('FAQ security answer', () => {
+  // NEW-SEC-03: the answer describes the same transport as Server Settings'
+  // warning (plain http on this computer, unencrypted to other devices,
+  // https only through a tunnel), not "HTTPS for all communications".
+  it('says which links are encrypted and which are not', async () => {
+    render(<Faq />)
+    await userEvent.click(screen.getByRole('button', { name: 'How secure is OpenAlgo?' }))
+    const answer = await screen.findByText(/^OpenAlgo Desktop keeps your broker credentials/)
+    expect(answer).not.toHaveTextContent(/HTTPS for all communications/i)
+    expect(answer).toHaveTextContent('plain http and ws on this computer (127.0.0.1)')
+    expect(answer).toHaveTextContent("broker's own secure (https and wss) addresses")
+    expect(answer).toHaveTextContent(
+      'If you allow access from other devices in Server Settings, that traffic is not encrypted'
+    )
+    expect(answer).toHaveTextContent('reach OpenAlgo through a tunnel with https')
+  })
+})

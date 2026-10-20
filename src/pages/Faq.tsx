@@ -69,7 +69,10 @@ const faqData = [
       {
         question: 'How secure is OpenAlgo?',
         answer:
-          'Security is a top priority. OpenAlgo stores API credentials locally on your machine with encryption. It uses HTTPS for all communications, implements CSRF protection, rate limiting, and secure session management. Since it runs on your own infrastructure, you have complete control over your data. We recommend using strong passwords and enabling 2FA where available.',
+          // Desktop: the web's answer said "HTTPS for all communications"; the
+          // desktop serves plain HTTP and WebSocket, so it says which link is
+          // encrypted and which is not, as Server Settings does (NEW-SEC-03).
+          "OpenAlgo Desktop keeps your broker credentials, API key and two-factor secret encrypted on your computer, locked with your OpenAlgo password. Its connections to your broker use the broker's own secure (https and wss) addresses. The app itself serves your browser and your tools over plain http and ws on this computer (127.0.0.1), which never leaves the machine. If you allow access from other devices in Server Settings, that traffic is not encrypted: use it only on a network you trust, or reach OpenAlgo through a tunnel with https. It also uses CSRF protection, rate limiting and secure sessions. Use a strong password and turn on two-factor login.",
       },
       {
         question: 'Why do I need to login daily?',
