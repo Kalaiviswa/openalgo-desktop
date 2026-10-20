@@ -186,6 +186,10 @@ custom-protocol = ["tauri/custom-protocol"]
 runner-window = []
 # Exposes brokers::mock (MockBroker, MockFeed) to integration test crates.
 test-support = []
+# CI's Windows native E2E only: the main window's WebView2 opens a debugging
+# port (src/e2e.rs). Does not build without OPENALGO_E2E_BUILD=1 outside a
+# debug build (build.rs); never in a release.
+e2e-debug-port = []
 
 [profile.release]
 panic = "abort"

@@ -28,6 +28,18 @@ pub mod clock;
 pub mod commands;
 pub mod config;
 pub mod db;
+// CI's Windows native E2E build only; see src/e2e.rs. The feature does not
+// build outside a debug build unless build.rs saw OPENALGO_E2E_BUILD=1.
+#[cfg(all(
+    feature = "e2e-debug-port",
+    not(any(e2e_build_allowed, debug_assertions))
+))]
+compile_error!(
+    "The e2e-debug-port feature opens a WebView2 debugging port and is only for CI's Windows \
+     native E2E: build it with OPENALGO_E2E_BUILD=1, never for a release."
+);
+#[cfg(all(windows, feature = "e2e-debug-port"))]
+mod e2e;
 pub mod error;
 pub mod events;
 pub mod feed;
@@ -241,7 +253,14 @@ fn main_window_url(ctx: &AppState, server_running: bool) -> WebviewUrl {
 /// left cannot be taken back, so no page on it may load here.
 fn open_main_window(app: &tauri::App, ctx: &Arc<AppState>, url: WebviewUrl) -> tauri::Result<()> {
     let live = Arc::downgrade(ctx);
-    WebviewWindowBuilder::new(app, "main", url)
+    let builder = WebviewWindowBuilder::new(app, "main", url);
+    // CI's Windows native E2E build only (src/e2e.rs).
+    #[cfg(all(windows, feature = "e2e-debug-port"))]
+    let builder = match e2e::debug_port() {
+        Some(port) => builder.additional_browser_args(&e2e::browser_args(port)),
+        None => builder,
+    };
+    builder
         .on_navigation(move |to| {
             let port = live.upgrade().map(|c| c.live_port());
             let ok =

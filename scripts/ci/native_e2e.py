@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """End-to-end through the installed app's own window, by WebDriver.
 
-    python3 scripts/ci/native_e2e.py <installed app binary>
+    python3 scripts/ci/native_e2e.py <app binary>
 
-CI only (.github/workflows/native-e2e.yml): the app binds the shipped ports
-5000 and 8765 and tauri-driver binds 4444. Needs `tauri-driver` on PATH,
-WebKitWebDriver (Linux) and `selenium`. Windows needs a test build of the
-app first (see the workflow); macOS has no WebDriver for WKWebView.
+CI only: the app binds the shipped ports 5000 and 8765 and the WebDriver
+server binds 4444. macOS has no WebDriver for WKWebView.
+
+- Linux (.github/workflows/native-e2e.yml): the installed .deb, started by
+  `tauri-driver` (on PATH) with WebKitWebDriver.
+- Windows (.github/workflows/native-e2e-windows.yml): the e2e-debug-port
+  test build (src-tauri/src/e2e.rs), never a release. MSEDGEDRIVER names
+  the msedgedriver of the installed WebView2's version. The script picks a
+  free port, starts the app with OPENALGO_E2E_DEBUG_PORT set to it, checks
+  the webview's debugging server listens on 127.0.0.1 only, and attaches
+  msedgedriver to it (debuggerAddress).
 
 Unlike the Playwright suite (a browser against `vite preview` with stubbed
 answers), this drives the native webview of the installed release build,
@@ -36,6 +43,27 @@ import urllib.request
 BASE = "http://127.0.0.1:5000"
 DRIVER_URL = "http://127.0.0.1:4444"
 WAIT_S = 60
+
+
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def listen_addresses(port: int) -> set[str]:
+    """Local addresses something listens on at `port` (Windows netstat)."""
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=30).stdout
+    found = set()
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 4 and cols[0] == "TCP" and cols[3] == "LISTENING":
+            addr, _, p = cols[1].rpartition(":")
+            if p == str(port):
+                found.add(addr)
+    return found
 
 
 def fresh_env(home: str) -> dict[str, str]:
@@ -76,16 +104,38 @@ def main(argv: list[str]) -> int:
     home = tempfile.mkdtemp(prefix="openalgo-e2e-")
     log_path = os.path.join(home, "driver-and-app.log")
     log = open(log_path, "wb")
-    # tauri-driver starts the app (and the platform's WebDriver) itself.
-    driver_proc = subprocess.Popen(["tauri-driver"], env=fresh_env(home), stdout=log, stderr=subprocess.STDOUT)
+    edge = os.environ.get("MSEDGEDRIVER")
+    app_proc = None
+    if edge:
+        # Windows: the test build opens its webview's debugging port on the
+        # port it is given; msedgedriver attaches to it. The runner's own
+        # profile is kept (the runner is fresh).
+        port = free_port()
+        app_env = {k: v for k, v in os.environ.items() if not k.startswith("OPENALGO")}
+        app_env["OPENALGO_E2E_DEBUG_PORT"] = str(port)
+        app_proc = subprocess.Popen([app], env=app_env, stdout=log, stderr=subprocess.STDOUT)
+        driver_proc = subprocess.Popen([edge, "--port=4444"], stdout=log, stderr=subprocess.STDOUT)
+    else:
+        # tauri-driver starts the app (and the platform's WebDriver) itself.
+        driver_proc = subprocess.Popen(["tauri-driver"], env=fresh_env(home), stdout=log, stderr=subprocess.STDOUT)
     problems: list[str] = []
     session = None
     try:
         if not wait_http(DRIVER_URL + "/status", 30):
-            raise RuntimeError("tauri-driver did not answer on 4444")
+            raise RuntimeError("the WebDriver server did not answer on 4444")
         options = ArgOptions()
-        options.set_capability("browserName", "wry")
-        options.set_capability("tauri:options", {"application": app})
+        if edge:
+            if not wait_http(f"http://127.0.0.1:{port}/json/version", WAIT_S):
+                raise RuntimeError("the test build's webview did not open its debugging port")
+            addresses = listen_addresses(port)
+            print(f"debugging port {port} listens on {sorted(addresses)}")
+            if addresses != {"127.0.0.1"}:
+                problems.append(f"the debugging port listens beyond 127.0.0.1: {sorted(addresses)}")
+            options.set_capability("browserName", "webview2")
+            options.set_capability("ms:edgeOptions", {"debuggerAddress": f"127.0.0.1:{port}"})
+        else:
+            options.set_capability("browserName", "wry")
+            options.set_capability("tauri:options", {"application": app})
         session = webdriver.Remote(command_executor=DRIVER_URL, options=options)
         wait = WebDriverWait(session, WAIT_S)
         if not wait_http(BASE + "/auth/csrf-token", WAIT_S):
@@ -155,17 +205,19 @@ def main(argv: list[str]) -> int:
                 session.quit()
             except Exception:  # noqa: BLE001
                 pass
-        if driver_proc.poll() is None:
-            driver_proc.terminate()
+        for proc in (driver_proc, app_proc):
+            if proc is None or proc.poll() is not None:
+                continue
+            proc.terminate()
             try:
-                driver_proc.wait(timeout=15)
+                proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                driver_proc.kill()
-                driver_proc.wait(timeout=15)
+                proc.kill()
+                proc.wait(timeout=15)
         log.close()
         with open(log_path, "rb") as f:
             lines = f.read().decode("utf-8", "replace").splitlines()
-        print("---- tauri-driver and app output (last 60 lines)")
+        print("---- WebDriver and app output (last 60 lines)")
         print("\n".join(lines[-60:]))
         print("----")
     for p in problems:

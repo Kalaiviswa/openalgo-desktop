@@ -170,6 +170,10 @@ jobs:
           if (-not $exe) { throw "openalgo-desktop.exe was not found under $env:LOCALAPPDATA after the install." }
           Write-Host "Installed: $($exe.FullName)"
           "APP_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: The installed binary is not the E2E test build
+        # src-tauri/src/e2e.rs: the test-only build opens a WebView2
+        # debugging port; a shipped binary carries none of its strings.
+        run: python scripts/ci/check_no_e2e_build.py "$APP_EXE"
       - name: Windows version
         shell: pwsh
         run: |

@@ -403,6 +403,15 @@ jobs:
         if: always() && runner.os == 'macOS'
         run: rm -f "${RUNNER_TEMP}"/AuthKey_*.p8
 
+      - name: The Windows binary is not the E2E test build
+        # src-tauri/src/e2e.rs: only CI's Windows native E2E builds the
+        # e2e-debug-port feature (a WebView2 debugging port); a release
+        # binary carrying its strings fails here.
+        if: runner.os == 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/ci/check_no_e2e_build.py "src-tauri/target/${TARGET}/release/openalgo-desktop.exe"
+
       - name: Check the installer signature
         # What the release notes say about signing comes from this check, not
         # from whether secrets exist. Configured signing that produced an

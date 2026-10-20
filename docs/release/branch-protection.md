@@ -206,6 +206,21 @@ commit the run built).
   account creation, a refused wrong password, sign-in, the signed-in shell
   and sign-out, against the app's real server and session cookie.
 
+Outside `ci-ok`, after every push to `master` and by hand:
+`.github/workflows/native-e2e-windows.yml` runs the same native script on
+Windows Server 2025. msedgedriver needs WebView2's remote debugging port,
+which the release app does not open, so the job builds a **test-only**
+binary with the `e2e-debug-port` feature (`src-tauri/src/e2e.rs`): its main
+window opens the port the script gives it (`OPENALGO_E2E_DEBUG_PORT`, a
+free port per run, on 127.0.0.1 only, which the script checks). Guardrails:
+the feature does not compile outside a debug build without
+`OPENALGO_E2E_BUILD=1`, which only this job sets; `release.yml` never builds
+it; and the install smoke and `release.yml` check the shipped Windows binary
+for its strings (`scripts/ci/check_no_e2e_build.py`), a check this job runs
+on its own build to show it finds them. It builds a second Windows release
+binary (39 minutes on 2026-10-20, run 39373651570), which is why it is not a
+pull request job.
+
 Cost: each job takes about a minute once its bundle exists (2026-10-20:
 25-45 s of steps per install smoke job, about 70 s for the native run), so
 a CI run ends about two minutes later than before, and uses one short

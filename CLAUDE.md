@@ -149,6 +149,9 @@ logged and never a `.env` file. Besides these the app reads only
 being run (an OS-runtime variable, never set by the trader, carrying no
 secret), and the MCP client configuration names that file instead of the
 temporary mount the binary runs from. The app reads no other variables.
+(CI's Windows native E2E builds a test-only binary with the `e2e-debug-port`
+feature that also reads `OPENALGO_E2E_DEBUG_PORT` and opens a WebView2
+debugging port; it never ships: `src-tauri/src/e2e.rs`.)
 
 A port already in use (macOS AirPlay holds 5000 on many Macs) must be reported
 to the user in the app with the fix, never only logged.
