@@ -21,11 +21,12 @@
 //! strategy's P&L comes from its own fills, never from these rows.
 
 use super::dispatch::{Book, RunMode};
-use super::store::{OrderRow, StrategyRow};
+use super::store::{ModedOrder, OrderRow, Store, StrategyRow};
 use super::StrategyModule;
 use crate::error::AppError;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 const DEFAULT_STATISTIC_KEYS: &[&str] = &[
     "total_buy_orders",
@@ -136,7 +137,10 @@ fn filled_quantity(row: &OrderRow) -> i64 {
 }
 
 /// Lifetime local residuals, one per durable position owner.
-fn residual_owners(orders: &[OrderRow], product: &str) -> Vec<Value> {
+fn residual_owners<'a>(
+    orders: impl IntoIterator<Item = &'a OrderRow>,
+    product: &str,
+) -> Vec<Value> {
     type OwnerKey = (i64, i64, String, String, String, String);
     let mut groups: BTreeMap<OwnerKey, Vec<&OrderRow>> = BTreeMap::new();
     for o in orders {
@@ -277,63 +281,108 @@ impl From<AppError> for Refusal {
     }
 }
 
-impl StrategyModule {
-    /// The mode of the book a view reads; `None` when the strategy has
-    /// never run. A failed read is an error, not "never run".
-    fn view_mode(&self, strategy_id: i64, run_id: Option<i64>) -> Result<Option<RunMode>, Refusal> {
-        let mode = match run_id {
-            Some(id) => {
-                let run = self
-                    .store
-                    .get_run(id)?
-                    .ok_or_else(|| Refusal::Message(format!("Run {} was not found", id)))?;
-                if run.strategy_id != strategy_id {
-                    return Err(Refusal::Message(format!(
-                        "Run {} does not belong to strategy {}",
-                        id, strategy_id
-                    )));
-                }
-                run.mode
+/// A strategy's order history, each row with its run's mode (SM-03), as
+/// the books read it.
+pub type History = Arc<Vec<ModedOrder>>;
+
+/// The mode of the book a view reads; `None` when the strategy has never
+/// run. A failed read is an error, not "never run".
+fn view_mode(
+    store: &Store,
+    strategy_id: i64,
+    run_id: Option<i64>,
+) -> Result<Option<RunMode>, Refusal> {
+    let mode = match run_id {
+        Some(id) => {
+            let run = store
+                .get_run(id)?
+                .ok_or_else(|| Refusal::Message(format!("Run {} was not found", id)))?;
+            if run.strategy_id != strategy_id {
+                return Err(Refusal::Message(format!(
+                    "Run {} does not belong to strategy {}",
+                    id, strategy_id
+                )));
             }
-            None => match self.store.list_runs(strategy_id, 1)?.into_iter().next() {
-                Some(r) => text(&r["mode"]),
-                None => return Ok(None),
-            },
-        };
-        RunMode::parse(&mode)
-            .map(Some)
-            .ok_or_else(|| Refusal::Message(format!("Unknown run mode: '{}'", mode)))
+            run.mode
+        }
+        None => match store.list_runs(strategy_id, 1)?.into_iter().next() {
+            Some(r) => text(&r["mode"]),
+            None => return Ok(None),
+        },
+    };
+    RunMode::parse(&mode)
+        .map(Some)
+        .ok_or_else(|| Refusal::Message(format!("Unknown run mode: '{}'", mode)))
+}
+
+/// The orders of `history` placed in `mode` (SM-03).
+fn placed_in(history: &[ModedOrder], mode: RunMode) -> impl Iterator<Item = &OrderRow> {
+    history
+        .iter()
+        .filter(move |o| o.mode == mode.as_str())
+        .map(|o| &o.order)
+}
+
+/// The broker order ids of the orders placed in `mode`.
+fn broker_ids(history: &[ModedOrder], mode: RunMode) -> HashSet<String> {
+    placed_in(history, mode)
+        .filter_map(|r| r.broker_order_id.clone().filter(|b| !b.trim().is_empty()))
+        .collect()
+}
+
+impl StrategyModule {
+    /// The strategy's order history for its books, read off the async
+    /// workers and shared by the books that ask for it at once: the Detail
+    /// page polls all three every 5 s, and the history grows with every
+    /// run. A failed read is an error: an empty set would filter every
+    /// broker row out and show a book that looks flat.
+    pub(crate) async fn order_history(
+        &self,
+        strategy_id: i64,
+        run_id: Option<i64>,
+    ) -> Result<History, AppError> {
+        let store = self.store.clone();
+        self.histories
+            .share((strategy_id, run_id), || async move {
+                store
+                    .blocking(move |s| {
+                        Ok(Arc::new(s.list_orders_for_strategy(strategy_id, run_id)?))
+                    })
+                    .await
+            })
+            .await
     }
 
-    /// The strategy's order rows placed in `mode` (SM-03). A failed read is
-    /// an error: an empty set would filter every broker row out and show a
-    /// book that looks flat.
-    fn order_rows(
+    /// The broker order ids of the strategy's orders placed in `mode`,
+    /// gathered off the async workers.
+    async fn order_ids(
         &self,
         strategy_id: i64,
         run_id: Option<i64>,
         mode: RunMode,
-    ) -> Result<Vec<OrderRow>, AppError> {
-        Ok(self
-            .store
-            .list_orders_for_strategy(strategy_id, run_id)?
-            .into_iter()
-            .filter(|o| o.mode == mode.as_str())
-            .map(|o| o.order)
-            .collect())
+    ) -> Result<HashSet<String>, AppError> {
+        let history = self.order_history(strategy_id, run_id).await?;
+        self.store
+            .blocking(move |_| Ok(broker_ids(&history, mode)))
+            .await
     }
 
-    /// The book's mode, or the answer to give instead: `Ok(Err(envelope))`
+    /// The book's mode, or the answer to give instead: `Ok(Err(answer))`
     /// for "never run" or a refused run, `Err` for a local read failure.
-    fn mode_or_answer(
+    /// Read off the async workers.
+    async fn mode_or_answer(
         &self,
         strategy_id: i64,
         run_id: Option<i64>,
-        never_run: impl FnOnce() -> Value,
+        never_run: Value,
     ) -> Result<Result<RunMode, Value>, AppError> {
-        Ok(match self.view_mode(strategy_id, run_id) {
+        let found = self
+            .store
+            .blocking(move |s| Ok(view_mode(s, strategy_id, run_id)))
+            .await?;
+        Ok(match found {
             Ok(Some(m)) => Ok(m),
-            Ok(None) => Err(never_run()),
+            Ok(None) => Err(never_run),
             Err(Refusal::Message(m)) => Err(err(m)),
             Err(Refusal::Read(e)) => return Err(e),
         })
@@ -368,17 +417,12 @@ impl StrategyModule {
         strategy_id: i64,
         run_id: Option<i64>,
     ) -> Result<Value, AppError> {
-        let mode = match self.mode_or_answer(strategy_id, run_id, || {
-            json!({"status": "success", "data": {"orders": [], "statistics": statistics(&[], &Value::Null)}})
-        })? {
+        let never_run = json!({"status": "success", "data": {"orders": [], "statistics": statistics(&[], &Value::Null)}});
+        let mode = match self.mode_or_answer(strategy_id, run_id, never_run).await? {
             Ok(m) => m,
             Err(answer) => return Ok(answer),
         };
-        let ids: HashSet<String> = self
-            .order_rows(strategy_id, run_id, mode)?
-            .into_iter()
-            .filter_map(|r| r.broker_order_id.filter(|b| !b.trim().is_empty()))
-            .collect();
+        let ids = self.order_ids(strategy_id, run_id, mode).await?;
         let mut payload = match self.gateway.book(mode, Book::Orders).await {
             Ok(p) => p,
             Err(e) => return Ok(Self::as_error(e, "Could not read the orderbook")),
@@ -401,19 +445,12 @@ impl StrategyModule {
         strategy_id: i64,
         run_id: Option<i64>,
     ) -> Result<Value, AppError> {
-        let mode = match self.mode_or_answer(
-            strategy_id,
-            run_id,
-            || json!({"status": "success", "data": []}),
-        )? {
+        let never_run = json!({"status": "success", "data": []});
+        let mode = match self.mode_or_answer(strategy_id, run_id, never_run).await? {
             Ok(m) => m,
             Err(answer) => return Ok(answer),
         };
-        let ids: HashSet<String> = self
-            .order_rows(strategy_id, run_id, mode)?
-            .into_iter()
-            .filter_map(|r| r.broker_order_id.filter(|b| !b.trim().is_empty()))
-            .collect();
+        let ids = self.order_ids(strategy_id, run_id, mode).await?;
         let mut payload = match self.gateway.book(mode, Book::Trades).await {
             Ok(p) => p,
             Err(e) => return Ok(Self::as_error(e, "Could not read the tradebook")),
@@ -433,22 +470,25 @@ impl StrategyModule {
         strategy_id: i64,
         run_id: Option<i64>,
     ) -> Result<Value, AppError> {
-        let mode = match self.mode_or_answer(
-            strategy_id,
-            run_id,
-            || json!({"status": "success", "data": []}),
-        )? {
+        let never_run = json!({"status": "success", "data": []});
+        let mode = match self.mode_or_answer(strategy_id, run_id, never_run).await? {
             Ok(m) => m,
             Err(answer) => return Ok(answer),
         };
-        // A failed read must not silently drop the product filter.
-        let product = self
-            .store
-            .get_strategy_unscoped(strategy_id)?
-            .map(|s| s.product.to_ascii_uppercase())
-            .unwrap_or_default();
         // Lifetime owners of this mode: a prior run can still own a position.
-        let owners = residual_owners(&self.order_rows(strategy_id, None, mode)?, &product);
+        let history = self.order_history(strategy_id, None).await?;
+        let (product, owners) = self
+            .store
+            .blocking(move |s| {
+                // A failed read must not silently drop the product filter.
+                let product = s
+                    .get_strategy_unscoped(strategy_id)?
+                    .map(|s| s.product.to_ascii_uppercase())
+                    .unwrap_or_default();
+                let owners = residual_owners(placed_in(&history, mode), &product);
+                Ok((product, owners))
+            })
+            .await?;
         let mut payload = match self.gateway.book(mode, Book::Positions).await {
             Ok(p) => p,
             Err(e) => return Ok(Self::as_error(e, "Could not read the positions")),

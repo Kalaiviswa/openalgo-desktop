@@ -822,6 +822,21 @@ impl Store {
         self.clock.now()
     }
 
+    /// Run `read` with this store on the blocking pool, so a strategy's
+    /// growing history is never read on an async worker, which carries the
+    /// market data feed and the risk owners (the books, the history routes
+    /// and `/api/v1/strategy`).
+    pub async fn blocking<T, F>(&self, read: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Store) -> Result<T> + Send + 'static,
+    {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || read(&store))
+            .await
+            .map_err(|e| crate::error::AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
     fn utcnow(&self) -> String {
         ts(self.clock.now())
     }

@@ -117,6 +117,8 @@ pub struct StrategyModule {
     pub scheduler: scheduler::Scheduler,
     /// The per-strategy position book fed by `order.placed` tags.
     pub book: Arc<book::StrategyBook>,
+    /// A strategy's order history, read once for the books that ask at once.
+    histories: crate::services::report_flight::KeyedFlight<(i64, Option<i64>), views::History>,
     pub(crate) session: (u32, u32),
     /// Runs whose risk fired while no broker session existed (one critical
     /// event per episode). Bounded by the number of open runs.
@@ -156,6 +158,9 @@ impl StrategyModule {
             tick_contexts: tick_context::TickContexts::default(),
             scheduler: scheduler::Scheduler::new(),
             book,
+            histories: crate::services::report_flight::KeyedFlight::new(
+                "a strategy's order history",
+            ),
             session: (deps.session_hour, deps.session_minute),
             unactionable: Mutex::new(HashSet::new()),
             day_run_locks: Mutex::new(HashMap::new()),

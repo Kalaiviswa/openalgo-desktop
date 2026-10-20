@@ -3,8 +3,8 @@
 //! and checkpoints.
 
 use super::{
-    data_or_failed, err, int_arg, ok200, read_failed, resolve, Ctx, EVENTS_DEFAULT_LIMIT,
-    EVENTS_MAX_LIMIT, Q,
+    data_off_worker, err, int_arg, read_failed, resolve, success_text, text_or_failed, Ctx,
+    EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, Q,
 };
 use crate::server::envelope::json_response;
 use crate::server::middleware::User;
@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
     response::Response,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// GET .../runs
@@ -24,8 +24,8 @@ pub async fn runs(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> Re
         Ok(r) => r,
         Err(r) => return *r,
     };
-    let runs = ctx.strategy.store.list_runs(row.id, 100);
-    data_or_failed(format_args!("the runs of strategy {}", row.id), runs)
+    let (id, what) = (row.id, format!("the runs of strategy {}", row.id));
+    data_off_worker(&ctx, what, move |c| c.strategy.store.list_runs(id, 100)).await
 }
 
 /// GET .../orders?run_id=
@@ -43,12 +43,19 @@ pub async fn orders(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let rows = ctx
-        .strategy
-        .store
-        .list_orders_for_strategy(row.id, run_id)
-        .map(|rows| rows.iter().map(|o| o.to_dict()).collect::<Vec<Value>>());
-    data_or_failed(format_args!("the orders of strategy {}", row.id), rows)
+    // The books' shared read of the history; shaped and serialized off the
+    // async workers.
+    let text = match ctx.strategy.order_history(row.id, run_id).await {
+        Ok(history) => {
+            ctx.blocking(move |_| {
+                let rows: Vec<Value> = history.iter().map(|o| o.to_dict()).collect();
+                success_text(json!({ "data": rows }))
+            })
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    text_or_failed(&format!("the orders of strategy {}", row.id), text)
 }
 
 /// GET .../events?run_id=&kind=&severity=&limit=
@@ -93,14 +100,13 @@ pub async fn events(
         .filter(|v| *v != 0)
         .unwrap_or(EVENTS_DEFAULT_LIMIT)
         .clamp(1, EVENTS_MAX_LIMIT);
-    let rows = ctx.strategy.store.list_events(
-        row.id,
-        run_id,
-        kind.map(String::as_str),
-        severity.map(String::as_str),
-        limit,
-    );
-    data_or_failed(format_args!("the events of strategy {}", row.id), rows)
+    let (id, kind, severity) = (row.id, kind.cloned(), severity.cloned());
+    let read = move |c: &AppState| {
+        c.strategy
+            .store
+            .list_events(id, run_id, kind.as_deref(), severity.as_deref(), limit)
+    };
+    data_off_worker(&ctx, format!("the events of strategy {}", id), read).await
 }
 
 /// GET .../webhook_events
@@ -109,11 +115,11 @@ pub async fn webhook_events(State(ctx): Ctx, User(u): User, Path(sid): Path<Stri
         Ok(r) => r,
         Err(r) => return *r,
     };
-    let rows = ctx.strategy.store.list_webhook_events(row.id, 200);
-    data_or_failed(
-        format_args!("the webhook events of strategy {}", row.id),
-        rows,
-    )
+    let (id, what) = (row.id, format!("the webhook events of strategy {}", row.id));
+    data_off_worker(&ctx, what, move |c| {
+        c.strategy.store.list_webhook_events(id, 200)
+    })
+    .await
 }
 
 async fn book(
@@ -193,9 +199,18 @@ pub async fn checkpoints(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    match ctx.strategy.checkpoint_page(&row, requested) {
-        Ok(Some(page)) => ok200(page),
+    // Polled every 5 s per running strategy: read and serialized off the
+    // async workers.
+    let id = row.id;
+    let read = ctx.blocking(
+        move |c| match c.strategy.checkpoint_page(&row, requested)? {
+            Some(page) => success_text(page).map(Some),
+            None => Ok(None),
+        },
+    );
+    match read.await {
+        Ok(Some(body)) => crate::server::routes::webui::ok_text(body),
         Ok(None) => err("Run not found", StatusCode::NOT_FOUND),
-        Err(e) => read_failed(format_args!("the checkpoints of strategy {}", row.id), e),
+        Err(e) => read_failed(format_args!("the checkpoints of strategy {}", id), e),
     }
 }

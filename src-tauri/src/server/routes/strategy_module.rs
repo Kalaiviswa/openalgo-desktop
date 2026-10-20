@@ -59,6 +59,26 @@ fn ok200(payload: Value) -> Response {
     ok(payload, StatusCode::OK)
 }
 
+/// The bytes [`ok200`] answers for `payload`, serialized where a long
+/// history was read (the blocking pool), so the async worker only sends
+/// them.
+fn success_text(payload: Value) -> crate::error::Result<Vec<u8>> {
+    let mut body = Map::new();
+    body.insert("status".into(), json!("success"));
+    if let Value::Object(m) = payload {
+        body.extend(m);
+    }
+    Ok(serde_json::to_vec(&Value::Object(body))?)
+}
+
+/// The answer [`success_text`] made, or [`read_failed`].
+fn text_or_failed(what: &str, text: crate::error::Result<Vec<u8>>) -> Response {
+    match text {
+        Ok(body) => crate::server::routes::webui::ok_text(body),
+        Err(e) => read_failed(format_args!("{}", what), e),
+    }
+}
+
 fn err(message: impl Into<String>, code: StatusCode) -> Response {
     json_response(code, json!({"status": "error", "message": message.into()}))
 }
@@ -120,15 +140,18 @@ fn read_failed(what: std::fmt::Arguments<'_>, e: AppError) -> Response {
     err(READ_FAILED, StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// `{"data": rows}` from a store read, or [`read_failed`].
-fn data_or_failed<T: serde::Serialize>(
-    what: std::fmt::Arguments<'_>,
-    read: crate::error::Result<T>,
-) -> Response {
-    match read {
-        Ok(rows) => ok200(json!({ "data": rows })),
-        Err(e) => read_failed(what, e),
-    }
+/// `{"data": rows}` from a store read, or [`read_failed`]: read and
+/// serialized on the blocking pool, since a strategy's history grows with
+/// every run and the async workers carry the feed and the risk owners.
+async fn data_off_worker<T, F>(ctx: &Arc<AppState>, what: String, read: F) -> Response
+where
+    T: serde::Serialize,
+    F: FnOnce(&AppState) -> crate::error::Result<T> + Send + 'static,
+{
+    let text = ctx
+        .blocking(move |c| success_text(json!({ "data": read(c)? })))
+        .await;
+    text_or_failed(&what, text)
 }
 
 fn json_body(bytes: &Bytes) -> Result<Map<String, Value>, Box<Response>> {
@@ -194,12 +217,15 @@ pub async fn list(State(ctx): Ctx, User(u): User, Query(q): Q) -> Response {
         .get("q")
         .map(|s| s.trim().chars().take(100).collect())
         .unwrap_or_default();
-    let rows = ctx.strategy.store.list_strategies(
-        &u.username,
-        status.map(String::as_str),
-        (!query.is_empty()).then_some(query.as_str()),
-    );
-    data_or_failed(format_args!("the strategy list"), rows)
+    let status = status.cloned();
+    let read = move |c: &AppState| {
+        c.strategy.store.list_strategies(
+            &u.username,
+            status.as_deref(),
+            (!query.is_empty()).then_some(query.as_str()),
+        )
+    };
+    data_off_worker(&ctx, "the strategy list".into(), read).await
 }
 
 /// POST /strategy/api/strategies
@@ -242,11 +268,8 @@ pub async fn detail(State(ctx): Ctx, User(u): User, Path(sid): Path<String>) -> 
         Ok(r) => r,
         Err(r) => return *r,
     };
-    let detail = ctx.strategy.strategy_detail(&row);
-    data_or_failed(
-        format_args!("the realized P&L of strategy {}", row.id),
-        detail,
-    )
+    let what = format!("the realized P&L of strategy {}", row.id);
+    data_off_worker(&ctx, what, move |c| c.strategy.strategy_detail(&row)).await
 }
 
 /// The edit's fields the strategy does not accept, as the refusal.

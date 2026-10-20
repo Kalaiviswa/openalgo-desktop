@@ -138,11 +138,26 @@ fn failure(message: impl Into<String>, code: StatusCode, extra: Value) -> Respon
 /// `{"data": rows}`, or the web's unexpected-error answer when the local
 /// read failed (SM-04). The web's store turns that failure into an empty
 /// list and a success; an empty history here would read as "never ran".
-fn history<T: serde::Serialize>(what: &str, sid: i64, read: crate::error::Result<T>) -> Response {
-    match read {
-        Ok(rows) => success(json!({ "data": rows })),
+/// Read and serialized on the blocking pool (the same bytes [`success`]
+/// answers): a strategy's history grows with every run, and the async
+/// workers carry the feed and the risk owners.
+async fn history<T, F>(ctx: &Arc<AppState>, what: String, read: F) -> Response
+where
+    T: serde::Serialize,
+    F: FnOnce(&AppState) -> crate::error::Result<T> + Send + 'static,
+{
+    let text = ctx
+        .blocking(move |c| {
+            let mut body = Map::new();
+            body.insert("status".into(), json!("success"));
+            body.insert("data".into(), serde_json::to_value(read(c)?)?);
+            Ok(serde_json::to_vec(&Value::Object(body))?)
+        })
+        .await;
+    match text {
+        Ok(body) => crate::server::routes::webui::ok_text(body),
         Err(e) => {
-            tracing::error!("Could not read the {} of strategy {}: {}", what, sid, e);
+            tracing::error!("Could not read {}: {}", what, e);
             failure(UNEXPECTED, StatusCode::INTERNAL_SERVER_ERROR, Value::Null)
         }
     }
@@ -257,18 +272,18 @@ pub async fn list(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let q = data["q"].as_str().map(str::trim).filter(|s| !s.is_empty());
-    match ctx
-        .strategy
-        .store
-        .list_strategies(&user, data["status"].as_str(), q)
-    {
-        Ok(rows) => success(json!({"data": rows})),
-        Err(e) => {
-            tracing::error!("Strategy list failed: {}", e);
-            failure(UNEXPECTED, StatusCode::INTERNAL_SERVER_ERROR, Value::Null)
-        }
-    }
+    let q = data["q"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let status = data["status"].as_str().map(String::from);
+    let read = move |c: &AppState| {
+        c.strategy
+            .store
+            .list_strategies(&user, status.as_deref(), q.as_deref())
+    };
+    history(&ctx, "the strategy list".into(), read).await
 }
 
 /// POST /api/v1/strategy/status
@@ -381,7 +396,9 @@ pub async fn runs(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
     };
     let limit = data["limit"].as_i64().unwrap_or(RUNS_DEFAULT_LIMIT);
-    history("runs", row.id, ctx.strategy.store.list_runs(row.id, limit))
+    let id = row.id;
+    let what = format!("the runs of strategy {}", id);
+    history(&ctx, what, move |c| c.strategy.store.list_runs(id, limit)).await
 }
 
 /// POST /api/v1/strategy/orders
@@ -393,17 +410,19 @@ pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
     };
-    let rows = ctx
-        .strategy
-        .store
-        .list_orders_for_strategy(row.id, data["run_id"].as_i64())
+    let (id, run_id) = (row.id, data["run_id"].as_i64());
+    let read = move |c: &AppState| {
         // The web's order shape, without the run mode the Detail page reads.
-        .map(|rows| {
-            rows.iter()
-                .map(|o| o.order.to_dict())
-                .collect::<Vec<Value>>()
-        });
-    history("orders", row.id, rows)
+        c.strategy
+            .store
+            .list_orders_for_strategy(id, run_id)
+            .map(|rows| {
+                rows.iter()
+                    .map(|o| o.order.to_dict())
+                    .collect::<Vec<Value>>()
+            })
+    };
+    history(&ctx, format!("the orders of strategy {}", id), read).await
 }
 
 /// POST /api/v1/strategy/events
@@ -415,12 +434,15 @@ pub async fn events(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
     let Some(row) = row else {
         return failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null);
     };
-    let events = ctx.strategy.store.list_events(
-        row.id,
-        data["run_id"].as_i64(),
-        data["kind"].as_str(),
-        data["severity"].as_str(),
-        data["limit"].as_i64().unwrap_or(EVENTS_DEFAULT_LIMIT),
-    );
-    history("events", row.id, events)
+    let id = row.id;
+    let run_id = data["run_id"].as_i64();
+    let kind = data["kind"].as_str().map(String::from);
+    let severity = data["severity"].as_str().map(String::from);
+    let limit = data["limit"].as_i64().unwrap_or(EVENTS_DEFAULT_LIMIT);
+    let read = move |c: &AppState| {
+        c.strategy
+            .store
+            .list_events(id, run_id, kind.as_deref(), severity.as_deref(), limit)
+    };
+    history(&ctx, format!("the events of strategy {}", id), read).await
 }
