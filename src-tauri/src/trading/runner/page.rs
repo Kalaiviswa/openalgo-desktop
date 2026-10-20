@@ -4,8 +4,8 @@
 
 use super::inbox::Message;
 use super::orders::{Planned, Target};
-use super::{orders, store};
-use super::{Refusal, RunEntry, Runner, MAX_LOG_LINES};
+use super::{orders, repeats, store};
+use super::{PageState, Refusal, RunEntry, Runner, MAX_LOG_LINES};
 use chrono::Duration as ChronoDuration;
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
@@ -104,20 +104,21 @@ impl Runner {
         Some(json!({"status": "success", "messages": messages, "stop": closed}))
     }
 
-    /// Lines the page writes into its run's log, and whether it is waiting
-    /// for the app to confirm a batch whose answer it never got.
-    pub fn page_log(
-        &self,
-        run_id: &str,
-        token: &str,
-        lines: &[String],
-        waiting: Option<bool>,
-    ) -> bool {
+    /// Lines the page writes into its run's log, and what it says of a
+    /// batch whose answer it never got: whether it is still waiting, and
+    /// whether it has waited long enough that the trader must be told.
+    pub fn page_log(&self, run_id: &str, token: &str, lines: &[String], state: PageState) -> bool {
         let Some(entry) = self.entry_for(run_id, token) else {
             return false;
         };
-        if let Some(waiting) = waiting {
+        if let Some(waiting) = state.waiting {
             entry.page_waiting.store(waiting, Ordering::SeqCst);
+            if !waiting {
+                entry.stuck_told.store(false, Ordering::SeqCst);
+            }
+        }
+        if state.stuck && !entry.stuck_told.swap(true, Ordering::SeqCst) {
+            self.tell_stuck(&entry);
         }
         let kept: Vec<String> = lines
             .iter()
@@ -126,6 +127,25 @@ impl Runner {
             .collect();
         self.write_log(&entry.info, &kept);
         true
+    }
+
+    /// A batch has had no answer for over a minute: nothing new is sent,
+    /// the run's own exits included, until its outcome is known. Said in
+    /// the run's log and on the Health page, once per wait (NEW-TR-04).
+    fn tell_stuck(&self, entry: &RunEntry) {
+        let message = format!(
+            "OpenScript {} on {}: an order of this strategy has had no answer from OpenAlgo for over a minute, so whether it was placed is not known. Until it is, this strategy sends nothing new, its own exits included. Check your order book{}.",
+            entry.info.script,
+            entry.info.symbol,
+            if entry.info.mode == crate::strategy::dispatch::RunMode::Live {
+                " at your broker"
+            } else {
+                ""
+            }
+        );
+        tracing::error!("{}", message);
+        self.write_log(&entry.info, std::slice::from_ref(&message));
+        self.services().alert(message);
     }
 
     /// The page says its script stopped.
@@ -152,26 +172,33 @@ impl Runner {
     /// with a frame in the inbox.
     ///
     /// **The batch runs to its end even when the page's request does not**
-    /// (NEW-TR-04). A placement cut off between sending and saving its
-    /// answer is the hazard; a reply the page never reads is not, because
-    /// the page sends the same batch again and is answered from the record
-    /// (`repeats`). The task is one batch long and awaited here.
+    /// (NEW-TR-04, `batches`). A placement cut off between sending and
+    /// saving its answer is the hazard; a reply the page never reads is
+    /// not, because the page sends the same batch again and is answered
+    /// from the record (`repeats`).
     pub async fn page_intents(
         &self,
         run_id: &str,
         token: &str,
         incarnation: Option<i64>,
         intents: Vec<Value>,
-    ) -> Option<Value> {
+    ) -> Option<Result<Value, Refusal>> {
         let entry = self.entry_for(run_id, token)?;
+        // Every intent is keyed by its number before anything is sent.
+        if let Err(why) = repeats::check_numbers(&intents) {
+            return Some(Err(why));
+        }
         let Some(runner) = self.me.upgrade() else {
-            return Some(json!({"status": "error", "message": "OpenAlgo is shutting down."}));
+            return Some(Ok(
+                json!({"status": "error", "message": "OpenAlgo is shutting down."}),
+            ));
         };
-        let batch = tokio::spawn(async move { runner.submit(&entry, incarnation, &intents).await });
-        Some(batch.await.unwrap_or_else(|e| {
-            tracing::error!("An OpenScript order batch did not finish: {}", e);
+        let answer =
+            self.spawn_batch(async move { runner.submit(&entry, incarnation, &intents).await });
+        Some(Ok(answer.await.unwrap_or_else(|_| {
+            tracing::error!("An OpenScript order batch did not finish");
             json!({"status": "error", "message": "The orders of this bar could not be handled."})
-        }))
+        })))
     }
 
     /// One batch, under the run's order lock: an intent answered already is

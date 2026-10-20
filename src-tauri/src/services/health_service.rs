@@ -430,14 +430,29 @@ pub const SCALPING_METRIC: &str = "scalping_protection";
 
 /// Raise the scalping protection alert with the monitor's trader text.
 pub fn scalping_alert(ctx: &AppState, message: String) {
+    raise_fail(ctx, SCALPING_ALERT, SCALPING_METRIC, message);
+}
+
+/// Alert type and metric of an OpenScript run whose page has had no answer
+/// to an order for over a minute: its exits are held back meanwhile
+/// (NEW-TR-04).
+pub const OPENSCRIPT_ALERT: &str = "openscript_orders";
+
+/// Raise the OpenScript order alert with the runner's trader text.
+pub fn openscript_alert(ctx: &AppState, message: String) {
+    raise_fail(ctx, OPENSCRIPT_ALERT, OPENSCRIPT_ALERT, message);
+}
+
+/// Record one failing alert on the Health page.
+fn raise_fail(ctx: &AppState, alert_type: &str, metric: &str, message: String) {
     let now = ctx.now();
     let r = ctx.logs.conn().and_then(|c| {
         store::raise_alert(
             &c,
             &AlertRow {
-                alert_type: SCALPING_ALERT.into(),
+                alert_type: alert_type.into(),
                 severity: "fail".into(),
-                metric_name: SCALPING_METRIC.into(),
+                metric_name: metric.into(),
                 metric_value: 1.0,
                 message,
                 ..Default::default()
@@ -446,7 +461,7 @@ pub fn scalping_alert(ctx: &AppState, message: String) {
         )
     });
     if let Err(e) = r {
-        tracing::warn!("Scalping alert not recorded: {}", e);
+        tracing::warn!("The {} alert was not recorded: {}", alert_type, e);
     }
 }
 

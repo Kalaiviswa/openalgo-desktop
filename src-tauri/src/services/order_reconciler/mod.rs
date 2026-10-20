@@ -221,6 +221,10 @@ pub struct BookSnapshot {
     source: Option<(Arc<dyn OrderGateway>, RunMode)>,
     corroboration: Arc<tokio::sync::OnceCell<Option<Arc<Corroboration>>>>,
     held_alert: Option<HeldAlert>,
+    /// The Live session the book was read through, the same before and
+    /// after the read; `None` for Sandbox (NEW-TR-01: an owner settles only
+    /// its own session's orders from it).
+    pub session: Option<crate::services::live_owner::LiveOwner>,
 }
 
 impl BookSnapshot {
@@ -233,7 +237,13 @@ impl BookSnapshot {
             source: None,
             corroboration: Arc::new(tokio::sync::OnceCell::new()),
             held_alert: None,
+            session: None,
         }
+    }
+
+    /// The Live session the book was read through.
+    pub fn with_session(self, session: Option<crate::services::live_owner::LiveOwner>) -> Self {
+        Self { session, ..self }
     }
 
     /// A read from a broker that reports every order's client tag.
@@ -501,6 +511,13 @@ impl OrderReconciler {
         })
     }
 
+    /// The Live session `mode`'s book is read through now.
+    fn session_of(&self, mode: RunMode) -> Option<crate::services::live_owner::LiveOwner> {
+        (mode == RunMode::Live)
+            .then(|| crate::services::live_owner::LiveOwner::active(self.gateway.as_ref()))
+            .flatten()
+    }
+
     /// The held-order alert a pass hands its owners.
     fn held_alert(&self) -> HeldAlert {
         let sink = self.alert_sink.get().cloned();
@@ -706,12 +723,17 @@ impl OrderReconciler {
             } else {
                 self.stats.book_reads.fetch_add(1, Ordering::Relaxed);
                 let tags = self.gateway.reports_order_tags(mode);
+                let session = self.session_of(mode);
                 match self.gateway.order_book_rows(mode).await {
+                    // The session changed during the read: whose book it is
+                    // is not known, so nothing is settled from it.
+                    Ok(_) if self.session_of(mode) != session => false,
                     Ok(rows) => {
                         let mut book = BookSnapshot::new(rows, self.clock.now())
                             .with_tags(tags)
                             .with_source(self.gateway.clone(), mode)
-                            .with_held_alert(self.held_alert());
+                            .with_held_alert(self.held_alert())
+                            .with_session(session);
                         book.owners = owners.clone();
                         for o in &holders {
                             unresolved_total += o.reconcile(mode, &book).await;

@@ -86,34 +86,40 @@ fn settles_here(mode: RunMode, session: Option<&LiveOwner>, o: &store::OrderRow)
     };
     match (mode, session) {
         (RunMode::Sandbox, _) => at.mode == RunMode::Sandbox,
+        // A row from before owners were recorded may be adopted by the book
+        // that finds it (`adopt_found`); nothing else of another session.
         (RunMode::Live, Some(owner)) => {
-            Destination::live(owner.clone()).owns(&at)
-                || (at.mode == RunMode::Live && !at.is_known())
+            let here = Destination::live(owner.clone());
+            here.owns(&at) || (here.is_known() && at.mode == RunMode::Live && o.broker.is_empty())
         }
         (RunMode::Live, None) => false,
     }
 }
 
 impl Runner {
-    /// The unconfirmed rows of one side that the session connected now may
-    /// settle.
-    fn unconfirmed_here(&self, mode: RunMode) -> crate::error::Result<Vec<store::OrderRow>> {
-        let session = match mode {
-            RunMode::Live => self.services().live_owner(),
-            RunMode::Sandbox => None,
-        };
+    /// The unconfirmed rows of one side that a book read through `session`
+    /// (Live) may settle.
+    fn unconfirmed_here(
+        &self,
+        mode: RunMode,
+        session: Option<&LiveOwner>,
+    ) -> crate::error::Result<Vec<store::OrderRow>> {
         let conn = self.db.conn()?;
         let rows = store::unconfirmed_rows(&conn, mode.as_str())?;
         Ok(rows
             .into_iter()
-            .filter(|o| settles_here(mode, session.as_ref(), o))
+            .filter(|o| settles_here(mode, session, o))
             .collect())
     }
 
     /// Whether one side has an unconfirmed row the session connected now
     /// may settle.
     pub fn has_unconfirmed(&self, mode: RunMode) -> bool {
-        match self.unconfirmed_here(mode) {
+        let session = match mode {
+            RunMode::Live => self.services().live_owner(),
+            RunMode::Sandbox => None,
+        };
+        match self.unconfirmed_here(mode, session.as_ref()) {
             Ok(rows) => !rows.is_empty(),
             Err(e) => {
                 // Unknown: read the book rather than leave a row unsettled.
@@ -152,7 +158,9 @@ impl Runner {
     /// Fold one book read for every unconfirmed row of `mode`. Returns how
     /// many stay unresolved.
     pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
-        let rows = match self.unconfirmed_here(mode) {
+        // Judged against the session the book was read through, not the one
+        // connected by the time it is folded.
+        let rows = match self.unconfirmed_here(mode, book.session.as_ref()) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(
@@ -179,7 +187,7 @@ impl Runner {
                     self.absence.forget(&key);
                     self.ambiguous.lock().remove(&key);
                     claimed.insert(b.order_id.clone());
-                    self.bind_unconfirmed(mode, o, b);
+                    self.bind_unconfirmed(book.session.as_ref(), o, b);
                 }
                 Found::Absent => {
                     let id = o.id.to_string();
@@ -230,7 +238,7 @@ impl Runner {
         unresolved
     }
 
-    fn bind_unconfirmed(&self, mode: RunMode, o: &store::OrderRow, b: &BookOrder) {
+    fn bind_unconfirmed(&self, session: Option<&LiveOwner>, o: &store::OrderRow, b: &BookOrder) {
         let now = self.clock.now();
         let conn = match self.db.conn() {
             Ok(c) => c,
@@ -240,7 +248,7 @@ impl Runner {
             }
         };
         match store::bind(&conn, o.id, &b.order_id, now) {
-            Ok(true) => self.adopt_found(&conn, mode, o),
+            Ok(true) => self.adopt_found(&conn, session, o),
             Ok(false) => return,
             Err(e) => {
                 tracing::error!(
@@ -286,16 +294,18 @@ impl Runner {
         }
     }
 
-    /// A Live row whose owner was never recorded, found in the book of the
-    /// session connected now: it was that session's, and is recorded so.
-    fn adopt_found(&self, conn: &rusqlite::Connection, mode: RunMode, o: &store::OrderRow) {
-        if mode != RunMode::Live || o.destination().is_some_and(|d| d.is_known()) {
-            return;
-        }
-        let Some(owner) = self.services().live_owner() else {
+    /// A Live row whose owner was never recorded, found in the book read
+    /// through `session`: it was that session's, and is recorded so.
+    fn adopt_found(
+        &self,
+        conn: &rusqlite::Connection,
+        session: Option<&LiveOwner>,
+        o: &store::OrderRow,
+    ) {
+        let Some(owner) = session.filter(|_| o.mode == "live" && o.broker.is_empty()) else {
             return;
         };
-        if let Err(e) = store::adopt(conn, o.id, &owner, self.clock.now()) {
+        if let Err(e) = store::adopt(conn, o.id, owner, self.clock.now()) {
             tracing::warn!(
                 "Could not record the owner of OpenScript order row {}: {}",
                 o.id,

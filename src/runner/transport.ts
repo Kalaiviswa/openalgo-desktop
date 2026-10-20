@@ -8,7 +8,14 @@
  */
 
 import type { HostBar, OrderIntent } from 'openalgo-script'
-import { type InboxMessage, Refused, RunGone, type RunSpec, type Transport } from './driver'
+import {
+  type InboxMessage,
+  type PageState,
+  Refused,
+  RunGone,
+  type RunSpec,
+  type Transport,
+} from './driver'
 
 /** The run and its secret, from `#run=<id>&token=<secret>`. */
 export function readFragment(hash: string): { run: string; token: string } | null {
@@ -71,8 +78,8 @@ export function httpTransport(
     async intents(incarnation: number, intents: readonly OrderIntent[]) {
       await post('/intents', { confirmed: true, incarnation, intents })
     },
-    async log(lines: readonly string[], waiting: boolean) {
-      await post('/log', { lines, waiting })
+    async log(lines: readonly string[], state: PageState) {
+      await post('/log', { lines, ...state })
     },
     async ended(message: string) {
       await post('/ended', { message })

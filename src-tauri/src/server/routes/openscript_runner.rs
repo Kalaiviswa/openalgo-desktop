@@ -22,7 +22,7 @@ use crate::strategy::dispatch::RunMode;
 use crate::trading::names::{
     is_deployment_id, is_script_name, names_something, script_name_refusal,
 };
-use crate::trading::runner::{books, schedule, store, Refusal};
+use crate::trading::runner::{books, schedule, store, PageState, Refusal};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -241,7 +241,14 @@ pub async fn close(State(ctx): Ctx, Path(name): Path<String>) -> Response {
         return not_running(&ctx, &name);
     }
     match ctx.trading.runner.close(&name).await {
-        Ok(message) => ok(json!({"status": "success", "file": name, "message": message})),
+        // Desktop: `held_elsewhere` (NEW-TR-01) lists what the deployment
+        // still holds or has working where this run did not trade.
+        Ok(c) => ok(json!({
+            "status": "success",
+            "file": name,
+            "message": c.message,
+            "held_elsewhere": c.held_elsewhere,
+        })),
         Err(r) => err(409, r.message),
     }
 }
@@ -613,7 +620,8 @@ pub async fn host_intents(
         .await
     {
         None => gone(),
-        Some(v) => ok(v),
+        Some(Ok(v)) => ok(v),
+        Some(Err(r)) => refused(r),
     }
 }
 
@@ -631,13 +639,18 @@ pub async fn host_log(
         .iter()
         .filter_map(|l| l.as_str().map(str::to_string))
         .collect();
-    let waiting = body
-        .as_ref()
-        .and_then(|b| b.get("waiting").and_then(Value::as_bool));
+    let flag = |k: &str| {
+        body.as_ref()
+            .and_then(|b| b.get(k).and_then(Value::as_bool))
+    };
+    let state = PageState {
+        waiting: flag("waiting"),
+        stuck: flag("stuck").unwrap_or(false),
+    };
     if ctx
         .trading
         .runner
-        .page_log(&run, &token(&headers), &lines, waiting)
+        .page_log(&run, &token(&headers), &lines, state)
     {
         ok(json!({"status": "success"}))
     } else {

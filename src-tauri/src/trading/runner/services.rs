@@ -90,6 +90,8 @@ pub trait RunnerServices: Send + Sync {
     /// run is bound to at start, and what its every order and read is
     /// checked against (NEW-TR-01).
     fn live_owner(&self) -> Option<LiveOwner>;
+    /// Tell the trader on the Health page (a run whose exits are held back).
+    fn alert(&self, message: String);
     /// Ask the order reconciler to read the order book now (an uncertain
     /// placement was just recorded).
     fn request_reconcile(&self) {}
@@ -313,6 +315,12 @@ impl RunnerServices for AppServices {
 
     fn live_owner(&self) -> Option<LiveOwner> {
         self.ctx.upgrade().and_then(|c| LiveOwner::of_session(&c))
+    }
+
+    fn alert(&self, message: String) {
+        if let Some(ctx) = self.ctx.upgrade() {
+            crate::services::health_service::openscript_alert(&ctx, message);
+        }
     }
 
     fn request_reconcile(&self) {

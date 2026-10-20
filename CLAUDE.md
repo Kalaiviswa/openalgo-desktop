@@ -272,15 +272,22 @@ unchanged:
   `trading/runner/identity.rs`, `store/identity.rs`). Every row records its
   side, broker and account and the run's incarnation (one
   `openscript_incarnations` row per start, never reused). A run's ledger is
-  the rows its destination owns: nothing of another broker or account is
-  counted, read, cancelled, reconciled or closed through the session
-  connected now, and a Live row from before accounts were recorded belongs
-  to no run (reported; the trader closes it at the broker). A page hears
-  only its own incarnation's frames. `(incarnation, intent_id)` is unique:
-  a batch sent again is answered from its record before any check and never
-  placed twice, and a batch runs to its end even if the page's request is
+  the rows its destination owns, and a destination needs the broker and
+  the account: a session whose account is not known owns nothing and
+  starts no Live run. Nothing of another broker or account is counted,
+  read, cancelled, reconciled or closed through the session connected now
+  (the reconciler judges by the session that read the book); a Live row
+  from before accounts were recorded belongs to no run. What a deployment
+  holds or has working elsewhere is told in the start log, the status and
+  Stop's `held_elsewhere`. A page hears only its own incarnation's frames.
+  `(incarnation, intent_id)` is unique and every intent of a batch needs its
+  own number: a batch sent again is answered from its record before any
+  check and never placed twice; a batch runs to its end in a task the
+  runner owns (shutdown waits for it) even if the page's request is
   dropped. On the page a lost or unreadable answer is pending, never a
-  rejection: nothing new is sent and the same batch is asked about again.
+  rejection: nothing new is sent, exits included, the same batch is asked
+  about again, and after about a minute the trader is told (run log, Health
+  page, the strategy's row).
 - **A placement has three outcomes, never two** (`brokers/common/outcome`):
   accepted (an order id), refused (provably never sent, or the broker said
   no), uncertain (sent, and no definite answer: a timeout or a dropped

@@ -171,6 +171,13 @@ impl Runner {
         if let Err(why) = host.open(&launch) {
             self.reg.lock().runs.remove(&run_id);
             entry.inbox.close();
+            if let Err(e) = self
+                .db
+                .conn()
+                .and_then(|c| store::forget_incarnation(&c, incarnation))
+            {
+                tracing::warn!("Could not forget the run that did not start: {}", e);
+            }
             self.write_log(
                 &info,
                 &[format!("The strategy could not be started: {}", why)],
@@ -273,6 +280,7 @@ impl Runner {
             unsaved: Mutex::new(Vec::new()),
             unresolved: AtomicUsize::new(0),
             page_waiting: AtomicBool::new(false),
+            stuck_told: AtomicBool::new(false),
             last_seen: Mutex::new(Instant::now()),
             anchor: Mutex::new(None),
             last_bar: Mutex::new(None),

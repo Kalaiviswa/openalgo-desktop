@@ -516,9 +516,11 @@ export function StrategiesPanel({ getChartContext }: Props) {
       setBusy(file)
       setProblem(null)
       try {
-        await what()
+        const note = await what()
         await refresh()
         setRevision((n) => n + 1)
+        // Desktop: something the action left for the trader to deal with.
+        if (typeof note === 'string' && note) setProblem(note)
       } catch (error) {
         setProblem(error instanceof Error ? error.message : String(error))
       } finally {
@@ -721,6 +723,8 @@ export function StrategiesPanel({ getChartContext }: Props) {
             // Desktop: a Stop whose closing order has not finished leaves the
             // run halted until Stop is pressed again (LOG-02).
             const closePending = run?.state === 'close_pending'
+            // Desktop (NEW-TR-04): an order's answer was lost; exits wait too.
+            const unconfirmed = run?.awaiting_confirmation === true
             const held = one.settings
             const where = run ?? held
             const holding = holdings[one.id]
@@ -732,7 +736,7 @@ export function StrategiesPanel({ getChartContext }: Props) {
                   <span
                     className={cn(
                       'h-1.5 w-1.5 shrink-0 rounded-full',
-                      closePending
+                      closePending || unconfirmed
                         ? 'bg-amber-500'
                         : run
                           ? 'bg-emerald-500'
@@ -748,14 +752,18 @@ export function StrategiesPanel({ getChartContext }: Props) {
                     title={
                       closePending
                         ? 'Stop sent a closing order that has not finished. Nothing new is sent. Check your orders, then press Stop again.'
-                        : undefined
+                        : unconfirmed
+                          ? "An order's answer did not come back, so whether it was placed is not known. Nothing new is sent, this strategy's exits included, until it is. Check your order book."
+                          : undefined
                     }
                   >
                     {closePending
                       ? 'close pending'
-                      : run
-                        ? `running ${since(run.started_at)}`
-                        : 'stopped'}
+                      : unconfirmed
+                        ? 'order unconfirmed'
+                        : run
+                          ? `running ${since(run.started_at)}`
+                          : 'stopped'}
                   </span>
                 </div>
 
@@ -936,8 +944,9 @@ export function StrategiesPanel({ getChartContext }: Props) {
                     }
                     onStop={() =>
                       void act(file, async () => {
-                        await closeStrategy(file)
+                        const elsewhere = await closeStrategy(file)
                         setConfirming(null)
+                        return elsewhere.join(' ')
                       })
                     }
                   />

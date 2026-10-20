@@ -17,6 +17,7 @@ use openalgo_desktop_lib::brokers::types::{Order, Position, Quote};
 use openalgo_desktop_lib::brokers::{Broker, BrokerRegistry};
 use openalgo_desktop_lib::services::apikey_service::ApiKeyService;
 use openalgo_desktop_lib::services::broker_switch;
+use openalgo_desktop_lib::services::live_owner::LiveOwner;
 use openalgo_desktop_lib::services::order_reconciler::BookSnapshot;
 use openalgo_desktop_lib::state::BrokerSession;
 use openalgo_desktop_lib::strategy::dispatch::{BookOrder, RunMode};
@@ -397,7 +398,8 @@ fn buy(intent: i64, qty: i64) -> Value {
     })
 }
 
-/// One read of a mock's order book, as the reconciler hands it to owners.
+/// One read of a mock's order book through Zerodha (AB1234), as the
+/// reconciler hands it to owners.
 fn book_of(mock: &MockBroker, read_at: chrono::DateTime<chrono::Utc>) -> BookSnapshot {
     let rows = match mock.order_book.lock().clone() {
         Some(Ok(rows)) => rows,
@@ -415,7 +417,7 @@ fn book_of(mock: &MockBroker, read_at: chrono::DateTime<chrono::Utc>) -> BookSna
             }))
         })
         .collect();
-    BookSnapshot::new(rows, read_at)
+    BookSnapshot::new(rows, read_at).with_session(Some(LiveOwner::new("zerodha", "AB1234")))
 }
 
 // ------------------------------------------------- NEW-TR-01: destination
@@ -456,6 +458,12 @@ async fn a_paused_run_never_closes_another_brokers_position() {
         answer.contains("long 3 SBIN MIS through Zerodha (AB1234)"),
         "{}",
         answer
+    );
+    assert_eq!(
+        v["held_elsewhere"].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        v
     );
     assert!(placed(&t.angel).is_empty(), "no order at Angel");
     assert!(cancelled(&t.angel).is_empty(), "no cancel at Angel");
@@ -954,6 +962,7 @@ async fn an_unsaved_answer_then_a_crash_and_reopen_place_exactly_once() {
     let stale = runner
         .page_intents(&id, &token, Some(old), intents.clone())
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(stale["stale"], true, "{}", stale);
     assert_eq!(
@@ -963,6 +972,7 @@ async fn an_unsaved_answer_then_a_crash_and_reopen_place_exactly_once() {
     let own = runner
         .page_intents(&id, &token, Some(new), intents.clone())
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         (own["sent"].clone(), own["unconfirmed"].clone()),
@@ -977,6 +987,7 @@ async fn an_unsaved_answer_then_a_crash_and_reopen_place_exactly_once() {
     let stale = runner
         .page_intents(&id, &token, Some(old), intents)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(stale["outcomes"][0]["status"], "filled");
 
@@ -1018,4 +1029,363 @@ async fn a_page_naming_another_deployments_run_reads_none_of_its_orders() {
         pairs(&[("BUY", 3)]),
         "nothing placed for it"
     );
+}
+
+// ------------------------------------------- independent review of #165
+
+/// Review 1: a working order at another account is told, never followed or
+/// cancelled from here. Zerodha (AB1234) BUY 3 left open and a working row
+/// from before accounts were recorded; started on Angel One (XY9876), the
+/// status and the Stop answer name both, and nothing reaches either broker.
+#[tokio::test]
+async fn a_working_order_at_another_account_is_told_never_followed() {
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    t.buy(&id, run, 1, 3).await;
+    *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-1", "BUY", 3, 0, "open")]));
+    runner.pump_once(&id).await;
+    t.pause(&id).await;
+    t.sql(&format!(
+        "INSERT INTO openscript_orders (deployment, mode, intent_id, symbol, exchange, action,
+            quantity, pricetype, product, orderid, status, filled_quantity, placed_at, updated_at)
+         VALUES ('{}', 'live', 1, 'SBIN', 'NSE', 'BUY', 2, 'LIMIT', 'MIS', 'OLD-2', 'working',
+            0, '2026-10-01T04:00:00+00:00', '2026-10-01T04:00:00+00:00')",
+        id
+    ));
+    t.sign_in("angel", "XY9876");
+    t.start(&id).await;
+    let elsewhere = t.status(&id).await["elsewhere"].to_string();
+    assert!(
+        elsewhere.contains(
+            "may still be working through Zerodha (AB1234): BUY 3 SBIN MIS (order MOCK-1)"
+        ),
+        "{}",
+        elsewhere
+    );
+    assert!(
+        elsewhere.contains("BUY 2 SBIN MIS (order OLD-2)"),
+        "{}",
+        elsewhere
+    );
+    assert!(
+        elsewhere.contains("cancel it at your broker"),
+        "{}",
+        elsewhere
+    );
+    let (s, v) = t.close(&id).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(
+        v["held_elsewhere"].as_array().map(Vec::len),
+        Some(2),
+        "{}",
+        v
+    );
+    assert_eq!(touched(&t.angel), 0);
+    assert!(
+        cancelled(&t.zerodha).is_empty(),
+        "nothing cancelled from here"
+    );
+}
+
+/// Review 3: a session at the same broker whose account is not known owns
+/// nothing: no order, no cancel, no exit of AB1234's position through it,
+/// and no Live start on it.
+#[tokio::test]
+async fn a_session_whose_account_is_not_known_owns_nothing() {
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    t.buy(&id, run, 1, 3).await;
+    *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-1", "BUY", 3, 3, "complete")]));
+    *t.zerodha.positions.lock() = Some(Ok(vec![long(3)]));
+    runner.pump_once(&id).await;
+
+    t.sign_in("zerodha", "");
+    assert_eq!(t.buy(&id, run, 2, 1).await["sent"], 0);
+    assert_eq!(t.close(&id).await.0, StatusCode::CONFLICT);
+    assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3)]));
+    assert!(cancelled(&t.zerodha).is_empty());
+    t.pause(&id).await;
+    let (s, v) = t
+        .call(
+            Method::POST,
+            &format!("/openscript/runner/start/{}", id),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", v);
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not tell which broker account"),
+        "{}",
+        v
+    );
+}
+
+/// Review 8: without a login whose account is known, a Live deployment's
+/// book is unavailable, never an empty book.
+#[tokio::test]
+async fn a_book_without_a_known_account_is_unavailable_not_empty() {
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    t.buy(&id, run, 1, 3).await;
+    *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-1", "BUY", 3, 3, "complete")]));
+    *t.zerodha.positions.lock() = Some(Ok(vec![long(3)]));
+    runner.pump_once(&id).await;
+    t.pause(&id).await;
+    t.sign_in("zerodha", "");
+    for book in ["positions", "orderbook", "tradebook"] {
+        let (s, v) = t
+            .call(
+                Method::GET,
+                &format!("/openscript/runner/{}/{}", book, id),
+                None,
+            )
+            .await;
+        assert_ne!(s, StatusCode::OK, "{}: {}", book, v);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot be read"),
+            "{}",
+            v
+        );
+    }
+}
+
+/// Review 4: a batch at the broker is a task the runner owns. Shutdown
+/// waits for it, its answer is saved, and no task is left.
+#[tokio::test]
+async fn shutdown_waits_for_a_batch_at_the_broker_and_leaves_no_task() {
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    let gate = Arc::new(PlaceGate::default());
+    *t.zerodha.place_gate.lock() = Some(gate.clone());
+    {
+        let request = t.post(&id, run, json!([buy(1, 3)]));
+        tokio::select! {
+            _ = request => panic!("the broker gate holds the placement"),
+            _ = gate.entered.notified() => {}
+        }
+    }
+    assert!(
+        runner.task_count() >= 1,
+        "the batch is the runner's own task"
+    );
+    let shutdown = runner.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown waits for the order at the broker"
+    );
+    gate.release.notify_one();
+    shutdown.await;
+    assert_eq!(runner.task_count(), 0);
+    assert_eq!(t.rows()[0], ("working".into(), Some("MOCK-1".into()), 0));
+}
+
+/// Review 10: the page sends a batch again while the first copy is still at
+/// the broker. The second waits for the first and is answered from its
+/// record: one order.
+#[tokio::test]
+async fn a_batch_sent_again_while_the_first_is_at_the_broker_places_once() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    let gate = Arc::new(PlaceGate::default());
+    *t.zerodha.place_gate.lock() = Some(gate.clone());
+    let first = t.post(&id, run, json!([buy(1, 3)]));
+    let second = async {
+        gate.entered.notified().await;
+        let again = t.post(&id, run, json!([buy(1, 3)]));
+        tokio::pin!(again);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut again)
+                .await
+                .is_err(),
+            "the copy waits behind the batch at the broker"
+        );
+        gate.release.notify_one();
+        again.await
+    };
+    let ((s1, v1), (s2, v2)) = tokio::join!(first, second);
+    assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK), "{} {}", v1, v2);
+    assert_eq!(v1["sent"], 1, "{}", v1);
+    assert_eq!(v2["repeated"], 1, "{}", v2);
+    assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3)]));
+}
+
+/// Review 5: a batch with an intent that has no usable number, or two of the
+/// same number, is refused whole before anything is sent.
+#[tokio::test]
+async fn a_batch_with_a_missing_or_repeated_number_sends_nothing() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    let mut unnumbered = buy(1, 3);
+    unnumbered.as_object_mut().unwrap().remove("intentId");
+    for batch in [
+        json!([unnumbered]),
+        json!([buy(-1, 3)]),
+        json!([buy(1, 3), buy(1, 2)]),
+    ] {
+        let (s, v) = t.post(&id, run, batch.clone()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{} -> {}", batch, v);
+    }
+    assert!(placed(&t.zerodha).is_empty());
+    assert!(t.rows().is_empty());
+}
+
+/// Review 6: a run that never began is not kept, and a removed deployment's
+/// runs go with it.
+#[tokio::test]
+async fn runs_are_forgotten_with_their_deployment_and_when_they_never_begin() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    let runs = || -> i64 {
+        t.h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM openscript_incarnations WHERE deployment = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    t.start(&id).await;
+    t.pause(&id).await;
+    assert_eq!(runs(), 1);
+    t.host.refuse_next("the window could not be opened");
+    let (s, _) = t
+        .call(
+            Method::POST,
+            &format!("/openscript/runner/start/{}", id),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(runs(), 1, "the start that never began left no run");
+    let (s, v) = t
+        .call(
+            Method::DELETE,
+            &format!("/openscript/runner/config/{}", id),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!(runs(), 0);
+}
+
+/// Review 7: a page whose batch has waited about a minute says so; the
+/// trader is told once, in the run's log and on the Health page, and the
+/// run's status shows it waiting until the page has its answer.
+#[tokio::test]
+async fn a_page_waiting_too_long_tells_the_trader_once() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    t.start(&id).await;
+    let log = |lines: &[&str], waiting: bool, stuck: bool| {
+        t.page(
+            Method::POST,
+            &id,
+            "log",
+            Some(json!({"lines": lines, "waiting": waiting, "stuck": stuck})),
+        )
+    };
+    log(&["waiting"], true, false).await;
+    assert_eq!(t.status(&id).await["run"]["awaiting_confirmation"], true);
+    log(&["a minute"], true, true).await;
+    log(&["still"], true, true).await;
+    let path = t.status(&id).await["run"]["log"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(text.matches("for over a minute").count(), 1, "{}", text);
+    let alerts: i64 = t
+        .h
+        .ctx
+        .logs
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM health_alerts WHERE alert_type = 'openscript_orders' AND resolved = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(alerts, 1);
+    log(&["answered"], false, false).await;
+    assert_eq!(t.status(&id).await["run"]["awaiting_confirmation"], false);
+}
+
+/// Review 9: a book read through Angel One, folded after Zerodha (AB1234)
+/// is connected again, settles none of Zerodha's orders: the session is the
+/// one that read the book, not the one connected at fold time.
+#[tokio::test]
+async fn a_book_settles_only_the_orders_of_the_session_that_read_it() {
+    let t = two_accounts(false).await;
+    let runner = t.h.ctx.trading.runner.clone();
+    let id = t.deploy().await;
+    let run = t.start(&id).await;
+    t.zerodha
+        .after_send
+        .lock()
+        .push_back((AfterSend::Dropped, "complete"));
+    *t.zerodha.after_send_price.lock() = 100.0;
+    *t.zerodha.after_send_time.lock() = "2026-10-05 10:00:05".into();
+    t.buy(&id, run, 1, 3).await;
+    assert_eq!(t.rows()[0].0, "unconfirmed");
+    let read_at = t.h.ctx.now() + chrono::Duration::seconds(10);
+    let through_angel =
+        book_of(&t.zerodha, read_at).with_session(Some(LiveOwner::new("angel", "XY9876")));
+    runner.reconcile_book(RunMode::Live, &through_angel).await;
+    assert_eq!(t.rows()[0], ("unconfirmed".into(), None, 0));
+    runner
+        .reconcile_book(RunMode::Live, &book_of(&t.zerodha, read_at))
+        .await;
+    assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-1".into()), 3));
+}
+
+/// Review 10: a Live order still unconfirmed from before accounts were
+/// recorded is settled by the book of the session that finds it, which is
+/// recorded as its owner.
+#[tokio::test]
+async fn an_unconfirmed_row_from_before_accounts_is_adopted_by_the_book_that_finds_it() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    t.sql(&format!(
+        "INSERT INTO openscript_orders (deployment, mode, intent_id, symbol, exchange, action,
+            quantity, pricetype, product, status, filled_quantity, placed_at, updated_at)
+         VALUES ('{}', 'live', 1, 'SBIN', 'NSE', 'BUY', 3, 'MARKET', 'MIS', 'unconfirmed', 0,
+            '2026-10-05T04:30:00+00:00', '2026-10-05T04:30:00+00:00')",
+        id
+    ));
+    *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-9", "BUY", 3, 3, "complete")]));
+    t.h.ctx.reconciler.pass().await;
+    assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-9".into()), 3));
+    let (broker, account): (String, String) =
+        t.h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .query_row("SELECT broker, account FROM openscript_orders", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+    assert_eq!((broker.as_str(), account.as_str()), ("zerodha", "AB1234"));
 }

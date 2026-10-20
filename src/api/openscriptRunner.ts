@@ -48,6 +48,12 @@ export interface RunningStrategy {
    * and a reader should not have to infer one from a list's membership.
    */
   state: string
+  /**
+   * Desktop (NEW-TR-04): the run's page has an order whose answer from the
+   * app never reached it. Nothing new is sent, the run's own exits included,
+   * until its outcome is known.
+   */
+  awaiting_confirmation?: boolean
   symbol: string | null
   exchange: string | null
   interval: string | null
@@ -201,9 +207,17 @@ export async function pauseStrategy(name: string): Promise<void> {
  * and the refusal says to check the position. Either way the message is passed
  * through rather than replaced, because it says what to do next.
  */
-export async function closeStrategy(name: string): Promise<void> {
+/**
+ * Answers what the deployment still holds, or may have working, somewhere this
+ * run did not trade (desktop, NEW-TR-01): another broker or account, or from
+ * before the account was recorded. Non-empty, the close was not the whole story.
+ */
+export async function closeStrategy(name: string): Promise<string[]> {
   try {
-    await webClient.post(`${BASE}/close/${encodeURIComponent(name)}`)
+    const { data } = await webClient.post<{ held_elsewhere?: string[] }>(
+      `${BASE}/close/${encodeURIComponent(name)}`
+    )
+    return data?.held_elsewhere ?? []
   } catch (error) {
     throw problemFrom(error, `${name} could not be closed and stopped.`)
   }

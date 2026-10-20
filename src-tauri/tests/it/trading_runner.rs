@@ -156,7 +156,10 @@ impl Fake {
                 }))
             })
             .collect();
-        let mut book = BookSnapshot::new(rows, read_at);
+        // Read through the fake's own session (NEW-TR-01: the runner settles
+        // only that session's orders from a book).
+        let mut book = BookSnapshot::new(rows, read_at)
+            .with_session((mode == RunMode::Live).then(|| LiveOwner::new("zerodha", "AB1234")));
         book.owners = owners;
         book
     }
@@ -370,6 +373,7 @@ impl RunnerServices for Fake {
             .load(Ordering::SeqCst)
             .then(|| LiveOwner::new("zerodha", "AB1234"))
     }
+    fn alert(&self, _message: String) {}
     fn entry_refusal(&self, mode: RunMode) -> Option<String> {
         self.gate
             .lock()

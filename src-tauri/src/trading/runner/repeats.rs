@@ -18,7 +18,7 @@
 //! deployment: naming another deployment's run number reads none of it.
 
 use super::inbox::Message;
-use super::{orders, store, RunEntry, Runner};
+use super::{orders, store, Refusal, RunEntry, Runner};
 use serde_json::{json, Value};
 
 /// The most intents a run remembers the answer of without a row. A page
@@ -55,6 +55,30 @@ fn row_frame(row: &store::OrderRow, now_ms: i64) -> Value {
         row.message.as_deref().filter(|_| word == "rejected"),
         now_ms,
     )
+}
+
+/// Refuse a batch, before anything of it is sent, when an intent carries no
+/// usable number or two carry the same one: the number is what a batch
+/// sent again is answered by, so an intent without one could be placed
+/// twice, and a second intent of the same number would be answered with the
+/// first one's order (or overwrite its frame on the page).
+pub(super) fn check_numbers(intents: &[Value]) -> Result<(), Refusal> {
+    let mut seen = std::collections::HashSet::new();
+    for intent in intents {
+        let Some(id) = intent_id(intent) else {
+            return Err(Refusal::new(
+                400,
+                "The orders of this bar were not sent: one had no order number.",
+            ));
+        };
+        if !seen.insert(id) {
+            return Err(Refusal::new(
+                400,
+                "The orders of this bar were not sent: two had the same order number.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn intent_id(intent: &Value) -> Option<i64> {

@@ -84,8 +84,10 @@ export interface Transport {
   bars(): Promise<HostBar[]>
   inbox(after: number): Promise<{ messages: InboxMessage[]; stop: boolean }>
   intents(incarnation: number, intents: readonly OrderIntent[]): Promise<void>
-  /** `waiting`: a batch is pending an answer from the app (run status shows it). */
-  log(lines: readonly string[], waiting: boolean): Promise<void>
+  /** With the page's state: a batch pending an answer (`waiting`, shown in
+   * the run status), and pending long enough that the trader must be told
+   * (`stuck`, a Health alert). */
+  log(lines: readonly string[], state: PageState): Promise<void>
   ended(message: string): Promise<void>
 }
 
@@ -121,6 +123,15 @@ export const WAITING_REFUSAL =
 /** How long the page waits before asking the app again about a batch it
  * has no answer for, attempt by attempt; the last delay repeats. */
 export const RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000]
+/** After this many asks without an answer (about a minute), the trader is
+ * told: the run's own exits are held back too while the batch is pending. */
+export const STUCK_AFTER = 8
+
+/** What the page tells the app with its log lines. */
+export interface PageState {
+  waiting: boolean
+  stuck: boolean
+}
 
 export class Driver {
   private engine: Engine | null = null
@@ -133,6 +144,7 @@ export class Driver {
   /** A batch the app has not answered: it may have been placed. */
   private waiting: OrderIntent[] | null = null
   private retries = 0
+  private stuckTold = false
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private asking = false
   private currentTime = 0
@@ -177,7 +189,7 @@ export class Driver {
     if (this.lines.length === 0) return
     const out = this.lines.splice(0, this.lines.length)
     try {
-      await this.transport.log(out, this.isWaiting)
+      await this.transport.log(out, { waiting: this.isWaiting, stuck: this.stuckTold })
     } catch {
       // The log is a convenience; a failed write is not worth stopping for.
     }
@@ -310,14 +322,22 @@ export class Driver {
     try {
       await this.transport.intents(this.spec.run.incarnation, batch)
       this.waiting = null
+      this.stuckTold = false
       this.say(`The app confirmed it has ${batchName(batch)}. This run sends orders again.`)
     } catch (e) {
       if (e instanceof RunGone) return this.gone()
       if (e instanceof Refused) {
         this.waiting = null
+        this.stuckTold = false
         this.reject(batch, e.message)
         this.say(`The app refused ${batchName(batch)}: ${e.message}. This run sends orders again.`)
       } else {
+        if (this.retries >= STUCK_AFTER && !this.stuckTold) {
+          this.stuckTold = true
+          this.say(
+            `The app's answer to ${batchName(batch)} has not come back for over a minute, so whether it was placed is not known. Nothing new is sent, this run's own exits included, until it is. Check your order book.`
+          )
+        }
         this.scheduleRetry()
       }
     } finally {

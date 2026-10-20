@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 
 mod approval;
 mod identity;
-pub use identity::{adopt, begin_incarnation, migrate_identity, order_of_intent};
+pub use identity::{
+    adopt, begin_incarnation, forget_incarnation, migrate_identity, order_of_intent,
+};
 mod prune;
 pub use approval::{bind_approved, held_for_approval, migrate_pending_link, refuse_held};
 pub use prune::prune_orders;
@@ -579,6 +581,11 @@ pub fn delete(
     };
     tx.execute(
         "DELETE FROM openscript_deployments WHERE deployment = ?1",
+        params![gone.deployment],
+    )?;
+    // Its runs go with it; AUTOINCREMENT keeps their numbers from coming back.
+    tx.execute(
+        "DELETE FROM openscript_incarnations WHERE deployment = ?1",
         params![gone.deployment],
     )?;
     tx.commit()?;

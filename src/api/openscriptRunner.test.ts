@@ -10,9 +10,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const get = vi.fn()
-vi.mock('./client', () => ({ webClient: { get: (...a: unknown[]) => get(...a) } }))
+const post = vi.fn()
+vi.mock('./client', () => ({
+  webClient: {
+    get: (...a: unknown[]) => get(...a),
+    post: (...a: unknown[]) => post(...a),
+  },
+}))
 
-const { strategyOrderbook, strategyPositions, strategyTradebook } = await import(
+const { closeStrategy, strategyOrderbook, strategyPositions, strategyTradebook } = await import(
   './openscriptRunner'
 )
 
@@ -94,5 +100,18 @@ describe('the request', () => {
     answers({ orders: [] })
     await strategyOrderbook('my strategy.oscript')
     expect(get.mock.calls[0][0]).toBe('/openscript/runner/orderbook/my%20strategy.oscript')
+  })
+})
+
+describe('what a Stop leaves elsewhere (desktop, NEW-TR-01)', () => {
+  it('answers what is still held at another account, so the panel can say so', async () => {
+    // Catches a Stop read as a clean close while exposure it cannot manage
+    // remains at another broker account.
+    post.mockResolvedValue({
+      data: { status: 'success', held_elsewhere: ['This strategy also holds long 3 SBIN MIS'] },
+    })
+    expect(await closeStrategy('x.oscript')).toEqual(['This strategy also holds long 3 SBIN MIS'])
+    post.mockResolvedValue({ data: { status: 'success' } })
+    expect(await closeStrategy('x.oscript')).toEqual([])
   })
 })

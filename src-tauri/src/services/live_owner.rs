@@ -106,14 +106,21 @@ impl LiveOwner {
     }
 
     /// Whether an obligation recorded on `self` was opened on the session
-    /// `other` names: the broker known on both sides and the same, and the
-    /// account the same wherever both know it. Strict where
-    /// [`Self::refusal`] is lenient: an owner never recorded matches nothing.
+    /// `other` names: the broker and the account known on both sides and
+    /// the same. Strict where [`Self::refusal`] is lenient: an owner never
+    /// recorded matches nothing, and neither does a session whose account
+    /// is not known (a failed account lookup must not own, cancel or exit
+    /// another account's orders at the same broker).
     pub fn same_session(&self, other: &LiveOwner) -> bool {
-        self.knows_broker()
-            && other.knows_broker()
+        self.is_complete()
+            && other.is_complete()
             && self.broker.eq_ignore_ascii_case(&other.broker)
-            && self.same_account(other)
+            && self.account.eq_ignore_ascii_case(&other.account)
+    }
+
+    /// Both the broker and the account are known.
+    fn is_complete(&self) -> bool {
+        self.knows_broker() && !self.account.is_empty()
     }
 
     /// What a trader reads when an order of `self` would have gone through
@@ -178,9 +185,9 @@ impl Destination {
     }
 
     /// Whether it says where its orders went: Sandbox always, Live when its
-    /// broker was recorded.
+    /// broker and account were recorded.
     pub fn is_known(&self) -> bool {
-        self.mode == RunMode::Sandbox || self.owner.knows_broker()
+        self.mode == RunMode::Sandbox || self.owner.is_complete()
     }
 
     /// Why an order, cancel or read for this destination must not go
@@ -199,7 +206,7 @@ impl Destination {
     pub fn describe(&self) -> String {
         match self.mode {
             RunMode::Sandbox => "sandbox mode".into(),
-            RunMode::Live if self.owner.knows_broker() => self.owner.describe(),
+            RunMode::Live if self.owner.is_complete() => self.owner.describe(),
             RunMode::Live => "your broker, on an account this version did not record".into(),
         }
     }
@@ -247,7 +254,10 @@ mod tests {
         let row = |m: &str, b: &str, acc: &str| Destination::recorded(m, b, acc).unwrap();
         assert!(a.owns(&row("live", "zerodha", "AB1234")));
         assert!(a.owns(&row("live", "ZERODHA", "ab1234")));
-        assert!(a.owns(&row("live", "zerodha", "")), "account not reported");
+        assert!(
+            !a.owns(&row("live", "zerodha", "")),
+            "account not recorded: nobody's"
+        );
         assert!(!a.owns(&row("live", "angel", "AB1234")));
         assert!(!a.owns(&row("live", "zerodha", "ZZ0001")));
         assert!(!a.owns(&row("live", "", "")), "never recorded: nobody's");
@@ -258,10 +268,15 @@ mod tests {
         assert!(!sandbox.owns(&row("live", "zerodha", "AB1234")));
         assert!(Destination::recorded("paper", "zerodha", "").is_none());
         assert!(!row("live", "", "").is_known());
+        assert!(!row("live", "zerodha", "").is_known());
 
         let angel = LiveOwner::new("angel", "XY9876");
         assert_eq!(a.refusal(Some(&LiveOwner::new("zerodha", "AB1234"))), None);
         assert_eq!(a.refusal(None), None, "no session: the caller says");
+        assert!(
+            a.refusal(Some(&LiveOwner::new("zerodha", ""))).is_some(),
+            "a session whose account is not known owns nothing"
+        );
         assert_eq!(
             a.refusal(Some(&angel)).unwrap(),
             "This was opened on Zerodha (AB1234), but OpenAlgo is signed in to Angel One (XY9876) now, so the order was not sent. Sign in to Zerodha (AB1234) to manage it."

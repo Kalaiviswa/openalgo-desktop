@@ -26,10 +26,12 @@ import {
   Driver,
   type InboxMessage,
   type Loader,
+  type PageState,
   RETRY_DELAYS_MS,
   Refused,
   RunGone,
   type RunSpec,
+  STUCK_AFTER,
   type Transport,
 } from './driver'
 
@@ -67,6 +69,7 @@ function harness(answer: (call: number) => Error | null) {
   const asked: Asked[] = []
   const logs: string[] = []
   const waiting: boolean[] = []
+  const stuck: boolean[] = []
   const transport: Transport = {
     spec: async () => spec,
     bars: async () => [],
@@ -76,9 +79,10 @@ function harness(answer: (call: number) => Error | null) {
       const failure = answer(asked.length)
       if (failure !== null) throw failure
     },
-    log: async (lines: readonly string[], w: boolean) => {
+    log: async (lines: readonly string[], state: PageState) => {
       logs.push(...lines)
-      waiting.push(w)
+      waiting.push(state.waiting)
+      stuck.push(state.stuck)
     },
     ended: async () => undefined,
   }
@@ -105,7 +109,7 @@ function harness(answer: (call: number) => Error | null) {
   }
   const driver = new Driver(transport, loader, spec, () => T0 + 10 * MIN)
   const orders = () => (engine as Engine | null)?.orders() ?? []
-  return { driver, asked, logs, waiting, transport, orders }
+  return { driver, asked, logs, waiting, stuck, transport, orders }
 }
 
 afterEach(() => {
@@ -172,6 +176,42 @@ describe('a lost answer is not a refusal (NEW-TR-04)', () => {
     expect(h.driver.isStopped).toBe(true)
     expect(await asksAfter(60_000)).toBe(5)
     expect(h.asked.every((a) => a.ids.join() === '1')).toBe(true)
+  })
+
+  it('after about a minute without an answer the trader is told; the batch stays pending', async () => {
+    vi.useFakeTimers()
+    const h = harness(() => new Error('no answer'))
+    h.driver.load()
+    await h.driver.begin([])
+    await h.driver.onBars([bar(0, true)])
+    const waitedFor = (asks: number) =>
+      Array.from(
+        { length: asks },
+        (_, i) => RETRY_DELAYS_MS[Math.min(i, RETRY_DELAYS_MS.length - 1)]
+      ).reduce((a, b) => a + b, 0)
+    await vi.advanceTimersByTimeAsync(waitedFor(STUCK_AFTER - 1))
+    expect(h.stuck).not.toContain(true)
+    await vi.advanceTimersByTimeAsync(waitedFor(STUCK_AFTER) - waitedFor(STUCK_AFTER - 1))
+    expect(waitedFor(STUCK_AFTER)).toBeGreaterThanOrEqual(50_000)
+    expect(h.stuck[h.stuck.length - 1]).toBe(true)
+    expect(h.logs.filter((l) => l.includes('for over a minute'))).toHaveLength(1)
+    expect(h.driver.isWaiting).toBe(true)
+    // Still asking about the same intent, never sending it anew.
+    expect(h.asked.every((a) => a.ids.join() === '1')).toBe(true)
+  })
+
+  it('a page that stops asks nothing more', async () => {
+    vi.useFakeTimers()
+    const h = harness(() => new Error('no answer'))
+    h.driver.load()
+    await h.driver.begin([])
+    await h.driver.onBars([bar(0, true)])
+    h.transport.inbox = async () => ({ messages: [], stop: true })
+    await h.driver.run()
+    expect(h.driver.isStopped).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(h.asked).toHaveLength(1)
   })
 
   it('an answer of refusal from the app rejects the batch, and the script trades on', async () => {

@@ -6,9 +6,9 @@ use super::inbox::Message;
 use super::orders::Target;
 use super::{books, orders, store};
 use super::{
-    side_name, side_words, CloseFailure, Refusal, RunEntry, RunInfo, Runner, BUSY_DELETE_REFUSAL,
-    CLOSE_PENDING_TAIL, CLOSE_TIMEOUT_MESSAGE, CLOSING_MESSAGE, NOTHING_CLOSED,
-    RUNNING_DELETE_REFUSAL,
+    side_name, side_words, CloseFailure, Closed, Refusal, RunEntry, RunInfo, Runner,
+    BUSY_DELETE_REFUSAL, CLOSE_PENDING_TAIL, CLOSE_TIMEOUT_MESSAGE, CLOSING_MESSAGE,
+    NOTHING_CLOSED, RUNNING_DELETE_REFUSAL,
 };
 use crate::strategy::dispatch::{Book, RunMode};
 use serde_json::Value;
@@ -71,7 +71,7 @@ impl Runner {
     /// has not confirmed) leaves the run close pending instead: halted, so
     /// nothing new is sent beside an order that may still fill, until Stop is
     /// pressed again or the run is paused.
-    pub async fn close(&self, given: &str) -> Result<String, Refusal> {
+    pub async fn close(&self, given: &str) -> Result<Closed, Refusal> {
         let run_id = self.as_run_id(given);
         let entry = {
             let mut reg = self.reg.lock();
@@ -97,13 +97,16 @@ impl Runner {
                     self.teardown(&e, "Closed and stopped");
                 }
                 tracing::info!("Closed and stopped the OpenScript run {}", run_id);
-                let mut answer = format!("{} closed and stopped", entry.info.script);
-                let elsewhere = self.held_elsewhere(&run_id, &entry.info.destination);
-                if !elsewhere.is_empty() {
-                    self.write_log(&entry.info, &elsewhere);
-                    answer = format!("{}. {}", answer, elsewhere.join(" "));
+                let mut message = format!("{} closed and stopped", entry.info.script);
+                let held_elsewhere = self.held_elsewhere(&run_id, &entry.info.destination);
+                if !held_elsewhere.is_empty() {
+                    self.write_log(&entry.info, &held_elsewhere);
+                    message = format!("{}. {}", message, held_elsewhere.join(" "));
                 }
-                Ok(answer)
+                Ok(Closed {
+                    message,
+                    held_elsewhere,
+                })
             }
             Err(failed) => {
                 drop(reg);
@@ -620,6 +623,8 @@ impl Runner {
         if !paused.is_empty() {
             tracing::info!("Paused {} OpenScript run(s) on the way out", paused.len());
         }
+        // An order at the broker finishes and its answer is saved.
+        self.drain_batches().await;
         let handle = self.scheduler.lock().take();
         if let Some(h) = handle {
             h.abort();

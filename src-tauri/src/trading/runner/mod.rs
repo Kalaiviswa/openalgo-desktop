@@ -51,8 +51,10 @@
 //! read back); the rest (reading, the pump, schedules, logs) is here.
 
 mod approval;
+mod batches;
 pub mod books;
 mod deployments;
+mod elsewhere;
 mod ending;
 mod follow;
 pub mod host;
@@ -229,6 +231,8 @@ struct RunEntry {
     unresolved: AtomicUsize,
     /// See [`RunInfo::awaiting_confirmation`].
     page_waiting: AtomicBool,
+    /// The trader was told the page's wait has gone on too long.
+    stuck_told: AtomicBool,
     last_seen: Mutex<Instant>,
     /// Bars at or after this open time are pushed (set by the page's first
     /// history read), and the last bar pushed.
@@ -271,6 +275,26 @@ struct Unsaved {
     client_tag: Option<String>,
     /// The Action Center order Semi-Auto held it as, awaiting approval.
     pending_order_id: Option<i64>,
+}
+
+/// What the page says of a batch whose answer it never got
+/// ([`Runner::page_log`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageState {
+    /// Still waiting (`None`: the page did not say).
+    pub waiting: Option<bool>,
+    /// Waited long enough that the trader must be told.
+    pub stuck: bool,
+}
+
+/// A Stop that closed what its run holds. `held_elsewhere` is what the
+/// deployment still holds, or may have working, somewhere the run does not
+/// trade (NEW-TR-01): a caller that finds it non-empty has not seen a clean
+/// close, and tells the trader so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closed {
+    pub message: String,
+    pub held_elsewhere: Vec<String>,
 }
 
 /// Why a Stop did not close, and whether anything of it may still fill.
@@ -341,6 +365,9 @@ pub struct Runner {
     /// Unconfirmed rows matching several book orders the trader was told of.
     ambiguous: Mutex<HashSet<String>>,
     cancel: CancellationToken,
+    /// Batches of intents being sent (`page`): each runs to its end even
+    /// when its page's request is dropped, and shutdown waits for them.
+    batches: Mutex<tokio::task::JoinSet<()>>,
 }
 
 fn random_token() -> String {
@@ -390,6 +417,7 @@ impl Runner {
             absence: crate::services::order_reconciler::AbsenceTracker::new(),
             ambiguous: Mutex::new(HashSet::new()),
             cancel: CancellationToken::new(),
+            batches: Mutex::new(tokio::task::JoinSet::new()),
         })
     }
 
@@ -468,7 +496,7 @@ impl Runner {
         all
     }
 
-    /// How many pump tasks are alive (hygiene).
+    /// How many pump, scheduler and order-batch tasks are alive (hygiene).
     pub fn task_count(&self) -> usize {
         let pumps = self
             .reg
@@ -482,7 +510,7 @@ impl Runner {
             .lock()
             .as_ref()
             .is_some_and(|h| !h.is_finished());
-        pumps + usize::from(sched)
+        pumps + usize::from(sched) + self.batches_alive()
     }
 
     /// How many runner pages the host has open.

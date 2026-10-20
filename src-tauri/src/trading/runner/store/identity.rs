@@ -91,6 +91,16 @@ pub fn begin_incarnation(
     Ok(conn.last_insert_rowid())
 }
 
+/// Forget a run that never began (its page could not be opened). Its
+/// number is not reused.
+pub fn forget_incarnation(conn: &Connection, incarnation: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM openscript_incarnations WHERE id = ?1",
+        params![incarnation],
+    )?;
+    Ok(())
+}
+
 /// The row one intent of one run of `deployment` became, if it became
 /// one. A run of another deployment finds nothing: a page is answered only
 /// about its own deployment's orders, whatever number it names.
