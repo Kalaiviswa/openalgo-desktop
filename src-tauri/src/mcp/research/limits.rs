@@ -99,8 +99,20 @@ pub async fn within_deadline(
     }
 }
 
-/// Every exchange `get_instruments` reads when none is given.
-pub const ALL_INSTRUMENT_EXCHANGES: usize = 9;
+/// Every exchange `get_instruments` reads when none is given: the web
+/// tool's documented list (`mcp/mcpserver.py` `get_instruments`), one
+/// `/api/v1/instruments` call each.
+pub const INSTRUMENT_EXCHANGES: [&str; 9] = [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "MCX",
+    "CDS",
+    "BCD",
+    "NSE_INDEX",
+    "BSE_INDEX",
+];
 
 pub(super) fn limit_error(message: String) -> Value {
     error(
@@ -210,7 +222,7 @@ pub fn planned_calls(tool: &str, a: &Map<String, Value>) -> usize {
             if a.get("exchange").is_some_and(|e| !e.is_null()) {
                 1
             } else {
-                ALL_INSTRUMENT_EXCHANGES
+                INSTRUMENT_EXCHANGES.len()
             }
         }
         _ => 1,

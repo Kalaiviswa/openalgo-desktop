@@ -892,20 +892,10 @@ async fn instruments(ctx: &Arc<AppState>, a: &Args) -> Value {
     let exchange = present(a, "exchange").map(|_| up(a, "exchange"));
     let exchanges: Vec<String> = match &exchange {
         Some(e) => vec![e.clone()],
-        None => [
-            "NSE",
-            "BSE",
-            "NFO",
-            "BFO",
-            "MCX",
-            "CDS",
-            "BCD",
-            "NSE_INDEX",
-            "BSE_INDEX",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
+        None => research::INSTRUMENT_EXCHANGES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
     let mut rows: Vec<Value> = Vec::new();
     for ex in &exchanges {
