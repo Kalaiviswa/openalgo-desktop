@@ -145,6 +145,7 @@ mod mcp_transport;
 mod messaging;
 mod order_identity;
 mod perf;
+mod polled_reads;
 mod sandbox_concurrency;
 mod sandbox_contract;
 mod sandbox_engine;
