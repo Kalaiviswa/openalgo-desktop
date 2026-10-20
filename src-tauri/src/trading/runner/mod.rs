@@ -49,6 +49,7 @@
 //! `ending` (pause, Stop, removal), `page` (what the run's page asks); the
 //! rest (reading, orders, the pump, schedules, logs) is here.
 
+mod approval;
 pub mod books;
 mod deployments;
 mod ending;
@@ -247,6 +248,8 @@ struct Unsaved {
     status: &'static str,
     message: Option<String>,
     client_tag: Option<String>,
+    /// The Action Center order Semi-Auto held it as, awaiting approval.
+    pending_order_id: Option<i64>,
 }
 
 /// Why a Stop did not close, and whether anything of it may still fill.
@@ -581,6 +584,7 @@ impl Runner {
             status,
             message: result.error.clone(),
             client_tag: result.client_tag.clone(),
+            pending_order_id: sending::held_for_approval(&result),
         };
         self.keep_answer(info, entry, ack).await;
         self.write_log(info, &[sending::sent_line(info, target, p, &result)]);
@@ -595,6 +599,9 @@ impl Runner {
 
     fn try_save(&self, ack: &Unsaved) -> crate::error::Result<()> {
         let conn = self.db.conn()?;
+        if let Some(pending) = ack.pending_order_id {
+            return store::held_for_approval(&conn, ack.row_id, pending, self.clock.now());
+        }
         if ack.status == store::UNCONFIRMED {
             return store::unconfirmed(
                 &conn,
@@ -711,6 +718,7 @@ impl Runner {
                 return;
             }
         };
+        let open = self.follow_approvals(entry, open);
         entry.unresolved.store(
             open.iter().filter(|o| o.orderid.is_none()).count(),
             Ordering::SeqCst,

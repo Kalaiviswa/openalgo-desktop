@@ -58,7 +58,10 @@ fn owner(ctx: &AppState) -> crate::error::Result<Option<String>> {
 }
 
 /// Web `queue_order`: store the request (without the key) and announce it.
-pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value) -> Reply {
+/// `force_live`: the caller already decided the order goes to the live
+/// broker (an OpenScript Live run), so its approval sends it there whatever
+/// analyzer mode says at that moment (a desktop addition, LOG-04).
+pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value, force_live: bool) -> Reply {
     let user_id = match owner(ctx) {
         Ok(Some(u)) => u,
         Ok(None) => {
@@ -75,10 +78,16 @@ pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value) -> Reply {
         m.remove("apikey");
         m.remove("api_key");
     }
-    let created = ctx
-        .sqlite
-        .conn()
-        .and_then(|c| action_center::create(&c, &user_id, api_type, &clean.to_string(), ctx.now()));
+    let created = ctx.sqlite.conn().and_then(|c| {
+        action_center::create(
+            &c,
+            &user_id,
+            api_type,
+            &clean.to_string(),
+            force_live,
+            ctx.now(),
+        )
+    });
     match created {
         Ok(id) => {
             tracing::info!(
@@ -112,6 +121,11 @@ pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value) -> Reply {
 }
 
 /// Queue when Semi-Auto applies; `None` means execute now.
-pub fn queue_if_semi_auto(ctx: &AppState, api_type: &str, req: &Value) -> Option<Reply> {
-    should_route_to_pending(ctx, api_type).then(|| queue_order(ctx, api_type, req))
+pub fn queue_if_semi_auto(
+    ctx: &AppState,
+    api_type: &str,
+    req: &Value,
+    force_live: bool,
+) -> Option<Reply> {
+    should_route_to_pending(ctx, api_type).then(|| queue_order(ctx, api_type, req, force_live))
 }

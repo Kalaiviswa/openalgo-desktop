@@ -25,6 +25,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+mod approval;
+pub use approval::{bind_approved, held_for_approval, migrate_pending_link, refuse_held};
 mod unconfirmed;
 pub use unconfirmed::{
     bind, has_unconfirmed, migrate_unconfirmed, order_by_id, owns_orderid, release_unconfirmed,
@@ -691,6 +693,8 @@ pub struct OrderRow {
     /// The limit and trigger prices it was sent with, where it had them.
     pub price: Option<f64>,
     pub trigger_price: Option<f64>,
+    /// The Action Center order Semi-Auto held it as (LOG-04).
+    pub pending_order_id: Option<i64>,
 }
 
 /// What a new row records.
@@ -797,13 +801,14 @@ fn order_from_row(r: &rusqlite::Row) -> rusqlite::Result<OrderRow> {
         placed_at: r.get(18)?,
         price: r.get(19)?,
         trigger_price: r.get(20)?,
+        pending_order_id: r.get(21)?,
     })
 }
 
 const ORDER_COLUMNS: &str =
     "id, deployment, mode, intent_id, tag, symbol, exchange, action, quantity, \
 pricetype, product, orderid, status, filled_quantity, average_price, message, is_exit, \
-client_tag, placed_at, price, trigger_price";
+client_tag, placed_at, price, trigger_price, pending_order_id";
 
 /// Every order one deployment placed on one side (`live` or `sandbox`),
 /// oldest first.
@@ -972,6 +977,8 @@ mod tests {
         migrate(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
+        migrate_pending_link(&c).unwrap();
+        migrate_pending_link(&c).unwrap();
         c
     }
 
@@ -1147,6 +1154,7 @@ mod tests {
             placed_at: String::new(),
             price: None,
             trigger_price: None,
+            pending_order_id: None,
         }
     }
 

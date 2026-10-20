@@ -84,7 +84,7 @@ pub fn route_to_pending(
     if route.internal {
         return None;
     }
-    super::order_router::queue_if_semi_auto(ctx, api_type, req)
+    super::order_router::queue_if_semi_auto(ctx, api_type, req, route.force_live)
 }
 
 /// Fractional quantities pass the web schema on CRYPTO, but the order

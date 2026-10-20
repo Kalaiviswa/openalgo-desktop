@@ -41,6 +41,11 @@ impl H {
     }
 
     pub fn at(now: DateTime<Utc>) -> Self {
+        Self::with_brokers(now, Arc::new(BrokerRegistry::with(vec![])))
+    }
+
+    /// The same context with these broker adapters (a mock broker).
+    pub fn with_brokers(now: DateTime<Utc>, brokers: Arc<BrokerRegistry>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let clock = ManualClock::new(now);
         let ctx = AppState::open(
@@ -48,7 +53,7 @@ impl H {
             OpenOptions {
                 keystore: Arc::new(MemoryKeyStore::new()),
                 clock: clock.clone(),
-                brokers: Arc::new(BrokerRegistry::with(vec![])),
+                brokers,
             },
         )
         .unwrap();

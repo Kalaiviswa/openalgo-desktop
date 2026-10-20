@@ -74,6 +74,14 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         crate::strategy::store::migrate_revision,
     ),
     ("087_chart_prefs", super::chart_prefs::migrate),
+    (
+        "088_openscript_pending_link",
+        crate::trading::runner::store::migrate_pending_link,
+    ),
+    (
+        "089_pending_orders_force_live",
+        super::action_center::migrate_force_live,
+    ),
 ];
 
 /// Run all database migrations

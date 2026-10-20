@@ -123,10 +123,18 @@ pub fn has_unconfirmed(conn: &Connection, mode: &str) -> Result<bool> {
         .exists(params![UNCONFIRMED, mode])?)
 }
 
-/// Whether a destination order id is already one of the runner's rows.
+/// Whether a destination order id is already one of the runner's rows,
+/// or the order an Action Center approval placed for a held row the run
+/// has not bound yet (LOG-04): no other owner may take it meanwhile.
 pub fn owns_orderid(conn: &Connection, orderid: &str) -> Result<bool> {
     Ok(conn
-        .prepare_cached("SELECT 1 FROM openscript_orders WHERE orderid = ?1 LIMIT 1")?
+        .prepare_cached(
+            "SELECT 1 FROM openscript_orders WHERE orderid = ?1
+             UNION ALL
+             SELECT 1 FROM openscript_orders o JOIN pending_orders p ON p.id = o.pending_order_id
+              WHERE p.broker_order_id = ?1 AND o.orderid IS NULL
+             LIMIT 1",
+        )?
         .exists(params![orderid])?)
 }
 
@@ -140,6 +148,8 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         super::super::migrate(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
+        super::super::migrate_pending_link(&c).unwrap();
+        crate::db::sqlite::action_center::migrate(&c).unwrap();
         c
     }
 
@@ -200,6 +210,7 @@ mod tests {
         .unwrap();
         migrate_unconfirmed(&c).unwrap();
         migrate_unconfirmed(&c).unwrap();
+        super::super::migrate_pending_link(&c).unwrap();
         let rows = orders_of(&c, "d", "live").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].orderid.as_deref(), Some("OID1"));

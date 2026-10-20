@@ -105,6 +105,27 @@ pub(super) fn row_status(result: &DispatchResult) -> &'static str {
     }
 }
 
+/// The Action Center order a placement was held as, when Semi-Auto order
+/// mode queued it for the trader's approval instead of sending it (an
+/// acceptance with no broker order, `mode: semi_auto`).
+pub(super) fn held_for_approval(result: &DispatchResult) -> Option<i64> {
+    let queued = result.ok
+        && result.broker_order_id.is_none()
+        && result
+            .response
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            == Some("semi_auto");
+    queued
+        .then(|| {
+            result
+                .response
+                .get("pending_order_id")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .flatten()
+}
+
 /// The run's log line for one order sent.
 pub(super) fn sent_line(
     info: &RunInfo,
@@ -112,7 +133,12 @@ pub(super) fn sent_line(
     p: &Placement,
     result: &DispatchResult,
 ) -> String {
-    if result.ok {
+    if let Some(pending) = held_for_approval(result) {
+        format!(
+            "{} {} {} as {} {} is waiting for your approval in the Action Center (pending order {}). This run follows it once it is approved or rejected there.",
+            p.action, p.quantity, target.symbol, p.pricetype, target.product, pending
+        )
+    } else if result.ok {
         format!(
             "Sent {} {} {} as {} {} on the {} side. Order {}.",
             p.action,

@@ -2167,3 +2167,264 @@ async fn new_entries_wait_while_order_facts_are_repaired() {
     assert_eq!(sent[3]["action"], "SELL");
     assert_eq!(sent[3]["quantity"], 3);
 }
+
+// ------------------------------------------- Semi-Auto approvals (LOG-04)
+//
+// The app's own services (no fake) with the mock broker connected as
+// Zerodha (AB1234), analyzer mode off and the order mode Semi-Auto: a Live
+// run's order is held in the Action Center, and what the trader decides
+// there reaches the run.
+
+mod approvals {
+    use super::*;
+    use openalgo_desktop_lib::brokers::mock::{MockBroker, MockCall};
+    use openalgo_desktop_lib::brokers::types::{Order, Position, Quote};
+
+    pub(super) fn sbin_order(id: &str, side: &str, quantity: i32) -> Order {
+        Order {
+            order_id: id.into(),
+            exchange_order_id: None,
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            side: side.into(),
+            quantity,
+            filled_quantity: quantity,
+            pending_quantity: 0,
+            price: 0.0,
+            trigger_price: 0.0,
+            average_price: 100.0,
+            order_type: "MARKET".into(),
+            product: "MIS".into(),
+            status: "complete".into(),
+            validity: "DAY".into(),
+            order_timestamp: "2026-10-05 10:00:05".into(),
+            exchange_timestamp: None,
+            rejection_reason: None,
+            order_tag: None,
+        }
+    }
+
+    pub(super) fn sbin_long(quantity: i32) -> Position {
+        Position {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            product: "MIS".into(),
+            quantity,
+            overnight_quantity: 0,
+            average_price: 100.0,
+            ltp: 100.0,
+            pnl: 0.0,
+            realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            buy_quantity: quantity,
+            buy_value: 100.0 * f64::from(quantity),
+            sell_quantity: 0,
+            sell_value: 0.0,
+        }
+    }
+
+    pub(super) async fn setup_semi_auto() -> (T, Arc<MockBroker>) {
+        use openalgo_desktop_lib::brokers::common::symbols::{SymToken, SymbolResolver};
+        use openalgo_desktop_lib::brokers::{Broker, BrokerRegistry};
+        use openalgo_desktop_lib::services::apikey_service::ApiKeyService;
+        use openalgo_desktop_lib::services::broker_auth_service::BrokerAuthService;
+        use openalgo_desktop_lib::state::BrokerSession;
+        let symbols = SymbolResolver::new();
+        let mock = Arc::new(MockBroker::with_symbols("zerodha", symbols.clone()));
+        let h = H::with_brokers(
+            ist(2026, 10, 5, 10, 0),
+            Arc::new(BrokerRegistry::with_symbols(
+                symbols,
+                vec![mock.clone() as Arc<dyn Broker>],
+            )),
+        );
+        h.ctx.load_symbol_cache(vec![SymToken {
+            symbol: "SBIN".into(),
+            brsymbol: "SBIN-EQ".into(),
+            name: "STATE BANK OF INDIA".into(),
+            exchange: "NSE".into(),
+            brexchange: "NSE".into(),
+            token: "3045".into(),
+            expiry: String::new(),
+            strike: 0.0,
+            lot_size: 1,
+            instrument_type: "EQ".into(),
+            tick_size: 0.05,
+        }]);
+        mock.set_quote(Quote {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            ltp: 100.0,
+            close: 100.0,
+            ..Default::default()
+        });
+        h.setup();
+        BrokerAuthService::persist(
+            &h.ctx,
+            &BrokerSession {
+                broker_id: "zerodha".into(),
+                auth_token: "mock-access-token".into(),
+                feed_token: None,
+                user_id: "AB1234".into(),
+                user_name: None,
+                authenticated_at: h.ctx.now(),
+            },
+        )
+        .unwrap();
+        h.ctx.sqlite.set_analyze_mode(false).unwrap();
+        ApiKeyService::set_order_mode(&h.ctx, "semi_auto").unwrap();
+        let (cookie, csrf) = h.session(true);
+        let host = Arc::new(RecordingHost::new());
+        let runner = &h.ctx.trading.runner;
+        runner.set_host(host.clone());
+        runner.set_options(fast());
+        let t = T {
+            h,
+            cookie,
+            csrf,
+            host,
+            fake: Arc::new(Fake::default()),
+        };
+        (t, mock)
+    }
+
+    pub(super) fn placed(mock: &MockBroker) -> Vec<(String, i64)> {
+        mock.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                MockCall::PlaceOrder(o) => Some((o.action.as_str().to_string(), o.quantity)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(super) fn held_row(t: &T) -> (i64, String, Option<String>, Option<i64>) {
+        t.h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT id, status, orderid, pending_order_id FROM openscript_orders ORDER BY id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    /// LOG-04: an entry held in the Action Center and approved there is
+    /// followed by its run: bound to the broker order the approval placed,
+    /// its fill counted, and Stop closes exactly it. Before, the row kept no
+    /// number, the fill never reached the run, and Stop stayed pending. The
+    /// approval goes to the live broker although analyzer mode was turned on
+    /// meanwhile: the run decided its side when it started (`force_live`).
+    #[tokio::test]
+    async fn an_order_approved_in_the_action_center_is_followed_by_its_run() {
+        let (t, mock) = setup_semi_auto().await;
+        let id = t.deploy("SBIN").await;
+        let run = t.start(&id).await;
+        assert_eq!(run["run"]["mode"], "live", "{}", run);
+        let v = t.buy(&id, 1, 3).await;
+        assert_eq!(v["sent"], 1, "{}", v);
+        assert!(placed(&mock).is_empty(), "held for approval, not sent");
+        let (row, status, orderid, pending) = held_row(&t);
+        assert_eq!((status.as_str(), orderid), ("working", None));
+        let pending = pending.expect("linked to its Action Center order");
+
+        t.h.ctx.sqlite.set_analyze_mode(true).unwrap();
+        *mock.order_book.lock() = Some(Ok(vec![
+            sbin_order("MOCK-1", "BUY", 3),
+            sbin_order("MOCK-2", "SELL", 3),
+        ]));
+        *mock.positions.lock() = Some(Ok(vec![sbin_long(3)]));
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/approve/{}", pending),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert_eq!(v["broker_order_id"], "MOCK-1", "sent live: {}", v);
+        assert_eq!(placed(&mock), vec![("BUY".to_string(), 3)]);
+
+        t.h.ctx.trading.runner.pump_once(&id).await;
+        assert_eq!(
+            t.row_status(row),
+            ("filled".to_string(), Some("MOCK-1".to_string()), 3),
+            "bound to the approved order and its fill counted"
+        );
+        let (s, v) = t.close(&id).await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert_eq!(
+            placed(&mock),
+            vec![("BUY".to_string(), 3), ("SELL".to_string(), 3)],
+            "exactly one exit, for what the approval filled"
+        );
+    }
+
+    /// LOG-04: an entry the trader rejects in the Action Center was never
+    /// placed: its row is rejected, the script is told, and Stop has nothing
+    /// to wait for. Before, the row stayed open with no number and Stop
+    /// stayed pending.
+    #[tokio::test]
+    async fn an_order_rejected_in_the_action_center_is_rejected_for_its_run() {
+        let (t, mock) = setup_semi_auto().await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        t.buy(&id, 1, 3).await;
+        let (row, _, _, pending) = held_row(&t);
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/reject/{}", pending.unwrap()),
+                Some(json!({"reason": "not today"})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        t.h.ctx.trading.runner.pump_once(&id).await;
+        assert_eq!(t.row_status(row).0, "rejected");
+        let frames = t.frames(&id, 1).await;
+        assert_eq!(frames.last().unwrap()["status"], "rejected", "{:?}", frames);
+        let (s, v) = t.close(&id).await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert!(placed(&mock).is_empty(), "nothing was ever sent");
+    }
+
+    /// LOG-04 with LOG-08: the approval reaches the broker and its answer is
+    /// lost. The run's row is unconfirmed, never sent again, and the order
+    /// book settles it, so the fill is counted like any order of the run.
+    #[tokio::test]
+    async fn an_approval_without_an_answer_is_settled_from_the_order_book() {
+        use openalgo_desktop_lib::brokers::mock::AfterSend;
+        let (t, mock) = setup_semi_auto().await;
+        t.h.ctx.reconciler.stop();
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        t.buy(&id, 1, 3).await;
+        let (row, _, _, pending) = held_row(&t);
+        mock.after_send
+            .lock()
+            .push_back((AfterSend::Dropped, "complete"));
+        *mock.after_send_price.lock() = 100.0;
+        *mock.after_send_time.lock() = "2026-10-05 10:00:05".into();
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/approve/{}", pending.unwrap()),
+                Some(json!({})),
+            )
+            .await;
+        assert!(s.is_success() || s.is_server_error(), "{}: {}", s, v);
+        assert_eq!(placed(&mock).len(), 1);
+        t.h.ctx.trading.runner.pump_once(&id).await;
+        assert_eq!(t.row_status(row).0, "unconfirmed");
+        // Nothing new goes out while it is unconfirmed.
+        assert_eq!(t.buy(&id, 2, 1).await["sent"], 0);
+        t.h.ctx.reconciler.pass().await;
+        t.h.ctx.trading.runner.pump_once(&id).await;
+        let (status, orderid, filled) = t.row_status(row);
+        assert_eq!(orderid.as_deref(), Some("MOCK-1"), "settled from the book");
+        assert_eq!((status.as_str(), filled), ("filled", 3));
+        assert_eq!(placed(&mock).len(), 1, "never sent twice");
+    }
+}

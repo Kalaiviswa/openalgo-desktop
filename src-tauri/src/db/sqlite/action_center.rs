@@ -81,6 +81,20 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migration `089_pending_orders_force_live` (LOG-04): whether the caller
+/// that queued the order had already decided it goes to the live broker
+/// (`Route::force_live`, an OpenScript Live run), so its approval does not
+/// re-read the analyzer toggle. A desktop column; the web has none. Checks
+/// before altering.
+pub fn migrate_force_live(conn: &Connection) -> Result<()> {
+    if !super::migrations::column_exists(conn, "pending_orders", "force_live")? {
+        conn.execute_batch(
+            "ALTER TABLE pending_orders ADD COLUMN force_live INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingOrderRow {
     pub id: i64,
@@ -98,11 +112,13 @@ pub struct PendingOrderRow {
     pub rejected_reason: Option<String>,
     pub broker_order_id: Option<String>,
     pub broker_status: Option<String>,
+    /// Sent to the live broker on approval whatever analyzer mode says then.
+    pub force_live: bool,
 }
 
 const COLS: &str = "id, user_id, api_type, order_data, created_at, created_at_ist, status, \
     approved_at, approved_at_ist, approved_by, rejected_at_ist, rejected_by, rejected_reason, \
-    broker_order_id, broker_status";
+    broker_order_id, broker_status, force_live";
 
 fn map(r: &Row) -> rusqlite::Result<PendingOrderRow> {
     Ok(PendingOrderRow {
@@ -121,6 +137,7 @@ fn map(r: &Row) -> rusqlite::Result<PendingOrderRow> {
         rejected_reason: r.get(12)?,
         broker_order_id: r.get(13)?,
         broker_status: r.get(14)?,
+        force_live: r.get(15)?,
     })
 }
 
@@ -141,12 +158,21 @@ pub fn create(
     user_id: &str,
     api_type: &str,
     order_data: &str,
+    force_live: bool,
     now: DateTime<Utc>,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO pending_orders (user_id, api_type, order_data, created_at, created_at_ist, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
-        params![user_id, api_type, order_data, utc_text(now), ist_text(now)],
+        "INSERT INTO pending_orders (user_id, api_type, order_data, created_at, created_at_ist,
+                status, force_live)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+        params![
+            user_id,
+            api_type,
+            order_data,
+            utc_text(now),
+            ist_text(now),
+            force_live
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -271,6 +297,7 @@ mod tests {
         c.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);")
             .unwrap();
         migrate(&c).unwrap();
+        migrate_force_live(&c).unwrap();
         c
     }
 
@@ -281,7 +308,7 @@ mod tests {
     #[test]
     fn transitions_are_compare_and_set() {
         let c = db();
-        let id = create(&c, "u", "placeorder", "{}", now()).unwrap();
+        let id = create(&c, "u", "placeorder", "{}", false, now()).unwrap();
         assert_eq!(pending_count(&c, "u").unwrap(), 1);
         assert!(
             !delete(&c, id, "u").unwrap(),
@@ -323,6 +350,7 @@ mod tests {
         .unwrap();
         migrate(&c).unwrap();
         migrate(&c).unwrap();
+        migrate_force_live(&c).unwrap();
         let rows = list(&c, "trader", None).unwrap();
         assert_eq!(rows.len(), 1);
         let data: serde_json::Value = serde_json::from_str(&rows[0].order_data).unwrap();

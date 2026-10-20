@@ -10,9 +10,11 @@
 //! after the claim writes a final broker status; a row left in `submitting`
 //! by a crash is never resent automatically.
 //!
-//! Approved orders run through the same services as `/api/v1`, with
-//! [`Route::INTERNAL`] so they are not queued again; analyzer mode at the
-//! moment of approval decides sandbox or live, as on the web.
+//! Approved orders run through the same services as `/api/v1`, as internal
+//! calls so they are not queued again; analyzer mode at the moment of
+//! approval decides sandbox or live, as on the web, except for an order its
+//! caller had already decided goes live (`force_live`, an OpenScript Live
+//! run), which goes to the live broker (LOG-04).
 
 use super::core::{publish, s, Reply};
 use super::order_service::Route;
@@ -389,13 +391,18 @@ fn summarize_ids(ids: &[String]) -> String {
     s.chars().take(255).collect()
 }
 
-async fn dispatch(ctx: &AppState, api_type: &str, data: &Value) -> Option<Reply> {
+async fn dispatch(ctx: &AppState, row: &PendingOrderRow, data: &Value) -> Option<Reply> {
     use super::{
         batch_order_service as batch, gtt_service as gtt, options_order_service as opt,
         order_service as ord,
     };
-    let r = Route::INTERNAL;
-    Some(match api_type {
+    // The trader approved it, so it is not queued again; an order whose
+    // caller had already decided on the live broker goes there (LOG-04).
+    let r = Route {
+        force_live: row.force_live,
+        internal: true,
+    };
+    Some(match row.api_type.as_str() {
         "placeorder" => ord::place_order(ctx, data, r).await,
         "smartorder" => ord::place_smart_order(ctx, data, r).await,
         "basketorder" => batch::basket_order(ctx, data, r).await,
@@ -429,7 +436,7 @@ pub async fn execute_approved(ctx: &AppState, id: i64) -> Execution {
         return Execution::fail(403, "Authentication failed");
     }
     tracing::info!("Executing approved order {} ({})", id, row.api_type);
-    let Some(reply) = dispatch(ctx, &row.api_type, &data).await else {
+    let Some(reply) = dispatch(ctx, &row, &data).await else {
         mark(ctx, id, None, "rejected");
         return Execution::fail(400, &format!("Unknown order type: {}", row.api_type));
     };
@@ -895,6 +902,7 @@ mod tests {
             rejected_reason: None,
             broker_order_id: None,
             broker_status: None,
+            force_live: false,
         }
     }
 
