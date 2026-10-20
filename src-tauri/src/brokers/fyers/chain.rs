@@ -58,8 +58,16 @@ pub struct NativeLeg {
     pub ask: f64,
     #[serde(deserialize_with = "i64_lenient")]
     pub volume: i64,
-    #[serde(deserialize_with = "i64_lenient")]
-    pub oi: i64,
+    /// `None` when Fyers sent no readable open interest (missing, `null`,
+    /// not a number): never a known zero (NEW-PAR-06).
+    #[serde(deserialize_with = "reported")]
+    pub oi: Option<i64>,
+}
+
+fn reported<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<i64>, D::Error> {
+    Ok(crate::brokers::common::book_read::whole(
+        &Value::deserialize(d)?,
+    ))
 }
 
 /// One entry of `data.expiryData`: `date` as `DD-MM-YYYY`, `expiry` the
@@ -238,7 +246,9 @@ fn leg_quote(key: &QuoteKey, l: &NativeLeg) -> Quote {
         bid: l.bid,
         ask: l.ask,
         volume: l.volume,
-        oi: l.oi,
+        // The public answer keeps the web's zero; `oi_missing` says it is
+        // not a measured figure.
+        oi: l.oi.unwrap_or(0),
         close,
         change: l.ltpch,
         change_percent: l.ltpchp,
@@ -268,25 +278,30 @@ pub async fn get_chain_quotes(
     };
     let mut quotes: Vec<Option<QuoteResult>> = Vec::with_capacity(req.keys.len());
     let mut rest: Vec<QuoteKey> = Vec::new();
+    let mut oi_missing = HashSet::new();
     for k in &req.keys {
         let hit = b
             .resolver()
             .by_symbol(&k.exchange, &k.symbol)
             .and_then(|row| legs.get(row.br_symbol()).cloned());
         match hit {
-            Some(l) => quotes.push(Some(QuoteResult {
-                symbol: k.symbol.clone(),
-                exchange: k.exchange.clone(),
-                data: Some(leg_quote(k, &l)),
-                error: None,
-            })),
+            Some(l) => {
+                if l.oi.is_none() {
+                    oi_missing.insert(k.symbol.clone());
+                }
+                quotes.push(Some(QuoteResult {
+                    symbol: k.symbol.clone(),
+                    exchange: k.exchange.clone(),
+                    data: Some(leg_quote(k, &l)),
+                    error: None,
+                }))
+            }
             None => {
                 rest.push(k.clone());
                 quotes.push(None);
             }
         }
     }
-    let mut oi_missing = HashSet::new();
     if !rest.is_empty() {
         let fetched = multiquotes_with(b, auth, &rest, false).await?;
         let mut by_key: HashMap<(String, String), QuoteResult> = fetched
@@ -323,6 +338,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// NEW-PAR-06: open interest Fyers did not send, or sent as something
+    /// other than a whole number, is not a known zero; a reported zero is.
+    #[test]
+    fn open_interest_is_kept_only_as_reported() {
+        let leg = |oi: Value| {
+            let mut l = json!({"symbol": "NSE:X26O1325000CE", "option_type": "CE", "ltp": 1});
+            l["oi"] = oi;
+            serde_json::from_value::<NativeLeg>(l).unwrap().oi
+        };
+        assert_eq!(leg(json!(1500)), Some(1500));
+        assert_eq!(leg(json!("1500")), Some(1500));
+        assert_eq!(leg(json!(0)), Some(0));
+        assert_eq!(leg(json!(null)), None);
+        assert_eq!(leg(json!("abc")), None);
+        assert_eq!(leg(json!(1.5)), None);
+        let absent = json!({"symbol": "NSE:X26O1325000CE", "option_type": "CE", "ltp": 1});
+        assert_eq!(
+            serde_json::from_value::<NativeLeg>(absent).unwrap().oi,
+            None
+        );
+    }
+
     #[test]
     fn native_answer_parses_legs_and_expiries() {
         let v = json!({
@@ -342,7 +379,7 @@ mod tests {
         });
         let c = parse_native(&v);
         assert_eq!(c.legs.len(), 1);
-        assert_eq!(c.legs[0].oi, 15_000);
+        assert_eq!(c.legs[0].oi, Some(15_000));
         assert_eq!(
             c.expiries,
             vec![

@@ -988,6 +988,44 @@ async fn the_native_chain_gives_every_legs_oi_for_the_requested_expiry() {
     assert!(fake.requests("GET", "/data/depth").is_empty());
 }
 
+/// NEW-PAR-06: a native leg whose open interest Fyers did not send, or sent
+/// as `null` or text that is not a number, is reported without OI (so the
+/// OI tools refuse a figure over it); a reported zero is a measured zero.
+#[tokio::test]
+async fn native_legs_without_a_readable_oi_are_reported_without_oi() {
+    let mut chain: serde_json::Value = serde_json::from_str(&native_chain("26O13")).unwrap();
+    let legs = chain["data"]["optionsChain"].as_array_mut().unwrap();
+    // legs[0] is the underlying; then CE, PE per strike from 22750.
+    legs[1].as_object_mut().unwrap().remove("oi");
+    legs[2]["oi"] = json!(null);
+    legs[3]["oi"] = json!("n/a");
+    legs[4]["oi"] = json!(0);
+    let fake = Fake::default();
+    fake.once(
+        "GET",
+        "/data/options-chain-v3",
+        (200, vec![], chain.to_string()),
+    );
+    let b = chain_broker(&fake.serve().await);
+    let got = b
+        .get_chain_quotes(&auth(), &chain_request("13OCT26", (2026, 10, 13)))
+        .await
+        .unwrap();
+    let mut missing: Vec<&str> = got.oi_missing.iter().map(String::as_str).collect();
+    missing.sort_unstable();
+    assert_eq!(
+        missing,
+        [
+            "NIFTY13OCT2622750CE",
+            "NIFTY13OCT2622750PE",
+            "NIFTY13OCT2622800CE"
+        ]
+    );
+    let zero = got.quotes[3].data.as_ref().unwrap();
+    assert_eq!((zero.symbol.as_str(), zero.oi), ("NIFTY13OCT2622800PE", 0));
+    assert!(fake.requests("GET", "/data/quotes").is_empty());
+}
+
 #[tokio::test]
 async fn margin_uses_multiorder_endpoint() {
     let fake = Fake::default();
