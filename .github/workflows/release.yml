@@ -28,7 +28,8 @@ name: Release
 #   macOS Apple Silicon    .dmg
 #   macOS Intel            .dmg
 #   Linux x64              AppImage and .deb
-#   Linux arm64 (Pi 4/5)   AppImage and .deb
+#   Linux arm64            AppImage and .deb (ARM64 laptops, desktops and VMs;
+#                          not Raspberry Pi, whose users run OpenAlgo web)
 #
 # Signing is optional. Without the secrets below the bundles are unsigned
 # (macOS Gatekeeper and Windows SmartScreen will warn). Configure them under

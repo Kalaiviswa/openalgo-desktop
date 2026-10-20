@@ -94,15 +94,18 @@ machines GitHub provides: Ubuntu 22.04 on x64 and on 64-bit ARM, the current
 macOS on Apple Silicon (the Intel Mac installer is built there too, but not
 run), and Windows Server 2025 with Desktop Experience.
 
-After every change that reaches the main branch, the installers built from
-it are installed on fresh machines and started as a trader would on first
-use, with the account created and signed in: the `.deb` and the AppImage on
-Ubuntu 22.04 (x64 and 64-bit ARM), the setup program on Windows Server 2022
-and Windows Server 2025, and the `.dmg` on Apple Silicon macOS (the "Install
-smoke" checks under the repository's Actions tab). A release is built only
-from a change that passed them. Windows 10 and 11, Intel Macs, ARM64 Linux
-computers and the other systems in the table have not yet been installed and
-used by hand.
+Every change, before it is accepted, also has its installers installed on
+fresh machines and started as a trader would on first use, with the account
+created and signed in and the app's own window checked to have opened its
+page: the `.deb` and the AppImage on Ubuntu 22.04 (x64 and 64-bit ARM), the
+setup program on Windows Server 2022 and Windows Server 2025, and the `.dmg`
+on Apple Silicon macOS. Both Mac apps are checked to ask for no newer macOS
+than this table says. On Ubuntu the installed app is also driven through its
+window: account created, a wrong password refused, signed in and out. A
+release is built only from a change that passed all of them. Windows 10 and
+11, Intel Macs, ARM64 Linux computers and the other systems in the table
+have not yet been installed and used by hand; the checklist for doing so is
+[Platform qualification](docs/release/platform-qualification.md).
 
 A computer with no internet connection and no WebView2 (some Windows 10 and
 Windows Server installs) cannot install it from the setup program: install

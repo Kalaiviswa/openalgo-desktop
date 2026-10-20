@@ -189,12 +189,18 @@ commit the run built).
   loaded its page from the app's server (the window's GET of `/` in the
   app's request log, `launch_smoke.py --window`), so a GUI that fails to
   start fails the job on every platform, macOS included; runs the packaged
-  `mcp` subcommand
-  over piped stdio, with no app and, after the sign-in, against the running
-  app with a read-scope MCP token created on it (`launch_smoke.py
+  `mcp` subcommand over piped stdio, with no app and, after the sign-in,
+  against the running app with a read-scope MCP token created on it
+  (`launch_smoke.py
   --mcp-bridge`: protocol versions, the read scope's tools and no order
   tool, an order refused for its scope, two calls, a token revoked midway);
-  and checks the `.deb` dependency list.
+  checks the `.deb` dependency list; checks that both Mac apps (Apple
+  Silicon and Intel) ask for no newer macOS than README "Supported systems"
+  claims (`check_macos_min.py`); and on Windows checks that the data folder
+  and its files are closed to Everyone, Users and the other broad groups
+  (`check_windows_acl.ps1`, after showing that it fails on a folder open to
+  Everyone). What CI cannot show is the maintainer's checklist,
+  [Platform qualification](platform-qualification.md).
 - `.github/workflows/native-e2e.yml`: the installed `.deb` driven through
   its own window by WebDriver (tauri-driver and WebKitWebDriver under Xvfb):
   account creation, a refused wrong password, sign-in, the signed-in shell
