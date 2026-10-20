@@ -38,10 +38,8 @@ r2d2_sqlite = "0.25"
 
 # Security
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
-argon2 = "0.5"
-# Argon2's working memory in pages of its own, returned when a run ends
-# (security::hashing::Workspace).
-memmap2 = "0.9"
+# zeroize: the crate wipes its own intermediate hashes (H0, the final block).
+argon2 = { version = "0.5", features = ["zeroize"] }
 aes-gcm = "0.10"
 # The AES key schedule is zeroed when the data key leaves memory at logout
 # (KEY-01).
@@ -150,6 +148,11 @@ rmcp = { version = "3.5", default-features = false, features = ["server", "trans
 
 # Process and host metrics (health monitor, diagnostics)
 sysinfo = { version = "0.38", default-features = false, features = ["system", "disk", "network"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Argon2's working memory in pages of its own on glibc, returned when a run
+# ends (security::hashing::Workspace). 0.9.11: RUSTSEC-2026-0186.
+memmap2 = "0.9.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Thread count for the health monitor (proc_pidinfo).

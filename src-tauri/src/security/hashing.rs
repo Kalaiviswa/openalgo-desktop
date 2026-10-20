@@ -33,41 +33,89 @@ fn peppered(pepper: &[u8], password: &str) -> zeroize::Zeroizing<String> {
     s
 }
 
-/// One Argon2 run's working memory (19 MiB with the account's parameters)
-/// in pages of its own, mapped for the run and unmapped when it ends, zeroed
-/// first. Taken from the allocator instead, glibc kept the freed block in
-/// the thread's malloc arena once the first one had raised its mmap
-/// threshold, so every thread that ever hashed held on to up to ~19 MiB,
-/// some several (weekly soak, 2026-10-18: +115 MB).
+/// Largest parameters a stored hash may ask for: 256 MiB, 16 passes and 16
+/// lanes (the account's own are 19 MiB, 2 and 1). A hash asking for more is
+/// refused before anything is allocated, never run.
+const MAX_M_COST_KIB: u32 = 256 * 1024;
+const MAX_T_COST: u32 = 16;
+const MAX_P_COST: u32 = 16;
+
+/// One Argon2 run's working memory (19 MiB with the account's parameters),
+/// zeroed when the run ends. On Linux with glibc it is an anonymous map of
+/// its own, unmapped when the run ends: taken from the allocator, a freed
+/// block stayed in the thread's malloc arena once the first one had raised
+/// glibc's mmap threshold, so every thread that ever hashed held on to up to
+/// ~19 MiB, some several (weekly soak, 2026-10-18: +115 MB). Where the map
+/// cannot be made, and on macOS and Windows (which return large frees by
+/// themselves; an anonymous map is briefly executable on Windows), it is a
+/// heap allocation. A sign-in never fails for want of a map.
 struct Workspace {
-    map: memmap2::MmapMut,
-    blocks: usize,
+    memory: Memory,
+}
+
+enum Memory {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Mapped(memmap2::MmapMut),
+    Heap(Vec<Block>),
 }
 
 impl Workspace {
     fn new(params: &Params) -> Result<Self> {
         let blocks = params.block_count();
-        let map = memmap2::MmapMut::map_anon(blocks * Block::SIZE)
-            .map_err(|e| AppError::Internal(format!("argon2 working memory: {}", e)))?;
-        Ok(Self { map, blocks })
+        let bytes = blocks
+            .checked_mul(Block::SIZE)
+            .ok_or_else(|| AppError::Internal("argon2 working memory: too large".into()))?;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(map) = map_anon(bytes) {
+            return Ok(Self {
+                memory: Memory::Mapped(map),
+            });
+        }
+        Ok(Self {
+            memory: Memory::Heap(vec![Block::default(); bytes / Block::SIZE]),
+        })
+    }
+}
+
+/// An anonymous map of `bytes`, or None when the system refuses one.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn map_anon(bytes: usize) -> Option<memmap2::MmapMut> {
+    #[cfg(test)]
+    if tests::MAP_FAILS.with(|f| f.get()) {
+        return None;
+    }
+    match memmap2::MmapMut::map_anon(bytes) {
+        Ok(map) => Some(map),
+        Err(e) => {
+            tracing::warn!("Argon2 working memory not mapped, using the heap: {}", e);
+            None
+        }
     }
 }
 
 impl AsMut<[Block]> for Workspace {
     fn as_mut(&mut self) -> &mut [Block] {
-        // SAFETY: the map is `blocks * Block::SIZE` bytes, page aligned (a
-        // Block needs 64) and zero-filled by the system; a Block is plain
-        // u64s, valid for any bytes; the slice borrows `self` mutably, so
-        // nothing else reaches the map while it lives.
-        unsafe {
-            std::slice::from_raw_parts_mut(self.map.as_mut_ptr().cast::<Block>(), self.blocks)
+        match &mut self.memory {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Memory::Mapped(map) => {
+                let blocks = map.len() / Block::SIZE;
+                // SAFETY: `blocks` whole blocks fit in the map, which is page
+                // aligned (a Block needs 64) and zero-filled by the system;
+                // a Block is plain u64s, valid for any bytes; the slice
+                // borrows the map mutably, so nothing else reaches it while
+                // the slice lives.
+                unsafe { std::slice::from_raw_parts_mut(map.as_mut_ptr().cast::<Block>(), blocks) }
+            }
+            Memory::Heap(blocks) => blocks,
         }
     }
 }
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        self.map[..].zeroize();
+        for block in self.as_mut() {
+            block.zeroize();
+        }
     }
 }
 
@@ -131,6 +179,14 @@ pub fn verify_password(pepper: &[u8], password: &str, hash: &str) -> Result<bool
         None => Version::default(),
     };
     let params = Params::try_from(&parsed).map_err(phc_error)?;
+    if params.m_cost() > MAX_M_COST_KIB
+        || params.t_cost() > MAX_T_COST
+        || params.p_cost() > MAX_P_COST
+    {
+        return Err(AppError::Internal(
+            "invalid password hash: parameters beyond what this app accepts".into(),
+        ));
+    }
     let mut salt_buf = [0u8; 64];
     let salt_bytes = salt.decode_b64(&mut salt_buf).map_err(phc_error)?;
     let mut out = vec![0u8; expected.len()];
@@ -212,12 +268,24 @@ fn stand_in_pepper() -> &'static [u8; 32] {
 /// nobody knows, made once per process.
 fn stand_in_hash() -> &'static str {
     static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut secret = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
-        hash_password(stand_in_pepper(), &hex::encode(secret)).unwrap_or_default()
-    })
+    if let Some(hash) = HASH.get() {
+        return hash;
+    }
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+    match hash_password(stand_in_pepper(), &hex::encode(secret)) {
+        // Kept only once it was made: an empty hash would end a stand-in
+        // check at once, and the timing would tell again.
+        Ok(hash) => HASH.get_or_init(|| hash),
+        Err(_) => STAND_IN_FALLBACK,
+    }
 }
+
+/// A well-formed hash with the account's parameters that no password
+/// matches, for a stand-in check while the real stand-in hash could not be
+/// made: checking it costs the same Argon2 work.
+const STAND_IN_FALLBACK: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$c3RhbmQtaW4tc2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 /// The work of checking `password` against the account's password hash,
 /// spent where a sign-in has no hash to check or no vault to open (a name
@@ -237,6 +305,198 @@ pub static STAND_IN_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+    use argon2::{AssociatedData, KeyId, ParamsBuilder};
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    thread_local! {
+        /// Makes [`map_anon`] refuse on this thread, as a system out of
+        /// map space or address space would.
+        pub(super) static MAP_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Review P2: a map the system refuses must not become a sign-in that
+    /// fails (the key vault would read as unreadable, and the only way out
+    /// offered is Start fresh). The run falls back to the heap and gives the
+    /// same answers.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_refused_map_falls_back_to_the_heap_and_signs_in() {
+        MAP_FAILS.with(|f| f.set(true));
+        let pepper = [7u8; 32];
+        let verified = verify_password(&pepper, "Secret@123", BEFORE);
+        let kek = derive_kek("pw", b"0123456789abcdef");
+        let hash = hash_password(&pepper, "Secret@123");
+        MAP_FAILS.with(|f| f.set(false));
+        assert!(verified.unwrap());
+        assert_eq!(hex::encode(kek.unwrap()), KEK_BEFORE);
+        assert!(verify_password(&pepper, "Secret@123", &hash.unwrap()).unwrap());
+    }
+
+    /// Review P3: the stand-in check's fallback hash is well formed, has the
+    /// account's parameters (so checking it costs the same work) and
+    /// matches nothing.
+    #[test]
+    fn the_stand_in_fallback_costs_a_full_check_and_matches_nothing() {
+        let parsed = PasswordHash::new(STAND_IN_FALLBACK).unwrap();
+        let params = Params::try_from(&parsed).unwrap();
+        let own = argon2().unwrap();
+        assert_eq!(
+            (params.m_cost(), params.t_cost(), params.p_cost()),
+            (
+                own.params().m_cost(),
+                own.params().t_cost(),
+                own.params().p_cost()
+            )
+        );
+        assert!(!verify_password(&[7u8; 32], "anything", STAND_IN_FALLBACK).unwrap());
+        assert!(!stand_in_hash().is_empty());
+    }
+
+    /// Review P3: a stored hash asking for more than the app accepts is
+    /// refused before any memory is taken, never run.
+    #[test]
+    fn a_hash_asking_for_huge_costs_is_refused_unrun() {
+        let tail = "$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA";
+        for params in ["m=262145,t=2,p=1", "m=19456,t=17,p=1", "m=19456,t=2,p=17"] {
+            let hash = format!("$argon2id$v=19${}{}", params, tail);
+            let started = std::time::Instant::now();
+            assert!(
+                verify_password(&[7u8; 32], "pw", &hash).is_err(),
+                "{}",
+                hash
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "{}",
+                hash
+            );
+        }
+        let at_the_bound = format!("$argon2id$v=19$m=8,t=16,p=1{}", tail);
+        assert!(!verify_password(&[7u8; 32], "pw", &at_the_bound).unwrap());
+    }
+
+    /// What the crate's own verifier says, as this file asked it before:
+    /// Some(true or false), or None for an error.
+    fn crate_verdict(pepper: &[u8], password: &str, hash: &str) -> Option<bool> {
+        let parsed = PasswordHash::new(hash).ok()?;
+        match Argon2::default().verify_password(peppered(pepper, password).as_bytes(), &parsed) {
+            Ok(()) => Some(true),
+            Err(argon2::password_hash::Error::Password) => Some(false),
+            Err(_) => None,
+        }
+    }
+
+    fn within_bounds(hash: &str) -> bool {
+        PasswordHash::new(hash)
+            .ok()
+            .and_then(|p| Params::try_from(&p).ok())
+            .is_none_or(|p| {
+                p.m_cost() <= MAX_M_COST_KIB && p.t_cost() <= MAX_T_COST && p.p_cost() <= MAX_P_COST
+            })
+    }
+
+    /// Review P3: side by side with the crate's own verifier (the security
+    /// review's harness, cut to cheap costs): every algorithm, both
+    /// versions, other output lengths, key ids and associated data, a
+    /// version left out, malformed strings and mutations of a good one.
+    /// The answers must agree: match, no match or error.
+    #[test]
+    fn verification_agrees_with_the_crates_verifier() {
+        let pepper = [7u8; 32];
+        let mut corpus: Vec<String> = Vec::new();
+        for alg in [Algorithm::Argon2d, Algorithm::Argon2i, Algorithm::Argon2id] {
+            for ver in [Version::V0x10, Version::V0x13] {
+                for (m, t, p) in [(8, 1, 1), (16, 2, 2), (64, 3, 4)] {
+                    for out in [None, Some(10), Some(64)] {
+                        for extra in 0..3 {
+                            let mut b = ParamsBuilder::new();
+                            b.m_cost(m).t_cost(t).p_cost(p);
+                            if let Some(o) = out {
+                                b.output_len(o);
+                            }
+                            if extra >= 1 {
+                                b.keyid(KeyId::new(b"kid12").unwrap());
+                            }
+                            if extra == 2 {
+                                b.data(AssociatedData::new(b"assoc data here").unwrap());
+                            }
+                            let salt = SaltString::from_b64("c29tZXNhbHRzb21lc2FsdA").unwrap();
+                            let h = Argon2::new(alg, ver, b.build().unwrap())
+                                .hash_password(peppered(&pepper, "pw").as_bytes(), &salt)
+                                .unwrap()
+                                .to_string();
+                            corpus.push(h.replace("$v=19$", "$").replace("$v=16$", "$"));
+                            corpus.push(h);
+                        }
+                    }
+                }
+            }
+        }
+        let good = "$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA";
+        for odd in [
+            "",
+            "not a hash",
+            "$argon2id$v=19$m=8,t=1,p=1",
+            "$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA",
+            "$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$",
+            "$argon2id$v=19$m=8,t=1,p=1$$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=1,p=1$c29tZQ$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$AAAAAAAAAAAA",
+            "$argon2id$v=20$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=7,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=0,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=1,p=2$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=1,p=1,x=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,m=16,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2$v=19$m=8,t=1,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$scrypt$ln=15,r=8,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+            "$argon2id$v=19$m=8,t=1,p=1,data=$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA",
+        ] {
+            corpus.push(odd.to_string());
+        }
+        // Mutations of a good hash: one to three edits each.
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let alphabet = b"$=,+/.-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+        for _ in 0..400 {
+            let mut s = good.as_bytes().to_vec();
+            for _ in 0..1 + next() % 3 {
+                let i = (next() as usize) % (s.len() + 1);
+                match next() % 3 {
+                    0 if i < s.len() => {
+                        s.remove(i);
+                    }
+                    1 => s.insert(i, alphabet[(next() as usize) % alphabet.len()]),
+                    _ if i < s.len() => s[i] = alphabet[(next() as usize) % alphabet.len()],
+                    _ => {}
+                }
+            }
+            if let Ok(s) = String::from_utf8(s) {
+                corpus.push(s);
+            }
+        }
+        let mut compared = 0;
+        for hash in corpus.iter().filter(|h| within_bounds(h)) {
+            for (pepper, password) in [([7u8; 32], "pw"), ([7u8; 32], "pW"), ([8u8; 32], "pw")] {
+                let ours = verify_password(&pepper, password, hash).ok();
+                assert_eq!(
+                    ours,
+                    crate_verdict(&pepper, password, hash),
+                    "{:?} with {}",
+                    hash,
+                    password
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 1000, "{}", compared);
+    }
 
     #[test]
     fn hash_and_verify() {
@@ -259,7 +519,6 @@ mod tests {
     /// The crate's own PasswordHasher, as this file used it before the
     /// run's memory moved to a [`Workspace`].
     fn crate_hash(pepper: &[u8], password: &str, salt: &SaltString) -> String {
-        use argon2::password_hash::PasswordHasher;
         argon2()
             .unwrap()
             .hash_password(peppered(pepper, password).as_bytes(), salt)
@@ -309,7 +568,6 @@ mod tests {
     fn verification_follows_the_parameters_in_the_hash() {
         // Another cost and output length, made by the crate: verification
         // reads them from the PHC string, as the crate's verifier did.
-        use argon2::password_hash::PasswordHasher;
         let pepper = [7u8; 32];
         let params = Params::new(4096, 1, 1, Some(40)).unwrap();
         let salt = SaltString::from_b64("c29tZXNhbHRzb21lc2FsdA").unwrap();
