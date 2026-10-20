@@ -600,3 +600,46 @@ async fn system_info_diagnostics_and_report_have_no_secrets() {
     assert!(String::from_utf8(b).unwrap().starts_with("# OpenAlgo"));
     let _: Value = Value::Null;
 }
+
+async fn diagnostics_checks(h: &H, c: &str, t: &str) -> Vec<Value> {
+    let (s, v) = h
+        .json(with(
+            req(Method::POST, "/admin/api/system/diagnostics", None),
+            c,
+            Some(t),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    v["checks"].as_array().unwrap().clone()
+}
+
+/// DIA-01: Run diagnostics shows the broker's market data stream and what
+/// state it is in, not only that a session object exists ("Broker
+/// session: Connected"). Without a session there is no stream line; the
+/// order-updates line appears only while this broker's order socket runs.
+#[tokio::test]
+async fn diagnostics_show_the_market_data_stream_of_a_broker_session() {
+    let (h, c, t) = signed_in();
+    let named = |checks: &[Value], name: &str| checks.iter().find(|x| x["name"] == name).cloned();
+
+    let checks = diagnostics_checks(&h, &c, &t).await;
+    assert!(named(&checks, "Market data from the broker").is_none());
+
+    h.ctx
+        .set_broker_session(Some(openalgo_desktop_lib::state::BrokerSession {
+            broker_id: "zerodha".into(),
+            auth_token: openalgo_desktop_lib::security::Secret::new("t"),
+            feed_token: None,
+            user_id: "AB1234".into(),
+            user_name: None,
+            authenticated_at: h.ctx.now(),
+        }));
+    let checks = diagnostics_checks(&h, &c, &t).await;
+    let market = named(&checks, "Market data from the broker").expect("market data line");
+    assert_eq!(market["ok"], false, "{}", market);
+    assert_eq!(
+        market["detail"],
+        "Not connected. If this lasts, sign in to your broker again from the Broker page."
+    );
+    assert!(named(&checks, "Order updates from the broker").is_none());
+}

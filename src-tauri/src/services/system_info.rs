@@ -16,6 +16,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+mod streams;
+
 pub const MAX_LIMIT: i64 = 200;
 pub const LEVELS: &[&str] = &["ERROR", "CRITICAL", "WARNING", "INFO", "DEBUG"];
 
@@ -462,6 +464,7 @@ pub fn diagnostics(ctx: &AppState) -> Value {
         Some(b) => json!({"name": format!("Broker session ({})", b.broker_id), "ok": true, "ms": Value::Null, "detail": "Connected"}),
         None => json!({"name": "Broker session", "ok": false, "ms": Value::Null, "detail": "No broker is connected. Sign in to your broker from the Broker page."}),
     });
+    checks.extend(streams::checks(ctx));
     json!({
         "status": "success",
         "ran_at": ctx.now().with_timezone(&Kolkata).format("%Y-%m-%d %H:%M:%S").to_string(),

@@ -99,6 +99,8 @@ async fn resubscribes_after_reconnect_and_publishes_ticks() {
     m.subscribe(vec![sub("SBIN", FeedMode::Quote)])
         .await
         .unwrap();
+    // DIA-01: the last update's age is unknown until one arrives.
+    assert_eq!(m.stats().last_event_age(), None);
     m.connect(Box::new(MockFeed::new(url))).await.unwrap();
     let mut ticks = 0;
     while ticks < 2 {
@@ -127,6 +129,7 @@ async fn resubscribes_after_reconnect_and_publishes_ticks() {
         );
     }
     assert!(m.stats().connects.load(Ordering::Relaxed) >= 2);
+    assert!(m.stats().last_event_age().is_some());
     assert!(m.is_connected());
     m.disconnect().await.unwrap();
     assert!(!m.is_running());

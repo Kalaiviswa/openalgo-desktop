@@ -104,12 +104,49 @@ pub enum FeedStatus {
 }
 
 /// Counters for monitoring and tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FeedStats {
     pub connects: AtomicU64,
     pub disconnects: AtomicU64,
     pub stalls: AtomicU64,
     pub events: AtomicU64,
+    /// When the last tick, depth or order update arrived: milliseconds
+    /// after `epoch`, plus one; 0 before the first (DIA-01 diagnostics).
+    last_event: AtomicU64,
+    epoch: Instant,
+}
+
+impl Default for FeedStats {
+    fn default() -> Self {
+        Self {
+            connects: AtomicU64::new(0),
+            disconnects: AtomicU64::new(0),
+            stalls: AtomicU64::new(0),
+            events: AtomicU64::new(0),
+            last_event: AtomicU64::new(0),
+            epoch: Instant::now(),
+        }
+    }
+}
+
+impl FeedStats {
+    fn mark_event(&self) {
+        self.events.fetch_add(1, Ordering::Relaxed);
+        let ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+        self.last_event
+            .store(ms.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// How long ago the last tick, depth or order update arrived; None
+    /// before the first.
+    pub fn last_event_age(&self) -> Option<Duration> {
+        let at = self.last_event.load(Ordering::Relaxed).checked_sub(1)?;
+        Some(
+            self.epoch
+                .elapsed()
+                .saturating_sub(Duration::from_millis(at)),
+        )
+    }
 }
 
 /// Change to apply on the live socket.
@@ -636,7 +673,7 @@ impl Supervisor {
                     }
                 }
                 e @ (FeedEvent::Tick(_) | FeedEvent::Depth(_) | FeedEvent::OrderUpdate(_)) => {
-                    self.stats.events.fetch_add(1, Ordering::Relaxed);
+                    self.stats.mark_event();
                     // No receiver yet is normal; nothing is retained.
                     let _ = self.events.send(Arc::new(e));
                 }
