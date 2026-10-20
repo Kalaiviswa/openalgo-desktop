@@ -76,6 +76,7 @@ pub mod window;
 use crate::clock::Clock;
 use crate::db::sqlite::SqliteDb;
 use crate::services::live_owner::Destination;
+use crate::services::report_flight::KeyedFlight;
 use crate::strategy::dispatch::RunMode;
 use crate::trading::names::is_script_name;
 use crate::trading::scripts::ScriptStore;
@@ -372,6 +373,9 @@ pub struct Runner {
     /// Batches of intents being sent (`page`): each runs to its end even
     /// when its page's request is dropped, and shutdown waits for them.
     batches: Mutex<tokio::task::JoinSet<()>>,
+    /// A deployment's own orders, read once for the book reads that ask at
+    /// once (`own_book`).
+    ledgers: KeyedFlight<(String, String), Result<Arc<books::OwnBook>, String>>,
 }
 
 fn random_token() -> String {
@@ -423,6 +427,7 @@ impl Runner {
             ambiguous: Mutex::new(HashSet::new()),
             cancel: CancellationToken::new(),
             batches: Mutex::new(tokio::task::JoinSet::new()),
+            ledgers: KeyedFlight::new("a deployment's own orders"),
         })
     }
 
@@ -617,13 +622,36 @@ impl Runner {
         self.own_orders(&info.run_id, &info.destination)
     }
 
-    /// The orders a deployment placed at one destination (for its books).
-    pub fn orders_of(
+    /// What its books need of the orders a deployment placed at one
+    /// destination, read and worked out off the async workers (a ledger
+    /// grows with every order) and shared by the book reads that ask at
+    /// once: the Strategies panel polls positions every 15 s per running
+    /// deployment. The sentence when they could not be read.
+    pub async fn own_book(
         &self,
         given: &str,
         destination: &Destination,
-    ) -> Result<Vec<store::OrderRow>, String> {
-        self.own_orders(&self.as_run_id(given), destination)
+    ) -> Result<Arc<books::OwnBook>, String> {
+        let Some(me) = self.me.upgrade() else {
+            return Err(ORDERS_UNREADABLE.to_string());
+        };
+        let name = given.to_string();
+        // The whole destination is the key: rows of another account are
+        // never this run's (NEW-TR-01).
+        let key = (name.clone(), format!("{:?}", destination));
+        let at = destination.clone();
+        let read = self.ledgers.share(key, || async move {
+            tokio::task::spawn_blocking(move || {
+                let own = me.own_orders(&me.as_run_id(&name), &at)?;
+                Ok(Arc::new(books::OwnBook::of(&own)))
+            })
+            .await
+            .map_err(|e| crate::error::AppError::Internal(format!("Blocking task failed: {}", e)))
+        });
+        read.await.unwrap_or_else(|e| {
+            tracing::error!("Could not read the orders of {}: {}", given, e);
+            Err(ORDERS_UNREADABLE.to_string())
+        })
     }
 
     /// Place one order for a run and record it. Answers the row id and the

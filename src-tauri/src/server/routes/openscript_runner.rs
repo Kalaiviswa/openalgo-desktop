@@ -272,31 +272,46 @@ pub async fn status_all(State(ctx): Ctx) -> Response {
     }))
 }
 
+/// GET /openscript/runner/status/{name}: read on the blocking pool (its
+/// saved settings, its log files and, for what it holds elsewhere, its
+/// whole ledger).
 pub async fn status_one(State(ctx): Ctx, Path(name): Path<String>) -> Response {
     if !names_something(&name) {
         return refusal(&name);
     }
+    match ctx.blocking(move |c| Ok(status_of(c, &name))).await {
+        Ok(v) => ok(v),
+        Err(e) => {
+            tracing::error!("Reading a strategy's status failed: {}", e);
+            err(500, STATUS_UNREADABLE)
+        }
+    }
+}
+
+const STATUS_UNREADABLE: &str = "This strategy's status could not be read just now. Try again.";
+
+fn status_of(ctx: &AppState, name: &str) -> Value {
     let runner = &ctx.trading.runner;
-    let run_id = runner.as_run_id(&name);
+    let run_id = runner.as_run_id(name);
     let entry = runner
         .running()
         .into_iter()
         .find(|r| r.script == name || r.run_id == run_id)
         .map(|r| r.answer());
-    let (schedule, saved) = runner.saved_of(&name);
-    ok(json!({
+    let (schedule, saved) = runner.saved_of(name);
+    json!({
         "status": "success",
         "file": name,
         "running": entry.is_some(),
         "run": entry,
-        "schedule": schedule.map(|s| s.answer(&name)),
-        "settings": saved.map(|d| d.answer(&name)),
+        "schedule": schedule.map(|s| s.answer(name)),
+        "settings": saved.map(|d| d.answer(name)),
         "logs": runner.logs_for(&run_id),
-        "log_dir": log_dir(&ctx),
+        "log_dir": log_dir(ctx),
         // Desktop (NEW-TR-01): what it holds through another account, or
         // from before this version recorded the account.
-        "elsewhere": runner.held_elsewhere_of(&name),
-    }))
+        "elsewhere": runner.held_elsewhere_of(name),
+    })
 }
 
 // ------------------------------------------------------------ settings
@@ -513,7 +528,7 @@ async fn book(ctx: &AppState, name: &str, which: &str) -> Response {
     };
     let mode: RunMode = destination.mode;
     // A ledger that cannot be read is said so, never shown as an empty book.
-    let own = match runner.orders_of(name, &destination) {
+    let own = match runner.own_book(name, &destination).await {
         Ok(own) => own,
         Err(why) => return err(500, why),
     };

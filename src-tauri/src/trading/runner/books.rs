@@ -13,7 +13,7 @@
 //! deployment's own, worked out from its own fills, never the account's.
 
 use super::services::RunnerServices;
-use super::store::{holdings, OrderRow};
+use super::store::{holdings, Holding, OrderRow};
 use crate::strategy::dispatch::{Book, RunMode};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -78,12 +78,35 @@ fn mine(rows: Vec<Value>, tag: &str, ids: &HashSet<String>) -> Vec<Value> {
         .collect()
 }
 
-fn ids_of(orders: &[OrderRow]) -> HashSet<String> {
-    orders
-        .iter()
-        .filter_map(|o| o.orderid.clone())
-        .filter(|s| !s.is_empty())
-        .collect()
+/// What the books need of a deployment's own orders, worked out where the
+/// orders were read (the blocking pool): a ledger grows with every order
+/// the deployment ever placed, and the async workers carry the feed.
+#[derive(Debug, Default)]
+pub struct OwnBook {
+    /// Its order ids.
+    ids: HashSet<String>,
+    /// The contracts it traded.
+    traded: HashSet<(String, String)>,
+    /// What it holds, from its own fills.
+    held: Vec<Holding>,
+}
+
+impl OwnBook {
+    pub fn of(own: &[OrderRow]) -> OwnBook {
+        OwnBook {
+            ids: own
+                .iter()
+                .filter_map(|o| o.orderid.clone())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            traded: own
+                .iter()
+                .filter(|o| o.filled_quantity > 0 || o.orderid.is_some())
+                .map(|o| (o.symbol.clone(), o.exchange.clone()))
+                .collect(),
+            held: holdings(own),
+        }
+    }
 }
 
 /// This deployment's orders, in the global orderbook's envelope.
@@ -91,7 +114,7 @@ pub async fn orderbook(
     services: &dyn RunnerServices,
     tag: &str,
     mode: RunMode,
-    own: &[OrderRow],
+    own: &OwnBook,
 ) -> Value {
     let mut payload = match services.book(mode, Book::Orders).await {
         Ok(p) => p,
@@ -99,7 +122,7 @@ pub async fn orderbook(
     };
     let data = payload["data"].clone();
     let (found, under) = rows_and_shape(&data, "orders");
-    let orders = mine(found, tag, &ids_of(own));
+    let orders = mine(found, tag, &own.ids);
     let stats = crate::strategy::views::statistics(&orders, &data["statistics"]);
     narrowed(&mut payload, &data, orders, under);
     if let Some(d) = payload["data"].as_object_mut() {
@@ -115,7 +138,7 @@ pub async fn tradebook(
     services: &dyn RunnerServices,
     tag: &str,
     mode: RunMode,
-    own: &[OrderRow],
+    own: &OwnBook,
 ) -> Value {
     let mut payload = match services.book(mode, Book::Trades).await {
         Ok(p) => p,
@@ -123,7 +146,7 @@ pub async fn tradebook(
     };
     let data = payload["data"].clone();
     let (found, under) = rows_and_shape(&data, "trades");
-    let kept = mine(found, tag, &ids_of(own));
+    let kept = mine(found, tag, &own.ids);
     narrowed(&mut payload, &data, kept, under);
     payload
 }
@@ -141,12 +164,8 @@ fn round2(x: f64) -> f64 {
 }
 
 /// The contracts this deployment traded, with its own profit as the totals.
-pub async fn positions(services: &dyn RunnerServices, mode: RunMode, own: &[OrderRow]) -> Value {
-    let traded: HashSet<(String, String)> = own
-        .iter()
-        .filter(|o| o.filled_quantity > 0 || o.orderid.is_some())
-        .map(|o| (o.symbol.clone(), o.exchange.clone()))
-        .collect();
+pub async fn positions(services: &dyn RunnerServices, mode: RunMode, own: &OwnBook) -> Value {
+    let traded = &own.traded;
     let mut payload = match services.book(mode, Book::Positions).await {
         Ok(p) => p,
         Err(e) => return as_error(e, "Could not read the positions"),
@@ -157,7 +176,7 @@ pub async fn positions(services: &dyn RunnerServices, mode: RunMode, own: &[Orde
         .into_iter()
         .filter(|r| traded.contains(&(text(&r["symbol"]), text(&r["exchange"]))))
         .collect();
-    let held = holdings(own);
+    let held = &own.held;
     let realized: f64 = held.iter().map(|h| h.realized).sum();
     let unrealized: f64 = held
         .iter()
