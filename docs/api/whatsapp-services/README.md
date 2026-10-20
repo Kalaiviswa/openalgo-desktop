@@ -132,3 +132,7 @@ kept for later.
 | `/api/v1/whatsapp/notify` | the general API limit, 100 per second per caller (the web allows 30 per minute) |
 | Bot replies to you | 20 per minute |
 | Bot replies to anyone else | 1 per hour |
+
+---
+
+**Back to**: [API Documentation](../README.md)

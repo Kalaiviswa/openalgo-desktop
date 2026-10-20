@@ -160,4 +160,4 @@ An error response carries `status` and `message` only.
 
 ---
 
-**Back to**: [Strategy Module API](./README.md)
+**Back to**: [Strategy Module API](./README.md), [API Documentation](../README.md)
