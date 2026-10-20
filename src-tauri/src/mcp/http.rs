@@ -365,10 +365,9 @@ pub fn origin_allowed(ctx: &AppState, headers: &HeaderMap) -> bool {
             return true;
         }
     }
-    match origin.strip_prefix("http://") {
-        Some(host) => crate::server::middleware::host_allowed(ctx, host),
-        None => false,
-    }
+    // NEW-SEC-01: the exact origin, as for the app's own pages.
+    origin.starts_with("http://")
+        && crate::server::origin::allowed(ctx, origin, crate::server::origin::request_host(headers))
 }
 
 fn bad_origin() -> Response {

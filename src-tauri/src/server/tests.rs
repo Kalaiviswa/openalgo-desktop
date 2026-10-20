@@ -229,6 +229,8 @@ mod broker_config;
 mod credentials_lifecycle;
 // KEY-01: no OS keychain; the keys locked with the password in openalgo.db.
 mod key_vault;
+// NEW-SEC-01: browser origins compared whole, apart from Host names.
+mod origin;
 
 // ------------------------------------------------------------------ fixtures
 

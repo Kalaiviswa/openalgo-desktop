@@ -3,6 +3,7 @@
 
 use crate::server::envelope::{error, json_response, not_authenticated, EarlyReply};
 use crate::server::form::{csrf_rejected, tokens_match, FormData};
+use crate::server::origin;
 use crate::server::ratelimit::{Admission, Bucket, Claim, SignInSource};
 use crate::session::web::{WebSession, COOKIE_NAME};
 use crate::state::AppState;
@@ -492,29 +493,11 @@ pub fn same_origin_navigation(ctx: &AppState, headers: &HeaderMap) -> bool {
     if let Some(site) = get("sec-fetch-site") {
         return site == "same-origin" || site == "none";
     }
-    if let Some(origin) = get("origin") {
-        if origin == "null" {
-            return false;
-        }
-        let host = origin
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        return host_allowed(ctx, host);
+    let host = origin::request_host(headers);
+    if let Some(o) = get("origin") {
+        return origin::allowed(ctx, o, host);
     }
-    let Some(url) = get("referer").and_then(|r| url::Url::parse(r).ok()) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = match url.port() {
-        Some(p) => format!("{}:{}", host, p),
-        None => host.to_string(),
-    };
-    host_allowed(ctx, &host)
+    get("referer").is_some_and(|r| origin::referer_allowed(ctx, r, host))
 }
 
 /// Same-origin check for cookie-authenticated writes (web `logout` uses
@@ -528,14 +511,8 @@ pub fn foreign_origin(ctx: &AppState, headers: &HeaderMap) -> bool {
             return true;
         }
     }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if origin == "null" {
-            return true;
-        }
-        let host = origin
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        return !host_allowed(ctx, host);
+    if let Some(o) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        return !origin::allowed(ctx, o, origin::request_host(headers));
     }
     false
 }
@@ -797,24 +774,6 @@ pub fn login_limited(ctx: &AppState, ip: IpAddr) -> Option<Response> {
     })
 }
 
-/// Whether `url` (an `Origin` or `Referer` value) is a page of this app.
-fn app_page(ctx: &AppState, url: &str) -> bool {
-    let Ok(u) = url::Url::parse(url.trim()) else {
-        return false;
-    };
-    if !matches!(u.scheme(), "http" | "https") {
-        return false;
-    }
-    let Some(host) = u.host_str() else {
-        return false;
-    };
-    let authority = match u.port() {
-        Some(p) => format!("{}:{}", host, p),
-        None => host.to_string(),
-    };
-    host_allowed(ctx, &authority)
-}
-
 /// The same-origin check every sign-in attempt (a password, an
 /// authenticator code, the current password) must pass before anything is
 /// counted or checked (security review S-02):
@@ -831,11 +790,14 @@ pub fn sign_in_origin_ok(ctx: &AppState, headers: &HeaderMap, source: Source) ->
     if site.is_some_and(|s| s != "same-origin" && s != "none") {
         return false;
     }
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        return origin.to_str().is_ok_and(|o| app_page(ctx, o));
+    let host = origin::request_host(headers);
+    if let Some(o) = headers.get(header::ORIGIN) {
+        return o.to_str().is_ok_and(|o| origin::allowed(ctx, o, host));
     }
     if let Some(referer) = headers.get(header::REFERER) {
-        return referer.to_str().is_ok_and(|r| app_page(ctx, r));
+        return referer
+            .to_str()
+            .is_ok_and(|r| origin::referer_allowed(ctx, r, host));
     }
     site.is_some() || source.is_local()
 }

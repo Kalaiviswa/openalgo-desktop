@@ -11,6 +11,7 @@ mod csp;
 pub mod envelope;
 pub mod form;
 pub mod middleware;
+pub mod origin;
 pub mod ratelimit;
 pub mod routes;
 pub mod socketio;
@@ -88,17 +89,16 @@ async fn method_not_allowed(method: Method, req: Request) -> Response {
 
 fn cors(ctx: Arc<AppState>) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
-            origin
-                .to_str()
-                .ok()
-                .and_then(|o| {
-                    o.strip_prefix("http://")
-                        .or_else(|| o.strip_prefix("https://"))
-                })
-                .map(|host| middleware::host_allowed(&ctx, host))
-                .unwrap_or(false)
-        }))
+        // NEW-SEC-01: the exact origin, not only its host name (server/origin.rs).
+        .allow_origin(AllowOrigin::predicate(
+            move |origin: &HeaderValue, parts| {
+                let host = origin::request_host(&parts.headers)
+                    .or(parts.uri.authority().map(|a| a.as_str()));
+                origin
+                    .to_str()
+                    .is_ok_and(|o| origin::allowed(&ctx, o, host))
+            },
+        ))
         .allow_credentials(true)
         .allow_methods([
             Method::GET,
