@@ -141,7 +141,7 @@ fn scalping_leg(symbol: &str, kind: Kind) -> SlUpsert {
 
 /// A one-leg cash strategy, long one share: a stop, a target, or a
 /// fixed-distance trail (`trail.x` alone).
-fn strategy_config(symbol: &str, kind: Kind) -> serde_json::Value {
+pub(super) fn strategy_config(symbol: &str, kind: Kind) -> serde_json::Value {
     let mut leg = json!({"id": 1, "segment": "cash", "position": "B", "lots": 1});
     match kind {
         Kind::Stop => leg["sl_pts"] = json!(STOP_PTS),

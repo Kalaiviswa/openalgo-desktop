@@ -9,13 +9,13 @@
 //! answer came. The decision latency is the target's (p99 under 50 ms);
 //! the pages' own times are reported beside it.
 
+use super::browsers::{self, Page};
 use super::lag_log;
 use super::rig::Rig;
 use super::tick_to_risk::{legs_per_kind, loaded_rig, manage_scalping_legs, measure, Owner};
 use super::{Report, Stats};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const BROWSERS: usize = 4;
 const TRAFFIC_ROWS: i64 = 100_000;
@@ -57,41 +57,6 @@ fn seed(rig: &Rig) {
     .unwrap();
 }
 
-/// A browser reloading the report pages in turn until `stop` (or the
-/// server goes, when the measurement ends); how long each answer took.
-fn browser(rig: &Rig, stop: Arc<AtomicBool>, n: usize) -> tokio::task::JoinHandle<Vec<Duration>> {
-    let (base, cookie) = (rig.base.clone(), rig.cookie.clone());
-    tokio::spawn(async move {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .unwrap();
-        let mut took = Vec::new();
-        let mut i = n;
-        while !stop.load(Ordering::Relaxed) {
-            let path = PAGES[i % PAGES.len()];
-            i += 1;
-            let t = Instant::now();
-            let r = http
-                .get(format!("{}{}", base, path))
-                .header("cookie", &cookie)
-                .header("accept", "application/json")
-                .send()
-                .await;
-            match r {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = resp.bytes().await;
-                    took.push(t.elapsed());
-                }
-                Ok(resp) => panic!("{} answered {}", path, resp.status()),
-                // The rig stopped the server at the end of the measurement.
-                Err(_) => break,
-            }
-        }
-        took
-    })
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn tick_to_decision_while_report_pages_read_a_large_log() {
@@ -102,9 +67,8 @@ async fn tick_to_decision_while_report_pages_read_a_large_log() {
     seed(&rig);
     manage_scalping_legs(&rig, &legs).await;
     let stop = Arc::new(AtomicBool::new(false));
-    let browsers: Vec<_> = (0..BROWSERS)
-        .map(|n| browser(&rig, stop.clone(), n))
-        .collect();
+    let pages = PAGES.iter().map(|p| Page::get(*p)).collect();
+    let browsers = browsers::start(&rig, pages, BROWSERS, stop.clone());
     let met = measure(
         "tick_to_risk_under_report_load",
         &skipped,
@@ -115,17 +79,17 @@ async fn tick_to_decision_while_report_pages_read_a_large_log() {
     )
     .await;
     stop.store(true, Ordering::Relaxed);
-    let mut pages = Vec::new();
-    for b in browsers {
-        pages.extend(b.await.unwrap());
-    }
+    let seen = browsers::collect(browsers).await;
     reader.abort();
+    let all_ok = seen.statuses.keys().all(|s| *s == 200);
     Report::new("report_pages_under_load")
         .field("browsers", BROWSERS)
         .field("traffic_rows", TRAFFIC_ROWS)
         .field("order_log_rows", ORDER_LOG_ROWS)
-        .stats("page", &Stats::of(&pages))
-        .verdict("recorded", true);
+        .field("statuses", seen.status_summary())
+        .stats("page", &Stats::of(&seen.took))
+        .verdict("every_page_200", all_ok);
+    assert!(all_ok, "a report page failed: {}", seen.status_summary());
     assert!(
         met,
         "tick to decision p99 over 50 ms, or a decision lost, while the report pages load"

@@ -14,7 +14,9 @@
 //! ```
 //!
 //! One benchmark: `perf::tick_to_risk`, `perf::report_load` (tick to
-//! decision while the report pages read a large log), `perf::reconnect`,
+//! decision while the report pages read a large log),
+//! `perf::trading_pages` (the same while the trading pages poll a long
+//! history), `perf::reconnect`,
 //! `perf::sqlite_wait`, `perf::event_burst`, `perf::disk_growth`; the
 //! endurance run is `perf::endurance` (15 minutes unless
 //! `OPENALGO_PERF_MINUTES` says otherwise). `.github/workflows/perf.yml`
@@ -32,6 +34,7 @@
 
 #![allow(dead_code)]
 
+mod browsers;
 mod disk_growth;
 mod endurance;
 mod event_burst;
@@ -42,6 +45,7 @@ mod report_load;
 mod rig;
 mod sqlite_wait;
 mod tick_to_risk;
+mod trading_pages;
 
 use std::io::Write;
 use std::time::Duration;
