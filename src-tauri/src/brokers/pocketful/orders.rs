@@ -2,9 +2,11 @@
 
 use super::mapping::{self, text, text_any};
 use super::{data, PocketfulBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, protected_price};
 use crate::brokers::common::outcome;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -140,7 +142,9 @@ async fn fetch_orders(
             None,
         )
         .await?;
-    Ok(mapping::list_at(&v, "orders").to_vec())
+    mapping::list_at(&v, "orders")
+        .map(<[Value]>::to_vec)
+        .ok_or_else(|| book_read::unreadable("pocketful", Book::Orders))
 }
 
 /// web `get_order_book`: completed + pending, merged. A half that fails is
@@ -160,6 +164,18 @@ async fn raw_orders(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec<Value>>
 }
 
 async fn raw_positions(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec<Value>> {
+    positions_read(b, auth, || {
+        book_read::unreadable("pocketful", Book::Positions)
+    })
+    .await
+}
+
+/// The position book; every row must carry its quantity (BR-03).
+async fn positions_read(
+    b: &PocketfulBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
     let client_id = b.client_id(auth).await?;
     let v = b
         .call(
@@ -169,7 +185,12 @@ async fn raw_positions(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec<Valu
             None,
         )
         .await?;
-    Ok(mapping::list_at(&v, "positions").to_vec())
+    let rows = mapping::list_at(&v, "positions").ok_or_else(&unread)?;
+    if !rows.iter().all(mapping::has_quantity) {
+        tracing::warn!("A Pocketful position row without its quantity");
+        return Err(unread());
+    }
+    Ok(rows.to_vec())
 }
 
 pub async fn get_order_book(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec<Order>> {
@@ -190,7 +211,8 @@ pub async fn get_trade_book(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec
         )
         .await?;
     Ok(mapping::map_trades(
-        mapping::list_at(&v, "trades"),
+        mapping::list_at(&v, "trades")
+            .ok_or_else(|| book_read::unreadable("pocketful", Book::Trades))?,
         b.resolver(),
     ))
 }
@@ -213,7 +235,8 @@ pub async fn get_holdings(b: &PocketfulBroker, auth: &AuthToken) -> Result<Vec<H
         )
         .await?;
     Ok(mapping::map_holdings(
-        mapping::list_at(&v, "holdings"),
+        mapping::list_at(&v, "holdings")
+            .ok_or_else(|| book_read::unreadable("pocketful", Book::Holdings))?,
         b.resolver(),
     ))
 }
@@ -254,7 +277,7 @@ pub async fn get_open_position(
         .resolver()
         .br_symbol(symbol, ex)
         .unwrap_or_else(|| symbol.to_string());
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Pocketful")).await? {
         let ps = text_any(&p, &["tradingsymbol", "trading_symbol"]);
         if ps == br && text(&p, "exchange") == ex && text(&p, "product") == product.as_str() {
             return Ok(mapping::num_any(&p, &["quantity", "net_quantity"]).unwrap_or(0.0) as i64);
@@ -267,7 +290,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &PocketfulBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Pocketful")).await? {
         let qty = mapping::position_qty(&p);
         if qty == 0 {
             continue;

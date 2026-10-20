@@ -261,18 +261,29 @@ pub struct PaytmOrder {
 }
 
 /// Order rows with the raw JSON kept alongside.
-pub fn parse_orders(data: &Value) -> Vec<PaytmOrder> {
-    match data {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|r| {
-                let mut o: PaytmOrder = serde_json::from_value(r.clone()).ok()?;
-                o.raw = r.clone();
-                Some(o)
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+/// The order rows of `data` (BR-03): `None` unless it is a list whose
+/// every row reads; Paytm Money sends `data: []` for an empty book.
+pub fn parse_orders(data: &Value) -> Option<Vec<PaytmOrder>> {
+    data.as_array()?
+        .iter()
+        .map(|r| {
+            let mut o: PaytmOrder = serde_json::from_value(r.clone()).ok()?;
+            o.raw = r.clone();
+            Some(o)
+        })
+        .collect()
+}
+
+/// Whether a position row carries its net quantity (`net_qty`, else
+/// `netQty`, as [`PaytmPosition::quantity`] reads it); a row without it is
+/// not flat (BR-03).
+pub fn has_quantity(p: &Value) -> bool {
+    let key = if p.get("net_qty").is_some() {
+        "net_qty"
+    } else {
+        "netQty"
+    };
+    crate::brokers::common::book_read::quantity(p, key).is_some()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -489,12 +500,14 @@ pub fn map_positions(rows: &[PaytmPosition], symbols: &SymbolResolver) -> Vec<Po
         .collect()
 }
 
-/// Holdings rows from `data` (a list, or `{"results": [...]}`).
-pub fn holding_rows(data: &Value) -> Vec<PaytmHolding> {
-    match data {
-        Value::Object(o) => o.get("results").map(rows_of).unwrap_or_default(),
-        other => rows_of(other),
-    }
+/// Holdings rows from `data` (a list, or `{"results": [...]}`); `None`
+/// when neither is there (BR-03: not an empty book).
+pub fn holding_rows(data: &Value) -> Option<Vec<PaytmHolding>> {
+    let list = match data {
+        Value::Object(o) => o.get("results")?,
+        other => other,
+    };
+    list.is_array().then(|| rows_of(list))
 }
 
 /// web `map_portfolio_data` + `transform_holdings_data`: NSE unless the row

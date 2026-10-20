@@ -2,11 +2,13 @@
 //! `mapping/transform_data.py`, `mapping/order_data.py`,
 //! `mapping/exchange.py`).
 
+use crate::brokers::common::book_read;
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
 use crate::brokers::common::mapping::{Action, Exchange, PriceType, Product};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::lower_status;
 use crate::brokers::types::*;
+use crate::error::{AppError, Result};
 use serde::Deserialize;
 
 /// OpenAlgo price type -> Arrow `order` (`transform_data.py:16-21`).
@@ -255,21 +257,18 @@ pub struct ArrowHolding {
     pub isin: String,
 }
 
-/// Rows of a `{status, data: [...]}` payload, leniently: a bad row is
-/// skipped (and logged) rather than failing the book.
-pub fn rows<T: serde::de::DeserializeOwned>(data: serde_json::Value, what: &str) -> Vec<T> {
+/// Rows of a `{status, data: [...]}` payload. Arrow sends `data: []` for
+/// an empty book, so a payload without the list, or with a row that does
+/// not read, is a book that was not read (BR-03); `quantities` are the
+/// fields every row must carry (a position's `qty`).
+pub fn rows<T: serde::de::DeserializeOwned>(
+    data: serde_json::Value,
+    quantities: &[&str],
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<T>> {
     match data {
-        serde_json::Value::Array(items) => items
-            .into_iter()
-            .filter_map(|r| match serde_json::from_value::<T>(r) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!("Skipped an Arrow {} row: {}", what, e);
-                    None
-                }
-            })
-            .collect(),
-        _ => Vec::new(),
+        serde_json::Value::Array(items) => book_read::positions(&items, quantities, unread),
+        _ => Err(unread()),
     }
 }
 

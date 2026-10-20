@@ -2,6 +2,7 @@
 
 use super::mapping::{self, s};
 use super::{is_success, message, refusal, MstockBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, Product};
 use crate::brokers::common::outcome;
 use crate::brokers::common::position_read::{says_no_positions, unread};
@@ -117,12 +118,10 @@ async fn book(b: &MstockBroker, auth: &AuthToken, path: &str) -> Result<Value> {
     if is_success(&v) || v.get("data").is_some_and(Value::is_array) {
         return Ok(v);
     }
+    // An empty answer (`{}`) is not an empty book (BR-03; the web reads it
+    // as one): only mStock's own "no data" messages are.
     let msg = message(&v).to_ascii_lowercase();
-    if v.as_object().is_some_and(|o| o.is_empty())
-        || msg.contains("no data")
-        || msg.contains("not found")
-        || msg.contains("no record")
-    {
+    if msg.contains("no data") || msg.contains("not found") || msg.contains("no record") {
         return Ok(Value::Object(Default::default()));
     }
     Err(refusal(
@@ -136,6 +135,7 @@ async fn book(b: &MstockBroker, auth: &AuthToken, path: &str) -> Result<Value> {
 pub async fn cancel_all_orders(b: &MstockBroker, auth: &AuthToken) -> Result<CancelAllResult> {
     let book = book(b, auth, ORDER_BOOK_PATH).await?;
     let pending: Vec<String> = mapping::rows(&book)
+        .ok_or_else(|| book_read::unreadable("mstock", Book::Orders))?
         .iter()
         .filter(|o| mapping::is_cancellable(&s(o, "status")))
         .map(|o| s(o, "orderid"))
@@ -173,7 +173,15 @@ pub async fn cancel_all_orders(b: &MstockBroker, auth: &AuthToken) -> Result<Can
 }
 
 pub(crate) async fn raw_positions(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Value>> {
-    Ok(mapping::rows(&book(b, auth, POSITIONS_PATH).await?))
+    let unread = || book_read::unreadable("mstock", Book::Positions);
+    position_rows(&book(b, auth, POSITIONS_PATH).await?, unread)
+}
+
+/// The rows of a position answer; every row must carry `netqty` (BR-03).
+fn position_rows(v: &Value, unread: impl Fn() -> AppError) -> Result<Vec<Value>> {
+    let rows = mapping::rows(v).ok_or_else(&unread)?;
+    book_read::require_quantities(&rows, &["netqty"], unread)?;
+    Ok(rows)
 }
 
 /// web `_position_book_ok`: mStock marks a read that worked with `status`
@@ -193,7 +201,7 @@ pub fn positions_ok(v: &Value) -> bool {
 async fn positions_strict(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Value>> {
     let v = b.call(Method::GET, POSITIONS_PATH, auth, None).await?;
     if positions_ok(&v) {
-        return Ok(mapping::rows(&v));
+        return position_rows(&v, || unread("mStock by Mirae Asset"));
     }
     if says_no_positions(&v, &["message"]) {
         return Ok(Vec::new());
@@ -237,7 +245,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &MstockBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_strict(b, auth).await? {
         let netqty = mapping::i(&p, "netqty");
         if netqty == 0 {
             continue;
@@ -277,22 +285,28 @@ pub async fn close_all_positions(b: &MstockBroker, auth: &AuthToken) -> Result<C
     Ok(result)
 }
 
+/// The rows of a book, or the book's trader-facing error (BR-03).
+async fn book_rows(b: &MstockBroker, auth: &AuthToken, path: &str, of: Book) -> Result<Vec<Value>> {
+    let v = book(b, auth, path).await?;
+    mapping::rows(&v).ok_or_else(|| book_read::unreadable("mstock", of))
+}
+
 pub async fn get_order_book(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Order>> {
-    let v = book(b, auth, ORDER_BOOK_PATH).await?;
-    Ok(mapping::map_orders(&v, b.resolver()))
+    let rows = book_rows(b, auth, ORDER_BOOK_PATH, Book::Orders).await?;
+    Ok(mapping::map_orders(&rows, b.resolver()))
 }
 
 pub async fn get_trade_book(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
-    let v = book(b, auth, TRADE_BOOK_PATH).await?;
-    Ok(mapping::map_trades(&v, b.resolver()))
+    let rows = book_rows(b, auth, TRADE_BOOK_PATH, Book::Trades).await?;
+    Ok(mapping::map_trades(&rows, b.resolver()))
 }
 
 pub async fn get_positions(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Position>> {
-    let v = book(b, auth, POSITIONS_PATH).await?;
-    Ok(mapping::map_positions(&v, b.resolver()))
+    let rows = raw_positions(b, auth).await?;
+    Ok(mapping::map_positions(&rows, b.resolver()))
 }
 
 pub async fn get_holdings(b: &MstockBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
-    let v = book(b, auth, HOLDINGS_PATH).await?;
-    Ok(mapping::map_holdings(&v, b.resolver()))
+    let rows = book_rows(b, auth, HOLDINGS_PATH, Book::Holdings).await?;
+    Ok(mapping::map_holdings(&rows, b.resolver()))
 }

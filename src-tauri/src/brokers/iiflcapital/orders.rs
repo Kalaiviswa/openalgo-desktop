@@ -7,7 +7,9 @@
 
 use super::mapping::{self, OrderFields};
 use super::IiflCapitalBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::{Method, StatusCode};
@@ -20,11 +22,16 @@ async fn read_book(
     what: &str,
 ) -> Result<Value> {
     let (status, data) = b.call(Method::GET, path, auth, None, true).await?;
-    // A plain list is a book; so is an envelope with rows or an ok status.
-    if status == StatusCode::OK
-        && (data.is_array() || !mapping::book_rows(&data).is_empty() || mapping::is_ok(&data))
-    {
-        return Ok(data);
+    // A plain list is a book; so is an envelope with rows or an ok status,
+    // when it carries a list (BR-03).
+    let answered =
+        data.is_array() || !mapping::book_rows(&data).is_empty() || mapping::is_ok(&data);
+    if status == StatusCode::OK && answered {
+        if mapping::book_located(&data) {
+            return Ok(data);
+        }
+        tracing::warn!("IIFL Capital answered the {} without a list", what);
+        return Err(book_read::unreadable("iiflcapital", book_of(what)));
     }
     let why = mapping::message_of(&data).unwrap_or_else(|| format!("Failed to fetch {}", what));
     tracing::warn!(
@@ -37,6 +44,37 @@ async fn read_book(
         "IIFL Capital could not return your {}: {}",
         what, why
     )))
+}
+
+/// The book a `read_book` call reads (for the trader-facing error).
+fn book_of(what: &str) -> Book {
+    match what {
+        "positions" => Book::Positions,
+        "trade book" => Book::Trades,
+        "holdings" => Book::Holdings,
+        _ => Book::Orders,
+    }
+}
+
+/// The position rows of a book read; each must carry its net quantity
+/// (`netQuantity`, else `quantity`, as the web reads it), or the book is
+/// not read (BR-03).
+fn position_rows(data: &Value, unread: impl Fn() -> AppError) -> Result<Vec<Value>> {
+    let rows = mapping::book_rows(data);
+    let readable = |r: &Value| {
+        let key = if r.get("netQuantity").is_some() {
+            "netQuantity"
+        } else {
+            "quantity"
+        };
+        book_read::quantity(r, key).is_some()
+    };
+    if rows.iter().all(readable) {
+        Ok(rows)
+    } else {
+        tracing::warn!("An IIFL Capital position row without its quantity");
+        Err(unread())
+    }
 }
 
 fn log_rejections(rows: &[Value]) {
@@ -244,7 +282,7 @@ pub async fn close_all_positions(
 ) -> Result<CloseAllResult> {
     let data = read_book(b, auth, "/positions", "positions").await?;
     let mut out = CloseAllResult::default();
-    for row in mapping::book_rows(&data) {
+    for row in position_rows(&data, || unread("IIFL Capital"))? {
         let net = mapping::int(row.get("netQuantity"));
         if net == 0 {
             continue;
@@ -288,14 +326,8 @@ pub async fn get_open_position(
     exchange: Exchange,
     product: Product,
 ) -> Result<i64> {
-    let (_, data) = b.call(Method::GET, "/positions", auth, None, true).await?;
-    if !(data.is_array() || mapping::is_ok(&data)) {
-        let why = mapping::message_of(&data).unwrap_or_else(|| "no answer".into());
-        return Err(AppError::Broker(format!(
-            "IIFL Capital could not return your positions: {}",
-            why
-        )));
-    }
+    let data = read_book(b, auth, "/positions", "positions").await?;
+    let rows = position_rows(&data, || unread("IIFL Capital"))?;
     let row_info = b.resolver().by_symbol(exchange.as_str(), symbol);
     let br = row_info
         .as_ref()
@@ -304,7 +336,7 @@ pub async fn get_open_position(
     let token = row_info.map(|r| r.token).unwrap_or_default();
     let segment = mapping::to_segment(exchange.as_str());
     let bprod = mapping::product_to_broker(product);
-    for row in mapping::book_rows(&data) {
+    for row in rows {
         let rs = mapping::text(mapping::first(&row, &["tradingSymbol", "symbol"]));
         let rid = mapping::text(row.get("instrumentId"));
         let rx = mapping::text(row.get("exchange"));
@@ -342,7 +374,8 @@ pub async fn get_trade_book(b: &IiflCapitalBroker, auth: &AuthToken) -> Result<V
 
 pub async fn get_positions(b: &IiflCapitalBroker, auth: &AuthToken) -> Result<Vec<Position>> {
     let data = read_book(b, auth, "/positions", "positions").await?;
-    Ok(mapping::book_rows(&data)
+    let unread = || book_read::unreadable("iiflcapital", Book::Positions);
+    Ok(position_rows(&data, unread)?
         .iter()
         .map(|r| mapping::position_row(r, b.resolver()))
         .collect())

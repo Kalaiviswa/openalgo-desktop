@@ -8,8 +8,10 @@
 
 use super::mapping::{self, rows};
 use super::{broker_error, is_success, text, DefinedgeBroker, DefinedgeSession};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, Product};
 use crate::brokers::common::outcome;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -152,7 +154,12 @@ async fn raw_orders(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<Value>>
     } else {
         rows(&v, "orderbook")
     };
-    Ok(r.to_vec())
+    r.map(<[Value]>::to_vec)
+        .ok_or_else(unreadable(Book::Orders))
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("definedge", book)
 }
 
 pub async fn get_order_book(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<Order>> {
@@ -167,6 +174,7 @@ pub async fn get_order_book(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec
 pub async fn get_trade_book(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let v = book(b, auth, "/trades").await?;
     Ok(rows(&v, "trades")
+        .ok_or_else(unreadable(Book::Trades))?
         .iter()
         .filter(|t| t.is_object())
         .map(|t| mapping::map_trade(t, b.resolver()))
@@ -174,8 +182,20 @@ pub async fn get_trade_book(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec
 }
 
 pub async fn get_positions(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<Position>> {
+    positions_read(b, auth, unreadable(Book::Positions)).await
+}
+
+/// The position book (BR-03): its list, every row carrying
+/// `net_quantity`, or `unread()`.
+async fn positions_read(
+    b: &DefinedgeBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Position>> {
     let v = book(b, auth, "/positions").await?;
-    Ok(rows(&v, "positions")
+    let list = rows(&v, "positions").ok_or_else(&unread)?;
+    book_read::require_quantities(list, &["net_quantity"], unread)?;
+    Ok(list
         .iter()
         .filter(|p| p.is_object())
         .map(|p| mapping::map_position(p, b.resolver()))
@@ -184,7 +204,8 @@ pub async fn get_positions(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<
 
 pub async fn get_holdings(b: &DefinedgeBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let v = book(b, auth, "/holdings").await?;
-    Ok(mapping::map_holdings(rows(&v, "holdings"), b.resolver()))
+    let list = rows(&v, "holdings").ok_or_else(unreadable(Book::Holdings))?;
+    Ok(mapping::map_holdings(list, b.resolver()))
 }
 
 /// web `cancel_all_orders_api`: every order whose broker status is in the
@@ -217,7 +238,7 @@ pub async fn get_open_position(
     exchange: Exchange,
     product: Product,
 ) -> Result<i64> {
-    let positions = get_positions(b, auth).await?;
+    let positions = positions_read(b, auth, || unread("Definedge")).await?;
     Ok(positions
         .iter()
         .find(|p| {

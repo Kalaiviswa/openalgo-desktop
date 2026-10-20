@@ -59,8 +59,12 @@ pub async fn get_funds(b: &AliceBlueBroker, auth: &AuthToken) -> Result<Funds> {
         .and_then(|a| a.first())
         .cloned()
     else {
+        // BR-03: an Ok without the margin figures is not a zero balance.
         tracing::warn!("AliceBlue returned no margin data");
-        return Ok(funds_from_limits(&Value::Null, 0.0));
+        return Err(crate::brokers::common::book_read::unreadable(
+            "aliceblue",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
     };
     let realized = match b.call(Method::GET, POSITIONS, auth, None, false).await {
         Ok((_, p)) => realized_from_positions(&p),

@@ -282,7 +282,10 @@ fn session_token_round_trip() {
 
 #[test]
 fn order_book_in_openalgo_terms() {
-    let book = map_orders(&fx(fixture!("order_book.json")), &resolver());
+    let book = map_orders(
+        &rows(&fx(fixture!("order_book.json"))).unwrap(),
+        &resolver(),
+    );
     assert_eq!(book.len(), 5);
     let o = &book[0];
     assert_eq!((o.symbol.as_str(), o.exchange.as_str()), ("SBIN", "NSE"));
@@ -317,12 +320,19 @@ fn order_book_in_openalgo_terms() {
         Some("RMS:Margin Exceeds")
     );
     assert_eq!(book[4].status, "cancelled");
-    assert!(map_orders(&json!({"status": "true", "data": null}), &resolver()).is_empty());
+    // mStock's empty book is `data: null`; a `data` of another type is not
+    // a book at all (BR-03).
+    let empty = rows(&json!({"status": "true", "data": null})).unwrap();
+    assert!(map_orders(&empty, &resolver()).is_empty());
+    assert!(rows(&json!({"status": "true", "data": "x"})).is_none());
 }
 
 #[test]
 fn trade_book_uppercase_keys() {
-    let t = map_trades(&fx(fixture!("trade_book.json")), &resolver());
+    let t = map_trades(
+        &rows(&fx(fixture!("trade_book.json"))).unwrap(),
+        &resolver(),
+    );
     assert_eq!(t.len(), 2);
     assert_eq!(
         (t[0].symbol.as_str(), t[0].exchange.as_str()),
@@ -346,7 +356,7 @@ fn trade_book_uppercase_keys() {
 
 #[test]
 fn positions_by_token_with_netvalue_pnl() {
-    let p = map_positions(&fx(fixture!("positions.json")), &resolver());
+    let p = map_positions(&rows(&fx(fixture!("positions.json"))).unwrap(), &resolver());
     assert_eq!(p.len(), 3);
     assert_eq!(
         (p[0].symbol.as_str(), p[0].exchange.as_str()),
@@ -367,7 +377,7 @@ fn positions_by_token_with_netvalue_pnl() {
 
 #[test]
 fn holdings_by_broker_symbol() {
-    let h = map_holdings(&fx(fixture!("holdings.json")), &resolver());
+    let h = map_holdings(&rows(&fx(fixture!("holdings.json"))).unwrap(), &resolver());
     assert_eq!(h.len(), 2);
     assert_eq!(
         (h[0].symbol.as_str(), h[0].exchange.as_str()),
@@ -391,7 +401,7 @@ fn holdings_by_broker_symbol() {
 #[test]
 fn funds_and_margin() {
     let v = fx(fixture!("fund_summary.json"));
-    let f = funds_from_summary(&rows(&v)[0]);
+    let f = funds_from_summary(&rows(&v).unwrap()[0]);
     assert_eq!(f.available_cash, 100000.46);
     assert_eq!(f.collateral, 5000.0);
     assert_eq!(f.m2m_realized, 0.0);

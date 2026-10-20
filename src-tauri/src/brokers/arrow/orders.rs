@@ -2,10 +2,12 @@
 
 use super::mapping::{self, ArrowHolding, ArrowOrder, ArrowPosition, ArrowTrade};
 use super::{arrow_error, message_of, session_expired, ArrowBroker, Category};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::master_contract::format_strike;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Map, Value};
 
@@ -183,14 +185,27 @@ pub(crate) async fn raw_orders(b: &ArrowBroker, auth: &AuthToken) -> Result<Vec<
     let data = b
         .call(Method::GET, "/user/orders", auth, None, Category::Other)
         .await?;
-    Ok(mapping::rows(data, "order"))
+    mapping::rows(data, &[], unreadable(Book::Orders))
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("arrow", book)
 }
 
 pub(crate) async fn raw_positions(b: &ArrowBroker, auth: &AuthToken) -> Result<Vec<ArrowPosition>> {
+    positions_read(b, auth, unreadable(Book::Positions)).await
+}
+
+/// The position book; every row must carry its `qty` (BR-03).
+async fn positions_read(
+    b: &ArrowBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<ArrowPosition>> {
     let data = b
         .call(Method::GET, "/user/positions", auth, None, Category::Other)
         .await?;
-    Ok(mapping::rows(data, "position"))
+    mapping::rows(data, &["qty"], unread)
 }
 
 pub async fn cancel_all_orders(b: &ArrowBroker, auth: &AuthToken) -> Result<CancelAllResult> {
@@ -229,7 +244,7 @@ pub async fn get_open_position(
         .br_symbol(symbol, ex)
         .unwrap_or_else(|| symbol.to_string());
     let code = mapping::product_code(product);
-    Ok(raw_positions(b, auth)
+    Ok(positions_read(b, auth, || unread("Arrow"))
         .await?
         .into_iter()
         .find(|p| p.symbol == br && p.exchange == ex && p.product == code)
@@ -241,7 +256,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &ArrowBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Arrow")).await? {
         if p.qty == 0 {
             continue;
         }
@@ -281,7 +296,7 @@ pub async fn get_trade_book(b: &ArrowBroker, auth: &AuthToken) -> Result<Vec<Tra
         .call(Method::GET, "/user/trades", auth, None, Category::Other)
         .await?;
     Ok(mapping::map_trades(
-        mapping::rows::<ArrowTrade>(data, "trade"),
+        mapping::rows::<ArrowTrade>(data, &[], unreadable(Book::Trades))?,
         b.resolver(),
     ))
 }
@@ -298,7 +313,7 @@ pub async fn get_holdings(b: &ArrowBroker, auth: &AuthToken) -> Result<Vec<Holdi
         .call(Method::GET, "/user/holdings", auth, None, Category::Other)
         .await?;
     Ok(mapping::map_holdings(
-        mapping::rows::<ArrowHolding>(data, "holding"),
+        mapping::rows::<ArrowHolding>(data, &[], unreadable(Book::Holdings))?,
         b.resolver(),
     ))
 }

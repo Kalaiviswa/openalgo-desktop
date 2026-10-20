@@ -14,7 +14,7 @@ pub const MARGIN_PATH: &str = "/margins/orders";
 /// web `get_margin_data`: `GET /user/fundsummary`, `data[0]`.
 pub async fn get_funds(b: &MstockBroker, auth: &AuthToken) -> Result<Funds> {
     let v = b.call(Method::GET, FUNDS_PATH, auth, None).await?;
-    let first = mapping::rows(&v).into_iter().next();
+    let first = mapping::rows(&v).into_iter().flatten().next();
     match first {
         Some(d) if is_success(&v) => Ok(mapping::funds_from_summary(&d)),
         _ => Err(refusal(

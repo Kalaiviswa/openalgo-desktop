@@ -527,6 +527,12 @@ impl Broker for IndmoneyBroker {
         orders::get_positions(self, auth).await.map_err(redact)
     }
 
+    async fn close_all_positions(&self, auth: &AuthToken) -> Result<CloseAllResult> {
+        orders::close_all_positions(self, auth)
+            .await
+            .map_err(redact)
+    }
+
     async fn get_holdings(&self, auth: &AuthToken) -> Result<Vec<Holding>> {
         orders::get_holdings(self, auth).await.map_err(redact)
     }

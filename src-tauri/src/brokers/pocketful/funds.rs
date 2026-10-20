@@ -21,5 +21,13 @@ pub async fn get_funds(b: &PocketfulBroker, auth: &AuthToken) -> Result<Funds> {
             None,
         )
         .await?;
+    // BR-03: an answer without the funds view is not a zero balance.
+    if !v["data"]["values"].is_array() {
+        tracing::warn!("Pocketful answered the funds without its view");
+        return Err(crate::brokers::common::book_read::unreadable(
+            "pocketful",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     Ok(mapping::map_funds(&v))
 }

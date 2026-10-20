@@ -298,7 +298,7 @@ fn static_maps_match_web() {
 #[test]
 fn order_book_is_normalised_to_openalgo() {
     let r = master();
-    let o = map_orders(&data_rows(&j(fixture!("orders.json"))), &r);
+    let o = map_orders(&data_rows(&j(fixture!("orders.json"))).unwrap(), &r);
     assert_eq!(o.len(), 6);
     assert_eq!(
         (
@@ -327,15 +327,34 @@ fn order_book_is_normalised_to_openalgo() {
     // No token: resolved through the broker symbol.
     assert_eq!(o[5].symbol, "IDEA");
     assert_eq!(o[5].status, "open");
-    // Not_Ok and null data are an empty book.
-    assert!(data_rows(&json!({"stat": "Not_Ok", "emsg": "No Data"})).is_empty());
-    assert!(data_rows(&json!({"stat": "Ok", "data": null})).is_empty());
+    // Kotak's "no data" refusal and `data: null` are its empty book; any
+    // other refusal, and a success without its list or with another type
+    // in its place, is a book that was not read (BR-03).
+    assert_eq!(
+        data_rows(&json!({"stat": "Not_Ok", "emsg": "No Data"})),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        data_rows(&json!({"stat": "Ok", "data": null})),
+        Some(Vec::new())
+    );
+    assert_eq!(data_rows(&json!({"stat": "Ok"})), None);
+    assert_eq!(data_rows(&json!({"stat": "Ok", "data": {}})), None);
+    assert_eq!(data_rows(&json!({"stat": "Ok", "data": "x"})), None);
+    assert_eq!(
+        data_rows(&json!({"stat": "Not_Ok", "emsg": "Something failed"})),
+        None
+    );
+    assert_eq!(
+        data_rows(&json!({"stat": "Ok", "data": []})),
+        Some(Vec::new())
+    );
 }
 
 #[test]
 fn trade_book_resolves_symbol_without_token() {
     let r = master();
-    let t = map_trades(&data_rows(&j(fixture!("trades.json"))), &r);
+    let t = map_trades(&data_rows(&j(fixture!("trades.json"))).unwrap(), &r);
     assert_eq!(t.len(), 2);
     assert_eq!(
         (
@@ -358,10 +377,10 @@ fn trade_book_resolves_symbol_without_token() {
 fn books_carry_the_order_tag() {
     use crate::services::account_service::{order_row, trade_row};
     let r = master();
-    let o = map_orders(&data_rows(&j(fixture!("orders.json"))), &r);
+    let o = map_orders(&data_rows(&j(fixture!("orders.json"))).unwrap(), &r);
     assert!(o.iter().all(|x| x.order_tag.as_deref() == Some("openalgo")));
     assert_eq!(order_row(&o[0])["order_tag"], "openalgo");
-    let t = map_trades(&data_rows(&j(fixture!("trades.json"))), &r);
+    let t = map_trades(&data_rows(&j(fixture!("trades.json"))).unwrap(), &r);
     assert_eq!(trade_row(&t[0])["order_tag"], "openalgo");
     let untagged = map_orders(&[json!({"nOrdNo": "1", "exSeg": "nse_cm"})], &r);
     assert_eq!(order_row(&untagged[0])["order_tag"], "");
@@ -375,7 +394,7 @@ fn books_carry_the_order_tag() {
 #[test]
 fn positions_follow_kotak_pnl_formula() {
     let r = master();
-    let rows = data_rows(&j(fixture!("positions.json")));
+    let rows = data_rows(&j(fixture!("positions.json"))).unwrap();
     let p0 = map_position(&rows[0], &r, 814.1);
     assert_eq!(
         (p0.symbol.as_str(), p0.quantity, p0.average_price),

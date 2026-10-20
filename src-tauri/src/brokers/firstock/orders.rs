@@ -3,7 +3,9 @@
 
 use super::mapping;
 use super::{session, FirstockBroker, Session};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Action, Exchange, PriceType, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::families::noren::mapping::{
     escape_tsym, f, i, mpp_margin, num, oa_symbol, product_code, reverse_product, text, MppOrder,
     MppQuote,
@@ -12,22 +14,66 @@ use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use serde_json::{json, Value};
 
-fn data_list(v: &Value) -> Vec<Value> {
+/// The rows of a success: `data` as a list, or one row as an object.
+/// Firstock sends `data: []` for an empty book, so anything else is a book
+/// that was not read (BR-03).
+fn data_list(v: &Value) -> Option<Vec<Value>> {
     match v.get("data") {
-        Some(Value::Array(a)) => a.clone(),
-        Some(o @ Value::Object(_)) => vec![o.clone()],
-        _ => Vec::new(),
+        Some(Value::Array(a)) => Some(a.clone()),
+        Some(o @ Value::Object(_)) => Some(vec![o.clone()]),
+        _ => None,
     }
 }
 
-/// A book; a failed answer that says "no data" is an empty book.
+/// The book an endpoint answers (for the trader-facing error).
+fn book_of(endpoint: &str) -> Book {
+    match endpoint {
+        "/positionBook" => Book::Positions,
+        "/tradeBook" => Book::Trades,
+        "/holdings" => Book::Holdings,
+        _ => Book::Orders,
+    }
+}
+
+/// A book; a failed answer that says "no data" is an empty book. Every
+/// position row must carry `netQuantity` (BR-03).
 async fn book(b: &FirstockBroker, s: &Session, endpoint: &str) -> Result<Vec<Value>> {
+    book_with(b, s, endpoint, || {
+        book_read::unreadable("firstock", book_of(endpoint))
+    })
+    .await
+}
+
+/// The position book for a decision to trade: refused with the web's
+/// position-read sentence when it cannot be read.
+async fn positions(b: &FirstockBroker, s: &Session) -> Result<Vec<Value>> {
+    book_with(b, s, "/positionBook", || unread("Firstock")).await
+}
+
+async fn book_with(
+    b: &FirstockBroker,
+    s: &Session,
+    endpoint: &str,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
     let v = b.call(endpoint, json!({}), s).await?;
     if super::is_success(&v) {
-        return Ok(data_list(&v));
+        let rows = data_list(&v).ok_or_else(&unread)?;
+        if endpoint == "/positionBook" {
+            book_read::require_quantities(&rows, &["netQuantity"], unread)?;
+        }
+        return Ok(rows);
     }
-    let m = super::error_message(&v).to_ascii_lowercase();
-    if m.contains("no data") || m.contains("not found") {
+    // The position book's empty answer is read as the web's position read
+    // reads it (its markers, Firstock's message fields); "not found" alone
+    // could be any refusal.
+    let empty = if endpoint == "/positionBook" {
+        crate::brokers::common::position_read::says_no_positions(&v, &["error.message", "message"])
+    } else {
+        let m = super::error_message(&v).to_ascii_lowercase();
+        m.contains("no data") || m.contains("not found")
+    };
+    if empty {
         return Ok(Vec::new());
     }
     Err(super::firstock_error(&v))
@@ -145,7 +191,7 @@ pub async fn get_open_position(
             .unwrap_or_else(|| symbol.to_string()),
     );
     let prd = product_code(product);
-    for p in book(b, &s, "/positionBook").await? {
+    for p in positions(b, &s).await? {
         if text(&p, "tradingSymbol") == br
             && text(&p, "exchange") == exchange.as_str()
             && text(&p, "product") == prd
@@ -160,7 +206,7 @@ pub async fn close_all_positions(b: &FirstockBroker, auth: &AuthToken) -> Result
     let s = session(auth)?;
     let symbols = b.resolver().clone();
     let mut r = CloseAllResult::default();
-    for p in book(b, &s, "/positionBook").await? {
+    for p in positions(b, &s).await? {
         let qty = i(&p, "netQuantity");
         if qty == 0 {
             continue;
@@ -232,9 +278,8 @@ pub async fn get_holdings(b: &FirstockBroker, auth: &AuthToken) -> Result<Vec<Ho
 pub async fn get_funds(b: &FirstockBroker, auth: &AuthToken) -> Result<Funds> {
     let s = session(auth)?;
     let v = b.call_ok("/limit", json!({}), &s).await?;
-    Ok(mapping::funds_from(
-        &v.get("data").cloned().unwrap_or_default(),
-    ))
+    let data = book_read::object(v.get("data"), "firstock", Book::Funds)?;
+    Ok(mapping::funds_from(data))
 }
 
 pub async fn calculate_margin(

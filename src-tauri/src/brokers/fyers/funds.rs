@@ -9,6 +9,7 @@
 use super::mapping::{self, FyersPosition};
 use super::orders::raw_positions;
 use super::{code_message, fyers_error, FyersBroker};
+use crate::brokers::common::book_read::Book;
 use crate::brokers::common::de::{f64_lenient, string_lenient};
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -192,7 +193,7 @@ pub async fn get_funds(b: &FyersBroker, auth: &AuthToken) -> Result<Funds> {
         );
         return Err(fyers_error(status.as_u16(), code, &message));
     }
-    let limits: Vec<FundLimit> = mapping::rows(&v, "fund_limit");
+    let limits: Vec<FundLimit> = mapping::rows(&v, "fund_limit", Book::Funds)?;
     let positions = raw_positions(b, auth).await?;
     let funds = funds_from_limits(&limits, &positions);
     b.funds_cache.store(auth, now, &funds);

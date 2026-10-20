@@ -5,6 +5,7 @@ use super::mapping::{
     self, GrowwHolding, GrowwOrder, GrowwPosition, GrowwTrade, SEGMENT_CASH, SEGMENT_FNO,
 };
 use super::{error_message, groww_error, in_transit, Category, GrowwCore, Reply};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::outcome;
 use crate::brokers::common::redact::url_safe_error;
@@ -353,14 +354,9 @@ async fn paged<T: serde::de::DeserializeOwned>(
             // the status).
             return Ok(Err(r.error_message()));
         }
-        let list: Vec<T> = r
-            .payload()
-            .get(list_key)
-            .cloned()
-            .filter(|v| !v.is_null())
-            .map(serde_json::from_value)
-            .transpose()?
-            .unwrap_or_default();
+        let list: Vec<T> = book_read::rows(r.payload(), list_key, || {
+            book_read::unreadable("groww", book_of(list_key))
+        })?;
         let n = list.len();
         out.extend(list);
         if n < page_size {
@@ -368,6 +364,27 @@ async fn paged<T: serde::de::DeserializeOwned>(
         }
     }
     Ok(Ok(out))
+}
+
+/// The book a paged list is (for the trader-facing error).
+fn book_of(list_key: &str) -> Book {
+    if list_key == "trade_list" {
+        Book::Trades
+    } else {
+        Book::Orders
+    }
+}
+
+/// Every Groww position row carries its net quantity, or the buy and sell
+/// quantities it is made of (web `_position_row`); a row with neither is a
+/// position that cannot be read, never a flat one (BR-03).
+fn quantities_read(rows: &[Value]) -> bool {
+    rows.iter().all(|r| {
+        book_read::quantity(r, "quantity").is_some()
+            || ["credit_quantity", "debit_quantity"]
+                .iter()
+                .all(|k| book_read::quantity(r, k).is_some())
+    })
 }
 
 /// Both segments' orders (web `direct_get_order_book`). A CASH read that
@@ -594,14 +611,15 @@ async fn segment_positions(
             m
         }));
     }
-    Ok(Ok(r
-        .payload()
-        .get("positions")
-        .cloned()
-        .filter(|v| !v.is_null())
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default()))
+    // Groww answers no positions with `positions: []` (web
+    // `test_position_read_failure`); anything else is not a book.
+    let unread = || book_read::unreadable("groww", Book::Positions);
+    let rows = book_read::list(r.payload(), "positions", unread)?;
+    if !quantities_read(rows) {
+        tracing::warn!("A Groww position row without its quantity");
+        return Err(unread());
+    }
+    Ok(Ok(book_read::typed(rows, unread)?))
 }
 
 /// Both segments' positions (web `get_positions(strict, include_ltp)`).
@@ -615,13 +633,20 @@ pub(crate) async fn read_positions(
     include_ltp: bool,
 ) -> Result<PositionRead> {
     let mut raw: Vec<(GrowwPosition, &'static str)> = Vec::new();
-    match segment_positions(core, auth, SEGMENT_CASH).await? {
-        Ok(rows) => raw.extend(rows.into_iter().map(|p| (p, SEGMENT_CASH))),
-        Err(why) if strict => {
+    // BR-03: an unread CASH book is an error for every reader, never the
+    // F&O rows alone (an F&O read refused on an account without F&O is
+    // left out, as on the web).
+    match segment_positions(core, auth, SEGMENT_CASH).await {
+        Ok(Ok(rows)) => raw.extend(rows.into_iter().map(|p| (p, SEGMENT_CASH))),
+        Ok(Err(why)) => {
             tracing::error!("Groww position book incomplete: CASH segment: {}", why);
+            return Err(position_unread(strict));
+        }
+        Err(e) if strict => {
+            tracing::error!("Groww CASH positions could not be read: {}", e);
             return Err(AppError::Broker(POSITION_UNREAD.into()));
         }
-        Err(why) => tracing::warn!("Groww CASH positions could not be read: {}", why),
+        Err(e) => return Err(e),
     }
     let mut failed = Vec::new();
     match segment_positions(core, auth, SEGMENT_FNO).await? {
@@ -664,16 +689,46 @@ pub(crate) async fn read_positions(
     Ok(PositionRead { rows, failed })
 }
 
+/// A segment as a trader names it.
+fn segment_name(segment: &str) -> &'static str {
+    if segment == SEGMENT_FNO {
+        "F&O"
+    } else {
+        "Cash"
+    }
+}
+
+/// The error for a position book that could not be read: the web's
+/// position-read sentence for a decision to trade, else the book's.
+fn position_unread(strict: bool) -> AppError {
+    if strict {
+        AppError::Broker(POSITION_UNREAD.into())
+    } else {
+        book_read::unreadable("groww", Book::Positions)
+    }
+}
+
 pub async fn get_positions(core: &GrowwCore, auth: &AuthToken) -> Result<Vec<Position>> {
     Ok(read_positions(core, auth, false, true).await?.rows)
 }
 
 /// Square off every open position at MARKET (web `close_all_positions`):
 /// the position book read without live prices, one exit order each for
-/// the OpenAlgo symbol, exchange and product of the row.
+/// the OpenAlgo symbol, exchange and product of the row. A segment whose
+/// positions could not be read stays in `failed` (NEW-PAR-01): its
+/// positions may still be open, so close-all never reads as complete
+/// (the web leaves it out and reports success).
 pub async fn close_all_positions(core: &GrowwCore, auth: &AuthToken) -> Result<CloseAllResult> {
-    let positions = read_positions(core, auth, false, false).await?.rows;
+    let read = read_positions(core, auth, true, false).await?;
     let mut result = CloseAllResult::default();
+    for segment in &read.failed {
+        result.failed.push(format!(
+            "{} positions: Groww did not return them (an account without {} answers the same way), so any open there were not squared off. Check them on Groww.",
+            segment_name(segment),
+            segment_name(segment)
+        ));
+    }
+    let positions = read.rows;
     for p in positions.into_iter().filter(|p| p.quantity != 0) {
         let label = format!("{} ({})", p.symbol, p.exchange);
         let req = OrderRequest {
@@ -746,14 +801,9 @@ pub async fn get_holdings_book(core: &GrowwCore, auth: &AuthToken) -> Result<Hol
     if !r.is_success() {
         return Err(groww_error(&r));
     }
-    let rows: Vec<GrowwHolding> = r
-        .payload()
-        .get("holdings")
-        .cloned()
-        .filter(|v| !v.is_null())
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default();
+    let rows: Vec<GrowwHolding> = book_read::rows(r.payload(), "holdings", || {
+        book_read::unreadable("groww", Book::Holdings)
+    })?;
     let keys: Vec<String> = rows
         .iter()
         .filter_map(|h| {

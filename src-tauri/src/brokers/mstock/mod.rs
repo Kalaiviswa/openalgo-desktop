@@ -244,6 +244,8 @@ pub(crate) async fn read_payload(resp: reqwest::Response) -> Result<Value> {
         return Ok(Value::Object(Default::default()));
     }
     match serde_json::from_slice::<Value>(&bytes) {
+        // A server error is no answer, whatever its body says (BR-03).
+        Ok(_) if status.is_server_error() => Err(http::server_error("mstock", status)),
         Ok(v) => Ok(unwrap_list(v)),
         Err(e) => {
             // The body is not logged: a sign-in answer can carry tokens.

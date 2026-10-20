@@ -250,7 +250,7 @@ fn place_body_matches_transform_data() {
 
 #[test]
 fn modify_and_cancel_bodies_echo_the_book_row() {
-    let book = parse_orders(&env(fixture!("orders.json")).data);
+    let book = parse_orders(&env(fixture!("orders.json")).data).unwrap();
     let row = &book[0];
     let m = ResolvedModify {
         order_id: row.order_no.clone(),
@@ -324,7 +324,10 @@ fn close_position_body_uses_the_row() {
 
 #[test]
 fn order_book_is_normalised_to_openalgo() {
-    let orders = map_orders(&parse_orders(&env(fixture!("orders.json")).data), &master());
+    let orders = map_orders(
+        &parse_orders(&env(fixture!("orders.json")).data).unwrap(),
+        &master(),
+    );
     assert_eq!(orders.len(), 5);
     let o = &orders[0];
     assert_eq!((o.symbol.as_str(), o.exchange.as_str()), ("SBIN", "NSE"));
@@ -367,7 +370,10 @@ fn order_book_is_normalised_to_openalgo() {
 
 #[test]
 fn trade_book_keeps_traded_orders_only() {
-    let trades = map_trades(&parse_orders(&env(fixture!("orders.json")).data), &master());
+    let trades = map_trades(
+        &parse_orders(&env(fixture!("orders.json")).data).unwrap(),
+        &master(),
+    );
     assert_eq!(trades.len(), 1);
     let t = &trades[0];
     assert_eq!(t.symbol, "NIFTY06OCT2624000CE");
@@ -403,7 +409,7 @@ fn positions_are_normalised() {
 #[test]
 fn holdings_pick_the_exchange_like_the_web() {
     let h = map_holdings(
-        &holding_rows(&env(fixture!("holdings.json")).data),
+        &holding_rows(&env(fixture!("holdings.json")).data).unwrap(),
         &master(),
     );
     assert_eq!(h.len(), 3);
@@ -425,7 +431,12 @@ fn holdings_pick_the_exchange_like_the_web() {
     assert_eq!(h[2].symbol, "DELISTCO");
     assert_eq!(h[2].pnl_percentage, 0.0);
     // A plain list works too.
-    assert_eq!(holding_rows(&json!([{"nse_security_id": "3045"}])).len(), 1);
+    assert_eq!(
+        holding_rows(&json!([{"nse_security_id": "3045"}])).map(|r| r.len()),
+        Some(1)
+    );
+    // BR-03: no list is not an empty book.
+    assert!(holding_rows(&json!({})).is_none());
 }
 
 #[test]

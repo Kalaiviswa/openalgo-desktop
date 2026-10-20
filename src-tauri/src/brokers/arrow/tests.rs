@@ -8,6 +8,11 @@ use super::master_contract::{classify_index_symbol, index_rows, norm, parse_inst
 use super::orders::{modify_order_body, place_order_body};
 use super::streaming::{decode_packet, ArrowFeed, ArrowOrderFeed};
 use super::*;
+use crate::brokers::common::book_read::Book;
+
+fn unread() -> crate::error::AppError {
+    crate::brokers::common::book_read::unreadable("arrow", Book::Orders)
+}
 use crate::brokers::common::mapping::{Action, PriceType, Validity};
 use crate::brokers::common::streaming::{FeedEvent, FeedMode, FeedSubscription, Message};
 use serde_json::{json, Value};
@@ -359,7 +364,7 @@ fn modify_body_has_no_side() {
 #[test]
 fn order_book_is_normalised_to_openalgo() {
     let r = master();
-    let orders = map_orders(rows(data("orders"), "order"), &r);
+    let orders = map_orders(rows(data("orders"), &[], unread).unwrap(), &r);
     assert_eq!(orders.len(), 7);
     let o = &orders[0];
     assert_eq!(o.order_id, "26100300001");
@@ -410,7 +415,7 @@ fn order_book_is_normalised_to_openalgo() {
 #[test]
 fn trade_book_uses_fill_fields_with_fallbacks() {
     let r = master();
-    let t = map_trades(rows(data("trades"), "trade"), &r);
+    let t = map_trades(rows(data("trades"), &[], unread).unwrap(), &r);
     assert_eq!(t.len(), 2);
     assert_eq!(t[0].symbol, "SBIN");
     assert_eq!(t[0].trade_id, "5001");
@@ -430,7 +435,7 @@ fn trade_book_uses_fill_fields_with_fallbacks() {
 #[test]
 fn positions_and_holdings() {
     let r = master();
-    let p = map_positions(rows(data("positions"), "position"), &r);
+    let p = map_positions(rows(data("positions"), &[], unread).unwrap(), &r);
     assert_eq!(p.len(), 3);
     assert_eq!(p[0].symbol, "SBIN");
     assert_eq!(p[0].product, "MIS");
@@ -442,7 +447,7 @@ fn positions_and_holdings() {
     assert_eq!(p[1].product, "NRML");
     assert_eq!(p[2].pnl, 120.5);
 
-    let h = map_holdings(rows(data("holdings"), "holding"), &r);
+    let h = map_holdings(rows(data("holdings"), &[], unread).unwrap(), &r);
     assert_eq!(h.len(), 2);
     assert_eq!(h[0].symbol, "SBIN");
     assert_eq!(h[0].exchange, "NSE");
@@ -457,12 +462,22 @@ fn positions_and_holdings() {
     assert_eq!(stats.totalinvvalue, 14000.0);
 }
 
+/// BR-03: a row that does not read, a position without its quantity, or a
+/// payload without the list is a book that was not read, never a book
+/// without that row or an empty one. Arrow's empty book is `[]`.
 #[test]
-fn bad_rows_are_skipped_not_fatal() {
-    let v = json!([{"symbol": "SBIN-EQ", "qty": "1"}, "nonsense", {"symbol": {"x": 1}}]);
-    let p: Vec<ArrowPosition> = rows(v, "position");
-    assert_eq!(p.len(), 2);
-    assert!(rows::<ArrowPosition>(Value::Null, "position").is_empty());
+fn a_book_is_read_whole_or_not_at_all() {
+    let unread = || crate::brokers::common::book_read::unreadable("arrow", Book::Positions);
+    let qty: &[&str] = &["qty"];
+    let ok = json!([{"symbol": "SBIN-EQ", "qty": "1"}, {"symbol": "INFY-EQ", "qty": -2}]);
+    assert_eq!(rows::<ArrowPosition>(ok, qty, unread).unwrap().len(), 2);
+    assert!(rows::<ArrowPosition>(json!([]), qty, unread)
+        .unwrap()
+        .is_empty());
+    let bad = json!([{"symbol": "SBIN-EQ", "qty": "1"}, "nonsense"]);
+    assert!(rows::<ArrowPosition>(bad, qty, unread).is_err());
+    assert!(rows::<ArrowPosition>(json!([{"symbol": "SBIN-EQ"}]), qty, unread).is_err());
+    assert!(rows::<ArrowPosition>(Value::Null, qty, unread).is_err());
 }
 
 // ---------------------------------------------------------------------------

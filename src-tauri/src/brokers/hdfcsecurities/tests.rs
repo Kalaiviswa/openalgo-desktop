@@ -353,7 +353,7 @@ fn modify_payload_carries_mutable_fields_only() {
 
 #[test]
 fn order_book_is_normalised() {
-    let rows = unwrap_rows(&data(fixture!("orders.json")), None);
+    let rows = unwrap_rows(&data(fixture!("orders.json")), None).unwrap();
     let o = map_orders(&rows, &master());
     assert_eq!(o.len(), 7);
     assert_eq!(o[0].symbol, "SBIN");
@@ -384,7 +384,7 @@ fn order_book_is_normalised() {
 
 #[test]
 fn trade_book_reconstructs_symbols() {
-    let rows = unwrap_rows(&data(fixture!("trades.json")), None);
+    let rows = unwrap_rows(&data(fixture!("trades.json")), None).unwrap();
     let t = map_trades(&rows, &master());
     assert_eq!(t.len(), 3);
     // Underlying name in security_id, confirmed by the master.
@@ -400,7 +400,7 @@ fn trade_book_reconstructs_symbols() {
 }
 
 fn priced_positions() -> Vec<Value> {
-    let mut rows = unwrap_rows(&data(fixture!("positions.json")), Some("net"));
+    let mut rows = unwrap_rows(&data(fixture!("positions.json")), Some("net")).unwrap();
     rows[0]["ltp"] = json!(810.0);
     rows[1]["ltp"] = json!(100.0);
     rows
@@ -426,7 +426,7 @@ fn positions_use_merged_ltp() {
 
 #[test]
 fn holdings_fall_back_to_close_and_isin() {
-    let mut rows = unwrap_rows(&data(fixture!("holdings.json")), None);
+    let mut rows = unwrap_rows(&data(fixture!("holdings.json")), None).unwrap();
     rows[0]["ltp"] = json!(810.0);
     let h = map_holdings(&rows, &master());
     assert_eq!(h[0].symbol, "SBIN");

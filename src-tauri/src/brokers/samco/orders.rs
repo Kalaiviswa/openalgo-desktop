@@ -2,6 +2,8 @@
 
 use super::mapping::{self, text, Resolved};
 use super::{data, is_success, samco_error, SamcoBroker};
+use crate::brokers::common::book_read::{self, Book};
+use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::outcome;
 use crate::brokers::common::position_read::{says_no_positions, unread};
@@ -197,7 +199,16 @@ fn says_empty_book(v: &Value) -> bool {
 /// non-JSON body, an error page, another `Failure`) is an error, never an
 /// empty book.
 fn book_or_error(status: reqwest::StatusCode, v: Value, key: &str) -> Result<Value> {
-    if is_success(&v) || v.get(key).is_some_and(Value::is_array) {
+    // BR-03: a server error is no answer, and a `Success` without its list
+    // is a book that was not read; every position carries `netQuantity`.
+    if status.is_server_error() {
+        return Err(http::server_error("samco", status));
+    }
+    if let Some(rows) = v.get(key).and_then(Value::as_array) {
+        if key == "positionDetails" {
+            let unread = || book_read::unreadable("samco", Book::Positions);
+            book_read::require_quantities(rows, &["netQuantity"], unread)?;
+        }
         return Ok(v);
     }
     if says_empty_book(&v) {
@@ -260,10 +271,12 @@ pub async fn get_holdings(b: &SamcoBroker, auth: &AuthToken) -> Result<Vec<Holdi
 /// sign-in message.
 pub async fn cancel_all_orders(b: &SamcoBroker, auth: &AuthToken) -> Result<CancelAllResult> {
     let (status, v) = b.send(Method::GET, "/order/orderBook", auth, None).await?;
+    // A server error is no answer, whatever its body says (BR-03).
+    let answered = !status.is_server_error();
     let mut result = CancelAllResult::default();
     let orders: Vec<Value> = match v.get("orderBookDetails") {
-        Some(Value::Array(a)) if is_success(&v) => a.clone(),
-        _ if !is_success(&v) && says_empty_book(&v) => Vec::new(),
+        Some(Value::Array(a)) if answered && is_success(&v) => a.clone(),
+        _ if answered && !is_success(&v) && says_empty_book(&v) => Vec::new(),
         _ => {
             tracing::error!(
                 status = status.as_u16(),
@@ -313,8 +326,20 @@ pub async fn collect_open_positions(
     let mut seen = std::collections::HashSet::new();
     let mut failed = Vec::new();
     for kind in ["DAY", "NET"] {
+        // BR-03: a confirmed book carries its list, and every row its
+        // `netQuantity`; a server error is no answer.
+        let read = |s: reqwest::StatusCode, v: &Value| {
+            !s.is_server_error()
+                && is_success(v)
+                && v.get("positionDetails")
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| {
+                        rows.iter()
+                            .all(|p| book_read::quantity(p, "netQuantity").is_some())
+                    })
+        };
         let v = match raw_positions(b, auth, kind).await {
-            Ok((_, v)) if is_success(&v) => v,
+            Ok((s, v)) if read(s, &v) => v,
             Ok(_) => {
                 tracing::warn!("Samco {} positions could not be read", kind);
                 failed.push(kind);
@@ -419,6 +444,9 @@ pub async fn get_open_position(
         .br_symbol(symbol, exchange.as_str())
         .unwrap_or_else(|| symbol.to_string());
     let (status, v) = raw_positions(b, auth, "DAY").await?;
+    if status.is_server_error() {
+        return Err(http::server_error("samco", status));
+    }
     if !positions_ok(&v) {
         if says_no_positions(&v, &["statusMessage"]) {
             return Ok(0);
@@ -434,14 +462,18 @@ pub async fn get_open_position(
             _ => unread("Samco"),
         });
     }
-    Ok(v.get("positionDetails")
+    // BR-03: a confirmed book carries its list, and every row its quantity.
+    let rows = v
+        .get("positionDetails")
         .and_then(Value::as_array)
-        .and_then(|a| {
-            a.iter().find(|p| {
-                text(p.get("tradingSymbol")) == br
-                    && mapping::oa_exchange(&text(p.get("exchange"))) == exchange.as_str()
-                    && text(p.get("productCode")) == product.as_str()
-            })
+        .ok_or_else(|| unread("Samco"))?;
+    book_read::require_quantities(rows, &["netQuantity"], || unread("Samco"))?;
+    Ok(rows
+        .iter()
+        .find(|p| {
+            text(p.get("tradingSymbol")) == br
+                && mapping::oa_exchange(&text(p.get("exchange"))) == exchange.as_str()
+                && text(p.get("productCode")) == product.as_str()
         })
         .map(mapping::signed_net)
         .unwrap_or(0))

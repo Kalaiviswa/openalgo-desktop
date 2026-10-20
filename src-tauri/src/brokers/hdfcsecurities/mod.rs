@@ -208,6 +208,9 @@ impl HdfcSecuritiesBroker {
         body: Option<&Value>,
     ) -> Result<Value> {
         let (status, v) = self.request(method, path, auth, body).await?;
+        if status.is_server_error() {
+            return Err(http::server_error("hdfcsecurities", status));
+        }
         if v.get("status").and_then(Value::as_str) == Some("success") {
             return Ok(v.get("data").cloned().unwrap_or(Value::Null));
         }

@@ -279,6 +279,9 @@ fn non_json_error(status: StatusCode) -> AppError {
 
 /// `data` of a success envelope, or the trader-facing error.
 pub(crate) fn envelope_data(status: StatusCode, v: Value, url: &str) -> Result<Value> {
+    if status.is_server_error() {
+        return Err(http::server_error("upstox", status));
+    }
     if v.get("status").and_then(Value::as_str) == Some("success") {
         return Ok(v.get("data").cloned().unwrap_or(Value::Null));
     }

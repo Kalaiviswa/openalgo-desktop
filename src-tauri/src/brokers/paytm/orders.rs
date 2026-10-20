@@ -5,7 +5,9 @@ use super::mapping::{
     paytm_side, segment, PaytmOrder, PaytmPosition,
 };
 use super::PaytmBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -126,12 +128,27 @@ pub async fn place_order(
 
 pub(crate) async fn raw_orders(b: &PaytmBroker, auth: &AuthToken) -> Result<Vec<PaytmOrder>> {
     let env = b.call(Method::GET, ORDERS, auth, None).await?;
-    Ok(parse_orders(&env.data))
+    parse_orders(&env.data).ok_or_else(|| book_read::unreadable("paytm", Book::Orders))
 }
 
 pub(crate) async fn raw_positions(b: &PaytmBroker, auth: &AuthToken) -> Result<Vec<PaytmPosition>> {
+    positions_read(b, auth, || book_read::unreadable("paytm", Book::Positions)).await
+}
+
+/// The position book (BR-03): a list whose every row reads and carries
+/// its net quantity, or `unread()`.
+async fn positions_read(
+    b: &PaytmBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<PaytmPosition>> {
     let env = b.call(Method::GET, POSITIONS, auth, None).await?;
-    Ok(env.rows())
+    let rows = env.data.as_array().ok_or_else(&unread)?;
+    if !rows.iter().all(mapping::has_quantity) {
+        tracing::warn!("A Paytm Money position row without its quantity");
+        return Err(unread());
+    }
+    book_read::typed(rows, unread)
 }
 
 fn not_found(order_id: &str) -> AppError {
@@ -237,7 +254,7 @@ pub fn close_position_body(p: &PaytmPosition) -> Option<Value> {
 
 pub async fn close_all_positions(b: &PaytmBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Paytm Money")).await? {
         if p.quantity() == 0 {
             continue;
         }
@@ -291,7 +308,7 @@ pub async fn get_open_position(
         )));
     };
     let want_product = paytm_product(product);
-    Ok(raw_positions(b, auth)
+    Ok(positions_read(b, auth, || unread("Paytm Money"))
         .await?
         .iter()
         .find(|p| {
@@ -326,8 +343,7 @@ pub async fn get_positions(b: &PaytmBroker, auth: &AuthToken) -> Result<Vec<Posi
 
 pub async fn get_holdings(b: &PaytmBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let env = b.call(Method::GET, HOLDINGS, auth, None).await?;
-    Ok(mapping::map_holdings(
-        &holding_rows(&env.data),
-        b.resolver(),
-    ))
+    let rows =
+        holding_rows(&env.data).ok_or_else(|| book_read::unreadable("paytm", Book::Holdings))?;
+    Ok(mapping::map_holdings(&rows, b.resolver()))
 }

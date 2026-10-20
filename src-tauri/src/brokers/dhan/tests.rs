@@ -13,6 +13,11 @@ use super::master_contract::{
 };
 use super::streaming::{Dhan20DepthFeed, DhanFeed, DhanOrderFeed};
 use super::*;
+use crate::brokers::common::book_read::Book;
+
+fn unread() -> crate::error::AppError {
+    crate::brokers::common::book_read::unreadable("dhan", Book::Orders)
+}
 use crate::brokers::common::mapping::{Action, PriceType, Product, Validity};
 use crate::brokers::common::streaming::{FeedEvent, FeedMode, FeedSubscription, Message};
 use chrono::NaiveDate;
@@ -370,7 +375,7 @@ fn enum_maps_match_web() {
 #[test]
 fn order_book_is_normalised_to_openalgo() {
     let r = master();
-    let orders = map_orders(rows(j(fixture!("orders.json"))).unwrap(), &r);
+    let orders = map_orders(rows(j(fixture!("orders.json")), &[], unread).unwrap(), &r);
     assert_eq!(orders.len(), 6);
     let o = &orders[0];
     assert_eq!(
@@ -409,7 +414,7 @@ fn order_book_is_normalised_to_openalgo() {
 #[test]
 fn trade_book_values_trades() {
     let r = master();
-    let t = map_trades(rows(j(fixture!("trades.json"))).unwrap(), &r);
+    let t = map_trades(rows(j(fixture!("trades.json")), &[], unread).unwrap(), &r);
     assert_eq!(t.len(), 2);
     assert_eq!((t[0].symbol.as_str(), t[0].trade_value), ("SBIN", 8123.5));
     assert_eq!(t[1].symbol, "NIFTY27OCT2625000PE");
@@ -422,7 +427,11 @@ fn positions_take_ltp_from_quotes() {
     let r = master();
     let mut ltp = HashMap::new();
     ltp.insert(ltp_key("NSE", "SBIN"), 814.1049);
-    let p = map_positions(rows(j(fixture!("positions.json"))).unwrap(), &r, &ltp);
+    let p = map_positions(
+        rows(j(fixture!("positions.json")), &[], unread).unwrap(),
+        &r,
+        &ltp,
+    );
     assert_eq!(p.len(), 3);
     assert_eq!(
         (p[0].symbol.as_str(), p[0].product.as_str()),
@@ -442,7 +451,11 @@ fn holdings_resolve_real_exchange() {
     let r = master();
     let mut ltp = HashMap::new();
     ltp.insert(ltp_key("NSE", "HDFCBANK"), 1700.25);
-    let h = map_holdings(rows(j(fixture!("holdings.json"))).unwrap(), &r, &ltp);
+    let h = map_holdings(
+        rows(j(fixture!("holdings.json")), &[], unread).unwrap(),
+        &r,
+        &ltp,
+    );
     assert_eq!(h.len(), 2);
     assert_eq!(
         (h[0].symbol.as_str(), h[0].exchange.as_str()),
@@ -460,19 +473,26 @@ fn holdings_resolve_real_exchange() {
     let errs = j(fixture!("errors.json"));
     assert!(is_no_holdings(&errs["no_holdings"]));
     assert!(!is_no_holdings(&errs["invalid_token"]));
+    let unread = || crate::brokers::common::book_read::unreadable("dhan", Book::Orders);
     assert_eq!(
-        rows::<DhanHolding>(errs["invalid_token"].clone())
+        rows::<DhanHolding>(errs["invalid_token"].clone(), &[], unread)
             .unwrap_err()
             .code(),
         "AUTH_ERROR"
     );
-    assert!(rows::<DhanOrder>(Value::Null).unwrap().is_empty());
+    // BR-03: Dhan's empty book is `[]`; `null` is a book that was not read.
+    assert!(rows::<DhanOrder>(json!([]), &[], unread)
+        .unwrap()
+        .is_empty());
+    assert!(rows::<DhanOrder>(Value::Null, &[], unread).is_err());
     assert_eq!(
-        rows::<DhanOrder>(json!({"data": [{"orderId": "1"}]}))
+        rows::<DhanOrder>(json!({"data": [{"orderId": "1"}]}), &[], unread)
             .unwrap()
             .len(),
         1
     );
+    // A position row without its quantity is not flat.
+    assert!(rows::<DhanPosition>(json!([{"securityId": "1"}]), &["netQty"], unread).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +501,7 @@ fn holdings_resolve_real_exchange() {
 
 #[test]
 fn funds_subtract_collateral_from_balance() {
-    let pos: Vec<DhanPosition> = rows(j(fixture!("positions.json"))).unwrap();
+    let pos: Vec<DhanPosition> = rows(j(fixture!("positions.json")), &[], unread).unwrap();
     let f = funds_from_limit(&j(fixture!("fundlimit.json")), &pos);
     assert_eq!(f.available_cash, 132340.75);
     assert_eq!(f.collateral, 20000.0);

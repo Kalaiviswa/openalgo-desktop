@@ -2,7 +2,10 @@
 
 use super::mapping::{self, s};
 use super::{kotak_error, stat_ok, KotakBroker, KotakSession};
+use crate::brokers::common::book_read::{self, Book};
+use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::brokers::Broker;
 use crate::error::{AppError, Result};
@@ -102,64 +105,81 @@ pub async fn cancel_order(
     Err(kotak_error(status, &v, "Failed to cancel order"))
 }
 
-async fn book(b: &KotakBroker, auth: &AuthToken, path: &str) -> Result<Vec<Value>> {
+async fn book(b: &KotakBroker, auth: &AuthToken, path: &str, of: Book) -> Result<Vec<Value>> {
     let sess = KotakSession::parse(auth)?;
     let (status, v) = b.trading_get(&sess, path).await?;
+    if status.is_server_error() {
+        return Err(http::server_error("kotak", status));
+    }
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         return Err(super::session_expired());
     }
-    if !v.is_object() {
-        return Err(AppError::Broker(
-            "Kotak returned an unexpected book. Try again shortly.".into(),
-        ));
+    if let Some(rows) = mapping::data_rows(&v) {
+        return Ok(rows);
     }
-    if s(&v, "stat").eq_ignore_ascii_case("not_ok") {
-        let e = kotak_error(status, &v, "");
-        // A session error is an error; any other Not_Ok is an empty book
-        // (web `map_order_data`).
-        if matches!(e, AppError::Auth(_)) {
-            return Err(e);
-        }
-        return Ok(Vec::new());
+    // A session error stays one; any other refusal or shape is a book that
+    // was not read, never an empty one (BR-03; the web reads every Not_Ok
+    // as empty).
+    let e = kotak_error(status, &v, "");
+    if matches!(e, AppError::Auth(_)) {
+        return Err(e);
     }
-    Ok(mapping::data_rows(&v))
+    tracing::warn!(
+        status = status.as_u16(),
+        "Kotak answered {} without a book",
+        path
+    );
+    Err(book_read::unreadable("kotak", of))
 }
 
-/// The raw positions book. A payload that is not an object is an error,
-/// never an empty book: close-all reads an empty book as nothing to close
-/// (web `get_positions`).
-pub(crate) async fn raw_positions(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Value>> {
+/// The raw positions book, read with `unread` when it cannot be (BR-03): a
+/// payload that is not an object, a server error, a missing `data` list or
+/// a row without its four quantities is never an empty book: close-all
+/// reads an empty book as nothing to close (web `get_positions`).
+async fn positions_read(
+    b: &KotakBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
     let sess = KotakSession::parse(auth)?;
     let (status, v) = b.trading_get(&sess, "/quick/user/positions").await?;
+    if status.is_server_error() {
+        return Err(http::server_error("kotak", status));
+    }
     if !v.is_object() {
         tracing::warn!(
             status = status.as_u16(),
             "Kotak positions payload is not an object"
         );
-        return Err(AppError::Broker(
-            "Kotak did not return the position book. Try again shortly.".into(),
-        ));
+        return Err(unread());
     }
-    if !stat_ok(&v) {
+    // Kotak's empty book: a "no data" refusal (web `read_position_book`
+    // with Kotak's message fields) or `data: null` (web close all's "No
+    // Open Positions Found").
+    let rows = mapping::data_rows(&v);
+    if !stat_ok(&v) && rows.is_none() {
         return Err(kotak_error(
             status,
             &v,
             "Kotak did not return the position book. Try again shortly.",
         ));
     }
-    Ok(v.get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+    let rows = rows.ok_or_else(&unread)?;
+    book_read::require_quantities(&rows, mapping::QUANTITIES, &unread)?;
+    Ok(rows)
+}
+
+pub(crate) async fn raw_positions(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Value>> {
+    positions_read(b, auth, || book_read::unreadable("kotak", Book::Positions)).await
 }
 
 pub async fn get_order_book(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Order>> {
-    let rows = book(b, auth, "/quick/user/orders").await?;
+    let rows = book(b, auth, "/quick/user/orders", Book::Orders).await?;
     Ok(mapping::map_orders(&rows, b.resolver()))
 }
 
 pub async fn get_trade_book(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
-    let rows = book(b, auth, "/quick/user/trades").await?;
+    let rows = book(b, auth, "/quick/user/trades", Book::Trades).await?;
     Ok(mapping::map_trades(&rows, b.resolver()))
 }
 
@@ -219,18 +239,29 @@ pub async fn get_holdings(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Holdi
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         return Err(super::session_expired());
     }
+    if status.is_server_error() {
+        return Err(http::server_error("kotak", status));
+    }
+    // Kotak answers no holdings with `data: null` (the web reads that as
+    // empty) or a "no data" refusal; a reply without `data`, or with
+    // another shape, is not a book (BR-03).
     let rows = match v.get("data") {
         Some(Value::Array(a)) => a.clone(),
-        Some(Value::Null) | None => {
-            if s(&v, "stat").eq_ignore_ascii_case("not_ok") || v.get("fault").is_some() {
-                let e = kotak_error(status, &v, "Kotak did not return holdings.");
-                if matches!(e, AppError::Auth(_)) {
-                    return Err(e);
-                }
-            }
+        Some(Value::Null)
+            if !s(&v, "stat").eq_ignore_ascii_case("not_ok") && v.get("fault").is_none() =>
+        {
             Vec::new()
         }
-        Some(_) => Vec::new(),
+        _ if s(&v, "stat").eq_ignore_ascii_case("not_ok") && mapping::data_rows(&v).is_some() => {
+            Vec::new()
+        }
+        _ => {
+            let e = kotak_error(status, &v, "");
+            if matches!(e, AppError::Auth(_)) {
+                return Err(e);
+            }
+            return Err(book_read::unreadable("kotak", Book::Holdings));
+        }
     };
     Ok(rows
         .iter()
@@ -242,7 +273,7 @@ pub async fn get_holdings(b: &KotakBroker, auth: &AuthToken) -> Result<Vec<Holdi
 /// `trigger pending`.
 pub async fn cancel_all_orders(b: &KotakBroker, auth: &AuthToken) -> Result<CancelAllResult> {
     let mut result = CancelAllResult::default();
-    for o in book(b, auth, "/quick/user/orders").await? {
+    for o in book(b, auth, "/quick/user/orders", Book::Orders).await? {
         let st = s(&o, "ordSt");
         if st != "open" && st != "trigger pending" {
             continue;
@@ -274,7 +305,7 @@ pub async fn get_open_position(
         .br_symbol(symbol, ex)
         .unwrap_or_else(|| symbol.to_string());
     let segment = mapping::reverse_map_exchange(ex).unwrap_or("");
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Kotak")).await? {
         if mapping::position_matches(&p, &br, segment, product.as_str()) {
             return Ok(mapping::net_quantity(&p));
         }
@@ -286,7 +317,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &KotakBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Kotak")).await? {
         let net = mapping::net_quantity(&p);
         if net == 0 {
             continue;

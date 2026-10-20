@@ -2,8 +2,10 @@
 
 use super::mapping::{self, token_text, vi, vs};
 use super::{motilal_error, paths, MotilalBroker, MotilalSession};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::mpp;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::brokers::Broker;
 use crate::error::{AppError, Result};
@@ -238,17 +240,46 @@ pub async fn cancel_order(
     })
 }
 
-/// A book's `data` rows (null data is an empty book).
+/// A book's `data` rows: Motilal answers an empty book with `data: null`
+/// (the web reads it as empty). BR-03: `data` of another type is a book
+/// that was not read, and every position row carries its buy and sell
+/// quantities.
 pub(crate) async fn raw_book(
     b: &MotilalBroker,
     s: &MotilalSession,
     path: &str,
 ) -> Result<Vec<Value>> {
+    let book = match path {
+        paths::POSITIONS => Book::Positions,
+        paths::TRADE_BOOK => Book::Trades,
+        paths::HOLDINGS => Book::Holdings,
+        _ => Book::Orders,
+    };
+    book_rows(b, s, path, || book_read::unreadable("motilal", book)).await
+}
+
+/// The position book for a decision to trade: refused with the web's
+/// position-read sentence when it cannot be read.
+async fn positions(b: &MotilalBroker, s: &MotilalSession) -> Result<Vec<Value>> {
+    book_rows(b, s, paths::POSITIONS, || unread("Motilal Oswal")).await
+}
+
+async fn book_rows(
+    b: &MotilalBroker,
+    s: &MotilalSession,
+    path: &str,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
     let v = b.post(s, path, None).await?;
-    Ok(v.get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+    let rows = match v.get("data") {
+        Some(Value::Array(rows)) => rows.clone(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => return Err(unread()),
+    };
+    if path == paths::POSITIONS {
+        book_read::require_quantities(&rows, &["buyquantity", "sellquantity"], unread)?;
+    }
+    Ok(rows)
 }
 
 /// web `cancel_all_orders_api`: rows whose raw status is confirm, sent,
@@ -286,7 +317,7 @@ pub async fn cancel_all_orders(b: &MotilalBroker, auth: &AuthToken) -> Result<Ca
 /// from the reverse map.
 pub async fn close_all_positions(b: &MotilalBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let s = MotilalSession::parse(auth)?;
-    let rows = raw_book(b, &s, paths::POSITIONS).await?;
+    let rows = positions(b, &s).await?;
     let mut out = CloseAllResult::default();
     for r in rows.iter().filter(|r| r.is_object()) {
         let net = vi(r, "buyquantity") - vi(r, "sellquantity");
@@ -347,7 +378,7 @@ pub async fn get_open_position(
         return Ok(0);
     };
     let s = MotilalSession::parse(auth)?;
-    let rows = raw_book(b, &s, paths::POSITIONS).await?;
+    let rows = positions(b, &s).await?;
     let mo_exchange = mapping::map_exchange(exchange.as_str());
     let mo_product = mapping::position_product(product, exchange);
     Ok(rows
@@ -382,10 +413,12 @@ pub async fn get_positions(b: &MotilalBroker, auth: &AuthToken) -> Result<Vec<Po
 pub async fn get_holdings(b: &MotilalBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let s = MotilalSession::parse(auth)?;
     let v = b.post(&s, paths::HOLDINGS, Some(&json!({}))).await?;
-    let rows = v
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    // `data: null` is no holdings, as for the other books; another type is
+    // a book that was not read (BR-03).
+    let rows = match v.get("data") {
+        Some(Value::Array(rows)) => rows.clone(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => return Err(book_read::unreadable("motilal", Book::Holdings)),
+    };
     Ok(mapping::map_holdings(&rows, b.resolver()))
 }

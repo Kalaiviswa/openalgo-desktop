@@ -9,9 +9,18 @@ use serde_json::json;
 
 pub async fn get_funds(b: &SamcoBroker, auth: &AuthToken) -> Result<Funds> {
     let (status, v) = b.send(Method::GET, "/limit/getLimits", auth, None).await?;
+    if status.is_server_error() {
+        return Err(crate::brokers::common::http::server_error("samco", status));
+    }
     if !is_success(&v) {
         return Err(samco_error(status, &v, "Samco could not load your funds."));
     }
+    // BR-03: a Success without the equity limits is not a zero balance.
+    crate::brokers::common::book_read::object(
+        v.get("equityLimit"),
+        "samco",
+        crate::brokers::common::book_read::Book::Funds,
+    )?;
     Ok(mapping::funds(&v))
 }
 

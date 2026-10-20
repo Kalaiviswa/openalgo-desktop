@@ -52,6 +52,19 @@ pub async fn get_funds(b: &DhanBroker, auth: &AuthToken) -> Result<Funds> {
             Category::Trade,
         )
         .await?;
+    // BR-03: a reply without the available balance is not a zero balance.
+    if crate::brokers::common::book_read::quantity(&limit, "availabelBalance").is_none()
+        && limit
+            .get("availabelBalance")
+            .and_then(Value::as_f64)
+            .is_none()
+    {
+        tracing::warn!("Dhan answered the fund limit without its available balance");
+        return Err(crate::brokers::common::book_read::unreadable(
+            "dhan",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     // P&L is best effort, as on the web: a failed position read is zero.
     let positions = match raw_positions(b, auth).await {
         Ok(p) => p,

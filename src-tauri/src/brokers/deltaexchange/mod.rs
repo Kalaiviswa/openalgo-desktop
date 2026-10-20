@@ -392,6 +392,8 @@ async fn read_envelope(resp: reqwest::Response, path: &str) -> Result<Envelope> 
                 "Delta Exchange blocked this request. Whitelist this computer's IP address for the API key in your Delta Exchange account, then try again.",
             ))
         }
+        // A server error is no answer, whatever its body says (BR-03).
+        (s, Ok(_)) if s.is_server_error() => Err(http::server_error("deltaexchange", s)),
         (_, Ok(env)) => {
             if env.success {
                 Ok(env)

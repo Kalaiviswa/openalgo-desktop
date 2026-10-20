@@ -8,6 +8,7 @@
 
 use crate::brokers::common::mapping::{Action, PriceType};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, py_round};
+use crate::brokers::common::position_read::says_no_positions;
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -363,16 +364,24 @@ pub fn openalgo_symbol(symbols: &SymbolResolver, row: &Value, exchange: &str) ->
     br
 }
 
-/// The `data` rows of a `stat`/`data` envelope; `Not_Ok` and `null` read as
-/// no rows (web `map_order_data`).
-pub fn data_rows(v: &Value) -> Vec<Value> {
-    if s(v, "stat") == "Not_Ok" {
-        return Vec::new();
+/// The rows of a Kotak book answer (BR-03): `stat: Ok` with a `data`
+/// list, or one of Kotak's empty books: `data: null` (web
+/// `map_order_data`, and close all's "No Open Positions Found") or a
+/// `Not_Ok` saying there is no data (`{"stat": "Not_Ok", "emsg": "No
+/// Data"}`). A missing or mistyped `data`, and any other refusal, are not
+/// a book.
+pub fn data_rows(v: &Value) -> Option<Vec<Value>> {
+    if s(v, "stat").eq_ignore_ascii_case("not_ok") {
+        let empty = says_no_positions(v, &["emsg", "errMsg", "message"]);
+        return empty.then(Vec::new);
     }
-    v.get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+    if !super::stat_ok(v) {
+        return None;
+    }
+    match v.get("data")? {
+        Value::Null => Some(Vec::new()),
+        data => data.as_array().cloned(),
+    }
 }
 
 /// `map_order_data` + `transform_order_data`.
@@ -487,6 +496,9 @@ pub fn carry_forward_amounts(p: &Value, factor: f64) -> (f64, f64, bool) {
     }
     (n(p, "cfBuyAmt"), n(p, "cfSellAmt"), true)
 }
+
+/// The quantities a position row's net is made of (`net_quantity`).
+pub const QUANTITIES: &[&str] = &["flBuyQty", "flSellQty", "cfBuyQty", "cfSellQty"];
 
 /// Net quantity of a position row: day plus carried legs.
 pub fn net_quantity(p: &Value) -> i64 {

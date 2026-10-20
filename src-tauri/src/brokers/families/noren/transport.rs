@@ -212,6 +212,9 @@ impl NorenBroker {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(session_expired(self.cfg.name));
         }
+        if status.is_server_error() {
+            return Err(http::server_error(self.cfg.id, status));
+        }
         Ok(v)
     }
 
@@ -238,11 +241,18 @@ pub fn check(name: &str, endpoint: &str, v: Value) -> Result<Value> {
     Err(noren_error(name, &emsg))
 }
 
-/// A list answer, `[]` for `no data`, an error otherwise.
+/// A list answer, `[]` for `no data` (Noren's empty book), an error
+/// otherwise: a `null` answer is a book that was not read (BR-03).
 pub fn as_list(name: &str, endpoint: &str, v: Value) -> Result<Vec<Value>> {
     match v {
         Value::Array(a) => Ok(a),
-        Value::Null => Ok(Vec::new()),
+        Value::Null => {
+            tracing::warn!(broker = name, "{} answered {} with null", name, endpoint);
+            Err(AppError::Broker(format!(
+                "OpenAlgo could not read the answer from {}. Try again shortly.",
+                name
+            )))
+        }
         other => {
             let e = emsg(&other);
             if is_no_data(&e) {
@@ -324,6 +334,7 @@ mod tests {
             json!({"stat":"Not_Ok","emsg":"Session Expired"})
         )
         .is_err());
+        assert!(as_list("X", "/OrderBook", Value::Null).is_err());
         assert!(check("X", "/Limits", json!({"stat":"Ok"})).is_ok());
         let e = check("X", "/Limits", json!({"stat":"Not_Ok","emsg":"bad"})).unwrap_err();
         assert_eq!(e.client_message(), "bad");

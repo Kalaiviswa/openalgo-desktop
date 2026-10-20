@@ -11,6 +11,7 @@
 
 use super::mapping::{self, text};
 use super::{data, token, unwrap_account, IndmoneyBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Action, Exchange, PriceType, Product, Validity};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, protected_price, py_round};
 use crate::brokers::common::outcome;
@@ -232,7 +233,7 @@ pub async fn raw_order_book(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<
     let v = b
         .account_call(Method::GET, "/order-book", &[], None, auth)
         .await?;
-    let rows = mapping::rows(&v);
+    let rows = mapping::rows(&v).ok_or_else(|| book_read::unreadable("indmoney", Book::Orders))?;
     b.remember_order_ids(
         rows.iter()
             .filter_map(|o| o.get("id").and_then(Value::as_str)),
@@ -385,6 +386,7 @@ pub async fn get_order_book(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<
 
 pub async fn get_trade_book(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let mut raw: Vec<(Value, &'static str)> = Vec::new();
+    let mut read = 0;
     for seg in ["EQUITY", "DERIVATIVE"] {
         match b
             .account_call(
@@ -396,10 +398,20 @@ pub async fn get_trade_book(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<
             )
             .await
         {
-            Ok(v) => raw.extend(mapping::rows(&v).into_iter().map(|t| (t, seg))),
+            Ok(v) => match mapping::rows(&v) {
+                Some(rows) => {
+                    read += 1;
+                    raw.extend(rows.into_iter().map(|t| (t, seg)));
+                }
+                None => tracing::warn!("INDmoney {} trade book is not a list", seg),
+            },
             Err(e @ AppError::Auth(_)) => return Err(e),
             Err(e) => tracing::warn!("INDmoney {} trade book failed: {}", seg, e.code()),
         }
+    }
+    // BR-03: no segment read is a trade book that was not read.
+    if read == 0 {
+        return Err(book_read::unreadable("indmoney", Book::Trades));
     }
     let book = match raw_order_book(b, auth).await {
         Ok(b) => b,
@@ -494,7 +506,15 @@ pub async fn fetch_positions(
                 continue;
             }
         };
-        for mut p in mapping::rows(&v) {
+        // A segment answered without a list, or with a row whose net
+        // quantity cannot be read, was not read (BR-03).
+        let Some(seg_rows) = mapping::rows(&v).filter(|r| r.iter().all(mapping::has_quantity))
+        else {
+            tracing::warn!("INDmoney {} {} positions were not readable", seg, prod);
+            failed.insert(*seg);
+            continue;
+        };
+        for mut p in seg_rows {
             if let Some(o) = p.as_object_mut() {
                 o.insert("query_segment".into(), json!(seg));
                 o.insert("query_product".into(), json!(prod));
@@ -559,6 +579,65 @@ pub async fn get_positions(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<P
         .collect())
 }
 
+/// A position segment as a trader names it.
+fn segment_name(segment: &str) -> &'static str {
+    if segment == "derivative" {
+        "F&O"
+    } else {
+        "Equity"
+    }
+}
+
+/// Square off every open position at MARKET (web `close_all_positions`).
+/// A segment whose positions could not be read stays in `failed`: its
+/// positions may still be open, so close all is never complete while one is
+/// unread (BR-03, as Groww's NEW-PAR-01; the default read the other
+/// segment alone and reported success).
+pub async fn close_all_positions(b: &IndmoneyBroker, auth: &AuthToken) -> Result<CloseAllResult> {
+    let (rows, failed) = fetch_positions(b, auth).await?;
+    if failed.len() == 2 && rows.is_empty() {
+        return Err(AppError::Broker(
+            "INDmoney did not return the position book. Try again shortly.".into(),
+        ));
+    }
+    let mut result = CloseAllResult::default();
+    let mut unread: Vec<&str> = failed.into_iter().collect();
+    unread.sort_unstable();
+    for segment in unread {
+        let name = segment_name(segment);
+        result.failed.push(format!(
+            "{} positions: INDmoney did not return them, so any open there were not squared off. Check them on INDmoney.",
+            name
+        ));
+    }
+    let positions = rows.iter().map(|p| mapping::map_position(b.resolver(), p));
+    for p in positions.filter(|p| p.quantity != 0) {
+        let label = format!("{} ({})", p.symbol, p.exchange);
+        let req = OrderRequest {
+            symbol: p.symbol.clone(),
+            exchange: p.exchange.clone(),
+            side: if p.quantity > 0 { "SELL" } else { "BUY" }.into(),
+            quantity: p.quantity.abs(),
+            price: 0.0,
+            order_type: PriceType::Market.as_str().into(),
+            product: p.product.clone(),
+            validity: "DAY".into(),
+            trigger_price: None,
+            disclosed_quantity: None,
+            amo: false,
+        };
+        let placed = match ResolvedOrder::resolve(&req, b.resolver()) {
+            Ok(o) => {
+                outcome::placing(async { place_order(b, auth, &o).await.map_err(super::redact) })
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        result.record(&label, placed);
+    }
+    Ok(result)
+}
+
 fn segment_of(exchange: Exchange) -> Option<&'static str> {
     match exchange {
         Exchange::Nse | Exchange::Bse => Some("equity"),
@@ -615,6 +694,7 @@ pub async fn get_holdings(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Vec<Ho
         .account_call(Method::GET, "/portfolio/holdings", &[], None, auth)
         .await?;
     Ok(mapping::rows(&v)
+        .ok_or_else(|| book_read::unreadable("indmoney", Book::Holdings))?
         .iter()
         .map(|h| mapping::map_holding(b.resolver(), h))
         .collect())

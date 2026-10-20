@@ -9,6 +9,7 @@ use super::mapping::{
     split_ticker, to_vortex_quantity,
 };
 use super::RupeezyBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::outcome;
 use crate::brokers::common::position_read::unread;
@@ -36,21 +37,27 @@ pub(crate) fn lot_of(row: &SymToken) -> i64 {
 }
 
 /// The rows under the first of `keys` that holds a non-empty list (the
-/// web's `payload.get("orders") or payload.get("data")`). `None` when none
-/// of the keys is there at all: a book that was not sent, not an empty one.
+/// web's `payload.get("orders") or payload.get("data")`); `null` there is
+/// no rows (the web's `or []`). `None` when none of the keys holds a list
+/// or `null`, or when a row does not read: a book that was not read, never
+/// an empty one (BR-03).
 pub(crate) fn rows_of<T: DeserializeOwned>(v: &Value, keys: &[&str]) -> Option<Vec<T>> {
     let lists: Vec<&Vec<Value>> = keys
         .iter()
         .filter_map(|k| v.get(*k).and_then(Value::as_array))
         .collect();
-    let first = lists.first()?;
+    let Some(first) = lists.first() else {
+        let null = keys.iter().any(|k| v.get(*k).is_some_and(Value::is_null));
+        return null.then(Vec::new);
+    };
     let list = lists.iter().find(|l| !l.is_empty()).unwrap_or(first);
-    Some(
-        list.iter()
-            .filter(|r| r.is_object())
-            .filter_map(|r| serde_json::from_value(r.clone()).ok())
-            .collect(),
-    )
+    list.iter()
+        .map(|r| {
+            r.is_object()
+                .then(|| serde_json::from_value(r.clone()).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// The order id in a `{data: {order_id}}` answer.
@@ -258,9 +265,13 @@ pub async fn cancel_order(
     })
 }
 
-/// Today's orders, page by page. `None` when Vortex answered without an
-/// order list.
-async fn fetch_orders(b: &RupeezyBroker, auth: &AuthToken) -> Result<Option<Vec<VortexOrder>>> {
+/// Today's orders, page by page, read with `unread` when a page came back
+/// without its order list (BR-03: a page missing would hide open orders).
+async fn fetch_orders(
+    b: &RupeezyBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<VortexOrder>> {
     let mut out = Vec::new();
     for page in 0..MAX_ORDER_PAGES {
         let q = [
@@ -269,7 +280,8 @@ async fn fetch_orders(b: &RupeezyBroker, auth: &AuthToken) -> Result<Option<Vec<
         ];
         let v = b.ok(auth, Call::get_with("/trading/orders", &q)).await?;
         let Some(batch) = rows_of::<VortexOrder>(&v, &["orders", "data"]) else {
-            return Ok((page > 0).then_some(out));
+            tracing::error!("Rupeezy answered the order book without its orders");
+            return Err(unread());
         };
         let n = batch.len();
         out.extend(batch);
@@ -277,24 +289,24 @@ async fn fetch_orders(b: &RupeezyBroker, auth: &AuthToken) -> Result<Option<Vec<
             break;
         }
     }
-    Ok(Some(out))
+    Ok(out)
 }
 
 pub async fn get_order_book(b: &RupeezyBroker, auth: &AuthToken) -> Result<Vec<Order>> {
-    let rows = fetch_orders(b, auth).await?.unwrap_or_default();
+    let rows = fetch_orders(b, auth, || book_read::unreadable("rupeezy", Book::Orders)).await?;
     Ok(books::map_orders(&rows, b.resolver()))
 }
 
 /// Cancel every open or trigger-pending order. An order book that cannot
 /// be read is an error, never "nothing to cancel".
 pub async fn cancel_all_orders(b: &RupeezyBroker, auth: &AuthToken) -> Result<CancelAllResult> {
-    let orders = fetch_orders(b, auth).await?.ok_or_else(|| {
-        tracing::error!("Rupeezy answered the order book without its orders");
+    let orders = fetch_orders(b, auth, || {
         AppError::Broker(
             "Rupeezy did not return your order book, so no order was cancelled. Check your orders and try again."
                 .into(),
         )
-    })?;
+    })
+    .await?;
     let mut result = CancelAllResult::default();
     for o in orders.iter().filter(|o| mapping::is_open(&o.status)) {
         match cancel_order(b, auth, &o.order_id).await {
@@ -313,11 +325,11 @@ pub async fn cancel_all_orders(b: &RupeezyBroker, auth: &AuthToken) -> Result<Ca
 /// cannot be read the trades are shown as they came.
 pub async fn get_trade_book(b: &RupeezyBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let v = b.ok(auth, Call::get("/trading/trades")).await?;
-    let mut trades: Vec<VortexTrade> = rows_of(&v, &["trades", "data"]).unwrap_or_default();
+    let mut trades: Vec<VortexTrade> = rows_of(&v, &["trades", "data"])
+        .ok_or_else(|| book_read::unreadable("rupeezy", Book::Trades))?;
     if trades.iter().any(|t| t.ticker.trim().is_empty()) {
-        match fetch_orders(b, auth).await {
+        match fetch_orders(b, auth, || book_read::unreadable("rupeezy", Book::Orders)).await {
             Ok(orders) => {
-                let orders = orders.unwrap_or_default();
                 let by_id: HashMap<&str, &VortexOrder> =
                     orders.iter().map(|o| (o.order_id.as_str(), o)).collect();
                 for t in trades.iter_mut() {
@@ -375,13 +387,17 @@ pub(crate) async fn fetch_ltps(
     Ok(out)
 }
 
-/// `data.net` of a positions answer; `None` when it is not there.
-fn net_rows(v: &Value) -> Option<Vec<VortexPosition>> {
-    match v.get("data") {
-        Some(d @ Value::Object(_)) => rows_of(d, &["net"]),
-        Some(d @ Value::Array(_)) => rows_of(&json!({ "net": d }), &["net"]),
-        _ => None,
-    }
+/// `data.net` of a positions answer (Vortex's empty book is `net: []`),
+/// read with `unread` when it is not a list or a row has no readable
+/// quantity: never an empty book or a flat position (BR-03).
+fn net_rows(v: &Value, unread: impl Fn() -> AppError) -> Result<Vec<VortexPosition>> {
+    let rows = match v.get("data") {
+        Some(d @ Value::Object(_)) => book_read::list(d, "net", &unread)?,
+        Some(Value::Array(rows)) => rows.as_slice(),
+        _ => return Err(unread()),
+    };
+    book_read::require_quantities(rows, &["quantity"], &unread)?;
+    book_read::typed(rows, unread)
 }
 
 /// The position book for a decision to trade (smart-order sizing, close
@@ -389,10 +405,7 @@ fn net_rows(v: &Value) -> Option<Vec<VortexPosition>> {
 /// No quotes are read: an order should not wait on a price.
 async fn strict_positions(b: &RupeezyBroker, auth: &AuthToken) -> Result<Vec<VortexPosition>> {
     let v = b.ok(auth, Call::get(POSITIONS)).await?;
-    net_rows(&v).ok_or_else(|| {
-        tracing::error!("Rupeezy answered the position book without its net positions");
-        unread("Rupeezy")
-    })
+    net_rows(&v, || unread("Rupeezy"))
 }
 
 /// The position book as the Positions page and funds read it: open rows
@@ -402,7 +415,7 @@ pub(crate) async fn priced_positions(
     auth: &AuthToken,
 ) -> Result<Vec<VortexPosition>> {
     let v = b.ok(auth, Call::get(POSITIONS)).await?;
-    let mut rows = net_rows(&v).unwrap_or_default();
+    let mut rows = net_rows(&v, || book_read::unreadable("rupeezy", Book::Positions))?;
     let open: Vec<String> = rows
         .iter()
         .filter(|p| p.quantity != 0)
@@ -435,7 +448,8 @@ pub async fn get_holdings(b: &RupeezyBroker, auth: &AuthToken) -> Result<Vec<Hol
     if !a.status.is_success() || a.failed() {
         return Err(a.refused("the holdings"));
     }
-    let mut rows: Vec<VortexHolding> = rows_of(&a.body, &["data"]).unwrap_or_default();
+    let mut rows: Vec<VortexHolding> = rows_of(&a.body, &["data"])
+        .ok_or_else(|| book_read::unreadable("rupeezy", Book::Holdings))?;
     let unpriced: Vec<String> = rows
         .iter()
         .filter(|h| h.last_price == 0.0)

@@ -94,6 +94,23 @@ pub fn client() -> reqwest::Client {
     shared().unwrap_or_else(|_| unreachable!("broker adapter built without a broker HTTP client"))
 }
 
+/// What a trader reads when a broker answered with a server error.
+pub const SERVER_ERROR: &str =
+    "The broker's servers are not responding normally. Try again shortly.";
+
+/// A server error (5xx) is no answer, whatever its body says (BR-03): a
+/// success marker or a book on it is not believed. Inside a placement it
+/// leaves the order unknown (`outcome::note_server_error`).
+pub fn server_error(broker: &'static str, status: reqwest::StatusCode) -> AppError {
+    super::outcome::note_server_error();
+    tracing::warn!(
+        broker,
+        status = status.as_u16(),
+        "The broker answered with a server error; its body is not taken as an answer"
+    );
+    AppError::Broker(SERVER_ERROR.into())
+}
+
 /// Read a response body as JSON. A body that is not JSON (an HTML error
 /// page, a plain-text rate-limit notice) becomes a trader-facing broker
 /// error; the status and a short, secret-free prefix go to the log.
@@ -139,9 +156,7 @@ pub async fn read_json<T: DeserializeOwned>(
                 ));
             }
             if status.is_server_error() {
-                return Err(AppError::Broker(
-                    "The broker's servers are not responding normally. Try again shortly.".into(),
-                ));
+                return Err(AppError::Broker(SERVER_ERROR.into()));
             }
             Err(AppError::Broker(
                 "The broker sent a response OpenAlgo could not read. Try again shortly.".into(),

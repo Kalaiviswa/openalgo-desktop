@@ -2,6 +2,7 @@
 //! resolver, OpenAlgo constants, history and master-contract helpers, and
 //! the streaming contract.
 
+pub mod book_read;
 pub mod de;
 pub mod history;
 pub mod http;

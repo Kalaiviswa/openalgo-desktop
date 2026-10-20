@@ -7,6 +7,8 @@
 
 use super::mapping;
 use super::XtsBroker;
+use crate::brokers::common::book_read::{self, Book};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -107,8 +109,9 @@ pub(crate) async fn close_all_positions(b: &XtsBroker, auth: &AuthToken) -> Resu
             None,
         )
         .await?;
+    let rows = mapping::position_list(result(&v)).ok_or_else(|| unread(b.cfg.name))?;
     let mut out = CloseAllResult::default();
-    for p in mapping::position_list(result(&v)) {
+    for p in rows {
         let qty = mapping::f(p, "Quantity") as i64;
         if qty == 0 {
             continue;
@@ -146,16 +149,33 @@ pub(crate) async fn close_all_positions(b: &XtsBroker, auth: &AuthToken) -> Resu
     Ok(out)
 }
 
+/// `result` when it is a list: XTS sends `[]` for an empty book, so any
+/// other `result` is a book that was not read (BR-03).
+fn result_list<'a>(b: &XtsBroker, v: &'a Value, book: Book) -> Result<&'a Value> {
+    let r = result(v);
+    if r.is_array() {
+        Ok(r)
+    } else {
+        Err(book_read::unreadable(b.cfg.id, book))
+    }
+}
+
 pub(crate) async fn get_order_book(b: &XtsBroker, auth: &AuthToken) -> Result<Vec<Order>> {
     let v = b.interactive(Method::GET, "/orders", auth, None).await?;
-    Ok(mapping::orders(result(&v), b.resolver()))
+    Ok(mapping::orders(
+        result_list(b, &v, Book::Orders)?,
+        b.resolver(),
+    ))
 }
 
 pub(crate) async fn get_trade_book(b: &XtsBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let v = b
         .interactive(Method::GET, "/orders/trades", auth, None)
         .await?;
-    Ok(mapping::trades(result(&v), b.resolver()))
+    Ok(mapping::trades(
+        result_list(b, &v, Book::Trades)?,
+        b.resolver(),
+    ))
 }
 
 pub(crate) async fn get_positions(b: &XtsBroker, auth: &AuthToken) -> Result<Vec<Position>> {
@@ -167,12 +187,15 @@ pub(crate) async fn get_positions(b: &XtsBroker, auth: &AuthToken) -> Result<Vec
             None,
         )
         .await?;
-    Ok(mapping::positions(result(&v), b.resolver()))
+    let rows = mapping::position_list(result(&v))
+        .ok_or_else(|| book_read::unreadable(b.cfg.id, Book::Positions))?;
+    Ok(mapping::positions(rows, b.resolver()))
 }
 
 pub(crate) async fn get_holdings(b: &XtsBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let v = b
         .interactive(Method::GET, "/portfolio/holdings", auth, None)
         .await?;
-    Ok(mapping::holdings(result(&v), b.resolver()))
+    mapping::holdings(result(&v), b.resolver())
+        .ok_or_else(|| book_read::unreadable(b.cfg.id, Book::Holdings))
 }

@@ -537,17 +537,18 @@ fn row_product(row: &Value) -> String {
 }
 
 /// `data` as a list: a bare list, or the first list under an object
-/// (positions nest under `net`).
-pub fn unwrap_rows(data: &Value, key: Option<&str>) -> Vec<Value> {
+/// (positions nest under `net`). BR-03: `None` when there is no list: a
+/// book that was not read, never an empty one (HDFC Securities sends
+/// `[]`, or `{"net": []}` for positions, when a book is empty).
+pub fn unwrap_rows(data: &Value, key: Option<&str>) -> Option<Vec<Value>> {
     match data {
-        Value::Array(a) => a.clone(),
+        Value::Array(a) => Some(a.clone()),
         Value::Object(o) => key
             .and_then(|k| o.get(k))
             .and_then(Value::as_array)
             .or_else(|| o.values().find_map(Value::as_array))
-            .cloned()
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            .cloned(),
+        _ => None,
     }
 }
 

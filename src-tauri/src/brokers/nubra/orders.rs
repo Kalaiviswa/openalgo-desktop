@@ -7,8 +7,10 @@
 
 use super::mapping;
 use super::{refused, NubraBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::outcome;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -121,9 +123,15 @@ pub async fn cancel_order(
     Err(refused(&v, status))
 }
 
-/// Raw bucketed order response.
+/// Raw bucketed order response. BR-03: without its `orders` buckets it is
+/// a book that was not read, never an empty one.
 async fn raw_orders(b: &NubraBroker, auth: &AuthToken) -> Result<Value> {
-    b.get_ok("/sentinel/orders", auth).await
+    let resp = b.get_ok("/sentinel/orders", auth).await?;
+    if resp.get("orders").is_some_and(Value::is_object) {
+        Ok(resp)
+    } else {
+        Err(book_read::unreadable("nubra", Book::Orders))
+    }
 }
 
 pub async fn cancel_all_orders(b: &NubraBroker, auth: &AuthToken) -> Result<CancelAllResult> {
@@ -151,12 +159,34 @@ pub async fn cancel_all_orders(b: &NubraBroker, auth: &AuthToken) -> Result<Canc
     Ok(out)
 }
 
-async fn raw_positions(b: &NubraBroker, auth: &AuthToken) -> Result<Value> {
-    b.get_ok("/sentinel/portfolio/positions", auth).await
+/// The position answer, read with `unread` when it is not a book (BR-03):
+/// its list (`portfolio.positions`, or a bare list) must be there and every
+/// row must carry its net quantity (web `extract_positions`; Nubra sends
+/// `positions: []` for no positions).
+async fn raw_positions(
+    b: &NubraBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Value> {
+    let resp = b.get_ok("/sentinel/portfolio/positions", auth).await?;
+    let rows = resp
+        .as_array()
+        .or_else(|| resp.get("portfolio")?.get("positions")?.as_array())
+        .ok_or_else(&unread)?;
+    let net = |p: &Value| {
+        book_read::quantity(p, "netQty")
+            .or_else(|| book_read::quantity(p, "netQuantity"))
+            .is_some()
+    };
+    if !rows.iter().all(net) {
+        tracing::warn!("A Nubra position row without its net quantity");
+        return Err(unread());
+    }
+    Ok(resp)
 }
 
 pub async fn close_all_positions(b: &NubraBroker, auth: &AuthToken) -> Result<CloseAllResult> {
-    let resp = raw_positions(b, auth).await?;
+    let resp = raw_positions(b, auth, || unread("Nubra")).await?;
     let symbols = b.resolver().clone();
     let mut out = CloseAllResult::default();
     for p in mapping::positions_list(&resp) {
@@ -206,7 +236,7 @@ pub async fn get_open_position(
     exchange: Exchange,
     product: Product,
 ) -> Result<i64> {
-    let resp = raw_positions(b, auth).await?;
+    let resp = raw_positions(b, auth, || unread("Nubra")).await?;
     let symbols = b.resolver();
     for p in mapping::positions_list(&resp) {
         let (s, e) = mapping::resolve_position(symbols, &p);
@@ -230,11 +260,19 @@ pub async fn get_trade_book(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<Tra
 }
 
 pub async fn get_positions(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<Position>> {
-    let resp = raw_positions(b, auth).await?;
+    let resp = raw_positions(b, auth, || book_read::unreadable("nubra", Book::Positions)).await?;
     Ok(mapping::positions(&resp, b.resolver()))
 }
 
 pub async fn get_holdings(b: &NubraBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let resp = b.get_ok("/sentinel/portfolio/holdings", auth).await?;
+    // BR-03: without its holdings list the answer is not a book.
+    if !resp
+        .get("portfolio")
+        .and_then(|p| p.get("holdings"))
+        .is_some_and(Value::is_array)
+    {
+        return Err(book_read::unreadable("nubra", Book::Holdings));
+    }
     Ok(mapping::holdings(&resp, b.resolver()))
 }

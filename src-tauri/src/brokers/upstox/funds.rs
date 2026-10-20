@@ -97,6 +97,13 @@ pub async fn get_funds(b: &UpstoxBroker, auth: &AuthToken) -> Result<Funds> {
         return Ok(Funds::default());
     }
     let data = envelope_data(status, body, &url)?;
+    if !data.is_object() {
+        // BR-03: a success without the figures is not a zero balance.
+        return Err(crate::brokers::common::book_read::unreadable(
+            "upstox",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     let mut funds = funds_from_v3(&data);
     // Realised / unrealised from the position book, best effort as on the web.
     match raw_positions(b, auth).await {

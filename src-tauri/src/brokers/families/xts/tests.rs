@@ -364,7 +364,7 @@ fn trade_book() {
 #[test]
 fn positions_pick_average_by_sign_and_accept_every_id_key() {
     let m = master();
-    let p = positions(&books()["positions"]["result"], &m);
+    let p = positions(position_list(&books()["positions"]["result"]).unwrap(), &m);
     assert_eq!(p.len(), 3);
     assert_eq!((p[0].symbol.as_str(), p[0].quantity), ("RELIANCE", 10));
     assert_eq!(p[0].average_price, 2501.4);
@@ -375,16 +375,25 @@ fn positions_pick_average_by_sign_and_accept_every_id_key() {
     assert_eq!(p[2].quantity, 0);
     assert_eq!(p[2].average_price, 0.0);
     assert_eq!(p[2].realized_pnl, 10.0);
-    let flat = positions(&books()["positions_flat"]["result"], &m);
+    let flat = positions(
+        position_list(&books()["positions_flat"]["result"]).unwrap(),
+        &m,
+    );
     assert_eq!(flat[0].symbol, "SBIN");
     assert_eq!(flat[0].average_price, 781.0);
     assert_eq!(flat[1].symbol, "RELIANCE");
-    assert_eq!(position_list(&json!({"positionList": []})).len(), 0);
+    assert_eq!(
+        position_list(&json!({"positionList": []})).map(<[_]>::len),
+        Some(0)
+    );
+    // BR-03: no list, or a row without its quantity, is not a flat book.
+    assert!(position_list(&json!({})).is_none());
+    assert!(position_list(&json!({"positionList": [{"TradingSymbol": "SBIN"}]})).is_none());
 }
 
 #[test]
 fn holdings_by_isin() {
-    let h = holdings(&books()["holdings"]["result"], &master());
+    let h = holdings(&books()["holdings"]["result"], &master()).unwrap();
     assert_eq!(h.len(), 2);
     let rel = h.iter().find(|x| x.symbol == "RELIANCE").unwrap();
     assert_eq!(rel.product, "CNC");
@@ -392,7 +401,10 @@ fn holdings_by_isin() {
     assert_eq!(rel.current_value, 4.0 * 2400.5);
     assert_eq!(rel.isin.as_deref(), Some("INE002A01018"));
     assert!(h.iter().any(|x| x.symbol == "INE000Z01011"));
-    assert!(holdings(&json!({}), &master()).is_empty());
+    // BR-03: a reply without the holdings map is not an empty book.
+    assert!(holdings(&json!({}), &master()).is_none());
+    let empty = json!({"RMSHoldings": {"Holdings": {}}});
+    assert!(holdings(&empty, &master()).unwrap().is_empty());
 }
 
 #[test]

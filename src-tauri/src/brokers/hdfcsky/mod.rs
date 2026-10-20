@@ -257,6 +257,9 @@ impl HdfcSkyBroker {
         let (status, v) = self
             .send(method, path, auth, query, with_client_id, body)
             .await?;
+        if status.is_server_error() {
+            return Err(http::server_error("hdfcsky", status));
+        }
         if v.get("status").and_then(Value::as_str) == Some("success") {
             return Ok(v);
         }

@@ -1,7 +1,8 @@
 //! Orders and books (web `api/order_api.py`).
 
-use super::mapping::{self, body_rows, int, text};
+use super::mapping::{self, int, text};
 use super::{session, FivepaisaBroker, Session};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, protected_price};
 use crate::brokers::common::position_read::{says_no_positions, unread};
@@ -26,9 +27,37 @@ fn client_body(s: &Session) -> Value {
     json!({"ClientCode": s.client_code})
 }
 
+/// A book's rows (BR-03): the list at `body.<key>`, or an empty book when
+/// 5 Paisa's message says there is no data (web `read_position_book`);
+/// anything else is a book that was not read, never an empty one. Every
+/// row must carry each of `quantities`.
+fn book_rows(
+    v: &Value,
+    key: &str,
+    quantities: &[&str],
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
+    match v
+        .get("body")
+        .and_then(|b| b.get(key))
+        .and_then(Value::as_array)
+    {
+        Some(rows) => {
+            book_read::require_quantities(rows, quantities, unread)?;
+            Ok(rows.clone())
+        }
+        None if says_no_positions(v, &["head.statusDescription", "body.Message"]) => Ok(Vec::new()),
+        None => Err(unread()),
+    }
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("fivepaisa", book)
+}
+
 pub(crate) async fn order_book_raw(b: &FivepaisaBroker, s: &Session) -> Result<Vec<Value>> {
     let v = b.post(ORDER_BOOK, client_body(s), s).await?;
-    Ok(body_rows(&v, "OrderBookDetail"))
+    book_rows(&v, "OrderBookDetail", &[], unreadable(Book::Orders))
 }
 
 /// The net position answer; a timeout is retried, other failures surface.
@@ -51,10 +80,13 @@ async fn positions_answer(b: &FivepaisaBroker, s: &Session) -> Result<Value> {
 
 /// The net position rows (the Positions page and close-all).
 pub(crate) async fn positions_raw(b: &FivepaisaBroker, s: &Session) -> Result<Vec<Value>> {
-    Ok(body_rows(
-        &positions_answer(b, s).await?,
+    let v = positions_answer(b, s).await?;
+    book_rows(
+        &v,
         "NetPositionDetail",
-    ))
+        &["NetQty"],
+        unreadable(Book::Positions),
+    )
 }
 
 /// web `_position_book_ok`: 5 Paisa confirms a read with rows, or with a
@@ -98,7 +130,7 @@ pub(crate) async fn positions_strict(b: &FivepaisaBroker, s: &Session) -> Result
 /// The decision of `positions_strict` on one answer.
 pub fn strict_rows(v: &Value) -> Result<Vec<Value>> {
     if positions_ok(v) || says_no_positions(v, &["head.statusDescription", "body.Message"]) {
-        return Ok(body_rows(v, "NetPositionDetail"));
+        return book_rows(v, "NetPositionDetail", &["NetQty"], || unread("5 Paisa"));
     }
     // Read outside the macro: `tracing::error!` brings its own `Value`
     // trait into scope around its arguments.
@@ -341,7 +373,7 @@ pub async fn cancel_all_orders(b: &FivepaisaBroker, auth: &AuthToken) -> Result<
 /// web `close_all_positions`: a MARKET order against each non-zero row.
 pub async fn close_all_positions(b: &FivepaisaBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let s = session(auth)?;
-    let rows = positions_raw(b, &s).await?;
+    let rows = positions_strict(b, &s).await?;
     let mut out = CloseAllResult::default();
     for row in rows {
         let net = int(&row, "NetQty");
@@ -427,10 +459,12 @@ pub async fn get_order_book(b: &FivepaisaBroker, auth: &AuthToken) -> Result<Vec
 pub async fn get_trade_book(b: &FivepaisaBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let s = session(auth)?;
     let v = b.post(TRADE_BOOK, client_body(&s), &s).await?;
-    Ok(body_rows(&v, "TradeBookDetail")
-        .iter()
-        .map(|r| mapping::to_trade(b.resolver(), r))
-        .collect())
+    Ok(
+        book_rows(&v, "TradeBookDetail", &[], unreadable(Book::Trades))?
+            .iter()
+            .map(|r| mapping::to_trade(b.resolver(), r))
+            .collect(),
+    )
 }
 
 pub async fn get_positions(b: &FivepaisaBroker, auth: &AuthToken) -> Result<Vec<Position>> {
@@ -445,7 +479,7 @@ pub async fn get_positions(b: &FivepaisaBroker, auth: &AuthToken) -> Result<Vec<
 pub async fn get_holdings(b: &FivepaisaBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let s = session(auth)?;
     let v = b.post(HOLDINGS, client_body(&s), &s).await?;
-    Ok(body_rows(&v, "Data")
+    Ok(book_rows(&v, "Data", &[], unreadable(Book::Holdings))?
         .iter()
         .map(|r| mapping::to_holding(b.resolver(), r))
         .collect())

@@ -4,7 +4,9 @@ use super::mapping::{
     self, extract_order_id, product_code, UpstoxHolding, UpstoxOrder, UpstoxPosition, UpstoxTrade,
 };
 use super::{Category, UpstoxBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -143,32 +145,52 @@ pub async fn cancel_order(
     }
 }
 
+/// The list a book read answers (BR-03): Upstox sends `[]` for an empty
+/// book, so a missing or `null` list, one of another type, or a position
+/// row without its quantity (`quantities`) is a book that was not read.
 async fn read_list<T: DeserializeOwned>(
     b: &UpstoxBroker,
     auth: &AuthToken,
     path: &str,
+    quantities: &[&str],
+    unread: impl Fn() -> AppError,
 ) -> Result<Vec<T>> {
     let data = b
         .call(Method::GET, &b.api(path), auth, None, Category::Standard)
         .await?;
-    if data.is_null() {
-        return Ok(Vec::new());
-    }
-    serde_json::from_value(data).map_err(|e| {
-        tracing::warn!("Upstox {} has an unexpected shape: {}", path, e);
-        AppError::Broker("Upstox sent a book OpenAlgo could not read. Try again shortly.".into())
-    })
+    let rows = data.as_array().ok_or_else(&unread)?;
+    book_read::positions(rows, quantities, unread)
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("upstox", book)
 }
 
 pub(crate) async fn raw_orders(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<UpstoxOrder>> {
-    read_list(b, auth, "/v2/order/retrieve-all").await
+    let path = "/v2/order/retrieve-all";
+    read_list(b, auth, path, &[], unreadable(Book::Orders)).await
 }
+
+const POSITIONS_PATH: &str = "/v2/portfolio/short-term-positions";
 
 pub(crate) async fn raw_positions(
     b: &UpstoxBroker,
     auth: &AuthToken,
 ) -> Result<Vec<UpstoxPosition>> {
-    read_list(b, auth, "/v2/portfolio/short-term-positions").await
+    read_list(
+        b,
+        auth,
+        POSITIONS_PATH,
+        &["quantity"],
+        unreadable(Book::Positions),
+    )
+    .await
+}
+
+/// BR-03: positions for a decision to trade (smart-order sizing, close
+/// all), refused with the web's position-read sentence when unread.
+async fn strict_positions(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<UpstoxPosition>> {
+    read_list(b, auth, POSITIONS_PATH, &["quantity"], || unread("Upstox")).await
 }
 
 pub async fn get_order_book(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<Order>> {
@@ -179,7 +201,8 @@ pub async fn get_order_book(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<Or
 }
 
 pub async fn get_trade_book(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
-    let rows: Vec<UpstoxTrade> = read_list(b, auth, "/v2/order/trades/get-trades-for-day").await?;
+    let path = "/v2/order/trades/get-trades-for-day";
+    let rows: Vec<UpstoxTrade> = read_list(b, auth, path, &[], unreadable(Book::Trades)).await?;
     Ok(mapping::map_trades(rows, b.resolver()))
 }
 
@@ -191,7 +214,9 @@ pub async fn get_positions(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<Pos
 }
 
 pub async fn get_holdings(b: &UpstoxBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
-    let rows: Vec<UpstoxHolding> = read_list(b, auth, "/v2/portfolio/long-term-holdings").await?;
+    let path = "/v2/portfolio/long-term-holdings";
+    let rows: Vec<UpstoxHolding> =
+        read_list(b, auth, path, &[], unreadable(Book::Holdings)).await?;
     Ok(mapping::map_holdings(rows, b.resolver()))
 }
 
@@ -231,7 +256,7 @@ pub async fn get_open_position(
         .unwrap_or_else(|| symbol.to_string());
     let token = row.map(|r| r.token).unwrap_or_default();
     let code = product_code(product);
-    for p in raw_positions(b, auth).await? {
+    for p in strict_positions(b, auth).await? {
         let psym = mapping::br_symbol(&p.trading_symbol, &p.tradingsymbol);
         let same_instrument = psym == br || (!token.is_empty() && p.instrument_token == token);
         if same_instrument && p.exchange == ex && p.product == code {
@@ -247,7 +272,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &UpstoxBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in strict_positions(b, auth).await? {
         if p.quantity == 0 {
             continue;
         }

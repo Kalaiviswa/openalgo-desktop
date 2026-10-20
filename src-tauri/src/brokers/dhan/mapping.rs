@@ -5,6 +5,7 @@
 //! symbol through the master contract (token-keyed, like the web's
 //! `get_symbol(token, exchange)`), never trusting Dhan's `tradingSymbol`.
 
+use crate::brokers::common::book_read;
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
 use crate::brokers::common::mapping::{Action, PriceType, Product, Validity};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, mpp_percentage, py_round};
@@ -376,35 +377,24 @@ pub struct DhanHolding {
 }
 
 /// Rows of a book response: Dhan answers a bare list (or `{"data": [...]}`
-/// in places); anything else is an error body.
-pub fn rows<T: serde::de::DeserializeOwned>(v: Value) -> Result<Vec<T>> {
+/// in places), `[]` when the book is empty. BR-03: anything else, a row
+/// that does not read, or a position row without each of `quantities`, is
+/// a book that was not read: Dhan's own error body when it sent one, else
+/// `unread()`.
+pub fn rows<T: serde::de::DeserializeOwned>(
+    v: Value,
+    quantities: &[&str],
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<T>> {
     let list = match v {
         Value::Array(a) => a,
         Value::Object(mut o) => match o.remove("data") {
             Some(Value::Array(a)) => a,
-            _ => {
-                return Err(super::dhan_error(&Value::Object(o)).unwrap_or_else(|| {
-                    AppError::Broker("Dhan returned an unexpected book. Try again shortly.".into())
-                }))
-            }
+            _ => return Err(super::dhan_error(&Value::Object(o)).unwrap_or_else(unread)),
         },
-        Value::Null => Vec::new(),
-        _ => {
-            return Err(AppError::Broker(
-                "Dhan returned an unexpected book. Try again shortly.".into(),
-            ))
-        }
+        _ => return Err(unread()),
     };
-    Ok(list
-        .into_iter()
-        .filter_map(|r| match serde_json::from_value::<T>(r) {
-            Ok(x) => Some(x),
-            Err(e) => {
-                tracing::warn!("Dhan book row skipped: {}", e);
-                None
-            }
-        })
-        .collect())
+    book_read::positions(&list, quantities, unread)
 }
 
 /// Holdings "no holdings" error shapes (web `map_portfolio_data`).

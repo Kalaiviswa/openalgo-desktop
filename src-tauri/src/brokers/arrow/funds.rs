@@ -46,6 +46,12 @@ pub async fn get_funds(b: &ArrowBroker, auth: &AuthToken) -> Result<Funds> {
     let data = b
         .call(Method::GET, "/user/limits", auth, None, Category::Other)
         .await?;
+    // BR-03: an answer without the margin figures is not a zero balance.
+    crate::brokers::common::book_read::object(
+        data.get("margin"),
+        "arrow",
+        crate::brokers::common::book_read::Book::Funds,
+    )?;
     Ok(funds_from_limits(&data))
 }
 

@@ -151,6 +151,9 @@ impl ZerodhaBroker {
         };
         let resp = req.send().await?;
         let (status, env): (_, KiteEnvelope<T>) = http::read_json("zerodha", resp).await?;
+        if status.is_server_error() {
+            return Err(http::server_error("zerodha", status));
+        }
         if env.status == "success" {
             return Ok(env);
         }

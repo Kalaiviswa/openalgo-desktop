@@ -342,8 +342,14 @@ fn market_orders_become_protected_limits() {
 #[test]
 fn order_book_merges_and_normalises() {
     let r = master();
-    let mut rows = list_at(&json(fixture!("orders_completed.json")), "orders").to_vec();
-    rows.extend(list_at(&json(fixture!("orders_pending.json")), "orders").to_vec());
+    let mut rows = list_at(&json(fixture!("orders_completed.json")), "orders")
+        .unwrap()
+        .to_vec();
+    rows.extend(
+        list_at(&json(fixture!("orders_pending.json")), "orders")
+            .unwrap()
+            .to_vec(),
+    );
     let orders = map_orders(&rows, &r);
     assert_eq!(orders.len(), 6);
     let o = &orders[0];
@@ -368,7 +374,9 @@ fn order_book_merges_and_normalises() {
 
 #[test]
 fn cancellable_rows_and_ids() {
-    let rows = list_at(&json(fixture!("orders_pending.json")), "orders").to_vec();
+    let rows = list_at(&json(fixture!("orders_pending.json")), "orders")
+        .unwrap()
+        .to_vec();
     assert!(rows.iter().all(is_cancellable));
     assert_eq!(order_id_of(&rows[0]), "260930000000104");
     assert!(!is_cancellable(&json!({"status": "COMPLETE"})));
@@ -380,7 +388,10 @@ fn cancellable_rows_and_ids() {
 #[test]
 fn trade_book_reads_both_field_sets() {
     let r = master();
-    let trades = map_trades(list_at(&json(fixture!("trades.json")), "trades"), &r);
+    let trades = map_trades(
+        list_at(&json(fixture!("trades.json")), "trades").unwrap(),
+        &r,
+    );
     assert_eq!(trades.len(), 2);
     assert_eq!(trades[0].symbol, "SBIN");
     assert!((trades[0].trade_value - 8123.5).abs() < 1e-6);
@@ -397,7 +408,10 @@ fn trade_book_reads_both_field_sets() {
 #[test]
 fn positions_compute_pnl_like_the_web() {
     let r = master();
-    let p = map_positions(list_at(&json(fixture!("positions.json")), "positions"), &r);
+    let p = map_positions(
+        list_at(&json(fixture!("positions.json")), "positions").unwrap(),
+        &r,
+    );
     assert_eq!(p.len(), 3);
     assert_eq!(p[0].symbol, "SBIN");
     assert_eq!(p[0].quantity, 10);
@@ -410,14 +424,17 @@ fn positions_compute_pnl_like_the_web() {
     assert_eq!(p[2].quantity, 0);
     // `data.positions` shape reads the same.
     let nested = json!({"status": "success", "data": {"positions": [{"trading_symbol": "SBIN-EQ", "exchange": "NSE", "quantity": "3", "product": "CNC"}]}});
-    let p = map_positions(list_at(&nested, "positions"), &r);
+    let p = map_positions(list_at(&nested, "positions").unwrap(), &r);
     assert_eq!((p[0].quantity, p[0].product.as_str()), (3, "CNC"));
 }
 
 #[test]
 fn holdings_use_fallback_fields() {
     let r = master();
-    let h = map_holdings(list_at(&json(fixture!("holdings.json")), "holdings"), &r);
+    let h = map_holdings(
+        list_at(&json(fixture!("holdings.json")), "holdings").unwrap(),
+        &r,
+    );
     // The row without any symbol is skipped (web `continue`).
     assert_eq!(h.len(), 2);
     assert_eq!(h[0].symbol, "SBIN");
@@ -453,8 +470,16 @@ fn loose_readers() {
     assert_eq!(text(&v, "b"), "");
     assert_eq!(text(&v, "c"), "7");
     assert_eq!(int(&v, "a"), 1);
-    assert_eq!(list_at(&json!({"data": {"x": [1, 2]}}), "orders").len(), 2);
-    assert!(list_at(&json!({"data": null}), "orders").is_empty());
+    assert_eq!(
+        list_at(&json!({"data": {"x": [1, 2]}}), "orders").map(<[_]>::len),
+        Some(2)
+    );
+    // BR-03: no list is not an empty book.
+    assert!(list_at(&json!({"data": null}), "orders").is_none());
+    assert_eq!(
+        list_at(&json!({"data": []}), "orders").map(<[_]>::len),
+        Some(0)
+    );
 }
 
 // ---------------------------------------------------------------------------

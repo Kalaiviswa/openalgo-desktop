@@ -2,6 +2,7 @@
 //! `mapping/order_data.py`, `api/funds.py`). Pure functions; the symbol
 //! master is passed in.
 
+use crate::brokers::common::book_read;
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
@@ -324,13 +325,17 @@ pub fn trades(result: &Value, symbols: &SymbolResolver) -> Vec<Trade> {
 }
 
 /// The position list: `result.positionList`, or `result` itself when it is
-/// a flat list (rmoney `order_api.py`).
-pub fn position_list(result: &Value) -> &[Value] {
-    match result {
+/// a flat list (rmoney `order_api.py`). `None` when it is neither, or when
+/// a row lacks its `Quantity` (BR-03: never an empty or flat book).
+pub fn position_list(result: &Value) -> Option<&[Value]> {
+    let rows: &[Value] = match result {
         Value::Array(a) => a,
-        Value::Object(_) => list(result.get("positionList").unwrap_or(&Value::Null)),
-        _ => &[],
-    }
+        Value::Object(_) => result.get("positionList")?.as_array()?,
+        _ => return None,
+    };
+    rows.iter()
+        .all(|p| book_read::quantity(p, "Quantity").is_some())
+        .then_some(rows)
 }
 
 /// Instrument id of a position row: `ExchangeInstrumentId` (lower-case d),
@@ -352,10 +357,10 @@ fn value_text(v: Option<&Value>) -> String {
     }
 }
 
-/// `transform_positions_data` (`order_data.py:280-325`).
-pub fn positions(result: &Value, symbols: &SymbolResolver) -> Vec<Position> {
-    position_list(result)
-        .iter()
+/// `transform_positions_data` (`order_data.py:280-325`) over a list
+/// [`position_list`] read.
+pub fn positions(rows: &[Value], symbols: &SymbolResolver) -> Vec<Position> {
+    rows.iter()
         .filter(|p| p.is_object())
         .map(|p| {
             let exchange = oa_exchange(&s(p, "ExchangeSegment"));
@@ -394,15 +399,15 @@ pub fn positions(result: &Value, symbols: &SymbolResolver) -> Vec<Position> {
 
 /// `map_portfolio_data` (`order_data.py:368-438`): holdings keyed by ISIN,
 /// symbol from the NSE instrument id, product CNC, P&L placeholders 0.
-pub fn holdings(result: &Value, symbols: &SymbolResolver) -> Vec<Holding> {
-    let Some(map) = result
+pub fn holdings(result: &Value, symbols: &SymbolResolver) -> Option<Vec<Holding>> {
+    // XTS sends `RMSHoldings.Holdings` as a map, empty when nothing is
+    // held; without it the reply is not a holdings book (BR-03).
+    let map = result
         .get("RMSHoldings")
         .and_then(|r| r.get("Holdings"))
-        .and_then(Value::as_object)
-    else {
-        return Vec::new();
-    };
-    map.iter()
+        .and_then(Value::as_object)?;
+    let rows = map
+        .iter()
         .map(|(isin, h)| {
             let token = value_text(h.get("ExchangeNSEInstrumentId"));
             let quantity = i(h, "HoldingQuantity") as i32;
@@ -430,7 +435,8 @@ pub fn holdings(result: &Value, symbols: &SymbolResolver) -> Vec<Holding> {
                 current_value: f64::from(quantity) * average_price,
             }
         })
-        .collect()
+        .collect();
+    Some(rows)
 }
 
 fn money(v: &Value, k: &str) -> f64 {

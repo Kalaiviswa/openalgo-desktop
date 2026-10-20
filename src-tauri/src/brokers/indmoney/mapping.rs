@@ -295,9 +295,12 @@ fn symbol_for(symbols: &SymbolResolver, token: &str, exchange: &str, fallback: &
 }
 
 /// Rows of a list answer (also tolerates `{net_positions, day_positions}`).
-pub fn rows(v: &Value) -> Vec<Value> {
+/// BR-03: an answer that is neither a list nor a positions object is a
+/// book that was not read (`None`), never an empty one; INDmoney sends
+/// `data: []` for an empty book.
+pub fn rows(v: &Value) -> Option<Vec<Value>> {
     match v {
-        Value::Array(a) => a.iter().filter(|x| x.is_object()).cloned().collect(),
+        Value::Array(a) => Some(a.iter().filter(|x| x.is_object()).cloned().collect()),
         Value::Object(o) if o.contains_key("net_positions") || o.contains_key("day_positions") => {
             let mut out = Vec::new();
             for k in ["net_positions", "day_positions"] {
@@ -305,10 +308,22 @@ pub fn rows(v: &Value) -> Vec<Value> {
                     out.extend(a.iter().filter(|x| x.is_object()).cloned());
                 }
             }
-            out
+            Some(out)
         }
-        _ => Vec::new(),
+        _ => None,
     }
+}
+
+/// Whether a position row carries its net quantity (`net_qty`, else
+/// `net_quantity`, as `position_qty` reads it); a row without it is not
+/// flat (BR-03).
+pub fn has_quantity(p: &Value) -> bool {
+    let key = if p.get("net_qty").is_some() {
+        "net_qty"
+    } else {
+        "net_quantity"
+    };
+    crate::brokers::common::book_read::quantity(p, key).is_some()
 }
 
 // ---------------------------------------------------------------------------

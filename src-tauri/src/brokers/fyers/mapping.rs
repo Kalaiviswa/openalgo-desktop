@@ -7,10 +7,12 @@
 //! (web `get_oa_symbol`), keeping the Fyers symbol when the master has no
 //! row, as the web does.
 
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
 use crate::brokers::common::mapping::{Action, PriceType, Product};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
+use crate::error::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -322,22 +324,12 @@ pub struct FyersHolding {
 }
 
 /// Rows under `key` of a Fyers book body (`orderBook`, `tradeBook`,
-/// `netPositions`, `holdings`); a missing or null list is empty, and a row
-/// that does not parse is skipped rather than failing the book.
-pub fn rows<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Vec<T> {
-    match v.get(key) {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(|r| match serde_json::from_value::<T>(r.clone()) {
-                Ok(x) => Some(x),
-                Err(e) => {
-                    tracing::warn!("Skipping an unreadable Fyers {} row: {}", key, e);
-                    None
-                }
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+/// `netPositions`, `holdings`, `fund_limit`). Fyers sends an empty book as
+/// an empty list (web `test_position_read_failure`), so a missing, `null`
+/// or mistyped list, or a row that does not read, is a book that was not
+/// read (BR-03): `book_read::unreadable` for `book`.
+pub fn rows<T: serde::de::DeserializeOwned>(v: &Value, key: &str, book: Book) -> Result<Vec<T>> {
+    book_read::rows(v, key, || book_read::unreadable("fyers", book))
 }
 
 // ---------------------------------------------------------------------------

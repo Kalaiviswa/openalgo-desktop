@@ -251,12 +251,15 @@ pub fn extract_order_id(v: &Value) -> Option<String> {
 // Books
 // ---------------------------------------------------------------------------
 
-/// The rows of a book answer (`data` list; anything else empty).
-pub fn rows(v: &Value) -> Vec<Value> {
+/// The rows of a book answer: the `data` list (one row as an object).
+/// mStock answers an empty book with `data: null` (the web reads it as
+/// empty); `data` of any other type is a book that was not read (BR-03).
+pub fn rows(v: &Value) -> Option<Vec<Value>> {
     match v.get("data") {
-        Some(Value::Array(a)) => a.clone(),
-        Some(Value::Object(_)) => vec![v["data"].clone()],
-        _ => Vec::new(),
+        Some(Value::Array(a)) => Some(a.clone()),
+        Some(o @ Value::Object(_)) => Some(vec![o.clone()]),
+        Some(Value::Null) | None => Some(Vec::new()),
+        Some(_) => None,
     }
 }
 
@@ -317,8 +320,8 @@ pub fn map_order(o: &Value, symbols: &SymbolResolver) -> Order {
     }
 }
 
-pub fn map_orders(v: &Value, symbols: &SymbolResolver) -> Vec<Order> {
-    rows(v).iter().map(|o| map_order(o, symbols)).collect()
+pub fn map_orders(rows: &[Value], symbols: &SymbolResolver) -> Vec<Order> {
+    rows.iter().map(|o| map_order(o, symbols)).collect()
 }
 
 /// One trade-book row (`map_trade_data` + `transform_tradebook_data`); the
@@ -376,8 +379,8 @@ pub fn map_trade(t: &Value, symbols: &SymbolResolver) -> Trade {
     }
 }
 
-pub fn map_trades(v: &Value, symbols: &SymbolResolver) -> Vec<Trade> {
-    rows(v).iter().map(|t| map_trade(t, symbols)).collect()
+pub fn map_trades(rows: &[Value], symbols: &SymbolResolver) -> Vec<Trade> {
+    rows.iter().map(|t| map_trade(t, symbols)).collect()
 }
 
 /// One position row (`map_position_data` + `transform_positions_data`):
@@ -410,8 +413,8 @@ pub fn map_position(p: &Value, symbols: &SymbolResolver) -> Position {
     }
 }
 
-pub fn map_positions(v: &Value, symbols: &SymbolResolver) -> Vec<Position> {
-    rows(v).iter().map(|p| map_position(p, symbols)).collect()
+pub fn map_positions(rows: &[Value], symbols: &SymbolResolver) -> Vec<Position> {
+    rows.iter().map(|p| map_position(p, symbols)).collect()
 }
 
 /// One holding row (`map_portfolio_data` + `transform_holdings_data`).
@@ -452,8 +455,8 @@ pub fn map_holding(h: &Value, symbols: &SymbolResolver) -> Holding {
     }
 }
 
-pub fn map_holdings(v: &Value, symbols: &SymbolResolver) -> Vec<Holding> {
-    rows(v).iter().map(|h| map_holding(h, symbols)).collect()
+pub fn map_holdings(rows: &[Value], symbols: &SymbolResolver) -> Vec<Holding> {
+    rows.iter().map(|h| map_holding(h, symbols)).collect()
 }
 
 // ---------------------------------------------------------------------------

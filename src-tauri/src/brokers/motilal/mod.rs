@@ -342,6 +342,9 @@ impl MotilalBroker {
         body: Option<&Value>,
     ) -> Result<Value> {
         let (status, v) = self.post_raw(s, path, body).await?;
+        if status.is_server_error() {
+            return Err(http::server_error("motilal", status));
+        }
         if is_success(&v) {
             return Ok(v);
         }

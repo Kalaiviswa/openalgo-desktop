@@ -5,9 +5,11 @@ use super::mapping::{
 };
 use super::transport::{as_list, noren_error, session, stat_ok, Category, Session};
 use super::NorenBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use serde_json::{json, Value};
 
 /// `{"uid","actid"}` for the book endpoints.
@@ -16,12 +18,29 @@ fn book_body(s: &Session) -> Value {
 }
 
 pub(crate) async fn raw_book(b: &NorenBroker, s: &Session, endpoint: &str) -> Result<Vec<Value>> {
+    if endpoint == "/PositionBook" {
+        return positions(b, s, || book_read::unreadable(b.cfg.id, Book::Positions)).await;
+    }
     let body = if endpoint == "/Holdings" {
         json!({"uid": s.uid, "actid": s.uid, "prd": "C"})
     } else {
         book_body(s)
     };
     b.post_list(endpoint, body, s, Category::Data).await
+}
+
+/// The position book; every row must carry `netqty`, or the book is not
+/// read, never flat (BR-03).
+async fn positions(
+    b: &NorenBroker,
+    s: &Session,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
+    let rows = b
+        .post_list("/PositionBook", book_body(s), s, Category::Data)
+        .await?;
+    book_read::require_quantities(&rows, &["netqty"], unread)?;
+    Ok(rows)
 }
 
 /// LTP and `ti` for MPP; `None` when the quote cannot be read.
@@ -194,7 +213,7 @@ pub async fn get_open_position(
         .br_symbol(symbol, exchange.as_str())
         .unwrap_or_else(|| symbol.to_string());
     let prd = product_code(product);
-    for p in raw_book(b, &s, "/PositionBook").await? {
+    for p in positions(b, &s, || unread(b.cfg.name)).await? {
         if text(&p, "tsym") == br && text(&p, "exch") == exchange.as_str() && text(&p, "prd") == prd
         {
             return Ok(mapping::i(&p, "netqty"));
@@ -207,7 +226,7 @@ pub async fn close_all_positions(b: &NorenBroker, auth: &AuthToken) -> Result<Cl
     let s = session(b.cfg, auth)?;
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_book(b, &s, "/PositionBook").await? {
+    for p in positions(b, &s, || unread(b.cfg.name)).await? {
         let qty = mapping::i(&p, "netqty");
         if qty == 0 {
             continue;

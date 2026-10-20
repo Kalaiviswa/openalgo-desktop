@@ -59,7 +59,10 @@ pub async fn get_funds(b: &IndmoneyBroker, auth: &AuthToken) -> Result<Funds> {
         ));
     }
     let data = super::unwrap_account("/funds", &r)?;
+    // BR-03: the figures are `data` itself; a success without it is not a
+    // zero balance.
     if r.json.get("status").and_then(Value::as_str) != Some("success")
+        || r.json.get("data").is_none()
         || !data.is_object()
         || data.as_object().map(|o| o.is_empty()).unwrap_or(true)
     {

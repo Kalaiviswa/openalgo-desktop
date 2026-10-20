@@ -412,8 +412,8 @@ fn margin_legs_and_result() {
 #[test]
 fn order_book_is_normalised() {
     let r = master();
-    let mut rows = unwrap_rows(&j(fixture!("orders_pending.json")), "orders");
-    rows.extend(unwrap_rows(&j(fixture!("orders_completed.json")), "orders"));
+    let mut rows = unwrap_rows(&j(fixture!("orders_pending.json")), "orders").unwrap();
+    rows.extend(unwrap_rows(&j(fixture!("orders_completed.json")), "orders").unwrap());
     let o = map_orders(&rows, &r);
     assert_eq!(o.len(), 7);
     assert_eq!(o[0].symbol, "RELIANCE");
@@ -444,7 +444,10 @@ fn order_book_is_normalised() {
 #[test]
 fn trades_positions_holdings() {
     let r = master();
-    let t = map_trades(&unwrap_rows(&j(fixture!("trades.json")), "trades"), &r);
+    let t = map_trades(
+        &unwrap_rows(&j(fixture!("trades.json")), "trades").unwrap(),
+        &r,
+    );
     assert_eq!(t.len(), 2);
     assert_eq!(t[0].symbol, "RELIANCE");
     assert_eq!(t[0].trade_value, 14015.0);
@@ -453,7 +456,7 @@ fn trades_positions_holdings() {
     assert_eq!(t[1].timestamp, "05-10-2026 09:40:00");
 
     let p = map_positions(
-        &unwrap_rows(&j(fixture!("positions.json")), "positions"),
+        &unwrap_rows(&j(fixture!("positions.json")), "positions").unwrap(),
         &r,
     );
     assert_eq!(p.len(), 3);
@@ -468,7 +471,10 @@ fn trades_positions_holdings() {
     );
     assert_eq!((p[2].quantity, p[2].pnl), (0, 100.0));
 
-    let h = map_holdings(&unwrap_rows(&j(fixture!("holdings.json")), "holdings"), &r);
+    let h = map_holdings(
+        &unwrap_rows(&j(fixture!("holdings.json")), "holdings").unwrap(),
+        &r,
+    );
     assert_eq!(h[0].symbol, "RELIANCE");
     assert_eq!(h[0].product, "CNC");
     assert_eq!((h[0].pnl, h[0].pnl_percentage), (550.0, 8.46));

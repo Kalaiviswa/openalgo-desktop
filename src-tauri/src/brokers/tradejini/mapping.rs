@@ -114,12 +114,14 @@ pub fn envelope_error(v: &Value) -> Option<String> {
         .map(|m| m.trim().to_string())
 }
 
-/// The `d` array of a book response (`no-data` and null become empty).
-pub fn rows(v: &Value) -> Vec<Value> {
-    match v.get("d") {
-        Some(Value::Array(a)) => a.clone(),
-        _ => Vec::new(),
+/// The `d` array of a book response; `s: no-data` is Tradejini's empty
+/// book. BR-03: an `ok` without the list (or with another type) is a book
+/// that was not read: `None`.
+pub fn rows(v: &Value) -> Option<Vec<Value>> {
+    if v.get("s").and_then(Value::as_str) == Some("no-data") {
+        return Some(Vec::new());
     }
+    v.get("d").and_then(Value::as_array).cloned()
 }
 
 // ---------------------------------------------------------------------------

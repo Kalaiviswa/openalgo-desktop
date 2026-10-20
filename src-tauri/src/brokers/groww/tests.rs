@@ -1668,6 +1668,7 @@ mod http_round_trip {
     #[derive(Clone, Copy, Default)]
     struct Faults {
         fno_positions_fail: bool,
+        cash_positions_fail: bool,
         fno_trades_fail: bool,
         cash_orders_fail: bool,
     }
@@ -1838,6 +1839,9 @@ mod http_round_trip {
                             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"status": "FAILURE"})));
                         }
                         return (StatusCode::OK, Json(fx(fixture!("positions_fno.json"))));
+                    }
+                    if f.cash_positions_fail {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"status": "FAILURE"})));
                     }
                     (StatusCode::OK, Json(fx(fixture!("positions_cash.json"))))
                 }),
@@ -2063,6 +2067,42 @@ mod http_round_trip {
         let seen = seen.lock().clone();
         assert!(!seen.iter().any(|s| s.starts_with("ltp|")), "{seen:?}");
         assert!(seen.iter().any(|s| s.starts_with("create|")), "{seen:?}");
+    }
+
+    /// NEW-PAR-01: close-all never reads as complete while a segment's
+    /// positions could not be read. An unread F&O book stays in `failed`
+    /// while the cash positions are exited; an unread cash book refuses
+    /// close-all before any exit is sent.
+    #[tokio::test]
+    async fn close_all_keeps_an_unread_segment_unresolved() {
+        let auth = AuthToken::new("good");
+        let (b, seen) = broker(true).await;
+        let r = b.close_all_positions(&auth).await.unwrap();
+        assert!(
+            r.failed.iter().any(|f| f.starts_with("F&O positions")),
+            "{:?}",
+            r
+        );
+        assert!(seen.lock().iter().any(|s| s.starts_with("create|")));
+        let (b, seen) = broker_with(Faults {
+            cash_positions_fail: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(b.close_all_positions(&auth).await.is_err());
+        assert!(!seen.lock().iter().any(|s| s.starts_with("create|")));
+        let (b, _) = broker_with(Faults {
+            cash_positions_fail: true,
+            fno_positions_fail: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(b.close_all_positions(&auth).await.is_err());
+        // Both books read: no segment left unresolved.
+        let (b, _) = broker(false).await;
+        let r = b.close_all_positions(&auth).await.unwrap();
+        let unresolved = r.failed.iter().any(|f| f.contains(" positions: Groww"));
+        assert!(!unresolved, "{:?}", r);
     }
 
     #[tokio::test]

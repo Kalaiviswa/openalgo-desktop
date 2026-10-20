@@ -39,6 +39,10 @@ pub fn funds_from_limits(v: &Value) -> Option<Funds> {
     if !(status == "SUCCESS" || status == "200" || v.get("cash").is_some()) {
         return None;
     }
+    // BR-03: a success without the cash figure is not a zero balance.
+    if v.get("cash").is_none_or(Value::is_null) {
+        return None;
+    }
     let mut unrealized = num(v, "currentUnrealizedMtom");
     if unrealized == 0.0 {
         unrealized = UNREALIZED_SEGMENTS.iter().map(|k| num(v, k)).sum();

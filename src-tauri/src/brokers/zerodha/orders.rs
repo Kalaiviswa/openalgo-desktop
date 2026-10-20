@@ -1,7 +1,8 @@
 //! Orders and books (web `api/order_api.py`, `mapping/transform_data.py`).
 
-use super::mapping::{self, KiteHolding, KiteOrder, KitePositions, KiteTrade};
+use super::mapping::{self, KiteHolding, KiteOrder, KiteTrade};
 use super::{Body, Category, ZerodhaBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, Product};
 use crate::brokers::common::master_contract::format_strike;
 use crate::brokers::common::outcome;
@@ -10,6 +11,7 @@ use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 struct OrderId {
@@ -161,25 +163,42 @@ pub async fn cancel_order(
     })
 }
 
-/// The order list; `None` when the answer carried no `data`.
-async fn orders_data(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Option<Vec<KiteOrder>>> {
-    let env = b
-        .call_raw::<Vec<KiteOrder>>(Method::GET, "/orders", auth, Body::None, Category::Other)
-        .await?;
-    Ok(env.data)
-}
-
+/// The order list. BR-03: a success reply without the list is an order
+/// book that was not read, never an empty one (Kite sends `[]` for no
+/// orders).
 async fn raw_orders(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<KiteOrder>> {
-    Ok(orders_data(b, auth).await?.unwrap_or_default())
+    read_orders(b, auth, || book_read::unreadable("zerodha", Book::Orders)).await
 }
 
-/// Net positions; `None` when the answer carried no `data` or no `net`.
+/// The order list, read with `unread` when it cannot be.
+async fn read_orders(
+    b: &ZerodhaBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<KiteOrder>> {
+    let env = b
+        .call_raw::<Value>(Method::GET, "/orders", auth, Body::None, Category::Other)
+        .await?;
+    book_read::rows(&env_data(env), "list", unread)
+}
+
+/// Kite's `data` under one key, so the book readers read every list the
+/// same way (a missing `data` reads as a missing list).
+fn env_data(env: mapping::KiteEnvelope<Value>) -> Value {
+    json!({ "list": env.data.unwrap_or(Value::Null) })
+}
+
+/// Net positions, read with `unread` when the book cannot be: `data` and
+/// `data.net` must both be there and every row must carry its quantity
+/// (BR-03). Kite sends `{"net": [], "day": []}` for no positions; the web
+/// raises on a missing `net` too.
 async fn net_positions(
     b: &ZerodhaBroker,
     auth: &AuthToken,
-) -> Result<Option<Vec<mapping::KitePosition>>> {
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<mapping::KitePosition>> {
     let env = b
-        .call_raw::<KitePositions>(
+        .call_raw::<Value>(
             Method::GET,
             "/portfolio/positions",
             auth,
@@ -187,44 +206,45 @@ async fn net_positions(
             Category::Other,
         )
         .await?;
-    Ok(env.data.and_then(|d| d.net))
+    let data = env.data.unwrap_or(Value::Null);
+    let rows = book_read::list(&data, "net", &unread)?;
+    book_read::require_quantities(rows, &["quantity"], &unread)?;
+    book_read::typed(rows, unread)
 }
 
 /// Raw Kite net positions (MCX quantities in contracts), as the Positions
-/// page reads them: a reply without them reads as no positions.
+/// page and the funds P&L read them.
 pub(crate) async fn raw_positions(
     b: &ZerodhaBroker,
     auth: &AuthToken,
 ) -> Result<Vec<mapping::KitePosition>> {
-    Ok(net_positions(b, auth).await?.unwrap_or_default())
+    net_positions(b, auth, || {
+        book_read::unreadable("zerodha", Book::Positions)
+    })
+    .await
 }
 
 /// BR-03: net positions for a decision to trade (smart-order sizing, close
-/// all). `data` and `data.net` must both be there: a success reply without
-/// them is a book that was not read, never a flat one (the web raises on a
-/// missing `net` too). Kite sends `{"net": [], "day": []}` for no
-/// positions.
+/// all): a book that was not read refuses with the web's position-read
+/// sentence.
 async fn strict_positions(
     b: &ZerodhaBroker,
     auth: &AuthToken,
 ) -> Result<Vec<mapping::KitePosition>> {
-    net_positions(b, auth).await?.ok_or_else(|| {
-        tracing::error!("Zerodha answered the position book without its net positions");
-        unread("Zerodha")
-    })
+    net_positions(b, auth, || unread("Zerodha")).await
 }
 
 /// web `cancel_all_orders`. BR-03: a success reply without the order list
 /// is an order book that was not read, never "nothing to cancel" (Kite
 /// sends `[]` for no orders).
 pub async fn cancel_all_orders(b: &ZerodhaBroker, auth: &AuthToken) -> Result<CancelAllResult> {
-    let orders = orders_data(b, auth).await?.ok_or_else(|| {
-        tracing::error!("Zerodha answered the order book without its orders");
+    let orders = read_orders(b, auth, || {
         AppError::Broker(
             "Zerodha did not return your order book, so no order was cancelled. Check your orders and try again."
                 .into(),
         )
-    })?;
+    })
+    .await?;
     let mut result = CancelAllResult::default();
     for o in orders {
         // web filters Kite's own strings
@@ -316,12 +336,12 @@ pub async fn get_order_book(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<O
 
 pub async fn get_trade_book(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let env = b
-        .call_raw::<Vec<KiteTrade>>(Method::GET, "/trades", auth, Body::None, Category::Other)
+        .call_raw::<Value>(Method::GET, "/trades", auth, Body::None, Category::Other)
         .await?;
-    Ok(mapping::map_trades(
-        env.data.unwrap_or_default(),
-        b.resolver(),
-    ))
+    let rows: Vec<KiteTrade> = book_read::rows(&env_data(env), "list", || {
+        book_read::unreadable("zerodha", Book::Trades)
+    })?;
+    Ok(mapping::map_trades(rows, b.resolver()))
 }
 
 pub async fn get_positions(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<Position>> {
@@ -333,7 +353,7 @@ pub async fn get_positions(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<Po
 
 pub async fn get_holdings(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let env = b
-        .call_raw::<Vec<KiteHolding>>(
+        .call_raw::<Value>(
             Method::GET,
             "/portfolio/holdings",
             auth,
@@ -341,8 +361,8 @@ pub async fn get_holdings(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Vec<Hol
             Category::Other,
         )
         .await?;
-    Ok(mapping::map_holdings(
-        env.data.unwrap_or_default(),
-        b.resolver(),
-    ))
+    let rows: Vec<KiteHolding> = book_read::rows(&env_data(env), "list", || {
+        book_read::unreadable("zerodha", Book::Holdings)
+    })?;
+    Ok(mapping::map_holdings(rows, b.resolver()))
 }

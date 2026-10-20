@@ -361,10 +361,24 @@ async fn open_position_refuses_an_unconfirmed_book() {
             );
         }
     }
-    // The Positions page still reads an empty body as an empty book.
+    // The Positions page reads an answer without mStock's status as a book
+    // that was not read, never an empty one (BR-03); `data: null` is the
+    // empty book.
     let fake = Fake::start(|r: &Req| {
         if r.path.ends_with("/portfolio/positions") {
             ok(json!({}))
+        } else {
+            route(r)
+        }
+    })
+    .await;
+    assert!(broker(&fake, "ws://127.0.0.1:9")
+        .get_positions(&auth())
+        .await
+        .is_err());
+    let fake = Fake::start(|r: &Req| {
+        if r.path.ends_with("/portfolio/positions") {
+            ok(json!({"status": "true", "data": null}))
         } else {
             route(r)
         }

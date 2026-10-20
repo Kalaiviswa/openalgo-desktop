@@ -294,6 +294,8 @@ pub(crate) async fn read_envelope<T: DeserializeOwned>(
         }
     }
     match serde_json::from_slice::<Envelope<T>>(&bytes) {
+        // A server error is no answer, whatever its body says (BR-03).
+        Ok(_) if status.is_server_error() => Err(http::server_error("angel", status)),
         Ok(env) => Ok(Reply::Ok(env)),
         Err(e) => {
             if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {

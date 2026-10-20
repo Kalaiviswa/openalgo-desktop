@@ -2,7 +2,9 @@
 
 use super::mapping::{self, DeltaFill, DeltaOrder, DeltaPosition, RawPosition, WalletBalance};
 use super::DeltaBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Action, Exchange, PriceType, Product, Validity};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -253,15 +255,25 @@ pub async fn raw_positions(
     auth: &AuthToken,
     strict: bool,
 ) -> Result<Vec<RawPosition>> {
-    let mut out = Vec::new();
-    match b
+    // BR-03: the derivative positions are the book; one that cannot be
+    // read, or a row whose size cannot, is an error for every reader, never
+    // a flat book. Only the spot balances are best effort outside a
+    // decision to trade.
+    let positions = b
         .signed::<Vec<DeltaPosition>>(auth, Method::GET, "/v2/positions/margined", &[], None)
-        .await
+        .await?;
+    if positions
+        .iter()
+        .any(|p| p.size.trim().parse::<rust_decimal::Decimal>().is_err())
     {
-        Ok(p) => out.extend(p.iter().map(RawPosition::from)),
-        Err(e) if strict || matches!(e, AppError::Auth(_)) => return Err(e),
-        Err(e) => tracing::warn!("Delta Exchange positions could not be read: {}", e.code()),
+        tracing::warn!("A Delta Exchange position without a readable size");
+        return Err(if strict {
+            unread("Delta Exchange")
+        } else {
+            book_read::unreadable("deltaexchange", Book::Positions)
+        });
     }
+    let mut out: Vec<RawPosition> = positions.iter().map(RawPosition::from).collect();
     match b
         .signed::<Vec<WalletBalance>>(auth, Method::GET, "/v2/wallet/balances", &[], None)
         .await

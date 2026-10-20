@@ -33,10 +33,9 @@ pub async fn get_funds(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<Funds> {
         return Err(broker_error(&msg));
     }
     let data = v.get("data").cloned().unwrap_or(Value::Null);
-    if data
-        .get("values")
-        .is_some_and(|x| !x.is_array() && !x.is_null())
-    {
+    // BR-03: an answer without the funds view is not a zero balance (and
+    // no proof the stored session still works).
+    if !data.get("values").is_some_and(Value::is_array) {
         return Err(AppError::Broker(
             "HDFC Sky sent funds in a form OpenAlgo could not read. Try again shortly.".into(),
         ));

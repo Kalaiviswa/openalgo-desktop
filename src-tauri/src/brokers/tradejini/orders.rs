@@ -10,6 +10,7 @@
 
 use super::mapping::{self, py_float};
 use super::{Body, TradejiniBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::*;
@@ -216,7 +217,12 @@ pub fn open_qty(
         let p = mapping::position_row(row, symbols);
         let mine = p.symbol.trim().eq_ignore_ascii_case(&want)
             && p.exchange.trim().eq_ignore_ascii_case(exchange);
-        match mapping::num_strict(row.get("netQty"), 0.0).filter(|q| q.is_finite()) {
+        // A missing or null `netQty` is not a zero (BR-03).
+        let qty = row.get("netQty").filter(|q| !q.is_null());
+        match qty
+            .and_then(|q| mapping::num_strict(Some(q), 0.0))
+            .filter(|q| q.is_finite())
+        {
             None if mine => {
                 return Err(unread(format!("netQty {} of {}", row["netQty"], p.symbol)));
             }
@@ -249,7 +255,13 @@ pub async fn get_open_position(
             Body::None,
         )
         .await?;
-    open_qty(&mapping::rows(&v), symbol, exchange.as_str(), b.resolver())
+    let rows = mapping::rows(&v).ok_or_else(|| AppError::Broker(POSITION_UNREAD.into()))?;
+    open_qty(&rows, symbol, exchange.as_str(), b.resolver())
+}
+
+/// A book's rows, or the book's trader-facing error (BR-03).
+fn book_rows(v: &Value, book: Book) -> Result<Vec<Value>> {
+    mapping::rows(v).ok_or_else(|| book_read::unreadable("tradejini", book))
 }
 
 fn sym_details() -> [(&'static str, String); 1] {
@@ -266,7 +278,7 @@ pub async fn get_order_book(b: &TradejiniBroker, auth: &AuthToken) -> Result<Vec
             Body::None,
         )
         .await?;
-    Ok(mapping::rows(&v)
+    Ok(book_rows(&v, Book::Orders)?
         .iter()
         .map(|o| mapping::order_row(o, b.resolver()))
         .collect())
@@ -282,7 +294,7 @@ pub async fn get_trade_book(b: &TradejiniBroker, auth: &AuthToken) -> Result<Vec
             Body::None,
         )
         .await?;
-    Ok(mapping::rows(&v)
+    Ok(book_rows(&v, Book::Trades)?
         .iter()
         .map(|t| mapping::trade_row(t, b.resolver()))
         .collect())
@@ -298,7 +310,13 @@ pub async fn get_positions(b: &TradejiniBroker, auth: &AuthToken) -> Result<Vec<
             Body::None,
         )
         .await?;
-    Ok(mapping::rows(&v)
+    // Every position carries its net quantity, or the book is not read: the
+    // default close-all sizes its exits from these rows (BR-03).
+    let rows = book_rows(&v, Book::Positions)?;
+    book_read::require_quantities(&rows, &["netQty"], || {
+        book_read::unreadable("tradejini", Book::Positions)
+    })?;
+    Ok(rows
         .iter()
         .map(|p| mapping::position_row(p, b.resolver()))
         .collect())
@@ -314,10 +332,17 @@ pub async fn get_holdings(b: &TradejiniBroker, auth: &AuthToken) -> Result<Vec<H
             Body::None,
         )
         .await?;
-    // `d.holdings[]`; `d` may be the string "No Holdings".
-    let list = match v.get("d").and_then(|d| d.get("holdings")) {
-        Some(Value::Array(a)) => a.clone(),
-        _ => Vec::new(),
+    // `d.holdings[]`; `d` is the string "No Holdings" (or `s: no-data`)
+    // when nothing is held (web `get_holdings`). Anything else, another
+    // text in `d` included, is not a book (BR-03).
+    let list = match v.get("d") {
+        Some(Value::String(d)) if d.contains("No Holdings") => Vec::new(),
+        _ if v.get("s").and_then(Value::as_str) == Some("no-data") => Vec::new(),
+        Some(d) => match d.get("holdings") {
+            Some(Value::Array(a)) => a.clone(),
+            _ => return Err(book_read::unreadable("tradejini", Book::Holdings)),
+        },
+        None => return Err(book_read::unreadable("tradejini", Book::Holdings)),
     };
     Ok(list
         .iter()

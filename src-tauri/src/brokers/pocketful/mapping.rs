@@ -63,21 +63,33 @@ fn round2(v: f64) -> f64 {
 }
 
 /// A list at `data`, `data.<key>` or the first list inside `data`, as the
-/// web's book readers accept.
-pub fn list_at<'a>(body: &'a Value, key: &str) -> &'a [Value] {
+/// web's book readers accept. BR-03: `None` when there is none: a reply
+/// without its list is a book that was not read, never an empty one
+/// (Pocketful sends `data: []` for an empty book).
+pub fn list_at<'a>(body: &'a Value, key: &str) -> Option<&'a [Value]> {
     let data = &body["data"];
     if let Some(a) = data.as_array() {
-        return a;
+        return Some(a);
     }
     if let Some(a) = data.get(key).and_then(Value::as_array) {
-        return a;
+        return Some(a);
     }
-    if let Some(obj) = data.as_object() {
-        if let Some(a) = obj.values().find_map(Value::as_array) {
-            return a;
-        }
-    }
-    &[]
+    data.as_object()?
+        .values()
+        .find_map(Value::as_array)
+        .map(Vec::as_slice)
+}
+
+/// Whether a position row carries its quantity (`quantity`, else
+/// `net_quantity`, as the decisions read it); a row without it is not flat
+/// (BR-03).
+pub fn has_quantity(p: &Value) -> bool {
+    let key = if p.get("quantity").is_some() {
+        "quantity"
+    } else {
+        "net_quantity"
+    };
+    crate::brokers::common::book_read::quantity(p, key).is_some()
 }
 
 // ---------------------------------------------------------------------------

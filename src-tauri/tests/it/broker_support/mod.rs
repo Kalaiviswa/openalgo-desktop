@@ -1,6 +1,6 @@
 //! A fake broker that answers every request with one scripted reply, for
 //! the cross-adapter tables (`broker_order_outcomes`,
-//! `broker_malformed_replies`).
+//! `broker_malformed_replies`, `broker_unread_routes`).
 
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -26,8 +26,11 @@ pub fn answer(status: u16, body: &str) -> Answer {
 pub struct Fake {
     /// The answer to every request no route matches.
     pub answer: Arc<Mutex<Answer>>,
-    /// Answers for the paths that contain a key, before `answer`.
+    /// Answers for the requests whose path and query contain a key,
+    /// before `answer`.
     pub routes: Arc<Mutex<Vec<(&'static str, Answer)>>>,
+    /// The path and query of every request, in order.
+    pub calls: Arc<Mutex<Vec<String>>>,
     pub base: String,
     task: tokio::task::JoinHandle<()>,
 }
@@ -43,6 +46,19 @@ impl Fake {
     pub fn reply(&self, status: u16, body: &str) {
         *self.answer.lock() = answer(status, body);
     }
+
+    /// Answer the requests whose path and query contain `key` with
+    /// `status` and `body`, ahead of the default answer.
+    pub fn route(&self, key: &'static str, status: u16, body: &str) {
+        let mut routes = self.routes.lock();
+        routes.retain(|(k, _)| *k != key);
+        routes.push((key, answer(status, body)));
+    }
+
+    /// How many requests went to a path and query containing `key`.
+    pub fn sent(&self, key: &str) -> usize {
+        self.calls.lock().iter().filter(|c| c.contains(key)).count()
+    }
 }
 
 pub async fn fake() -> Fake {
@@ -51,12 +67,17 @@ pub async fn fake() -> Fake {
         body: "{}".into(),
     }));
     let routes: Arc<Mutex<Vec<(&'static str, Answer)>>> = Arc::default();
-    let (a, r) = (answer.clone(), routes.clone());
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (a, r, c) = (answer.clone(), routes.clone(), calls.clone());
     let app = Router::new().fallback(move |uri: Uri| {
+        let target = uri
+            .path_and_query()
+            .map_or_else(|| uri.path().to_string(), |p| p.to_string());
+        c.lock().push(target.clone());
         let a = r
             .lock()
             .iter()
-            .find(|(p, _)| uri.path().contains(p))
+            .find(|(p, _)| target.contains(p))
             .map(|(_, a)| a.clone())
             .unwrap_or_else(|| a.lock().clone());
         async move {
@@ -77,6 +98,7 @@ pub async fn fake() -> Fake {
     Fake {
         answer,
         routes,
+        calls,
         base,
         task,
     }
@@ -85,7 +107,13 @@ pub async fn fake() -> Fake {
 /// A master with SBIN on NSE.
 pub fn symbols() -> SymbolResolver {
     let r = SymbolResolver::new();
-    r.load(vec![SymToken {
+    r.load(vec![sbin()]);
+    r
+}
+
+/// SBIN on NSE, as the brokers' masters list it.
+pub fn sbin() -> SymToken {
+    SymToken {
         symbol: "SBIN".into(),
         brsymbol: "SBIN-EQ".into(),
         name: "SBIN".into(),
@@ -97,6 +125,5 @@ pub fn symbols() -> SymbolResolver {
         lot_size: 1,
         instrument_type: "EQ".into(),
         tick_size: 0.05,
-    }]);
-    r
+    }
 }

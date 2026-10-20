@@ -13,7 +13,9 @@
 use super::data::fetch_ltp;
 use super::mapping::{self, exit_action, f, i, map_product, row_exchange, s, unwrap_rows};
 use super::HdfcSecuritiesBroker;
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -100,22 +102,33 @@ async fn raw_list(
     auth: &AuthToken,
     path: &str,
     key: Option<&str>,
+    unread: impl Fn() -> AppError,
 ) -> Result<Vec<Value>> {
     let data = b.call(Method::GET, path, auth, None).await?;
-    Ok(unwrap_rows(&data, key))
+    unwrap_rows(&data, key).ok_or_else(unread)
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("hdfcsecurities", book)
 }
 
 pub(crate) async fn raw_positions(
     b: &HdfcSecuritiesBroker,
     auth: &AuthToken,
 ) -> Result<Vec<Value>> {
-    raw_list(
-        b,
-        auth,
-        "/oapi/v1/portfolio/cumulative-positions",
-        Some("net"),
-    )
-    .await
+    positions_read(b, auth, unreadable(Book::Positions)).await
+}
+
+/// The position book; every row must carry `net_qty` (BR-03).
+async fn positions_read(
+    b: &HdfcSecuritiesBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
+    let path = "/oapi/v1/portfolio/cumulative-positions";
+    let rows = raw_list(b, auth, path, Some("net"), &unread).await?;
+    book_read::require_quantities(&rows, &["net_qty"], unread)?;
+    Ok(rows)
 }
 
 /// Add `ltp` to rows from one batched `/fetch-ltp` pass (web
@@ -156,12 +169,12 @@ pub(crate) async fn enrich_with_ltp(
 }
 
 pub async fn get_order_book(b: &HdfcSecuritiesBroker, auth: &AuthToken) -> Result<Vec<Order>> {
-    let rows = raw_list(b, auth, "/oapi/v1/orders", None).await?;
+    let rows = raw_list(b, auth, "/oapi/v1/orders", None, unreadable(Book::Orders)).await?;
     Ok(mapping::map_orders(&rows, b.resolver()))
 }
 
 pub async fn get_trade_book(b: &HdfcSecuritiesBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
-    let rows = raw_list(b, auth, "/oapi/v1/trades", None).await?;
+    let rows = raw_list(b, auth, "/oapi/v1/trades", None, unreadable(Book::Trades)).await?;
     Ok(mapping::map_trades(&rows, b.resolver()))
 }
 
@@ -181,7 +194,8 @@ pub async fn get_positions(b: &HdfcSecuritiesBroker, auth: &AuthToken) -> Result
 }
 
 pub async fn get_holdings(b: &HdfcSecuritiesBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
-    let mut rows = raw_list(b, auth, "/oapi/v1/portfolio/holdings", None).await?;
+    let path = "/oapi/v1/portfolio/holdings";
+    let mut rows = raw_list(b, auth, path, None, unreadable(Book::Holdings)).await?;
     enrich_with_ltp(b, auth, &mut rows, true).await?;
     Ok(mapping::map_holdings(&rows, b.resolver()))
 }
@@ -191,7 +205,7 @@ pub async fn cancel_all_orders(
     auth: &AuthToken,
 ) -> Result<CancelAllResult> {
     let mut result = CancelAllResult::default();
-    for row in raw_list(b, auth, "/oapi/v1/orders", None).await? {
+    for row in raw_list(b, auth, "/oapi/v1/orders", None, unreadable(Book::Orders)).await? {
         if !mapping::is_cancellable(&row) {
             continue;
         }
@@ -218,7 +232,7 @@ pub async fn get_open_position(
 ) -> Result<i64> {
     let ex = exchange.as_str();
     let want = map_product(product, ex);
-    for row in raw_positions(b, auth).await? {
+    for row in positions_read(b, auth, || unread("HDFC Securities")).await? {
         let rex = row_exchange(&row);
         if rex == ex
             && mapping::oa_symbol(&row, &rex, b.resolver()) == symbol
@@ -236,7 +250,7 @@ pub async fn close_all_positions(
 ) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for row in raw_positions(b, auth).await? {
+    for row in positions_read(b, auth, || unread("HDFC Securities")).await? {
         let net = f(&row, "net_qty") as i64;
         if net == 0 {
             continue;

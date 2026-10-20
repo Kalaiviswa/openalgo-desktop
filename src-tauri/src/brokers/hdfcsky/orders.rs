@@ -3,9 +3,11 @@
 use super::data;
 use super::mapping::{self, s, to_oa_exchange, unwrap_rows};
 use super::{broker_error, message_of, HdfcSkyBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, PriceType, Product};
 use crate::brokers::common::mpp::{instrument_type_from_symbol, protected_price};
 use crate::brokers::common::outcome;
+use crate::brokers::common::position_read::unread;
 use crate::brokers::common::streaming::now_ms;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -172,7 +174,7 @@ async fn orders_of(b: &HdfcSkyBroker, auth: &AuthToken, kind: &str) -> Result<Ve
             None,
         )
         .await?;
-    Ok(unwrap_rows(&v, "orders"))
+    unwrap_rows(&v, "orders").ok_or_else(|| book_read::unreadable("hdfcsky", Book::Orders))
 }
 
 /// Pending and completed books merged (one failing half is skipped, as on
@@ -203,6 +205,18 @@ pub(crate) async fn raw_orders(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<Ve
 }
 
 pub(crate) async fn raw_positions(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<Vec<Value>> {
+    positions_read(b, auth, || {
+        book_read::unreadable("hdfcsky", Book::Positions)
+    })
+    .await
+}
+
+/// The position book; every row must carry `net_quantity` (BR-03).
+async fn positions_read(
+    b: &HdfcSkyBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<Value>> {
     let v = b
         .call(
             Method::GET,
@@ -213,7 +227,9 @@ pub(crate) async fn raw_positions(b: &HdfcSkyBroker, auth: &AuthToken) -> Result
             None,
         )
         .await?;
-    Ok(unwrap_rows(&v, "positions"))
+    let rows = unwrap_rows(&v, "positions").ok_or_else(&unread)?;
+    book_read::require_quantities(&rows, &["net_quantity"], unread)?;
+    Ok(rows)
 }
 
 pub async fn cancel_all_orders(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<CancelAllResult> {
@@ -246,7 +262,7 @@ pub async fn get_open_position(
         .resolver()
         .br_symbol(symbol, ex)
         .unwrap_or_else(|| symbol.to_string());
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("HDFC Sky")).await? {
         if s(&p, "trading_symbol") == br
             && to_oa_exchange(&s(&p, "exchange")) == ex
             && s(&p, "product").eq_ignore_ascii_case(product.as_str())
@@ -260,7 +276,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("HDFC Sky")).await? {
         let net = mapping::i(&p, "net_quantity");
         if net == 0 {
             continue;
@@ -304,7 +320,7 @@ pub async fn get_trade_book(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<Vec<T
         .call(Method::GET, "/oapi/v1/trades", auth, &[], true, None)
         .await?;
     Ok(mapping::map_trades(
-        &unwrap_rows(&v, "trades"),
+        &unwrap_rows(&v, "trades").ok_or_else(|| book_read::unreadable("hdfcsky", Book::Trades))?,
         b.resolver(),
     ))
 }
@@ -320,13 +336,16 @@ pub async fn get_holdings(b: &HdfcSkyBroker, auth: &AuthToken) -> Result<Vec<Hol
     let (status, v) = b
         .send(Method::GET, "/oapi/v1/holdings", auth, &[], true, None)
         .await?;
-    // An empty demat account answers with an error envelope on some days;
-    // only a real refusal is an error.
-    if v.get("status").and_then(Value::as_str) != Some("success") && status != StatusCode::OK {
+    // A refusal is the broker's error, whatever the HTTP status (web
+    // `holdings_service`: `status: error` is an error); a success without
+    // its holdings list is a book that was not read (BR-03).
+    let said = v.get("status").and_then(Value::as_str);
+    if said == Some("error") || (said != Some("success") && status != StatusCode::OK) {
         return Err(broker_error(&message_of(&v)));
     }
     Ok(mapping::map_holdings(
-        &unwrap_rows(&v, "holdings"),
+        &unwrap_rows(&v, "holdings")
+            .ok_or_else(|| book_read::unreadable("hdfcsky", Book::Holdings))?,
         b.resolver(),
     ))
 }

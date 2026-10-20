@@ -127,6 +127,40 @@ pub fn book_rows(payload: &Value) -> Vec<Value> {
     }
 }
 
+/// Whether a reply carries a book [`book_rows`] can read: a list of
+/// objects where IIFL puts one, or a single row as `result` (BR-03). A
+/// success with no list at all (`{"status": "Ok"}`), a list of anything
+/// but objects, or a list of the wrong type is a book that was not read,
+/// never an empty one; IIFL sends `result: []` for an empty book.
+pub fn book_located(payload: &Value) -> bool {
+    let list = |v: Option<&Value>| match v {
+        Some(Value::Array(rows)) => Some(rows.iter().all(Value::is_object)),
+        _ => None,
+    };
+    let found = match payload {
+        Value::Array(_) => list(Some(payload)),
+        Value::Object(map) => match map.get("result") {
+            Some(Value::Array(_)) => list(map.get("result")),
+            Some(r @ Value::Object(inner)) => [
+                "orders",
+                "trades",
+                "positions",
+                "holdings",
+                "data",
+                "positionList",
+            ]
+            .iter()
+            .find_map(|k| list(inner.get(*k)))
+            .or_else(|| looks_like_row(r).then_some(true)),
+            _ => ["data", "orders", "trades", "positions", "holdings"]
+                .iter()
+                .find_map(|k| list(map.get(*k))),
+        },
+        _ => None,
+    };
+    found == Some(true)
+}
+
 fn status_ok(v: Option<&Value>) -> bool {
     v.and_then(Value::as_str)
         .map(|s| matches!(s.to_ascii_lowercase().as_str(), "success" | "ok"))

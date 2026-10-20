@@ -70,6 +70,14 @@ pub async fn get_funds(core: &GrowwCore, auth: &AuthToken) -> Result<Funds> {
             Category::NonTrading,
         )
         .await?;
+    // BR-03: a success without the cash figure is not a zero balance.
+    if payload.get("clear_cash").is_none_or(Value::is_null) {
+        tracing::warn!("Groww answered the margins without the cash figure");
+        return Err(crate::brokers::common::book_read::unreadable(
+            "groww",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     let (realised, unrealised) = match orders::read_positions(core, auth, true, true).await {
         Ok(read) => {
             if !read.failed.is_empty() {

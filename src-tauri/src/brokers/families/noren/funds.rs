@@ -53,6 +53,14 @@ pub async fn get_funds(b: &NorenBroker, auth: &AuthToken) -> Result<Funds> {
         )
         .await?;
     let limits = check(b.cfg.name, "/Limits", v)?;
+    // BR-03: an Ok without the cash figure is not a zero balance.
+    if limits.get("cash").is_none_or(Value::is_null) {
+        tracing::warn!(broker = b.cfg.id, "Limits answered without the cash figure");
+        return Err(crate::brokers::common::book_read::unreadable(
+            b.cfg.id,
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     let positions = if b.cfg.funds_m2m == FundsM2m::PositionBook {
         match raw_book(b, &s, "/PositionBook").await {
             Ok(p) => p,

@@ -63,6 +63,14 @@ pub async fn get_funds(b: &KotakBroker, auth: &AuthToken) -> Result<Funds> {
             "Kotak did not return your funds. Try again shortly.",
         ));
     }
+    // BR-03: an Ok without the cash figure is not a zero balance.
+    if v.get("CollateralValue").is_none_or(Value::is_null) {
+        tracing::warn!("Kotak answered the limits without its figures");
+        return Err(crate::brokers::common::book_read::unreadable(
+            "kotak",
+            crate::brokers::common::book_read::Book::Funds,
+        ));
+    }
     Ok(funds_from_limits(&v))
 }
 

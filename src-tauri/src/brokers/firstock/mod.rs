@@ -204,6 +204,8 @@ impl FirstockBroker {
                 ));
             }
             return match serde_json::from_slice::<Value>(&bytes) {
+                // A server error is no answer, whatever its body says (BR-03).
+                Ok(_) if status.is_server_error() => Err(http::server_error("firstock", status)),
                 Ok(v) => Ok(v),
                 Err(_) => {
                     tracing::warn!(

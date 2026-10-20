@@ -2,7 +2,9 @@
 
 use super::mapping::{self, product_code, FyersHolding, FyersOrder, FyersPosition, FyersTrade};
 use super::{code_message, fyers_error, is_ok, FyersBroker};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
 use reqwest::Method;
@@ -80,12 +82,29 @@ pub async fn cancel_order(
 
 pub(crate) async fn raw_orders(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<FyersOrder>> {
     let v = b.call(Method::GET, "/api/v3/orders", auth, None).await?;
-    Ok(mapping::rows(&v, "orderBook"))
+    mapping::rows(&v, "orderBook", Book::Orders)
 }
 
 pub(crate) async fn raw_positions(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<FyersPosition>> {
+    positions_read(b, auth, || book_read::unreadable("fyers", Book::Positions)).await
+}
+
+/// BR-03: net positions for a decision to trade (smart-order sizing, close
+/// all). A book that was not read refuses with the web's position-read
+/// sentence: no order is sent against a position OpenAlgo could not see.
+async fn strict_positions(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<FyersPosition>> {
+    positions_read(b, auth, || unread("Fyers")).await
+}
+
+/// The net positions; every row must carry `netQty` (BR-03).
+async fn positions_read(
+    b: &FyersBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<FyersPosition>> {
     let v = b.call(Method::GET, "/api/v3/positions", auth, None).await?;
-    Ok(mapping::rows(&v, "netPositions"))
+    let rows = book_read::list(&v, "netPositions", &unread)?;
+    book_read::positions(rows, &["netQty"], unread)
 }
 
 /// web `cancel_all_orders_api`: cancel orders whose Fyers status is 4
@@ -125,7 +144,7 @@ pub async fn get_open_position(
         .br_symbol(symbol, exchange.as_str())
         .unwrap_or_else(|| symbol.to_string());
     let want = product_code(product);
-    Ok(raw_positions(b, auth)
+    Ok(strict_positions(b, auth)
         .await?
         .into_iter()
         .find(|p| p.symbol == br && p.product_type == want)
@@ -137,7 +156,7 @@ pub async fn get_open_position(
 /// The open positions are read first so the result names what was squared
 /// off (Fyers returns no order ids for an exit-all).
 pub async fn close_all_positions(b: &FyersBroker, auth: &AuthToken) -> Result<CloseAllResult> {
-    let open: Vec<String> = raw_positions(b, auth)
+    let open: Vec<String> = strict_positions(b, auth)
         .await?
         .into_iter()
         .filter(|p| p.net_qty != 0)
@@ -215,7 +234,7 @@ pub async fn get_order_book(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<Ord
 pub async fn get_trade_book(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let v = b.call(Method::GET, "/api/v3/tradebook", auth, None).await?;
     Ok(mapping::map_trades(
-        mapping::rows::<FyersTrade>(&v, "tradeBook"),
+        mapping::rows::<FyersTrade>(&v, "tradeBook", Book::Trades)?,
         b.resolver(),
     ))
 }
@@ -230,7 +249,7 @@ pub async fn get_positions(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<Posi
 pub async fn get_holdings(b: &FyersBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let v = b.call(Method::GET, "/api/v3/holdings", auth, None).await?;
     Ok(mapping::map_holdings(
-        mapping::rows::<FyersHolding>(&v, "holdings"),
+        mapping::rows::<FyersHolding>(&v, "holdings", Book::Holdings)?,
         b.resolver(),
     ))
 }

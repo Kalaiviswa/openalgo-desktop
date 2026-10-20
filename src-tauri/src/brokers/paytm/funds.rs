@@ -68,6 +68,12 @@ pub fn funds_from(s: &FundsSummary, realised: f64, unrealised: f64) -> Funds {
 
 pub async fn get_funds(b: &PaytmBroker, auth: &AuthToken) -> Result<Funds> {
     let env = b.call(Method::GET, FUNDS, auth, None).await?;
+    // BR-03: a success without the funds summary is not a zero balance.
+    crate::brokers::common::book_read::object(
+        env.data.get("funds_summary"),
+        "paytm",
+        crate::brokers::common::book_read::Book::Funds,
+    )?;
     let s = summary(&env.data);
     // P&L is best effort, as on the web: an unreadable position book
     // leaves it at zero.

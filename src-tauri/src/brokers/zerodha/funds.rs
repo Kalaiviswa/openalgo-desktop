@@ -4,6 +4,7 @@
 use super::mapping::{self, KitePosition};
 use super::orders::raw_positions;
 use super::{Body, Category, ZerodhaBroker};
+use crate::brokers::common::book_read;
 use crate::brokers::common::de::f64_lenient;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -110,7 +111,7 @@ struct LtpEntry {
 }
 
 pub async fn get_funds(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Funds> {
-    let margins: KiteMargins = b
+    let data: serde_json::Value = b
         .call(
             Method::GET,
             "/user/margins",
@@ -119,6 +120,10 @@ pub async fn get_funds(b: &ZerodhaBroker, auth: &AuthToken) -> Result<Funds> {
             Category::Other,
         )
         .await?;
+    // BR-03: margins without the equity segment are not a zero balance.
+    let unread = || book_read::unreadable("zerodha", book_read::Book::Funds);
+    book_read::object(data.get("equity"), "zerodha", book_read::Book::Funds)?;
+    let margins: KiteMargins = serde_json::from_value(data).map_err(|_| unread())?;
     let mut funds = funds_from_margins(&margins);
     // P&L is best effort, as on the web: a failure here leaves it at zero.
     match pnl(b, auth).await {

@@ -915,9 +915,11 @@ mod http_round_trip {
             .unwrap()
             .cancelled
             .is_empty());
-        // The Positions page stays lenient.
+        // The Positions page reads a reply without `net` as a book that was
+        // not read, as the web does (its mapping raises on a missing
+        // `net`), never as no positions (BR-03).
         *reply.lock() = serde_json::json!({"status": "success", "data": {"day": []}});
-        assert!(b.get_positions(&auth).await.unwrap().is_empty());
+        assert!(b.get_positions(&auth).await.is_err());
     }
 
     #[tokio::test]

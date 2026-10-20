@@ -50,6 +50,8 @@ struct Fake {
     profile_status: AtomicUsize,
     /// Answer the F&O instrument list with 500.
     fno_down: std::sync::atomic::AtomicBool,
+    /// Answer the derivative position reads with 500.
+    fno_positions_down: std::sync::atomic::AtomicBool,
 }
 
 impl Fake {
@@ -128,6 +130,12 @@ fn route(fake: &Fake, s: &Seen) -> Response {
             Some("EQUITY") => pick("trade_book_equity"),
             _ => pick("trade_book_derivative"),
         },
+        ("GET", "/portfolio/positions")
+            if s.query["segment"] == "derivative"
+                && fake.fno_positions_down.load(Ordering::SeqCst) =>
+        {
+            status(500, json!({"status": "error", "message": "internal error"}))
+        }
         ("GET", "/portfolio/positions") => {
             let k = format!("positions_{}_{}", s.query["segment"], s.query["product"]);
             pick(&k)
@@ -448,6 +456,30 @@ async fn books_are_normalised() {
     assert!(exits
         .iter()
         .any(|e| e.body["txn_type"] == "SELL" && e.body["security_id"] == "3045"));
+}
+
+/// BR-03: with the derivative positions unread, close all exits the equity
+/// position it read and keeps F&O unresolved; it is never complete. The
+/// smart-order read of an F&O symbol is an error, of an equity one is not.
+#[tokio::test]
+async fn close_all_keeps_an_unread_segment_unresolved() {
+    let (b, fake, auth) = broker().await;
+    fake.fno_positions_down.store(true, Ordering::SeqCst);
+    let r = b.close_all_positions(&auth).await.unwrap();
+    assert_eq!(r.failed.len(), 1, "{:?}", r);
+    assert!(r.failed[0].starts_with("F&O positions"), "{:?}", r);
+    assert_eq!(r.placed.len(), 1, "{:?}", r);
+    let exits = fake.calls("/order");
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].body["security_id"], "3045");
+    assert!(b
+        .get_open_position(&auth, "NIFTY27OCT2625000CE", Exchange::Nfo, Product::Mis)
+        .await
+        .is_err());
+    assert!(b
+        .get_open_position(&auth, "SBIN", Exchange::Nse, Product::Mis)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]

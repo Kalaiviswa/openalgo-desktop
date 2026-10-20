@@ -502,20 +502,19 @@ pub fn funds_from_view(data: &Value) -> Funds {
 // Books (web `mapping/order_data.py`)
 // ---------------------------------------------------------------------------
 
-/// Rows of an envelope: `data` as a list, or `data[key]`.
-pub fn unwrap_rows(payload: &Value, key: &str) -> Vec<Value> {
-    match payload {
-        Value::Array(a) => a.clone(),
-        _ => match payload.get("data") {
-            Some(Value::Array(a)) => a.clone(),
-            Some(Value::Object(o)) => o
-                .get(key)
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-            _ => Vec::new(),
+/// Rows of an envelope: `data` as a list, or `data[key]`. BR-03: `None`
+/// when neither is a list: a book that was not read, never an empty one
+/// (HDFC Sky sends `data: []` for an empty book).
+pub fn unwrap_rows(payload: &Value, key: &str) -> Option<Vec<Value>> {
+    let list = match payload {
+        Value::Array(_) => payload,
+        _ => match payload.get("data")? {
+            a @ Value::Array(_) => a,
+            Value::Object(o) => o.get(key)?,
+            _ => return None,
         },
-    }
+    };
+    list.as_array().cloned()
 }
 
 fn oa_symbol(symbols: &SymbolResolver, brsymbol: &str, exchange: &str) -> String {

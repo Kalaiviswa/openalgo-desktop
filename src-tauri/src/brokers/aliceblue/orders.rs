@@ -5,6 +5,8 @@
 
 use super::mapping::{self, s};
 use super::{broker_error, status_ok, text, AliceBlueBroker};
+use crate::brokers::common::book_read;
+use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, OrderStatus, PriceType, Product};
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -83,6 +85,10 @@ pub fn means_empty(book: Book, message: &str) -> bool {
     }
 }
 
+fn unreadable() -> AppError {
+    AppError::Broker("AliceBlue could not return the book. Try again shortly.".into())
+}
+
 /// Rows of a book, or empty when AliceBlue says there are none.
 pub async fn read_book(
     b: &AliceBlueBroker,
@@ -90,20 +96,26 @@ pub async fn read_book(
     path: &str,
     book: Book,
 ) -> Result<Vec<Value>> {
-    let (_, v) = b.call(Method::GET, path, auth, None, true).await?;
+    let (status, v) = b.call(Method::GET, path, auth, None, true).await?;
+    if status.is_server_error() {
+        return Err(http::server_error("aliceblue", status));
+    }
     if status_ok(&v) {
+        // BR-03: an `Ok` without its rows (or with rows of another type) is
+        // a book that was not read, for every reader; a position whose
+        // `netQuantity` cannot be read is not flat.
         return match v.get("result") {
-            Some(Value::Array(rows)) => Ok(rows.clone()),
-            Some(Value::Null) => Ok(Vec::new()),
-            // A strict read (smart order, cancel all, close all) does not
-            // take an `Ok` without its rows as an empty book.
-            _ if matches!(book, Book::OrdersStrict | Book::PositionsStrict) => {
-                tracing::warn!("AliceBlue answered Ok without the book's rows");
-                Err(AppError::Broker(
-                    "AliceBlue could not return the book. Try again shortly.".into(),
-                ))
+            Some(Value::Array(rows)) => {
+                if matches!(book, Book::Positions | Book::PositionsStrict) {
+                    book_read::require_quantities(rows, &["netQuantity"], unreadable)?;
+                }
+                Ok(rows.clone())
             }
-            _ => Ok(Vec::new()),
+            Some(Value::Null) => Ok(Vec::new()),
+            _ => {
+                tracing::warn!("AliceBlue answered Ok without the book's rows");
+                Err(unreadable())
+            }
         };
     }
     let msg = text(v.get("message"));

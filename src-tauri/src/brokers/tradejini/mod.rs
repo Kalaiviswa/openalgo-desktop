@@ -174,6 +174,9 @@ impl TradejiniBroker {
             return Err(session_expired());
         }
         let (_, v): (_, Value) = http::read_json("tradejini", resp).await?;
+        if status.is_server_error() {
+            return Err(http::server_error("tradejini", status));
+        }
         match v.get("s").and_then(Value::as_str) {
             Some("ok") | Some("no-data") => Ok(v),
             _ => {

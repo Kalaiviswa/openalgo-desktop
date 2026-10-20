@@ -207,6 +207,7 @@ fn expiry_formats() {
 fn order_book_rows() {
     let r = master();
     let rows: Vec<Order> = rows(&json(fixture!("orders.json")))
+        .unwrap()
         .iter()
         .map(|o| order_row(o, &r))
         .collect();
@@ -272,6 +273,7 @@ fn status_table() {
 fn trade_book_rows() {
     let r = master();
     let t: Vec<Trade> = rows(&json(fixture!("trades.json")))
+        .unwrap()
         .iter()
         .map(|x| trade_row(x, &r))
         .collect();
@@ -291,6 +293,7 @@ fn trade_book_rows() {
 fn position_rows() {
     let r = master();
     let p: Vec<Position> = rows(&json(fixture!("positions.json")))
+        .unwrap()
         .iter()
         .map(|x| position_row(x, &r))
         .collect();
@@ -311,7 +314,7 @@ fn position_rows() {
 #[test]
 fn open_position_refuses_an_unreadable_book() {
     let r = master();
-    let book = rows(&json(fixture!("positions.json")));
+    let book = rows(&json(fixture!("positions.json"))).unwrap();
     assert_eq!(
         open_qty(&book, "NIFTY27OCT2625000CE", "NFO", &r).unwrap(),
         -75
@@ -337,13 +340,14 @@ fn open_position_refuses_an_unreadable_book() {
         assert!(open_qty(&b, "NIFTY27OCT2625000CE", "NFO", &r).is_err());
     }
 
-    // Numeric text reads, a fraction truncates as `int(float())` does, and a
-    // missing quantity is flat.
+    // Numeric text reads, and a fraction truncates as `int(float())` does.
+    // A missing quantity is an unknown position, never flat (BR-03).
     let mut b = book.clone();
     b[1]["netQty"] = Value::String("-75.9".into());
     assert_eq!(open_qty(&b, "NIFTY27OCT2625000CE", "NFO", &r).unwrap(), -75);
     b[1].as_object_mut().unwrap().remove("netQty");
-    assert_eq!(open_qty(&b, "NIFTY27OCT2625000CE", "NFO", &r).unwrap(), 0);
+    let e = open_qty(&b, "NIFTY27OCT2625000CE", "NFO", &r).unwrap_err();
+    assert_eq!(e.client_message(), POSITION_UNREAD);
 }
 
 #[test]
@@ -395,7 +399,12 @@ fn envelope_errors() {
         Some("Order not found")
     );
     assert_eq!(envelope_error(&json(r#"{"s":"error"}"#)), None);
-    assert!(rows(&json(r#"{"s":"no-data","msg":"No Data Available"}"#)).is_empty());
+    assert_eq!(
+        rows(&json(r#"{"s":"no-data","msg":"No Data Available"}"#)),
+        Some(Vec::new())
+    );
+    // BR-03: an ok without its list is not an empty book.
+    assert_eq!(rows(&json(r#"{"s":"ok"}"#)), None);
 }
 
 // ---------------------------------------------------------------------------

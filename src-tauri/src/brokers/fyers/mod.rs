@@ -294,6 +294,9 @@ impl FyersBroker {
         body: Option<&Value>,
     ) -> Result<Value> {
         let (status, v) = self.raw_in(op, method, path_and_query, auth, body).await?;
+        if status.is_server_error() {
+            return Err(http::server_error("fyers", status));
+        }
         if is_ok(&v) {
             return Ok(v);
         }

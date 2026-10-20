@@ -166,16 +166,17 @@ pub fn modify_body(m: &ResolvedModify) -> Value {
 }
 
 /// The rows of a book envelope (`orders` / `trades` / `positions` /
-/// `data`), or the body itself when it is a list.
-pub fn rows<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+/// `data`), or the body itself when it is a list. BR-03: `None` when there
+/// is no list: a book that was not read, never an empty one (Definedge
+/// sends `positions: []` for an empty book).
+pub fn rows<'a>(v: &'a Value, key: &str) -> Option<&'a [Value]> {
     if let Some(a) = v.as_array() {
-        return a;
+        return Some(a);
     }
     v.get(key)
         .or_else(|| v.get("data"))
         .and_then(Value::as_array)
         .map(Vec::as_slice)
-        .unwrap_or(&[])
 }
 
 fn clamp_i32(v: i64) -> i32 {

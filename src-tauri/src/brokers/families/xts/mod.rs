@@ -299,6 +299,9 @@ impl XtsBroker {
 
     /// Envelope check shared by both APIs.
     pub(crate) fn check(&self, status: reqwest::StatusCode, v: Value, path: &str) -> Result<Value> {
+        if status.is_server_error() {
+            return Err(http::server_error(self.cfg.id, status));
+        }
         if v.get("type").and_then(Value::as_str) == Some("success") {
             return Ok(v);
         }

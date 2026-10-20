@@ -2,7 +2,10 @@
 
 use super::mapping::{self, DhanHolding, DhanOrder, DhanPosition, DhanTrade};
 use super::{session_expired, Category, DhanBroker, DhanSession};
+use crate::brokers::common::book_read::{self, Book};
+use crate::brokers::common::http;
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::types::*;
 use crate::brokers::Broker;
 use crate::error::{AppError, Result};
@@ -139,10 +142,15 @@ async fn get_rows<T: serde::de::DeserializeOwned>(
     b: &DhanBroker,
     s: &DhanSession,
     path: &str,
+    quantities: &[&str],
+    unread: impl Fn() -> AppError,
 ) -> Result<Vec<T>> {
     let (status, v) = b
         .send(Method::GET, path, s, None, None, Category::Trade)
         .await?;
+    if status.is_server_error() {
+        return Err(http::server_error("dhan", status));
+    }
     if let Some(e) = super::dhan_error(&v) {
         tracing::warn!(status = status.as_u16(), "Dhan refused {}", path);
         return Err(e);
@@ -150,17 +158,30 @@ async fn get_rows<T: serde::de::DeserializeOwned>(
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         return Err(session_expired());
     }
-    mapping::rows(v)
+    mapping::rows(v, quantities, unread)
+}
+
+fn unreadable(book: Book) -> impl Fn() -> AppError {
+    move || book_read::unreadable("dhan", book)
 }
 
 pub(crate) async fn raw_orders(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<DhanOrder>> {
     let s = DhanSession::parse(auth)?;
-    get_rows(b, &s, "/v2/orders").await
+    get_rows(b, &s, "/v2/orders", &[], unreadable(Book::Orders)).await
 }
 
 pub(crate) async fn raw_positions(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<DhanPosition>> {
+    positions_read(b, auth, unreadable(Book::Positions)).await
+}
+
+/// The position book; every row must carry `netQty` (BR-03).
+async fn positions_read(
+    b: &DhanBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<DhanPosition>> {
     let s = DhanSession::parse(auth)?;
-    get_rows(b, &s, "/v2/positions").await
+    get_rows(b, &s, "/v2/positions", &["netQty"], unread).await
 }
 
 pub async fn get_order_book(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<Order>> {
@@ -172,7 +193,7 @@ pub async fn get_order_book(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<Orde
 
 pub async fn get_trade_book(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<Trade>> {
     let s = DhanSession::parse(auth)?;
-    let rows: Vec<DhanTrade> = get_rows(b, &s, "/v2/trades").await?;
+    let rows: Vec<DhanTrade> = get_rows(b, &s, "/v2/trades", &[], unreadable(Book::Trades)).await?;
     Ok(mapping::map_trades(rows, b.resolver()))
 }
 
@@ -218,14 +239,19 @@ pub async fn get_holdings(b: &DhanBroker, auth: &AuthToken) -> Result<Vec<Holdin
     let (status, v) = b
         .send(Method::GET, "/v2/holdings", &s, None, None, Category::Trade)
         .await?;
+    // Dhan answers no holdings with its "no holdings" error code on a 500
+    // (recorded); any other server error is no answer (BR-03).
     if mapping::is_no_holdings(&v) {
         return Ok(Vec::new());
+    }
+    if status.is_server_error() {
+        return Err(http::server_error("dhan", status));
     }
     if let Some(e) = super::dhan_error(&v) {
         tracing::warn!(status = status.as_u16(), "Dhan refused holdings");
         return Err(e);
     }
-    let rows: Vec<DhanHolding> = mapping::rows(v)?;
+    let rows: Vec<DhanHolding> = mapping::rows(v, &[], unreadable(Book::Holdings))?;
     let mut keys: Vec<QuoteKey> = rows
         .iter()
         .map(|h| {
@@ -270,7 +296,7 @@ pub async fn get_open_position(
     let row = b.resolver().by_symbol(ex, symbol);
     let segment = mapping::exchange_segment(ex).unwrap_or("");
     let want_product = mapping::product_type(product);
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Dhan")).await? {
         if p.exchange_segment != segment || p.product_type != want_product {
             continue;
         }
@@ -290,7 +316,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &DhanBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in positions_read(b, auth, || unread("Dhan")).await? {
         if p.net_qty == 0 {
             continue;
         }

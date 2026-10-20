@@ -2,8 +2,10 @@
 
 use super::mapping::{self, AngelOrder, AngelPortfolio, AngelPosition, AngelTrade};
 use super::{angel_error, session_expired, AngelBroker, Category};
+use crate::brokers::common::book_read::{self, Book};
 use crate::brokers::common::de::string_lenient;
 use crate::brokers::common::mapping::{Exchange, Product};
+use crate::brokers::common::position_read::unread;
 use crate::brokers::common::redact::url_safe_error;
 use crate::brokers::types::*;
 use crate::error::{AppError, Result};
@@ -280,11 +282,25 @@ pub(crate) async fn raw_orders(b: &AngelBroker, auth: &AuthToken) -> Result<Vec<
 }
 
 pub(crate) async fn raw_positions(b: &AngelBroker, auth: &AuthToken) -> Result<Vec<AngelPosition>> {
-    Ok(
-        b.call::<Vec<AngelPosition>>(Method::GET, POSITIONS_PATH, auth, None, Category::Other)
-            .await?
-            .unwrap_or_default(),
-    )
+    net_positions(b, auth, || book_read::unreadable("angel", Book::Positions)).await
+}
+
+/// The position book, read with `unread` when it cannot be (BR-03): Angel
+/// answers no positions with `data: null` (the web reads that as flat), and
+/// any other list must be a list whose every row carries `netqty`.
+async fn net_positions(
+    b: &AngelBroker,
+    auth: &AuthToken,
+    unread: impl Fn() -> AppError,
+) -> Result<Vec<AngelPosition>> {
+    let data = b
+        .call::<Value>(Method::GET, POSITIONS_PATH, auth, None, Category::Other)
+        .await?;
+    match data {
+        None => Ok(Vec::new()),
+        Some(Value::Array(rows)) => book_read::positions(&rows, &["netqty"], unread),
+        Some(_) => Err(unread()),
+    }
 }
 
 /// web `cancel_all_orders_api`: cancel rows whose raw status is `open` or
@@ -322,7 +338,7 @@ pub async fn get_open_position(
         .br_symbol(symbol, ex)
         .unwrap_or_else(|| symbol.to_string());
     let producttype = mapping::map_product_type(product.as_str());
-    Ok(raw_positions(b, auth)
+    Ok(net_positions(b, auth, || unread("Angel One"))
         .await?
         .into_iter()
         .find(|p| p.tradingsymbol == br && p.exchange == ex && p.producttype == producttype)
@@ -335,7 +351,7 @@ pub async fn get_open_position(
 pub async fn close_all_positions(b: &AngelBroker, auth: &AuthToken) -> Result<CloseAllResult> {
     let symbols = b.resolver().clone();
     let mut result = CloseAllResult::default();
-    for p in raw_positions(b, auth).await? {
+    for p in net_positions(b, auth, || unread("Angel One")).await? {
         if p.netqty == 0 {
             continue;
         }

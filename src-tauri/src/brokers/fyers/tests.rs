@@ -234,7 +234,8 @@ fn order_book_is_normalised_to_openalgo() {
 }
 
 fn rows_of<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Vec<T> {
-    super::mapping::rows(v, key)
+    let book = crate::brokers::common::book_read::Book::Orders;
+    super::mapping::rows(v, key, book).unwrap()
 }
 
 #[test]

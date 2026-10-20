@@ -239,6 +239,7 @@ fn order_book_rows() {
     let s = symbols();
     let body = v(fixture!("order_book.json"));
     let orders: Vec<Order> = rows(&body, "orders")
+        .unwrap()
         .iter()
         .map(|o| map_order(o, &s))
         .collect();
@@ -269,6 +270,7 @@ fn order_book_rows() {
     assert_eq!(orders[4].symbol, "CRUDEOIL20OCT25FUT");
     // cancel-all picks the broker statuses the web treats as cancellable.
     let ids: Vec<String> = rows(&body, "orders")
+        .unwrap()
         .iter()
         .filter(|o| is_cancellable(o))
         .map(order_id)
@@ -281,6 +283,7 @@ fn trade_book_rows() {
     let s = symbols();
     let body = v(fixture!("trade_book.json"));
     let t: Vec<Trade> = rows(&body, "trades")
+        .unwrap()
         .iter()
         .map(|x| map_trade(x, &s))
         .collect();
@@ -302,6 +305,7 @@ fn position_rows() {
     let s = symbols();
     let body = v(fixture!("positions.json"));
     let p: Vec<Position> = rows(&body, "positions")
+        .unwrap()
         .iter()
         .map(|x| map_position(x, &s))
         .collect();
@@ -322,7 +326,7 @@ fn position_rows() {
 fn holdings_rows() {
     let s = symbols();
     let body = v(fixture!("holdings.json"));
-    let h = map_holdings(rows(&body, "holdings"), &s);
+    let h = map_holdings(rows(&body, "holdings").unwrap(), &s);
     assert_eq!(h.len(), 1, "zero-quantity holdings are skipped");
     assert_eq!(h[0].symbol, "INFY");
     assert_eq!(h[0].exchange, "NSE");
