@@ -68,7 +68,14 @@ pub struct StopOutcome {
     pub error: Option<String>,
     pub exits: Vec<Value>,
     pub run_stopped: Option<bool>,
+    /// The run or its strategy could not be read, so nothing was attempted
+    /// (SM-04): an error to answer as such, never "not active" or "not
+    /// found".
+    pub read_failed: bool,
 }
+
+/// What a trader reads when a stop or a close could not read its own run.
+pub const STOP_READ_FAILED: &str = "The strategy records could not be read just now, so nothing was closed and no exit order was placed. The run is still open and managed. Try again; if it keeps happening, restart the app.";
 
 impl StopOutcome {
     fn err(error: impl Into<String>) -> Self {
@@ -79,13 +86,33 @@ impl StopOutcome {
         }
     }
 
+    /// A read of the run or its strategy that failed: logged with its
+    /// cause, and answered as an error (SM-04).
+    fn read_failed(what: std::fmt::Arguments<'_>, e: crate::error::AppError) -> Self {
+        tracing::error!("Could not read {}: {}", what, e);
+        Self {
+            read_failed: true,
+            ..Self::err(STOP_READ_FAILED)
+        }
+    }
+
+    /// The HTTP status a refused stop or close answers with: 500 when its
+    /// own records could not be read, else 409.
+    pub fn error_status(&self) -> u16 {
+        if self.read_failed {
+            500
+        } else {
+            409
+        }
+    }
+
     fn pending(error: impl Into<String>, exits: Vec<Value>) -> Self {
         Self {
             ok: false,
             stop_pending: true,
             error: Some(error.into()),
             exits,
-            run_stopped: None,
+            ..Default::default()
         }
     }
 

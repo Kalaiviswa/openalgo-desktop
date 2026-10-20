@@ -241,9 +241,10 @@ async fn stop_current(
     }
     let r = ctx.strategy.stop_run(run_id, user, "manual").await;
     if !r.ok {
+        let code = StatusCode::from_u16(r.error_status()).unwrap_or(StatusCode::CONFLICT);
         return failure(
             r.error.unwrap_or_else(|| "Could not stop the run".into()),
-            StatusCode::CONFLICT,
+            code,
             json!({"stop_pending": r.stop_pending, "exits": r.exits}),
         );
     }
@@ -355,9 +356,10 @@ pub async fn close_leg(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
     let leg_id = data["leg_id"].as_i64().unwrap_or(0);
     let r = ctx.strategy.close_leg(run_id, leg_id, &user).await;
     if !r.ok {
+        let code = StatusCode::from_u16(r.error_status()).unwrap_or(StatusCode::CONFLICT);
         return failure(
             r.error.unwrap_or_else(|| "Could not close that leg".into()),
-            StatusCode::CONFLICT,
+            code,
             Value::Null,
         );
     }

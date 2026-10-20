@@ -3,7 +3,7 @@
 //! run is flat.
 
 use super::{ev, StopOutcome, StrategyModule, STATE_UNAVAILABLE};
-use crate::strategy::store::ORDER_KINDS;
+use crate::strategy::store::{RunRow, StrategyRow, ORDER_KINDS};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 
@@ -35,17 +35,12 @@ impl StrategyModule {
     }
 
     async fn stop_run_inner(&self, run_id: i64, user_id: &str, reason: &str) -> StopOutcome {
-        let Ok(Some(run_row)) = self.store.get_run(run_id) else {
-            return StopOutcome::err("Run is not active");
+        let (run_row, strategy) = match self.active_run(run_id, user_id) {
+            Ok(r) => r,
+            Err(refused) => return refused,
         };
-        if run_row.stopped_at.is_some() {
-            return StopOutcome::err("Run is not active");
-        }
         let strategy_id = run_row.strategy_id;
         let mode = self.mode_of(&run_row.mode);
-        let Ok(Some(strategy)) = self.store.get_strategy(strategy_id, user_id) else {
-            return StopOutcome::err("Strategy not found");
-        };
 
         // Durable before every broker call.
         let reason = match self
@@ -119,6 +114,26 @@ impl StrategyModule {
             .await
     }
 
+    /// The open run and its strategy, which a stop or a close acts on. A
+    /// run that has ended answers "not active" and a strategy that is not
+    /// the user's "not found"; a read that failed is an error (SM-04), so a
+    /// stop is never told that a run it could not read is not running.
+    fn active_run(&self, run_id: i64, user_id: &str) -> Result<(RunRow, StrategyRow), StopOutcome> {
+        let run = match self.store.get_run(run_id) {
+            Ok(Some(r)) if r.stopped_at.is_none() => r,
+            Ok(_) => return Err(StopOutcome::err("Run is not active")),
+            Err(e) => return Err(StopOutcome::read_failed(format_args!("run {}", run_id), e)),
+        };
+        match self.store.get_strategy(run.strategy_id, user_id) {
+            Ok(Some(strategy)) => Ok((run, strategy)),
+            Ok(None) => Err(StopOutcome::err("Strategy not found")),
+            Err(e) => Err(StopOutcome::read_failed(
+                format_args!("strategy {} of run {}", run.strategy_id, run_id),
+                e,
+            )),
+        }
+    }
+
     /// Records the stop request durably (the stored reason wins), marks the
     /// run stopping and announces it. A request that cannot be saved
     /// places no exit (`Err`: the stop's answer).
@@ -138,7 +153,7 @@ impl StrategyModule {
                         .into(),
                 ),
                 exits: vec![],
-                run_stopped: None,
+                ..Default::default()
             });
         }
         let reason = self
@@ -322,17 +337,12 @@ impl StrategyModule {
     /// Exit one leg; the run continues with the rest. Never triggers
     /// trail-to-entry: an operator's close is an override, not a signal.
     pub async fn close_leg(&self, run_id: i64, leg_id: i64, user_id: &str) -> StopOutcome {
-        let Ok(Some(run_row)) = self.store.get_run(run_id) else {
-            return StopOutcome::err("Run is not active");
+        let (run_row, strategy) = match self.active_run(run_id, user_id) {
+            Ok(r) => r,
+            Err(refused) => return refused,
         };
-        if run_row.stopped_at.is_some() {
-            return StopOutcome::err("Run is not active");
-        }
         let strategy_id = run_row.strategy_id;
         let mode = self.mode_of(&run_row.mode);
-        let Ok(Some(strategy)) = self.store.get_strategy(strategy_id, user_id) else {
-            return StopOutcome::err("Strategy not found");
-        };
         if let Err(e) = self.gateway.authorised(mode) {
             return StopOutcome::err(e);
         }
@@ -358,7 +368,7 @@ impl StrategyModule {
                         .into(),
                 ),
                 exits,
-                run_stopped: None,
+                ..Default::default()
             };
         }
         // Non-empty is not success: a refused exit is still a held position.
@@ -374,7 +384,7 @@ impl StrategyModule {
                 stop_pending: false,
                 error: Some(format!("Exit refused: {}", errors)),
                 exits,
-                run_stopped: None,
+                ..Default::default()
             };
         }
         self.emit(

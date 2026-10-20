@@ -441,6 +441,121 @@ async fn an_unreadable_strategy_is_an_error_not_not_found() {
     assert_ne!(b["message"], "Strategy not found");
 }
 
+fn restore_table(a: &App, table: &str) {
+    a.ctx
+        .sqlite
+        .conn()
+        .unwrap()
+        .execute_batch(&format!(
+            "ALTER TABLE {table}_unreadable RENAME TO {table};"
+        ))
+        .unwrap();
+}
+
+/// The stop and leg-close requests of the page and of `/api/v1`, each
+/// answered 500 with `status: error` and never as "not active" or "not
+/// found"; the page's carry the trader's text.
+async fn stop_and_close_are_unavailable(a: &App, sid: i64) {
+    use openalgo_desktop_lib::strategy::engine::STOP_READ_FAILED;
+    for path in [
+        format!("/strategy/api/strategies/{}/stop", sid),
+        format!("/strategy/api/strategies/{}/legs/1/close", sid),
+    ] {
+        let (s, b) = a.post(&path, json!({})).await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}: {}", path, b);
+        assert_eq!(b["status"], "error");
+        assert_ne!(b["message"], "Run is not active", "{}", path);
+        assert_ne!(b["message"], "Strategy not found", "{}", path);
+        if b["message"] != STOP_READ_FAILED {
+            // The strategy itself unreadable: the route answers first (SM-04).
+            assert!(b["message"].as_str().unwrap().contains("could not be read"));
+        }
+    }
+    for (route, body) in [
+        ("/api/v1/strategy/stop", json!({"strategy_id": sid})),
+        (
+            "/api/v1/strategy/close_leg",
+            json!({"strategy_id": sid, "leg_id": 1}),
+        ),
+    ] {
+        let (s, b) = a.api(route, body).await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}: {}", route, b);
+        assert_eq!(b["status"], "error");
+        assert_ne!(b["message"], "Run is not active", "{}", route);
+        assert_ne!(b["message"], "Strategy not found", "{}", route);
+    }
+}
+
+/// SM-04 follow-up (re-audit NEW-TR-06): a stop or a leg close that cannot
+/// read its own run, or its strategy, answers an error (500, logged), never
+/// "Run is not active" or "Strategy not found", through the page and
+/// `/api/v1` alike. Nothing is closed: no exit order is written, and the run
+/// stays open and managed.
+#[tokio::test]
+async fn a_stop_that_cannot_read_its_run_is_an_error_not_not_active() {
+    let a = app();
+    let (_, b) = a.post("/strategy/api/strategies", create_body()).await;
+    let sid = b["data"]["id"].as_i64().unwrap();
+    let (s, b) = a
+        .post(
+            &format!("/strategy/api/strategies/{}/start", sid),
+            json!({"mode": "sandbox"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", b);
+    let run = b["run_id"].as_i64().unwrap();
+    let orders = a.ctx.strategy.store.list_orders(run).unwrap().len();
+    for table in ["sm_strategy_run", "sm_strategy"] {
+        break_table(&a, table);
+        stop_and_close_are_unavailable(&a, sid).await;
+        restore_table(&a, table);
+    }
+    // Nothing was closed: no exit order, the run still open and managed.
+    assert_eq!(a.ctx.strategy.store.list_orders(run).unwrap().len(), orders);
+    let open = a.ctx.strategy.store.get_run(run).unwrap().unwrap();
+    assert!(open.stopped_at.is_none() && open.stop_requested_at.is_none());
+    assert!(
+        a.ctx.strategy.state.snapshot(run).is_some(),
+        "still managed"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_that_cannot_read_its_strategy_is_an_error_not_not_found() {
+    use openalgo_desktop_lib::strategy::engine::STOP_READ_FAILED;
+    let a = app();
+    let (row, _) = a
+        .ctx
+        .strategy
+        .store
+        .create_strategy(USER, &config("Read", json!([short_call_leg()]), json!({})))
+        .unwrap();
+    let r = a
+        .ctx
+        .strategy
+        .start_run(row.id, USER, "sandbox", "manual", None)
+        .await;
+    assert!(r.ok, "{:?}", r);
+    let run = r.run_id.unwrap();
+    break_table(&a, "sm_strategy");
+    let stop = a.ctx.strategy.stop_run(run, USER, "manual").await;
+    assert!(stop.read_failed, "{:?}", stop);
+    assert_eq!(stop.error.as_deref(), Some(STOP_READ_FAILED));
+    assert_eq!(stop.error_status(), 500);
+    let close = a.ctx.strategy.close_leg(run, 1, USER).await;
+    assert!(close.read_failed, "{:?}", close);
+    assert_eq!(close.error.as_deref(), Some(STOP_READ_FAILED));
+    restore_table(&a, "sm_strategy");
+    assert!(
+        a.ctx.strategy.state.snapshot(run).is_some(),
+        "still managed"
+    );
+    // A strategy that is not the user's is still "not found", a 409.
+    let other = a.ctx.strategy.stop_run(run, "someone-else", "manual").await;
+    assert_eq!(other.error.as_deref(), Some("Strategy not found"));
+    assert_eq!(other.error_status(), 409);
+}
+
 // ------------------------------------------------- SM-03, SM-05
 
 #[tokio::test]
