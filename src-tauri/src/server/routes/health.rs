@@ -129,19 +129,16 @@ pub async fn check(State(ctx): Ctx) -> Response {
 /// `reason`, its own readings unchanged.
 pub async fn current(State(ctx): Ctx) -> Response {
     let c = ctx.clone();
-    let r = tokio::task::spawn_blocking(move || match health::latest_sample(&c) {
-        Ok(Some(m)) => Ok(Some(m)),
-        Ok(None) => health::sample_once(&c).map(Some),
-        Err(e) => Err(e),
-    })
-    .await;
+    let r = tokio::task::spawn_blocking(move || health::current_sample(&c)).await;
     match r {
-        Ok(Ok(Some(m))) => {
+        Ok(Ok((m, growth))) => {
             let o = health::overall_of(&m, ctx.now());
             let mut v = with_freshness(health::current_json(&m), &o);
+            v["database"]["growth"] = growth;
             v["order_facts"] = health::order_facts_json(&ctx);
             v["records"] = crate::services::record_loss::json(&ctx);
             v["strategy_ticks"] = crate::services::strategy_ticks::json(&ctx);
+            v["market_data"] = crate::services::feed_losses::json(&ctx);
             if health::order_facts_failing(&ctx) {
                 v["overall_status"] = json!("fail");
             } else if o.status == "unknown" {
@@ -149,10 +146,6 @@ pub async fn current(State(ctx): Ctx) -> Response {
             }
             ok(v)
         }
-        Ok(Ok(None)) => json_response(
-            StatusCode::NOT_FOUND,
-            json!({"error": "No metrics available"}),
-        ),
         Ok(Err(e)) => failed(
             "Health metrics",
             e,

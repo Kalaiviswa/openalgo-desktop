@@ -40,6 +40,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Error as WsError;
 
+mod losses;
+pub use losses::{Reader, SinceConnect};
+
 /// Capacity of the event fan-out channel.
 pub const TICK_CHANNEL_CAP: usize = 4096;
 
@@ -114,6 +117,9 @@ pub struct FeedStats {
     /// after `epoch`, plus one; 0 before the first (DIA-01 diagnostics).
     last_event: AtomicU64,
     epoch: Instant,
+    /// What the feed's readers skipped, and the counts at the current
+    /// connection's start (NEW-REL-05).
+    losses: losses::Losses,
 }
 
 impl Default for FeedStats {
@@ -125,16 +131,37 @@ impl Default for FeedStats {
             events: AtomicU64::new(0),
             last_event: AtomicU64::new(0),
             epoch: Instant::now(),
+            losses: losses::Losses::default(),
         }
     }
 }
 
 impl FeedStats {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+    }
+
     fn mark_event(&self) {
         self.events.fetch_add(1, Ordering::Relaxed);
-        let ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
         self.last_event
-            .store(ms.saturating_add(1), Ordering::Relaxed);
+            .store(self.now_ms().saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// A reader of this feed fell behind and skipped `n` events.
+    pub fn note_skipped(&self, reader: Reader, n: u64) {
+        self.losses.note(reader, n);
+    }
+
+    fn mark_connected(&self) {
+        self.losses
+            .connected(self.events.load(Ordering::Relaxed), self.now_ms());
+    }
+
+    /// Events received and skipped by each reader since the current (or
+    /// last) connection began.
+    pub fn since_connect(&self) -> SinceConnect {
+        self.losses
+            .since_connect(self.events.load(Ordering::Relaxed), self.now_ms())
     }
 
     /// How long ago the last tick, depth or order update arrived; None
@@ -633,6 +660,7 @@ impl Supervisor {
         if !self.resubscribe(write).await {
             return false;
         }
+        self.stats.mark_connected();
         self.status.send_replace(FeedStatus::Connected {
             broker: broker.to_string(),
         });

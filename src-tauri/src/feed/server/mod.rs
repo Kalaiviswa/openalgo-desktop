@@ -16,7 +16,7 @@
 use super::auth::FeedAuth;
 use super::orders::order_update_frame;
 use super::registry::{Registry, RegistryStats};
-use super::source::{InstrumentKey, MarketDataSource, MarketUpdate, Mode};
+use super::source::{ClientLosses, InstrumentKey, MarketDataSource, MarketUpdate, Mode};
 use crate::events::OrderUpdate;
 use conn::serve_conn;
 use std::collections::HashMap;
@@ -344,6 +344,8 @@ struct Shared {
     /// Loopback connections still in the handshake (this computer or the
     /// tunnel, not yet told apart); capped by both pools together.
     pending_loopback: AtomicUsize,
+    /// What the clients were not sent, for health (the source's counts).
+    losses: Arc<ClientLosses>,
 }
 
 /// A running feed server.
@@ -423,6 +425,7 @@ port in Server Settings.",
     };
     let addr = listener.local_addr().unwrap_or(addr);
     let updates = deps.source.updates();
+    let losses = deps.source.client_losses().unwrap_or_default();
     let shared = Arc::new(Shared {
         registry: Registry::new(deps.source, cfg.max_subscriptions_per_client),
         auth: deps.auth,
@@ -433,6 +436,7 @@ port in Server Settings.",
         local: AtomicUsize::new(0),
         pending_loopback: AtomicUsize::new(0),
         per_address: parking_lot::Mutex::new(HashMap::new()),
+        losses,
         cfg,
     });
     let token = CancellationToken::new();
@@ -592,8 +596,10 @@ async fn credentials_moved(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -
 async fn market_loop(shared: Arc<Shared>, mut rx: broadcast::Receiver<Arc<MarketUpdate>>) {
     let throttle = shared.cfg.throttle;
     let mut lagged: u64 = 0;
+    let losses = shared.losses.clone();
     let mut note_lag = |n: u64| {
         lagged += n;
+        losses.lagged.fetch_add(n, Ordering::Relaxed);
         tracing::warn!(
             "Market data feed fell behind the broker stream; skipped {} updates ({} total)",
             n,

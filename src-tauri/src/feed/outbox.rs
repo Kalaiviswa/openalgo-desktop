@@ -10,9 +10,11 @@
 //!   backlog), so this lane can hold at most one frame per subscription.
 //!   `market_cap` is a second fence: past it the oldest key is dropped.
 
+use super::source::ClientLosses;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// Market-data slot key: interned instrument id and mode number.
@@ -44,6 +46,8 @@ pub struct Outbox {
     market_cap: usize,
     coalesced: AtomicU64,
     dropped: AtomicU64,
+    /// The server's totals across clients, which outlive this one.
+    totals: Option<Arc<ClientLosses>>,
 }
 
 impl Outbox {
@@ -64,7 +68,15 @@ impl Outbox {
             market_cap: market_cap.max(1),
             coalesced: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            totals: None,
         }
+    }
+
+    /// Count this client's coalesced and dropped frames in the server's
+    /// totals too.
+    pub fn with_totals(mut self, totals: Arc<ClientLosses>) -> Self {
+        self.totals = Some(totals);
+        self
     }
 
     /// Queue a control frame. Returns `false` (and flags overflow) when the
@@ -107,6 +119,9 @@ impl Outbox {
             }
             if s.market.insert(key, frame).is_some() {
                 self.coalesced.fetch_add(1, Ordering::Relaxed);
+                if let Some(t) = &self.totals {
+                    t.coalesced.fetch_add(1, Ordering::Relaxed);
+                }
                 return;
             }
             s.order.push_back(key);
@@ -114,6 +129,9 @@ impl Outbox {
                 if let Some(old) = s.order.pop_front() {
                     s.market.remove(&old);
                     self.dropped.fetch_add(1, Ordering::Relaxed);
+                    if let Some(t) = &self.totals {
+                        t.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }

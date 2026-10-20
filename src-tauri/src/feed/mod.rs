@@ -29,7 +29,7 @@ pub mod server;
 pub mod source;
 
 pub use server::{start, FeedConfig, FeedDeps, FeedHandle, StartError};
-pub use source::{FakeSource, InstrumentKey, MarketDataSource, MarketUpdate, Mode};
+pub use source::{ClientLosses, FakeSource, InstrumentKey, MarketDataSource, MarketUpdate, Mode};
 
 use crate::state::{AppState, ServerStatus};
 use parking_lot::{Mutex, RwLock};

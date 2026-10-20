@@ -25,7 +25,13 @@ pub(super) fn checks(ctx: &AppState) -> Vec<Value> {
 
 fn check(name: &str, feed: &WebSocketManager, market: bool) -> Value {
     let instruments = market.then(|| feed.instrument_count());
-    let (ok, detail) = describe(&feed.status(), feed.stats().last_event_age(), instruments);
+    let (ok, mut detail) = describe(&feed.status(), feed.stats().last_event_age(), instruments);
+    // What arrived since it connected and what its readers skipped
+    // (NEW-REL-05).
+    let since = crate::services::feed_losses::sentence(&feed.stats().since_connect());
+    if ok && !since.is_empty() {
+        detail = format!("{} {}", detail, since);
+    }
     json!({"name": name, "ok": ok, "ms": Value::Null, "detail": detail})
 }
 

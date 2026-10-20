@@ -129,36 +129,6 @@ fn worst<'a>(statuses: &[&'a str]) -> &'a str {
     }
 }
 
-/// Every database in the data folder: the name health and the system
-/// report show, and its file. The sandbox's is as large as the trader's
-/// analyzer history and grows with it, so it is shown with the others.
-pub const DATABASES: &[(&str, &str)] = &[
-    ("openalgo", "openalgo.db"),
-    ("logs", "logs.db"),
-    ("sandbox", "sandbox.db"),
-    ("historify", "historify.duckdb"),
-];
-
-/// File sizes of each database, MB (including WAL).
-pub fn db_sizes(ctx: &AppState) -> Map<String, Value> {
-    let mut m = Map::new();
-    for &(name, file) in DATABASES {
-        let base = ctx.data_dir.join(file);
-        let mut bytes = 0u64;
-        for suffix in ["", "-wal", "-shm"] {
-            let p = std::path::PathBuf::from(format!("{}{}", base.display(), suffix));
-            if let Ok(md) = std::fs::metadata(&p) {
-                bytes += md.len();
-            }
-        }
-        m.insert(
-            name.into(),
-            json!((bytes as f64 / (1024.0 * 1024.0) * 100.0).round() / 100.0),
-        );
-    }
-    m
-}
-
 /// Take one sample, store it, raise or resolve alerts. Blocking: run it on a
 /// blocking thread.
 pub fn sample_once(ctx: &AppState) -> Result<HealthRow> {
@@ -220,7 +190,7 @@ pub fn sample_once(ctx: &AppState) -> Result<HealthRow> {
             "vms_mb": p.vms_mb.unwrap_or(0.0),
             "memory_percent": p.memory_percent.unwrap_or(0.0),
         }])),
-        db_sizes: Some(Value::Object(db_sizes(ctx))),
+        db_sizes: Some(Value::Object(crate::services::store_sizes::sizes(ctx))),
         overall_status: Some(overall.into()),
         ..Default::default()
     };
@@ -727,6 +697,17 @@ pub fn clamp_hours(raw: Option<&str>) -> i64 {
 
 pub fn since(now: DateTime<Utc>, hours: i64) -> DateTime<Utc> {
     now - Duration::hours(hours)
+}
+
+/// The newest sample, taken now when there is none yet, and the data
+/// folder's growth up to it (`store_sizes::growth_json`). Blocking.
+pub fn current_sample(ctx: &AppState) -> Result<(HealthRow, Value)> {
+    let m = match latest_sample(ctx)? {
+        Some(m) => m,
+        None => sample_once(ctx)?,
+    };
+    let growth = crate::services::store_sizes::growth_json(ctx, &m);
+    Ok((m, growth))
 }
 
 /// The newest health sample, if any.

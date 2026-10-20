@@ -43,6 +43,9 @@ pub trait PriceSource: Send + Sync {
     fn ticks(&self) -> broadcast::Receiver<MarketEvent>;
     /// Last prices over REST, for symbols the stream has gone quiet on.
     async fn poll(&self, keys: &[Key]) -> Vec<(Key, f64)>;
+    /// The reader fell behind the ticks and skipped `n` (health counts it
+    /// against the feed, NEW-REL-05).
+    fn note_skipped(&self, _n: u64) {}
 }
 
 #[derive(Default)]
@@ -196,13 +199,14 @@ pub fn start(module: &Arc<StrategyModule>) {
     let Some(source) = module.feed.source.clone() else {
         return;
     };
-    spawn_reader(module, source.ticks());
+    spawn_reader(module, source.clone());
     spawn_evaluator(module, source);
 }
 
 /// Read every tick as it comes and queue the held ones; nothing here
 /// waits on an evaluation.
-fn spawn_reader(module: &Arc<StrategyModule>, mut rx: broadcast::Receiver<MarketEvent>) {
+fn spawn_reader(module: &Arc<StrategyModule>, source: Arc<dyn PriceSource>) {
+    let mut rx = source.ticks();
     let weak = Arc::downgrade(module);
     let token = module.shutdown_token();
     module.spawn(async move {
@@ -221,7 +225,10 @@ fn spawn_reader(module: &Arc<StrategyModule>, mut rx: broadcast::Receiver<Market
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => m.feed.pending.note_lagged(n),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    m.feed.pending.note_lagged(n);
+                    source.note_skipped(n);
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -283,11 +290,17 @@ impl StrategyModule {
 pub struct FeedPrices {
     ctx: Weak<AppState>,
     feed: Arc<crate::websocket::WebSocketManager>,
+    /// Who reads these prices, for the feed's skip counts.
+    reader: crate::websocket::Reader,
 }
 
 impl FeedPrices {
-    pub fn new(ctx: Weak<AppState>, feed: Arc<crate::websocket::WebSocketManager>) -> Self {
-        Self { ctx, feed }
+    pub fn new(
+        ctx: Weak<AppState>,
+        feed: Arc<crate::websocket::WebSocketManager>,
+        reader: crate::websocket::Reader,
+    ) -> Self {
+        Self { ctx, feed, reader }
     }
 
     fn subscriptions(&self, keys: &[Key]) -> Vec<FeedSubscription> {
@@ -332,6 +345,10 @@ impl PriceSource for FeedPrices {
 
     fn ticks(&self) -> broadcast::Receiver<MarketEvent> {
         self.feed.subscribe_ticks()
+    }
+
+    fn note_skipped(&self, n: u64) {
+        self.feed.stats().note_skipped(self.reader, n);
     }
 
     async fn poll(&self, keys: &[Key]) -> Vec<(Key, f64)> {

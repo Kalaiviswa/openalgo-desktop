@@ -722,6 +722,8 @@ impl OrderGateway for FakeGateway {
 struct FakePrices {
     tx: broadcast::Sender<MarketEvent>,
     held: Mutex<Vec<Key>>,
+    /// Ticks the monitor said it skipped (NEW-REL-05).
+    skipped: std::sync::atomic::AtomicU64,
 }
 
 impl FakePrices {
@@ -729,6 +731,7 @@ impl FakePrices {
         Arc::new(Self {
             tx: broadcast::channel(64).0,
             held: Mutex::new(vec![]),
+            skipped: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
@@ -746,6 +749,10 @@ impl PriceSource for FakePrices {
     }
     async fn poll(&self, _: &[Key]) -> Vec<(Key, f64)> {
         vec![]
+    }
+    fn note_skipped(&self, n: u64) {
+        self.skipped
+            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1724,6 +1731,37 @@ async fn a_removed_stop_takes_its_held_exits_with_it() {
     m.store.delete_sl(OPT, "NFO", "MIS", Some("live")).unwrap();
     m.mon.sync().await;
     assert!(m.mon.held_orders().is_empty());
+}
+
+/// NEW-REL-05: ticks the monitor's reader skipped because it fell behind
+/// the feed are reported to its price source, which counts them against the
+/// broker feed for health. They were a debug log line only.
+#[tokio::test]
+async fn ticks_the_monitor_skips_are_counted_against_the_feed() {
+    let m = monitor();
+    m.mon.start();
+    // The monitor's task has not run yet on this test's one thread, so 200
+    // ticks into the 64-tick channel leave its reader 136 behind.
+    for i in 0..200 {
+        let tick = openalgo_desktop_lib::brokers::common::streaming::NormalizedTick {
+            symbol: OPT.into(),
+            exchange: "NFO".into(),
+            ltp: 100.0 + i as f64 * 0.05,
+            ..Default::default()
+        };
+        let _ = m.prices.tx.send(Arc::new(
+            openalgo_desktop_lib::brokers::common::streaming::FeedEvent::Tick(tick),
+        ));
+    }
+    let skipped = || m.prices.skipped.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..200 {
+        if skipped() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(skipped(), 136);
+    m.mon.stop().await;
 }
 
 #[tokio::test]

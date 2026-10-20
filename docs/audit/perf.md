@@ -98,9 +98,9 @@ is checked against the cause before it is called a product miss.
 | Order-socket reconnect to book reconciled | under 5 s | 0.31-0.50 s over 6 drops (each after a connection that lived 31 s): the reconnect backoff's first wait (250-500 ms) plus one order-book pass; a fill made while the socket was down was applied every time. A flapping line (drops 1 s after each reconnect): 0.61, 1.09, 3.13 s | pass |
 | Order-path SQLite wait while Historify imports | p99 under 20 ms | stop save to `openalgo.db`: p99 3.29 ms (max 26.6 ms) while 3 imports of 200,000 rows ran (20,000 rows/s), against p99 1.24 ms without; `/api/v1/placeorder` p99 6.6 ms. Before the IMMEDIATE fix (PR #160, `fix(db)`) the save failed with "database is locked" within 30 s, imports or not | pass (after the fix) |
 | Critical event delivery | zero drops under a 10x burst | 11,000 events (100/s, then 1,000/s for 10 s, then 100/s), every one delivered to the critical-lane probe: no critical drop, panic, closed queue or fact loss; deepest critical queue 36 of 10,000; delivery p99 0.28-0.89 ms; no best-effort entry shed | pass |
-| Market-data drops | counted and shown | a feed client reading one frame every 2 ms missed 84% of 2,000 ticks/s (the feed keeps the latest per symbol, by design); the counts live per connection in memory and vanish with it, and health shows none | miss (reporting) |
+| Market-data drops | counted and shown | a feed client reading one frame every 2 ms missed 84% of 2,000 ticks/s (the feed keeps the latest per symbol, by design). Before the NEW-REL-05 follow-up the counts lived per connection and vanished with it, and health showed none; with it (`pr/health-feed-losses`), `/health/api/current` `market_data` showed the 28,367 folded frames, and each broker feed's updates and per-reader skips since it connected | miss on #160; pass with the follow-up |
 | Disk growth: monitoring tables | bounded | six cycles writing 20% over every cap: every table at its cap after housekeeping; `logs.db` 99 MB after the first cycle, 141 MB after the second, then flat (141,227 to 141,255 KiB) | pass |
-| Disk growth: reported in health | sizes and growth in health | every database's size, the sandbox's included since PR #160 (`fix(health)`); no growth figure | miss (reporting) |
+| Disk growth: reported in health | sizes and growth in health | every database's size, the sandbox's included since PR #160 (`fix(health)`); with the NEW-REL-05 follow-up, `database.growth` adds each store's growth and daily rate over the monitoring window (DuckDB's `.wal` counted) | miss on #160; pass with the follow-up |
 | Memory and descriptors | flat within 5% after warm-up | 15-minute smoke (the harness check; 3-minute warm-up, 12 faults injected, every one handled as expected, no activity or API failure): memory 44,370 to 47,650 KiB (+7.4%), still rising about 15 MB an hour at the end; descriptors 50 to a peak of 53, pool 8, live tasks 45 to 47; data folder +34 MB an hour (the request log at 20 calls a second, until its 100,000-row cap). A 60-minute run (6-minute warm-up, 54 faults, every one as expected, no activity failure): memory 44,530 KiB at the warm-up, 49,138 at minute 30, then 49,922 from minute 50 to 60; the first half after the warm-up grew 4.6 MB, the second 0.8 MB: a plateau about 30 minutes in, so +12.1% over a 6-minute warm-up and +1.6% from minute 30. Live heap allocations (macOS `heap`) grew 0.40 MB from minute 13 to 30 and 0.13 MB from 30 to 45 while the footprint grew 2.8 and 0.7 MB: caches filling and the allocator keeping freed pages, not a line. SQLite's own memory stayed between 1.5 and 6.8 MB. Descriptors 50 to 55 with the pool 4 to 8 (two per connection), live tasks 47 throughout. 35 of about 72,000 `/api/v1` calls did not answer 200 in that run, most likely the harness's own catch-up bursts after a stall tripping the 100-a-second limit; it now paces its calls without bursts and records failures by status, and a 30-minute run with that change had none (27 faults, every one as expected) | harness proven; plateau within the hour; 5% verdict for the maintainer's 8-hour run (48-minute warm-up) |
 
 The strategy module's miss on master: one task read the market-data
@@ -130,17 +130,19 @@ run's memory numbers are not used.
 1. **Strategy tick path**: fixed on `pr/strategy-tick-path` (`cee33a75`,
    trading follow-ups agent); measured above. Once it lands, the nightly
    run holds it.
-2. **Market-data drops shown in health** (observability): a feed-wide count
-   of the frames each 8765 client's outbox coalesced or dropped (kept today
-   per connection and lost when it closes), the bridge's and feed server's
-   "fell behind; skipped N" (log lines only), and the scalping monitor's and
-   sandbox forwarder's `Lagged` skips (debug log only), in a health block
-   with an alert, like the strategy module's new `strategy_ticks`. The
-   benchmarks count the log lines meanwhile (`tests/it/perf/lag_log.rs`).
-3. **Data folder growth in health** (observability, UI): the folder's total
-   and its growth over 24 hours, from the sizes every health sample already
-   stores (`health_metrics.db_sizes`), on the Health page, which today shows
-   no sizes at all.
+2. **Market-data drops shown in health**: done in the NEW-REL-05
+   follow-up (`pr/health-feed-losses`): every reader of a broker feed
+   (strategies, scalping stops, the sandbox, the relay to apps, the order
+   update relay) reports what it skipped; health's `market_data` block
+   shows, per feed since it connected, the updates received and each
+   reader's skips, and what apps on the 8765 feed were not sent (folded,
+   dropped, skipped); Run diagnostics adds the same in a sentence. The
+   Health page itself still shows none of the API's blocks (a UI
+   follow-up).
+3. **Data folder growth in health**: done in the same follow-up:
+   `database.sizes_mb` and `database.growth` (size, growth and daily rate
+   per store and in total over the monitoring window). Also not yet drawn
+   on the Health page.
 4. **Release-build numbers**: every figure here is a debug build; a release
    run of `perf::` on the M1 and the maintainer's Windows laptop would give
    the shipped numbers.
