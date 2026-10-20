@@ -11,5 +11,9 @@
 #
 # Set on 2026-10-10 from CI run 38020543419 at 87d49f9: 84.17% of lines
 # (120,695 of 143,390), less half a point for run-to-run noise.
-# The frontend has its own thresholds, in vitest.config.ts.
-83.67
+# Raised on 2026-10-20 from CI runs 39249242727 (ce5dd006) and 39230596668
+# (aa69fc93) on master: 87.27% of lines (141,161 of 161,748), less half a
+# point. The critical areas have floors of their own in
+# .github/coverage-areas.json; the frontend has its thresholds in
+# vitest.config.ts.
+86.77

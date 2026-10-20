@@ -28,26 +28,25 @@ export default defineConfig({
       // executable helpers (strategy_module.ts, option-chain.ts), and the
       // rest are type-only, which adds nothing to either side of the ratio.
       exclude: ['node_modules/', 'src/test/', '**/*.d.ts', '**/*.config.*'],
-      // Desktop: a ratchet, so CI fails when coverage drops. Set from what
-      // CI itself measured on 2026-10-12 (PR #42, run 38272962752), rounded
-      // down: the totals and directories 1 point under it, the trading
-      // areas 2 points under the lowest of CI's Node 22 run and a Node 24
-      // run. V8's counts move by up to about a point between Node versions
-      // and runs on these small groups (functions on the book pages: 48.55
-      // on Node 22, 47.82 on CI's Node 24), and a floor at the measured
-      // value fails at random. Raise these as coverage rises; never lower
-      // one, and never exclude a file to meet it. The trading areas have
-      // floors of their own, so a drop there cannot hide behind a rise
-      // elsewhere.
+      // Desktop: a ratchet, so CI fails when coverage drops. Raised on
+      // 2026-10-20 from what CI measured on master (run 39249242727 at
+      // ce5dd006: Node 20, 22 and 24 within 0.02 of each other on the
+      // totals) and a local Node 24 run of the same tree, rounded down:
+      // the totals and directories 1 point under the lower measurement,
+      // the trading areas 2 points under it (V8's counts moved by up to
+      // about a point between Node versions on these small groups in
+      // October 2026). Raise these as coverage rises; never lower one, and
+      // never exclude a file to meet it. The trading areas have floors of
+      // their own, so a drop there cannot hide behind a rise elsewhere.
       thresholds: {
-        lines: 54,
-        statements: 53,
-        functions: 48,
-        branches: 48,
-        'src/lib/**': { lines: 82, statements: 78, functions: 82, branches: 72 },
-        'src/stores/**': { lines: 31, statements: 31, functions: 39, branches: 21 },
-        'src/hooks/**': { lines: 72, statements: 70, functions: 70, branches: 58 },
-        'src/types/**': { lines: 92, statements: 90, functions: 92, branches: 83 },
+        lines: 61,
+        statements: 60,
+        functions: 55,
+        branches: 53,
+        'src/lib/**': { lines: 85, statements: 82, functions: 85, branches: 74 },
+        'src/stores/**': { lines: 59, statements: 57, functions: 61, branches: 47 },
+        'src/hooks/**': { lines: 75, statements: 74, functions: 76, branches: 62 },
+        'src/types/**': { lines: 93, statements: 91, functions: 94, branches: 84 },
         // Orders: the book pages, order entry and the terminal's order dock.
         'src/pages/{OrderBook,TradeBook,Positions}.tsx': {
           lines: 51,
@@ -63,15 +62,15 @@ export default defineConfig({
         },
         // Strategies: the strategy module and the strategy builder.
         'src/{pages/strategy/*,api/strategy_module,types/strategy_module,lib/trading/strategy*}.{ts,tsx}':
-          { lines: 55, statements: 54, functions: 45, branches: 43 },
+          { lines: 62, statements: 61, functions: 51, branches: 48 },
         'src/{pages/StrategyBuilder,components/strategy-builder/*,lib/strategyMath,lib/strategyTemplates}.{ts,tsx}':
           { lines: 87, statements: 84, functions: 81, branches: 77 },
         // Scalping and its protection (stop-loss, target, trailing).
         'src/{pages/Scalping,components/scalping/*,hooks/useTrailingSL,lib/scalping*,api/scalping}.{ts,tsx}':
-          { lines: 7, statements: 7, functions: 1, branches: 9 },
+          { lines: 51, statements: 48, functions: 42, branches: 43 },
         // Broker connection pages.
         'src/{pages/BrokerSelect,pages/BrokerTOTP,components/auth/Broker*,stores/brokerStore}.{ts,tsx}':
-          { lines: 58, statements: 58, functions: 69, branches: 56 },
+          { lines: 84, statements: 84, functions: 78, branches: 73 },
       },
     },
     css: true,

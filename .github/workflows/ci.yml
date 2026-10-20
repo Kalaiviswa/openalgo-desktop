@@ -170,6 +170,7 @@ jobs:
         working-directory: src-tauri
         run: cargo llvm-cov nextest --locked --all-targets --no-fail-fast --no-report
       - name: Build coverage reports
+        id: report
         working-directory: src-tauri
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info
@@ -204,6 +205,13 @@ jobs:
           if awk -v c="$current" -v b="$baseline" 'BEGIN { exit !(c >= b + 1) }'; then
             echo "::notice title=Coverage ratchet::Line coverage ${current}% is at least 1 point above the baseline ${baseline}%; raise .github/coverage-baseline.txt"
           fi
+      - name: Coverage floors of the critical areas (.github/coverage-areas.json)
+        # A gate like the ratchet: the order path, sandbox, strategies,
+        # scalping, risk rules, security and the other listed areas each
+        # keep their own line-coverage floor, so a fall there cannot hide
+        # behind a rise elsewhere.
+        if: always() && steps.report.outcome == 'success'
+        run: python3 scripts/ci/coverage_areas.py src-tauri/coverage-summary.json
       - name: Upload lcov
         if: always()
         uses: actions/upload-artifact@v6
@@ -236,6 +244,9 @@ jobs:
       - name: Update manifest tests
         # scripts/ci/updater_manifest.py builds a release's latest.json.
         run: python3 scripts/ci/test_updater_manifest.py
+      - name: Coverage area floor tests
+        # scripts/ci/coverage_areas.py, the rust-coverage job's area gate.
+        run: python3 scripts/ci/test_coverage_areas.py
       - name: Biome (lint, format, import order)
         run: npx biome ci --reporter=github ./src
       - name: Type check

@@ -1,0 +1,23 @@
+{
+  "about": [
+    "Line-coverage floors, in percent, for the critical areas of src-tauri/src, checked by scripts/ci/coverage_areas.py in the rust-coverage job after the total ratchet (.github/coverage-baseline.txt).",
+    "Paths are relative to src-tauri/src: * stays within one path segment, ** spans any number.",
+    "Set on 2026-10-20 from CI's own measurement on master (runs 39249242727 at ce5dd006 and 39230596668 at aa69fc93): the lower of the two, less half a point, rounded down to a tenth.",
+    "Raise a floor when the job's notice says the area is a point above it. Never lower one without a written reason in the commit message, and never exclude code to meet it. A moved folder moves its paths here in the same change."
+  ],
+  "areas": {
+    "Order services (placement, routing, reconciliation)": {"paths": ["services/*order*.rs", "services/order_reconciler/**"], "lines": 90.3},
+    "Order dispatch and OpenScript runner": {"paths": ["trading/**"], "lines": 87.1},
+    "Broker transport and order outcomes": {"paths": ["brokers/common/**"], "lines": 94.6},
+    "Sandbox engine": {"paths": ["sandbox/**"], "lines": 90.4},
+    "Strategy module": {"paths": ["strategy/**"], "lines": 80.1},
+    "Scalping protection": {"paths": ["scalping/**"], "lines": 82.7},
+    "Risk rules": {"paths": ["risk/**"], "lines": 88.6},
+    "Security and keys": {"paths": ["security/**"], "lines": 88.3},
+    "Broker sessions": {"paths": ["session/**"], "lines": 95.7},
+    "Event bus": {"paths": ["events/**"], "lines": 94.0},
+    "Databases": {"paths": ["db/**"], "lines": 92.4},
+    "MCP": {"paths": ["mcp/**"], "lines": 88.8},
+    "Market data feed": {"paths": ["feed/**"], "lines": 90.0}
+  }
+}
