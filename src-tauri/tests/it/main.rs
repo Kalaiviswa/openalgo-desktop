@@ -139,6 +139,7 @@ mod mcp_security;
 mod mcp_subcommand;
 mod mcp_transport;
 mod messaging;
+mod perf;
 mod sandbox_concurrency;
 mod sandbox_contract;
 mod sandbox_engine;
