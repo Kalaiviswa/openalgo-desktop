@@ -267,6 +267,20 @@ unchanged:
   broker and account; dispatch refuses through any other before sending (a
   definite refusal), behind the broker switch guard. A new Live obligation
   records its owner and checks it at dispatch.
+- **An OpenScript order belongs to its destination and its run**
+  (NEW-TR-01/03/04, `services::live_owner::Destination`,
+  `trading/runner/identity.rs`, `store/identity.rs`). Every row records its
+  side, broker and account and the run's incarnation (one
+  `openscript_incarnations` row per start, never reused). A run's ledger is
+  the rows its destination owns: nothing of another broker or account is
+  counted, read, cancelled, reconciled or closed through the session
+  connected now, and a Live row from before accounts were recorded belongs
+  to no run (reported; the trader closes it at the broker). A page hears
+  only its own incarnation's frames. `(incarnation, intent_id)` is unique:
+  a batch sent again is answered from its record before any check and never
+  placed twice, and a batch runs to its end even if the page's request is
+  dropped. On the page a lost or unreadable answer is pending, never a
+  rejection: nothing new is sent and the same batch is asked about again.
 - **A placement has three outcomes, never two** (`brokers/common/outcome`):
   accepted (an order id), refused (provably never sent, or the broker said
   no), uncertain (sent, and no definite answer: a timeout or a dropped

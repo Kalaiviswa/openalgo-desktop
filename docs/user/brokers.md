@@ -217,6 +217,15 @@ orders are not sent there: the strategy or stop says "This was opened on X
 (your client id), but OpenAlgo is signed in to ... now, so the order was not
 sent", stays managed, and acts again once you sign in to that account.
 
+A paused OpenScript strategy keeps what it holds at the account it traded
+through. Started again on another broker or account, it begins with nothing
+there and never counts, cancels or closes the earlier position: its status
+and its Stop answer say "This strategy also holds ... through X (your client
+id), from an earlier run there." Sign in to X and start and Stop it there to
+close that position, or close it at X yourself. A position from before
+OpenAlgo recorded the account an order went through is shown the same way,
+with "Close it at your broker".
+
 Your keys for the broker you leave stay saved, so switching back needs only a
 login, not your keys again. No restart is needed.
 
