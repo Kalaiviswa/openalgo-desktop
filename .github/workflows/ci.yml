@@ -363,8 +363,12 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/install-gitleaks
-      - name: Scan full git history
-        run: gitleaks git --config .github/gitleaks.toml --redact --verbose --exit-code 1 .
+      - name: Scan the full history of the commit under test
+        # Every commit reachable from the checked-out HEAD, back to the first
+        # (fetch-depth 0), and nothing else: gitleaks' default is every ref
+        # the checkout fetched, so another branch's commit failed every pull
+        # request on 2026-10-20. security.yml still scans every branch.
+        run: gitleaks git --config .github/gitleaks.toml --redact --verbose --exit-code 1 --log-opts=HEAD .
 
   # --------------------------------------------------------- Code health
   code-health:
