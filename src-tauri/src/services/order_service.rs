@@ -64,9 +64,19 @@ impl Route {
         analyze_mode(ctx)
     }
 
-    /// Semi-Auto applies to this call (an API-key client in Semi-Auto mode).
-    pub fn semi_auto(&self, ctx: &AppState) -> bool {
-        !self.internal && semi_auto(ctx)
+    /// The answer when this live call is one Semi-Auto refuses an API-key
+    /// client (`refused`), or when the mode cannot be read; `None` when it
+    /// may go ahead. The app's own calls for the trader (`internal`: page
+    /// actions, approved orders, protective exits) are never held by it.
+    pub fn semi_auto_refusal(&self, ctx: &AppState, analyze: bool, refused: &str) -> Option<Reply> {
+        if analyze || self.internal {
+            return None;
+        }
+        match semi_auto(ctx) {
+            Ok(true) => Some(Reply::error(403, refused)),
+            Ok(false) => None,
+            Err(unreadable) => Some(unreadable),
+        }
     }
 }
 
@@ -164,11 +174,19 @@ async fn apply_leverage(h: &BrokerHandle, ctx: &AppState, req: &Value, order: &R
     }
 }
 
-pub fn semi_auto(ctx: &AppState) -> bool {
-    matches!(
-        super::apikey_service::ApiKeyService::order_mode(ctx).as_deref(),
-        Ok("semi_auto")
-    )
+/// What an API-key client reads when the order mode cannot be read.
+pub const ORDER_MODE_UNREADABLE: &str = "OpenAlgo could not read whether your orders wait for approval in the Action Center (Semi-Auto), so nothing was sent. Try again in a moment; if it keeps happening, restart OpenAlgo.";
+
+/// Whether the order mode is Semi-Auto, or the refusal when it cannot be
+/// read: never a default (re-audit NEW-TR-05; the web reads a failure as
+/// Auto and executes).
+pub fn semi_auto(ctx: &AppState) -> Result<bool, Reply> {
+    super::apikey_service::ApiKeyService::order_mode(ctx)
+        .map(|m| m == "semi_auto")
+        .map_err(|e| {
+            tracing::error!("Could not read the order mode: {}", e);
+            Reply::error(500, ORDER_MODE_UNREADABLE)
+        })
 }
 
 /// The web's status for a broker-side failure.
@@ -667,11 +685,11 @@ pub async fn modify_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         orderid: orderid.clone(),
         error_message: reply.message(),
     };
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Modify order operation is not allowed in Semi-Auto mode. Please switch to Auto mode to modify orders.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Modify order operation is not allowed in Semi-Auto mode. Please switch to Auto mode to modify orders.",
+    ) {
         publish(ctx, modify_failed(Mode::Live, safe_request(req), &reply));
         return reply;
     }
@@ -768,11 +786,11 @@ pub async fn cancel_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         publish(ctx, failed(mode_of(analyze), safe_request(req), &reply));
         return reply;
     }
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Cancel order operation is not allowed in Semi-Auto mode. Please switch to Auto mode to cancel orders.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Cancel order operation is not allowed in Semi-Auto mode. Please switch to Auto mode to cancel orders.",
+    ) {
         publish(ctx, failed(Mode::Live, safe_request(req), &reply));
         return reply;
     }
@@ -843,11 +861,11 @@ pub async fn cancel_all_orders(ctx: &AppState, req: &Value, route: Route) -> Rep
         Ok(a) => a,
         Err(r) => return r,
     };
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Cancel all orders operation is not allowed in Semi-Auto mode. Please switch to Auto mode to cancel orders.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Cancel all orders operation is not allowed in Semi-Auto mode. Please switch to Auto mode to cancel orders.",
+    ) {
         publish(
             ctx,
             all_cancelled_event(Mode::Live, safe_request(req), &reply),
@@ -909,11 +927,11 @@ pub async fn close_position(ctx: &AppState, req: &Value, route: Route) -> Reply 
         meta: meta(mode, "closeposition", request, &reply.body),
         message: Some(reply.message()),
     };
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Close position operation is not allowed in Semi-Auto mode. Please switch to Auto mode to close positions.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Close position operation is not allowed in Semi-Auto mode. Please switch to Auto mode to close positions.",
+    ) {
         publish(ctx, closed(Mode::Live, safe_request(req), &reply));
         return reply;
     }

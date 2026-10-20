@@ -37,18 +37,14 @@ pub const IMMEDIATE_EXECUTION_OPERATIONS: &[&str] = &[
 pub const QUEUED_MESSAGE: &str = "Order queued for approval in Action Center";
 
 /// Web `should_route_to_pending`: Semi-Auto mode and a queueable operation.
-/// Any failure to read the mode answers "execute" (the web's default).
-pub fn should_route_to_pending(ctx: &AppState, api_type: &str) -> bool {
+/// A mode that cannot be read is the refusal, never "execute": the web
+/// answers execute, so an order meant to wait for the trader's approval
+/// went straight to the broker (re-audit NEW-TR-05, a deliberate departure).
+pub fn should_route_to_pending(ctx: &AppState, api_type: &str) -> Result<bool, Reply> {
     if IMMEDIATE_EXECUTION_OPERATIONS.contains(&api_type.to_ascii_lowercase().as_str()) {
-        return false;
+        return Ok(false);
     }
-    match super::apikey_service::ApiKeyService::order_mode(ctx) {
-        Ok(m) => m == "semi_auto",
-        Err(e) => {
-            tracing::error!("Could not read the order mode: {}", e);
-            false
-        }
-    }
+    super::order_service::semi_auto(ctx)
 }
 
 /// The owner of the API key (single-user app: the account's username).
@@ -124,12 +120,17 @@ pub fn queue_order(ctx: &AppState, api_type: &str, req: &Value, force_live: bool
     }
 }
 
-/// Queue when Semi-Auto applies; `None` means execute now.
+/// Queue when Semi-Auto applies, or refuse when the mode cannot be read;
+/// `None` means execute now.
 pub fn queue_if_semi_auto(
     ctx: &AppState,
     api_type: &str,
     req: &Value,
     force_live: bool,
 ) -> Option<Reply> {
-    should_route_to_pending(ctx, api_type).then(|| queue_order(ctx, api_type, req, force_live))
+    match should_route_to_pending(ctx, api_type) {
+        Ok(true) => Some(queue_order(ctx, api_type, req, force_live)),
+        Ok(false) => None,
+        Err(refused) => Some(refused),
+    }
 }

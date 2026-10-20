@@ -1005,6 +1005,110 @@ async fn approve_all_and_other_queueable_types() {
         .all(|r| r.broker_status.as_deref() != Some("submitting")));
 }
 
+/// Re-audit NEW-TR-05: Semi-Auto is on and the order mode cannot be read,
+/// while the API key is still verified from its cache. Every queueable
+/// order, and every call Semi-Auto refuses an API client, answers an error
+/// and sends nothing to the broker: the web reads the failure as Auto and
+/// executes, so an order meant to wait for approval went straight out. The
+/// app's own orders for the trader (a protective exit) still go. Readable
+/// again, the same order queues.
+#[tokio::test]
+async fn an_unreadable_order_mode_sends_nothing_for_an_api_client() {
+    use openalgo_desktop_lib::services::order_service::{
+        place_order, Route, ORDER_MODE_UNREADABLE,
+    };
+    let h = H::new(true).await;
+    h.semi_auto();
+    let (s, v) = h.api("/api/v1/funds", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "the key is verified and cached: {}", v);
+    let column = |from: &str, to: &str| {
+        h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute_batch(&format!(
+                "ALTER TABLE api_keys RENAME COLUMN {} TO {}",
+                from, to
+            ))
+            .unwrap()
+    };
+    column("order_mode", "order_mode_unreadable");
+    let leg = json!({"symbol": "SBIN", "exchange": "NSE", "action": "BUY", "quantity": 1,
+        "pricetype": "MARKET", "product": "MIS"});
+    for (path, body) in [
+        ("/api/v1/placeorder", place_body()),
+        (
+            "/api/v1/placesmartorder",
+            json!({"strategy": "t", "symbol": "SBIN", "exchange": "NSE", "action": "BUY",
+                "quantity": 1, "position_size": 1, "pricetype": "MARKET", "product": "MIS"}),
+        ),
+        (
+            "/api/v1/basketorder",
+            json!({"strategy": "t", "orders": [leg]}),
+        ),
+        (
+            "/api/v1/modifyorder",
+            json!({"strategy": "t", "symbol": "SBIN", "exchange": "NSE", "action": "BUY",
+                "orderid": "1", "product": "MIS", "pricetype": "LIMIT", "price": 100,
+                "quantity": 2, "disclosed_quantity": 0, "trigger_price": 0}),
+        ),
+        (
+            "/api/v1/cancelorder",
+            json!({"strategy": "t", "orderid": "1"}),
+        ),
+        ("/api/v1/cancelallorder", json!({"strategy": "t"})),
+        ("/api/v1/closeposition", json!({"strategy": "t"})),
+    ] {
+        let (s, v) = h.api(path, body).await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}: {}", path, v);
+        assert_eq!(v["status"], "error", "{}", path);
+        assert_eq!(v["message"], ORDER_MODE_UNREADABLE, "{}", path);
+    }
+    let broker_calls = h
+        .mock
+        .calls()
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                MockCall::PlaceOrder(_)
+                    | MockCall::ModifyOrder(_)
+                    | MockCall::CancelOrder(_)
+                    | MockCall::CancelAll
+                    | MockCall::CloseAll
+            )
+        })
+        .count();
+    assert_eq!(broker_calls, 0, "nothing reached the broker");
+    let queued = action_center::list(&h.ctx.sqlite.conn().unwrap(), USER, None).unwrap();
+    assert!(queued.is_empty(), "nothing queued as if approved later");
+
+    // A protective exit the app places for the trader is never held by it.
+    let exit = json!({"strategy": "t", "symbol": "SBIN", "exchange": "NSE", "action": "SELL",
+        "quantity": 1, "pricetype": "MARKET", "product": "MIS"});
+    let r = place_order(
+        &h.ctx,
+        &exit,
+        Route {
+            force_live: true,
+            internal: true,
+        },
+    )
+    .await;
+    assert!(r.is_success(), "{:?}", r.body);
+    assert_eq!(h.places(), 1);
+
+    column("order_mode_unreadable", "order_mode");
+    let (s, v) = h.api("/api/v1/placeorder", place_body()).await;
+    assert_eq!(
+        (s, v["mode"].as_str()),
+        (StatusCode::OK, Some("semi_auto")),
+        "{}",
+        v
+    );
+    assert_eq!(h.places(), 1, "queued, not sent");
+}
+
 #[tokio::test]
 async fn auto_mode_executes_immediately() {
     let h = H::new(true).await;

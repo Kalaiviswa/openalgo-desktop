@@ -203,11 +203,11 @@ pub async fn modify_gtt_with(ctx: &AppState, req: &Value, route: Route) -> Reply
         Ok(a) => a,
         Err(r) => return r,
     };
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Modify GTT order is not allowed in Semi-Auto mode. Switch to Auto mode.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Modify GTT order is not allowed in Semi-Auto mode. Switch to Auto mode.",
+    ) {
         publish(
             ctx,
             gtt_event(
@@ -293,11 +293,11 @@ pub async fn cancel_gtt_with(ctx: &AppState, req: &Value, route: Route) -> Reply
     if trigger_id.is_empty() {
         return Reply::error(400, "trigger_id is missing");
     }
-    if !analyze && route.semi_auto(ctx) {
-        let reply = Reply::error(
-            403,
-            "Cancel GTT order is not allowed in Semi-Auto mode. Switch to Auto mode.",
-        );
+    if let Some(reply) = route.semi_auto_refusal(
+        ctx,
+        analyze,
+        "Cancel GTT order is not allowed in Semi-Auto mode. Switch to Auto mode.",
+    ) {
         publish(
             ctx,
             gtt_event(
