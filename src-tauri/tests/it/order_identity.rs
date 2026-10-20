@@ -1395,7 +1395,15 @@ async fn an_unconfirmed_row_from_before_accounts_is_adopted_by_the_book_that_fin
         id
     ));
     *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-9", "BUY", 3, 3, "complete")]));
-    t.h.ctx.reconciler.pass().await;
+    // A book read through Zerodha (AB1234) for any reason finds it.
+    t.h.ctx
+        .trading
+        .runner
+        .reconcile_book(
+            RunMode::Live,
+            &book_of(&t.zerodha, t.h.ctx.now() + chrono::Duration::seconds(10)),
+        )
+        .await;
     assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-9".into()), 3));
     let (broker, account): (String, String) =
         t.h.ctx
@@ -1424,16 +1432,21 @@ async fn an_unconfirmed_row_from_before_accounts_is_never_judged_absent() {
             '2026-10-05T04:30:00+00:00', '2026-10-05T04:30:00+00:00')",
         id
     ));
+    let runner = t.h.ctx.trading.runner.clone();
     for _ in 0..8 {
         t.h.ctx.reconciler.pass().await;
+        runner
+            .reconcile_book(RunMode::Live, &book_of(&t.zerodha, t.h.ctx.now()))
+            .await;
         t.h.clock
             .set(t.h.ctx.now() + chrono::Duration::seconds(120));
     }
-    assert_eq!(t.rows()[0], ("unconfirmed".into(), None, 0));
-    assert!(
-        t.h.ctx.trading.runner.held_orders().is_empty(),
-        "never offered as not placed against this book"
+    assert_eq!(
+        t.rows()[0],
+        ("unconfirmed".into(), None, 0),
+        "never released as absent"
     );
+    assert_eq!(touched(&t.zerodha), 0, "no book is read for it alone");
     let elsewhere = t.status(&id).await["elsewhere"].to_string();
     assert!(
         elsewhere.contains("may have been placed at your broker before this version recorded"),
@@ -1475,7 +1488,11 @@ async fn a_broker_that_names_no_account_is_owned_by_its_saved_keys() {
     runner.pump_once(&id).await;
     assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-1".into()), 3));
 
+    // Other keys saved for the broker end its session; the next login is
+    // made with them.
     save_keys("second-key");
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("zerodha", "");
     assert_eq!(t.buy(&id, run, 2, 1).await["sent"], 0);
     let (s, v) = t.close(&id).await;
     assert_eq!(s, StatusCode::CONFLICT, "{}", v);
@@ -1490,6 +1507,8 @@ async fn a_broker_that_names_no_account_is_owned_by_its_saved_keys() {
     assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3)]));
 
     save_keys("first-key");
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("zerodha", "");
     t.zerodha
         .order_book
         .lock()
@@ -1501,4 +1520,112 @@ async fn a_broker_that_names_no_account_is_owned_by_its_saved_keys() {
     let (s, v) = t.close(&id).await;
     assert_eq!(s, StatusCode::OK, "{}", v);
     assert_eq!(placed(&t.zerodha), pairs(&[("BUY", 3), ("SELL", 3)]));
+}
+
+/// Save `api_key` as the broker's keys.
+fn save_keys(t: &Two, broker: &str, api_key: &str) {
+    use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+    credentials::save(
+        &t.h.ctx.sqlite.conn().unwrap(),
+        &t.h.ctx.security,
+        broker,
+        CredentialUpdate {
+            api_key: Some(api_key.into()),
+            api_secret: Some("secret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+/// The account the session connected now trades through.
+fn account_now(t: &Two) -> String {
+    LiveOwner::of_session(&t.h.ctx).unwrap().account
+}
+
+/// Lead's third review of #165, item 3: the account is worked out once per
+/// session, so keys that cannot be read later (a locked vault, a busy
+/// database) do not change it; a new session whose keys cannot be read
+/// owns nothing, never the placeholder its login named.
+#[tokio::test]
+async fn the_account_is_worked_out_once_and_unreadable_keys_own_nothing() {
+    let t = two_accounts(false).await;
+    save_keys(&t, "zerodha", "kitekey");
+    t.sign_in("zerodha", "");
+    let first = account_now(&t);
+    assert!(first.starts_with("keys:"), "{}", first);
+    t.sql("ALTER TABLE broker_credentials RENAME TO broker_credentials_unreadable;");
+    assert_eq!(account_now(&t), first, "the same session keeps its account");
+    // A new session naming only the API key (a placeholder): unreadable
+    // keys cannot tell, so it owns nothing.
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("zerodha", "kitekey");
+    assert_eq!(account_now(&t), "");
+}
+
+/// Lead's third review of #165, item 4: an XTS login names the market
+/// login's account once market keys are saved, the interactive one before.
+/// The account is told by the interactive keys either way, so saving market
+/// keys later does not make another owner.
+#[tokio::test]
+async fn an_xts_login_is_told_by_its_saved_keys_whichever_login_named_it() {
+    let t = two_accounts(false).await;
+    save_keys(&t, "jainamxts", "interactive-key");
+    t.sign_in("jainamxts", "INTERACTIVE1");
+    let before = account_now(&t);
+    assert!(before.starts_with("keys:"), "{}", before);
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("jainamxts", "MARKET1");
+    assert_eq!(account_now(&t), before);
+}
+
+/// Disclosed limit (lead's third review of #165, item 6): where the broker
+/// names no account, two logins of different accounts made with the same
+/// saved keys are one owner. Other keys are another owner.
+#[tokio::test]
+async fn two_logins_on_the_same_keys_are_one_owner_when_the_broker_names_neither() {
+    let t = two_accounts(false).await;
+    save_keys(&t, "paytm", "one-key-set");
+    t.sign_in("paytm", "");
+    let first = account_now(&t);
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("paytm", "");
+    assert_eq!(account_now(&t), first, "the limit: one key set, one owner");
+    save_keys(&t, "paytm", "another-key-set");
+    t.h.clock.set(t.h.ctx.now() + chrono::Duration::seconds(1));
+    t.sign_in("paytm", "");
+    assert_ne!(account_now(&t), first);
+}
+
+/// Lead's third review of #165, item 5: such a row is listed with the held
+/// orders, and the trader's mark after checking the broker sets it aside.
+#[tokio::test]
+async fn an_unconfirmed_row_from_before_accounts_is_dismissed_by_the_trader() {
+    let t = two_accounts(false).await;
+    let id = t.deploy().await;
+    t.sql(&format!(
+        "INSERT INTO openscript_orders (deployment, mode, intent_id, symbol, exchange, action,
+            quantity, pricetype, product, status, filled_quantity, placed_at, updated_at)
+         VALUES ('{}', 'live', 1, 'SBIN', 'NSE', 'BUY', 3, 'MARKET', 'MIS', 'unconfirmed', 0,
+            '2026-10-05T04:30:00+00:00', '2026-10-05T04:30:00+00:00')",
+        id
+    ));
+    let runner = t.h.ctx.trading.runner.clone();
+    // Listed for the trader, who checks the broker and marks it.
+    let held = runner.held_orders();
+    assert_eq!(held.len(), 1, "{:?}", held);
+    assert!(
+        held[0].message.contains("Check your broker's order book"),
+        "{:?}",
+        held
+    );
+    t.h.ctx
+        .reconciler
+        .confirm_not_placed("openscript", &held[0].id)
+        .await
+        .unwrap();
+    assert_eq!(t.rows()[0].0, "rejected");
+    assert!(runner.held_orders().is_empty());
+    let elsewhere = t.status(&id).await["elsewhere"].to_string();
+    assert!(!elsewhere.contains("may have been placed"), "{}", elsewhere);
 }

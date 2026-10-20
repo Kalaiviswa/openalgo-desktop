@@ -271,6 +271,55 @@ async fn dispatch_refuses_an_a_owned_exit_while_b_is_active() {
     assert_eq!(placed(), entry_only + 1, "the exit went out through AB1234");
 }
 
+/// Lead's third review of #165, P2-2: a run recorded before accounts were
+/// derived from the saved keys carries the broker's placeholder as its
+/// account (Samco answered "samco"). The same broker's session, now told by
+/// its saved keys, still manages it: the stop's exit goes out. Before, the
+/// two different values refused it, with a message no sign-in could meet.
+#[tokio::test]
+async fn a_run_recorded_with_a_placeholder_account_is_still_managed_by_its_brokers_keys() {
+    use openalgo_desktop_lib::brokers::mock::MockCall;
+    use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+    use openalgo_desktop_lib::state::BrokerSession;
+    let a = app();
+    a.ctx.reconciler.stop();
+    let run = live_run(&a).await;
+    let conn = a.ctx.sqlite.conn().unwrap();
+    conn.execute(
+        "UPDATE sm_strategy_run SET broker_account = 'zerodha' WHERE id = ?1",
+        [run],
+    )
+    .unwrap();
+    credentials::save(
+        &conn,
+        &a.ctx.security,
+        "zerodha",
+        CredentialUpdate {
+            api_key: Some("kitekey".into()),
+            api_secret: Some("kitesecret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(conn);
+    let own = a.ctx.get_broker_session().unwrap();
+    a.ctx.set_broker_session(Some(BrokerSession {
+        user_id: String::new(),
+        ..own
+    }));
+    let placed = || {
+        a.mock
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, MockCall::PlaceOrder(_)))
+            .count()
+    };
+    let before = placed();
+    let out = a.ctx.strategy.stop_run(run, USER, "manual").await;
+    assert!(out.ok, "{:?}", out);
+    assert_eq!(placed(), before + 1, "the exit went out");
+}
+
 /// Row 1: a running Live strategy refuses the switch, named, until it is
 /// stopped.
 #[tokio::test]

@@ -2591,6 +2591,51 @@ mod approvals {
         assert_eq!(placed(&mock), vec![("BUY".to_string(), 3)]);
     }
 
+    /// Lead's third review of #165, P2-2: an order queued in the Action
+    /// Center before accounts were derived from the saved keys carries the
+    /// broker's placeholder as its account. Approved under the same broker's
+    /// session, now told by its saved keys, it goes out. Before, the two
+    /// values refused it.
+    #[tokio::test]
+    async fn an_order_queued_with_a_placeholder_account_is_approved_through_its_brokers_keys() {
+        use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+        let (t, mock) = setup_live(true).await;
+        let id = t.deploy("SBIN").await;
+        t.start(&id).await;
+        t.buy(&id, 1, 3).await;
+        let (_, _, _, pending) = held_row(&t);
+        let conn = t.h.ctx.sqlite.conn().unwrap();
+        conn.execute_batch("UPDATE pending_orders SET broker_account = 'zerodha'")
+            .unwrap();
+        credentials::save(
+            &conn,
+            &t.h.ctx.security,
+            "zerodha",
+            CredentialUpdate {
+                api_key: Some("kitekey".into()),
+                api_secret: Some("kitesecret".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let own = t.h.ctx.get_broker_session().unwrap();
+        t.h.ctx
+            .set_broker_session(Some(openalgo_desktop_lib::state::BrokerSession {
+                user_id: String::new(),
+                ..own
+            }));
+        let (s, v) = t
+            .call(
+                Method::POST,
+                &format!("/action-center/approve/{}", pending.unwrap()),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        assert_eq!(placed(&mock), vec![("BUY".to_string(), 3)]);
+    }
+
     /// LOG-07: an order a Live run queued in the Action Center while
     /// Zerodha (AB1234) was connected is not sent when it is approved under
     /// another account's session: refused, nothing sent, and the run's row

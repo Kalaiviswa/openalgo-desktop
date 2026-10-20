@@ -101,7 +101,13 @@ impl LiveOwner {
     pub fn refusal(&self, active: Option<&LiveOwner>) -> Option<String> {
         let active = active?;
         let other_broker = self.knows_broker() && !self.broker.eq_ignore_ascii_case(&active.broker);
-        if !other_broker && self.same_account(active) {
+        // A session told by its saved keys means the broker names no real
+        // account: what an obligation recorded before accounts were derived
+        // so (the broker's name, a key value) was a placeholder of it.
+        let keys = crate::services::session_account::KEYS_ACCOUNT;
+        let recorded_placeholder =
+            active.account.starts_with(keys) && !self.account.starts_with(keys);
+        if !other_broker && (self.same_account(active) || recorded_placeholder) {
             return None;
         }
         Some(self.not_sent_through(active))
@@ -295,5 +301,21 @@ mod tests {
             "strict"
         );
         assert_eq!(sandbox.refusal(Some(&angel)), None);
+    }
+
+    /// Lead's third review, P2-2: an obligation recorded before accounts
+    /// were derived from the saved keys carries the broker's placeholder
+    /// ("samco"). The same broker's session told by its keys still manages
+    /// it; other keys, or another broker, do not.
+    #[test]
+    fn a_recorded_placeholder_matches_its_brokers_keys_identity() {
+        let old = LiveOwner::new("samco", "samco");
+        let keys = LiveOwner::new("samco", "keys:new-set");
+        assert_eq!(old.refusal(Some(&keys)), None);
+        let by_old_keys = LiveOwner::new("samco", "keys:old-set");
+        assert!(by_old_keys.refusal(Some(&keys)).is_some(), "other keys");
+        assert!(old
+            .refusal(Some(&LiveOwner::new("angel", "keys:new-set")))
+            .is_some());
     }
 }

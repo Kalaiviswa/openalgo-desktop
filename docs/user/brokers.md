@@ -224,7 +224,18 @@ and its Stop answer say "This strategy also holds ... through X (your client
 id), from an earlier run there." Sign in to X and start and Stop it there to
 close that position, or close it at X yourself. A position from before
 OpenAlgo recorded the account an order went through is shown the same way,
-with "Close it at your broker".
+with "Close it at your broker". An order from that time whose outcome is not
+known is listed with the held orders on the Health page: check your broker's
+order book, then mark it there.
+
+Some brokers do not name the account when you log in: Paytm Money never
+does, and Fyers, Upstox, Zerodha and a few others leave it out when their
+reply does not carry it. For those, OpenAlgo knows the account by the keys
+you saved for that broker ("Paytm Money (saved keys ...)"). Two logins to
+different accounts made with the same saved keys are therefore one account
+to OpenAlgo: keep one set of keys per account. Saving other keys for the
+broker makes it another account, so what a strategy opened with the old
+keys is not managed with the new ones.
 
 Your keys for the broker you leave stay saved, so switching back needs only a
 login, not your keys again. No restart is needed.

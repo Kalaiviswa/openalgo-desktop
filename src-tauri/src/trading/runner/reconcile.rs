@@ -33,7 +33,7 @@
 //!
 //! [`AbsenceTracker::judge`]: crate::services::order_reconciler::AbsenceTracker::judge
 
-use super::{orders, store, RunEntry, Runner};
+use super::{orders, store, unowned, RunEntry, Runner};
 use crate::services::live_owner::{Destination, LiveOwner};
 use crate::services::order_reconciler::{
     held_message, Absence, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
@@ -121,7 +121,8 @@ impl Runner {
             RunMode::Sandbox => None,
         };
         match self.unconfirmed_here(mode, session.as_ref()) {
-            Ok(rows) => !rows.is_empty(),
+            // An unowned row alone never needs a book read (`unowned`).
+            Ok(rows) => rows.iter().any(|o| !unowned::is_unowned_live(o)),
             Err(e) => {
                 // Unknown: read the book rather than leave a row unsettled.
                 tracing::warn!("Could not check for unconfirmed OpenScript orders: {}", e);
@@ -192,10 +193,9 @@ impl Runner {
                 }
                 // A row from before accounts were recorded may belong to
                 // another broker's session: its absence from this book says
-                // nothing. Found, it is adopted; absent, it stays unconfirmed
-                // and is told as such (`elsewhere`), never released or held
-                // for a "not placed" judged against this book.
-                Found::Absent if o.mode == "live" && o.broker.is_empty() => unresolved += 1,
+                // nothing (`unowned`). Found, it is adopted; absent, it is
+                // neither judged nor counted here.
+                Found::Absent if unowned::is_unowned_live(o) => {}
                 Found::Absent => {
                     let id = o.id.to_string();
                     match self.absence.judge(&key, &id, mode, book, &u).await {
@@ -370,16 +370,19 @@ impl Runner {
     }
 
     /// Write a line to the run's log, or the app log when it is not running.
-    fn tell(&self, o: &store::OrderRow, line: &str) {
+    pub(super) fn tell(&self, o: &store::OrderRow, line: &str) {
         match self.running_entry(&o.deployment, &o.mode) {
             Some(e) => self.write_log(&e.info, &[line.to_string()]),
             None => tracing::warn!("OpenScript {}: {}", o.deployment, line),
         }
     }
 
-    /// Live orders held for the trader (P0-3).
+    /// Live orders held for the trader (P0-3), and the unowned ones for the
+    /// trader to check at their broker (`unowned`).
     pub fn held_orders(&self) -> Vec<HeldOrder> {
-        self.absence.held()
+        let mut held = self.absence.held();
+        held.extend(self.unowned_held());
+        held
     }
 
     /// The trader checked the broker's books: the held order `id` (the
@@ -388,7 +391,7 @@ impl Runner {
     /// order book and trade book once more.
     pub async fn confirm_not_placed(&self, id: &str) -> Result<bool, String> {
         let Some(key) = self.absence.held_key(id) else {
-            return Ok(false);
+            return self.dismiss_unowned(id);
         };
         let Ok(row_id) = id.parse::<i64>() else {
             return Ok(false);

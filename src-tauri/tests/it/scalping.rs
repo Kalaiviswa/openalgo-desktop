@@ -2336,6 +2336,59 @@ async fn a_live_stop_is_not_exited_through_another_accounts_session() {
     h.shutdown().await;
 }
 
+/// Lead's third review of #165, P2-2: a Live stop recorded before accounts
+/// were derived from the saved keys carries the broker's placeholder as its
+/// account. The same broker's session, now told by its saved keys, still
+/// exits it. Before, the two values refused the exit and the stop stayed
+/// with nothing able to act on it.
+#[tokio::test]
+async fn a_stop_recorded_with_a_placeholder_account_is_exited_through_its_brokers_keys() {
+    use openalgo_desktop_lib::db::sqlite::credentials::{self, CredentialUpdate};
+    let h = H::new().await;
+    *h.mock.positions.lock() = Some(Ok(vec![pos(OPT, "NFO", "MIS", 65)]));
+    let (cookie, csrf) = session(&h);
+    let body = json!({"symbol": OPT, "exchange": "NFO", "product": "MIS", "side": "BUY",
+        "quantity": 65, "entry_price": 100, "initial_sl": 95});
+    let (s, v) = call(
+        &h,
+        req(
+            Method::POST,
+            "/scalping/api/sl",
+            Some(body),
+            Some(&cookie),
+            Some(&csrf),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let conn = h.ctx.sqlite.conn().unwrap();
+    conn.execute_batch("UPDATE scalping_sl_state SET broker_account = 'zerodha'")
+        .unwrap();
+    credentials::save(
+        &conn,
+        &h.ctx.security,
+        "zerodha",
+        CredentialUpdate {
+            api_key: Some("kitekey".into()),
+            api_secret: Some("kitesecret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(conn);
+    h.ctx.scalping.monitor.sync().await;
+    let own = h.ctx.get_broker_session().unwrap();
+    h.ctx
+        .set_broker_session(Some(openalgo_desktop_lib::state::BrokerSession {
+            user_id: String::new(),
+            ..own
+        }));
+    h.ctx.scalping.monitor.process_tick(OPT, "NFO", 90.0).await;
+    h.ctx.scalping.monitor.wait_idle().await;
+    assert_eq!(placed(&h), vec![("SELL".to_string(), 65)]);
+    h.shutdown().await;
+}
+
 /// Re-audit NEW-TR-07: the saved stops cannot be read. The list answers an
 /// error the page shows as out of date, never a successful empty list (which
 /// reads as "nothing is protected"), and the running monitor keeps the stop

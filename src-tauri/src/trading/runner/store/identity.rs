@@ -14,7 +14,7 @@
 //! deployment that its destination owns, so a run started on another broker
 //! or account never reads, reconciles, cancels or closes them.
 //!
-//! Migration `093_openscript_identity` adds both. Rows written before it
+//! Migration `094_openscript_identity` adds both. Rows written before it
 //! keep no incarnation, so no page hears of them again. Sandbox rows are
 //! recorded as sandbox, which is all a sandbox destination is. Live rows
 //! keep a blank broker: nothing recorded says which account placed them
@@ -31,7 +31,7 @@ use crate::services::live_owner::{Destination, LiveOwner, SANDBOX_BROKER};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
-/// Migration `093_openscript_identity`. Checks before altering; idempotent.
+/// Migration `094_openscript_identity`. Checks before altering; idempotent.
 pub fn migrate_identity(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS openscript_incarnations (
@@ -150,13 +150,13 @@ mod tests {
         c
     }
 
-    /// Migration 093 on a populated store: rows written before it keep
+    /// Migration 094 on a populated store: rows written before it keep
     /// their facts, sandbox rows are recorded as sandbox, Live rows keep no
     /// broker (nothing says which account placed them), and two legacy rows
     /// with the same intent number do not stop the unique key, which holds
     /// from here on. Running it again changes nothing.
     #[test]
-    fn migration_093_records_what_is_known_and_keys_new_intents() {
+    fn migration_094_records_what_is_known_and_keys_new_intents() {
         let c = legacy_schema();
         for (mode, intent) in [("live", 1), ("live", 1), ("sandbox", 1)] {
             c.execute(

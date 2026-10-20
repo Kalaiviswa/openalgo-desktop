@@ -54,7 +54,7 @@ fn working_line(at: &Destination, o: &store::OrderRow) -> String {
         // Never settled as absent from a book of a session it may not
         // belong to (`reconcile`): only the trader can.
         format!(
-            "An order of this strategy may have been placed at your broker before this version recorded which account it went through: {}. Its outcome is not known. Check your broker's order book.",
+            "An order of this strategy may have been placed at your broker before this version recorded which account it went through: {}. Its outcome is not known. Check your broker's order book, then mark it on the Health page.",
             what
         )
     } else if at.is_known() {

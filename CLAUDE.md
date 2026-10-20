@@ -273,8 +273,10 @@ unchanged:
   side, broker and account and the run's incarnation (one
   `openscript_incarnations` row per start, never reused). A run's ledger is
   the rows its destination owns, and a destination needs the broker and
-  the account: a session whose account is not known owns nothing and
-  starts no Live run. Nothing of another broker or account is counted,
+  the account (`services::session_account`: the broker's account id, or,
+  where its login names none or only a placeholder, a keyed identity of
+  the saved keys, worked out once per session): a session whose account
+  cannot be told owns nothing and starts no Live run. Nothing of another broker or account is counted,
   read, cancelled, reconciled or closed through the session connected now
   (the reconciler judges by the session that read the book); a Live row
   from before accounts were recorded belongs to no run. What a deployment
