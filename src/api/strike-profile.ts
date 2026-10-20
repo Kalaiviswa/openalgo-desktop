@@ -68,7 +68,7 @@ export const strikeProfileApi = {
 
   getExpiries: async (exchange: string, underlying: string) => {
     const response = await webClient.get<{ status: 'success' | 'error'; expiries: string[] }>(
-      `/search/api/expiries?exchange=${encodeURIComponent(exchange)}&underlying=${encodeURIComponent(underlying)}&instrumenttype=options`
+      `/search/api/expiries?exchange=${exchange}&underlying=${underlying}&instrumenttype=options`
     )
     return response.data
   },

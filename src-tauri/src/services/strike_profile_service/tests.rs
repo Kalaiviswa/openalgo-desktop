@@ -404,33 +404,48 @@ async fn no_underlying_price_is_refused() {
     );
 }
 
-/// Desktop (TOOLS-04, TOOLS-13): a leg whose open interest did not come
-/// back is not totalled as zero. On the first expiry the request is
-/// refused like the GEX dashboard's; on a later one that expiry is marked
-/// unavailable and the rest of the grid stands. The web totals the gap as
-/// zero.
+/// Web parity (maintainer 2026-10-20: Strike Profile matches the web
+/// exactly): a put whose quote did not come back reaches the service as the
+/// chain fills it, zero open interest and no Greeks, and is totalled as
+/// zero, on the first expiry and on a later one alike; neither is refused
+/// nor marked unavailable. The call is web test_units_and_signs's: 0.001 x
+/// 1e6 x 20000^2 x 1% / 1e7 = 400 crore of GEX and 0.5 x 1e6 x 20000 / 1e7
+/// = 1000 crore of DEX, and with the put at zero those are the strike's
+/// totals.
 #[tokio::test]
-async fn open_interest_gaps_are_not_totalled_as_zero() {
+async fn an_open_interest_gap_is_totalled_as_zero() {
     let gap = || {
-        let mut a = one_strike().unwrap();
-        a.oi_missing.insert("NIFTY20OCT2620000CE".into());
+        let mut a = chain(
+            vec![row(
+                20_000.0,
+                priced(1_000_000, 0.001, 0.5),
+                leg(0, 0.0, 0.0, false),
+            )],
+            3.0,
+        )
+        .unwrap();
+        a.quote_missing.insert("NIFTY20OCT2620000PE".into());
+        a.oi_missing.insert("NIFTY20OCT2620000PE".into());
         Ok(a)
     };
-    let fake = Fake::new(vec![("20OCT26", fixed(gap()))]);
-    let r = run(&fake, &["20OCT26"], None).await.unwrap_err();
-    assert_eq!(r.status, 503);
-    assert!(
-        r.message().starts_with("Open interest did not come back"),
-        "{}",
-        r.message()
-    );
-
-    let fake = Fake::new(vec![
-        ("20OCT26", fixed(one_strike())),
-        ("27OCT26", fixed(gap())),
-    ]);
+    let fake = Fake::new(vec![("20OCT26", fixed(gap())), ("27OCT26", fixed(gap()))]);
     let body = run(&fake, &["20OCT26", "27OCT26"], None).await.unwrap();
-    assert_eq!(body["expiries"][0]["available"], json!(true));
-    assert_eq!(body["expiries"][1]["available"], json!(false));
-    assert_eq!(body["expiries"][1]["cells"], json!([null]));
+    for e in body["expiries"].as_array().unwrap() {
+        assert_eq!(e["available"], json!(true), "{e}");
+        let cell = &e["cells"][0];
+        assert!(close(&cell["ce_gex"], 400.0), "{cell}");
+        assert!(close(&cell["pe_gex"], 0.0), "{cell}");
+        assert!(close(&cell["gex"], 400.0), "{cell}");
+        assert!(close(&cell["ce_dex"], 1000.0), "{cell}");
+        assert!(close(&cell["pe_dex"], 0.0), "{cell}");
+        assert!(close(&cell["dex"], 1000.0), "{cell}");
+        assert_eq!(cell["pe_oi"], json!(0));
+        // No open interest, so nothing unpriced to flag.
+        assert_eq!(cell["unpriced"], json!(false));
+        assert!(close(&e["net_gex"], 400.0), "{e}");
+    }
+    // Every call GEX is positive and no put has any: a call wall, no put
+    // wall.
+    assert_eq!(body["call_wall"], json!(20_000.0));
+    assert_eq!(body["put_wall"], Value::Null);
 }

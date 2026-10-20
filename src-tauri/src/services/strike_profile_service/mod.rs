@@ -9,13 +9,12 @@
 //! (units, signs, the gamma flip, the walls, the window) is in
 //! [`crate::analytics::strike_profile`].
 //!
-//! Desktop: an expiry whose open interest did not all come back is not
-//! totalled as if the gap were zero (TOOLS-04, TOOLS-13, as every chain
-//! tool): on the first expiry the request is refused like the GEX
-//! dashboard's, on a later one that expiry is marked unavailable. The web
-//! reads the gap as zero open interest.
+//! The answer matches the web exactly (maintainer 2026-10-20: Strike
+//! Profile matches the web exactly). A leg whose quote or open interest did
+//! not come back is totalled as zero open interest, as on the web; unlike
+//! the other chain tools, which refuse such a chain (TOOLS-13), it is
+//! neither refused nor marked unavailable.
 
-use super::chain_tools_service::require_oi;
 use super::core::{float, Reply};
 use super::options_service::{option_chain_answer, ChainAnswer};
 use crate::analytics::py_round;
@@ -40,7 +39,6 @@ const BROKER_BUSY: u16 = 429;
 const SECONDS_PER_YEAR: f64 = 365.0 * 86_400.0;
 
 const NO_DATA: &str = "No option data for this expiry.";
-const OI_MISSING: &str = "Open interest did not all come back from your broker for this expiry, so it is not shown. Refresh to try again.";
 
 /// What the page asked for, validated.
 #[derive(Debug, Clone)]
@@ -163,13 +161,6 @@ where
                 (a, spot)
             }
         };
-        if let Err(r) = require_oi(&answer, &req.underlying, expiry) {
-            if index == 0 {
-                return Err(r);
-            }
-            grid.columns.push(Column::unavailable(expiry, OI_MISSING));
-            continue;
-        }
         add_column(&mut grid, expiry, &answer.body, spot, now);
     }
     match basis {

@@ -33,7 +33,6 @@ const mocks = vi.hoisted(() => {
     volSurface: { getSurfaceData: vi.fn() },
     straddle: { getIntervals: vi.fn(), getStraddleData: vi.fn() },
     custom: { getIntervals: vi.fn(), getLotSize: vi.fn(), simulate: vi.fn() },
-    strikeProfile: { ...listing(), getProfileData: vi.fn() },
   }
 })
 
@@ -46,7 +45,6 @@ vi.mock('@/api/iv-chart', () => ({ ivChartApi: mocks.ivChart }))
 vi.mock('@/api/vol-surface', () => ({ volSurfaceApi: mocks.volSurface }))
 vi.mock('@/api/straddle-chart', () => ({ straddleChartApi: mocks.straddle }))
 vi.mock('@/api/custom-straddle', () => ({ customStraddleApi: mocks.custom }))
-vi.mock('@/api/strike-profile', () => ({ strikeProfileApi: mocks.strikeProfile }))
 vi.mock('@/lib/Plot2D', () => ({ default: () => null }))
 vi.mock('@/lib/Plot3D', () => ({ default: () => null }))
 vi.mock('lightweight-charts', () => {
@@ -173,13 +171,8 @@ const DATA_PAGES: PageCase[] = [
     start: 'Load Surface',
     busy: 'Loading...',
   },
-  {
-    name: 'Strike Profile',
-    load: () => import('./StrikeProfile'),
-    listing: mocks.strikeProfile,
-    data: () => mocks.strikeProfile.getProfileData,
-    busy: 'Loading...',
-  },
+  // Strike Profile is not here: the maintainer chose web parity for that
+  // page (2026-10-20), so it keeps the web's request handling verbatim.
 ]
 
 const CHART_PAGES: PageCase[] = [
@@ -222,7 +215,6 @@ beforeEach(() => {
     mocks.oiTracker,
     mocks.oiProfile,
     mocks.ivChart,
-    mocks.strikeProfile,
   ] as ApiMock[]) {
     api.getUnderlyings.mockResolvedValue({ status: 'success', underlyings: ['NIFTY', 'BANKNIFTY'] })
   }

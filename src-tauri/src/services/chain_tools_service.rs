@@ -80,7 +80,7 @@ async fn fetch_chain(
 /// interest is a reading. A leg the broker answered without one (no
 /// quote, or OI not supplied) would otherwise read as zero and pass for a
 /// quiet strike (TOOLS-04, TOOLS-13). The web totals such legs as zero.
-pub fn require_oi(a: &ChainAnswer, underlying: &str, expiry: &str) -> Result<(), Reply> {
+fn require_oi(a: &ChainAnswer, underlying: &str, expiry: &str) -> Result<(), Reply> {
     let unknown = a.oi_unknown();
     if unknown.is_empty() {
         return Ok(());

@@ -1530,28 +1530,43 @@ async fn strike_profile_by_strike_and_expiry() {
     );
 }
 
-/// TOOLS-04, TOOLS-13: the first expiry's open interest gap refuses the
-/// profile as it refuses the GEX dashboard; a later expiry's gap marks
-/// that expiry unavailable.
+/// Web parity (maintainer 2026-10-20: Strike Profile matches the web
+/// exactly): the 25100 put's quote does not come back on either expiry, the
+/// chain answers that leg with zeros, and the profile totals it as zero
+/// open interest instead of refusing (the GEX dashboard refuses, TOOLS-13)
+/// or marking the expiry unavailable. Worked outside the kernels like
+/// `strike_profile_by_strike_and_expiry`: the 25100 call alone, IV 5.96%,
+/// gamma 0.000998 and delta 0.4224, gives GEX 2.4970 and DEX 4.2257 crore;
+/// without that put's -1.2485 and -2.8892, each expiry nets 1.4524 GEX and
+/// 4.4483 DEX. The put wall stays at 25000.
 #[tokio::test]
-async fn strike_profile_does_not_total_an_open_interest_gap() {
+async fn strike_profile_totals_an_open_interest_gap_as_zero() {
     let h = H::new(true);
+    h.mock.quotes.lock().remove("NFO:NIFTY30OCT2625100PE");
     h.mock.quotes.lock().remove("NFO:NIFTY27NOV2625100PE");
     let (s, v) = h
         .post("/strikeprofile/api/profile-data", strike_profile_body())
         .await;
     assert_eq!(s, StatusCode::OK, "{}", v);
-    assert_eq!(v["expiries"][0]["available"], json!(true));
-    assert_eq!(v["expiries"][1]["available"], json!(false));
-    h.mock.quotes.lock().remove("NFO:NIFTY30OCT2625100PE");
-    let (s, v) = h
-        .post("/strikeprofile/api/profile-data", strike_profile_body())
-        .await;
-    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{}", v);
-    assert_eq!(
-        v["message"],
-        "Open interest did not come back from your broker for 1 of 10 options of NIFTY 30OCT26, so the OI figures are not shown: a missing value would read as zero. Try again shortly."
-    );
+    for e in v["expiries"].as_array().unwrap() {
+        assert_eq!(e["available"], json!(true), "{}", e["expiry"]);
+        assert_eq!(
+            e["cells"][3],
+            json!({
+                "ce_oi": 4000, "pe_oi": 0,
+                "ce_gex": 2.497, "pe_gex": 0.0,
+                "ce_dex": 4.2257, "pe_dex": 0.0,
+                "gex": 2.497, "dex": 4.2257,
+                "unpriced": false,
+            }),
+            "{}",
+            e["expiry"]
+        );
+        assert_eq!(e["net_gex"], json!(1.4524), "{}", e["expiry"]);
+        assert_eq!(e["net_dex"], json!(4.4483), "{}", e["expiry"]);
+    }
+    assert_eq!(v["call_wall"], json!(25_100.0));
+    assert_eq!(v["put_wall"], json!(25_000.0));
 }
 
 #[tokio::test]

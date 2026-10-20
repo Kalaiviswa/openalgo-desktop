@@ -2,7 +2,6 @@ import { Check, ChevronsUpDown, Copy } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type StrikeProfileResponse, strikeProfileApi } from '@/api/strike-profile'
-import { ExpiryLookupNotice } from '@/components/tools/ExpiryLookupNotice'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -22,7 +21,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useExpiryLookup } from '@/hooks/useExpiryLookup'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import Plot from '@/lib/Plot2D'
 import { serverSentence } from '@/lib/serverSentence'
@@ -606,28 +604,32 @@ export default function StrikeProfile() {
     }
   }, [selectedExchange, defaultUnderlyings])
 
-  // Fetch expiries when underlying changes; the nearest few are selected.
-  // Desktop: every outcome is a state the page shows, with Retry (TOOLS-02).
-  const expiryLookup = useExpiryLookup(
-    selectedExchange,
-    selectedUnderlying,
-    strikeProfileApi.getExpiries,
-    {
-      onReset: () => {
-        // Desktop: an answer for the previous underlying is dropped from
-        // here on, not only once the next data request starts (TOOLS-08).
-        requestIdRef.current += 1
-        setIsLoading(false)
+  // Fetch expiries when underlying changes; the nearest few are selected
+  useEffect(() => {
+    if (!selectedUnderlying) return
+    setExpiries([])
+    setSelectedExpiries([])
+    setData(null)
+
+    let cancelled = false
+    const fetchExpiries = async () => {
+      try {
+        const response = await strikeProfileApi.getExpiries(selectedExchange, selectedUnderlying)
+        if (cancelled) return
+        if (response.status === 'success' && response.expiries.length > 0) {
+          setExpiries(response.expiries)
+          setSelectedExpiries(response.expiries.slice(0, DEFAULT_EXPIRY_COUNT))
+        }
+      } catch {
+        if (cancelled) return
         setExpiries([])
-        setSelectedExpiries([])
-        setData(null)
-      },
-      onReady: (list) => {
-        setExpiries(list)
-        setSelectedExpiries(list.slice(0, DEFAULT_EXPIRY_COUNT))
-      },
+      }
     }
-  )
+    fetchExpiries()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedUnderlying, selectedExchange])
 
   const fetchProfile = useCallback(async () => {
     if (selectedExpiries.length === 0) return
@@ -852,8 +854,6 @@ export default function StrikeProfile() {
           </Button>
         </div>
       </div>
-
-      <ExpiryLookupNotice lookup={expiryLookup} />
 
       {data?.status === 'success' && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
