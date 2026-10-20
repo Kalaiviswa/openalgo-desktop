@@ -19,7 +19,7 @@ analyzer logs are kept forever, so the disk bound is the monitoring tables.
 
 | Measure | Target | Benchmark |
 | --- | --- | --- |
-| Feed tick to risk decision (stop, target, trailing) | p99 under 50 ms at 1,000 subscribed symbols and 2,000 ticks/s | `perf::tick_to_risk` (scalping monitor and strategy module) |
+| Feed tick to risk decision (stop, target, trailing) | p99 under 50 ms at 1,000 subscribed symbols and 2,000 ticks/s | `perf::tick_to_risk` (scalping monitor and strategy module); `perf::report_load` (the scalping monitor while the report pages read a large log) |
 | Order-socket reconnect to book reconciled | under 5 s | `perf::reconnect` |
 | Order-path SQLite wait while Historify imports | p99 under 20 ms | `perf::sqlite_wait` |
 | Critical event delivery (order, position, risk topics) | zero drops under a 10x burst; market-data drops counted and shown | `perf::event_burst` |
@@ -75,6 +75,7 @@ running install for the 8-hour run.
 | `tests/it/perf/mod.rs` | percentiles, the `PERF` line, the JSON record, process memory |
 | `tests/it/perf/rig.rs` | the app under load: synthetic broker market socket (paced ticks, stamped ticks, drops), broker order socket, running clock |
 | `tests/it/perf/tick_to_risk.rs` | tick to stop, target and trailing decisions |
+| `tests/it/perf/report_load.rs` | the same decisions while four browsers keep reloading the report pages over a large log |
 | `tests/it/perf/reconnect.rs` | order-socket drop to order book reconciled |
 | `tests/it/perf/sqlite_wait.rs` | order-path writes and `/api/v1/placeorder` while Historify imports |
 | `tests/it/perf/event_burst.rs` | critical-lane delivery under a 10x burst; market-data drops |
@@ -125,6 +126,41 @@ round failed. The harness now repeats the breach tick until the exit is
 placed, as a market that fell through a stop keeps ticking under it; that
 run's memory numbers are not used.
 
+### 2026-10-20, report pages under load, branch `pr/report-routes-blocking` on `ac7129d3`
+
+The roadmap's "Async-worker DB reads": the report pages read SQLite and
+shaped and serialized their answers on the async workers that carry the
+market data feed and the risk owners. `perf::report_load` runs the
+scalping rig (1,000 symbols, 2,000 ticks/s, 90 managed legs, 120
+decisions) over a log grown large (100,000 requests in the traffic log,
+its cap, and 200,000 order log entries) while four browsers reload
+`/traffic/api/logs?limit=1000`, `/traffic/api/stats`, `/logs?page=1` and
+`/logs?page=1&search=SYM0001`, each as soon as its last answer came. Debug
+build, load 3-4.
+
+| Run | Tick to decision | Ticks the app received | Pages |
+| --- | --- | --- | --- |
+| Same rig, no pages (`perf::tick_to_risk` with 30 legs per kind) | p99 5.57 ms, none lost | 2,014/s of 2,000 | none |
+| Before (`ac7129d3`) | all 120 decisions lost (none within 10 s) | 486/s of 2,046: the feed's socket reader starved, so the deciding ticks queued behind a growing backlog | 503 answers, p50 107 ms, p99 946 ms |
+| After | p99 5.03 and 4.12 ms (two runs), none lost | 2,013/s | 330 answers, p50 87-98 ms, p99 576-592 ms |
+
+The fix moves every Web UI report read off the async workers: the Traffic
+page (requests, statistics), the Logs page, the Health page (history,
+statistics, alerts, export), the Security page (data, statistics, login
+activity, ban by host), the Diagnostics error log (list, statistics,
+groups), the MCP audit log and the Analyzer page and export. The largest
+answers are serialized where they are read (`webui::json_text`): a week of
+health samples serialized on the async worker still held it for up to
+0.46 s on a loaded machine. The Traffic statistics (19 scans of the log,
+refreshed every 30 s by every open page) are computed once for concurrent
+refreshes (`ReportFlight`, shared with the Latency report). Regressions:
+`webui_reports::report_pages_over_a_large_log_do_not_hold_the_runtime`
+(two of each page at once: the runtime was held for 2.1-3.4 s at once
+before, 16-26 ms after at load 16-21) and
+`webui_reports::traffic_stats_refreshes_share_one_computation` (four
+refreshes held all four logs connections without the single flight, one
+with it).
+
 ### Follow-ups
 
 1. **Strategy tick path**: fixed on `pr/strategy-tick-path` (`cee33a75`,
@@ -149,3 +185,11 @@ run's memory numbers are not used.
 5. **The weekly soak's one-time memory step** (soak run 39090876797): the
    CI-and-evidence agent is tracing it in `docs/audit/soak.md`; the endurance
    run measures after its warm-up.
+6. **Synchronous reads outside the report pages**, still on the async
+   workers (other areas): the strategy module's order, trade and position
+   books (every order a strategy placed, polled every 5 s per open Detail
+   page), the Action Center data (every pending order, twice, on each
+   socket event), the OpenScript runner's books (polled every 15 s per
+   running deployment), `/api/v1/analyzer` and the analyzer toggles (a
+   `COUNT(*)` of the never-purged analyzer log), and the Telegram and
+   WhatsApp statistics (WhatsApp's `executed_at` has no index).
