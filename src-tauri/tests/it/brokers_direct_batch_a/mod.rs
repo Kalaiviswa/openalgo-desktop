@@ -13,3 +13,4 @@ mod definedge;
 mod motilal;
 mod mstock;
 mod samco;
+mod samco_stream;

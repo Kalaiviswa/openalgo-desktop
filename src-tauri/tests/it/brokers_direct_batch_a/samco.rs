@@ -66,7 +66,7 @@ fn creds(key: &str, secret: Option<&str>) -> BrokerCredentials {
 }
 
 /// The default fake Samco.
-fn samco_routes(r: &Req) -> Response {
+pub(super) fn samco_routes(r: &Req) -> Response {
     let ok_status = || ok(json!({"status":"Success","statusMessage":"done"}));
     match (r.method.as_str(), r.path.as_str()) {
         ("POST", "/session/token") => {
@@ -851,7 +851,7 @@ async fn secrets_stay_out_of_errors_and_logs() {
 
 /// The recorded order book with `edits` (order id, field, value) applied
 /// and `extra` appended.
-fn book_with(edits: &[(&str, &str, &str)], extra: Option<Value>) -> Value {
+pub(super) fn book_with(edits: &[(&str, &str, &str)], extra: Option<Value>) -> Value {
     let mut v: Value = serde_json::from_str(crate::fixture!("samco", "order_book.json")).unwrap();
     let rows = v["orderBookDetails"].as_array_mut().unwrap();
     for (id, key, value) in edits {

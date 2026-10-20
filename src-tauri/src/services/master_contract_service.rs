@@ -921,6 +921,120 @@ mod tests {
         ctx.runtime.teardown(ctx).await;
     }
 
+    /// A fake broker market feed: accepts every connection and counts the
+    /// subscribe frames it reads.
+    async fn counting_feed() -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let subs = Arc::new(AtomicUsize::new(0));
+        let seen = subs.clone();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", l.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut conns = tokio::task::JoinSet::new();
+            while let Ok((tcp, _)) = l.accept().await {
+                let seen = seen.clone();
+                conns.spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    while let Some(Ok(m)) = ws.next().await {
+                        if m.to_text().is_ok_and(|t| t.contains("\"sub\"")) {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+        (url, subs, task)
+    }
+
+    /// 14-N1: a session whose master could not be loaded resyncs no feed
+    /// client onto the master left in memory. Zerodha's master from the
+    /// day before is still loaded when the next morning's download fails:
+    /// the clients' instruments wait, nothing is subscribed at the broker,
+    /// and the day's master, once loaded, brings them in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_feed_resync_without_the_sessions_master() {
+        use crate::feed::source::{InstrumentKey, MarketDataSource, Mode};
+        use std::sync::atomic::Ordering;
+        let (t, zerodha, _angel) = two_brokers(ist(3, 10, 0));
+        let ctx = &t.ctx;
+        let (feed_url, subs, server) = counting_feed().await;
+        let (orders_url, _, orders_server) = counting_feed().await;
+        *zerodha.feed_url.lock() = Some(feed_url);
+        *zerodha.order_feed_url.lock() = Some(orders_url);
+        ctx.bridge.start();
+        async fn until(what: &str, cond: impl Fn() -> bool) {
+            for _ in 0..1000 {
+                if cond() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {}", what);
+        }
+        let start = |ctx: &Arc<AppState>| {
+            session_for(ctx, "zerodha");
+            ctx.get_broker_session().unwrap()
+        };
+        // Day one: the master loads, the session's sockets come up (past
+        // its own resync), and a feed client's SBIN streams. What the
+        // broker saw by then, once settled, is the baseline.
+        let s = start(ctx);
+        ctx.runtime.activate(ctx, &s).await;
+        until("day one's master", || ctx.symbol_count() == 1).await;
+        until("day one's order socket", || {
+            ctx.runtime.order_ws.is_connected()
+        })
+        .await;
+        until("day one's market feed", || ctx.websocket.is_connected()).await;
+        let sbin = InstrumentKey::new("SBIN", "NSE");
+        MarketDataSource::subscribe(&*ctx.bridge, &sbin, Mode::Ltp, 5);
+        until("SBIN subscribed", || subs.load(Ordering::SeqCst) >= 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let day_one = subs.load(Ordering::SeqCst);
+
+        // The next morning the download fails; day one's master is still
+        // in memory.
+        t.clock.set(ist(4, 9, 0));
+        *zerodha.master.lock() = Some(Err("down".into()));
+        let s = start(ctx);
+        ctx.runtime.activate(ctx, &s).await;
+        // The order socket comes up after the point where the feed clients
+        // would have been resynced.
+        until("the order socket", || ctx.runtime.order_ws.is_connected()).await;
+        until("the market feed", || ctx.websocket.is_connected()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(ctx.symbol_count(), 1, "day one's master was dropped");
+        assert!(ctx.bridge.applied().is_empty(), "resynced without a master");
+        assert_eq!(
+            subs.load(Ordering::SeqCst),
+            day_one,
+            "subscribed without a master"
+        );
+
+        // The day's master loads: the client's SBIN is subscribed again.
+        *zerodha.master.lock() = Some(Ok(vec![crate::brokers::common::symbols::tests::row(
+            "SBIN", "SBIN", "NSE", "779521",
+        )]));
+        let zd: Arc<dyn Broker> = zerodha.clone();
+        download(ctx, &zd, &AuthToken::new("t")).await.unwrap();
+        ctx.bridge.resync();
+        until("SBIN subscribed again", || {
+            subs.load(Ordering::SeqCst) > day_one
+        })
+        .await;
+        assert_eq!(ctx.bridge.applied().len(), 1);
+        ctx.runtime.teardown(ctx).await;
+        server.abort();
+        orders_server.abort();
+    }
+
     /// Delta's `contract_value` is filled only through `download_master`:
     /// the download stores it with the rows and loads it into memory, and a
     /// cache reload brings it back from the database.

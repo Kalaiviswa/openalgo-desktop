@@ -39,7 +39,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// What the Socket.IO clients would receive.
 #[derive(Default)]
-struct SocketPushes(Mutex<Vec<(String, Value)>>);
+pub(crate) struct SocketPushes(Mutex<Vec<(String, Value)>>);
 
 #[async_trait::async_trait]
 impl UiEmitter for SocketPushes {
@@ -49,7 +49,7 @@ impl UiEmitter for SocketPushes {
 }
 
 impl SocketPushes {
-    fn named(&self, name: &str) -> Vec<Value> {
+    pub(crate) fn named(&self, name: &str) -> Vec<Value> {
         self.0
             .lock()
             .iter()
@@ -61,7 +61,7 @@ impl SocketPushes {
 
 /// `order.update` events on the bus.
 #[derive(Default)]
-struct OrderEvents(Mutex<Vec<Arc<Event>>>);
+pub(crate) struct OrderEvents(pub(crate) Mutex<Vec<Arc<Event>>>);
 
 #[async_trait::async_trait]
 impl Subscriber for OrderEvents {
