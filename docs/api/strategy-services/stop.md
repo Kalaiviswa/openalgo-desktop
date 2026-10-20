@@ -211,4 +211,4 @@ Each object in `exits`:
 
 ---
 
-**Back to**: [Strategy Module API](./README.md)
+**Back to**: [Strategy Module API](./README.md), [API Documentation](../README.md)

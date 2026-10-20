@@ -362,3 +362,7 @@ Money fields are JSON numbers, never strings.
 | Webhook auto-lock | None | Locked after 10 refused-address alerts in 10 minutes |
 | Webhook while OpenAlgo is locked | Not applicable | 503, nothing placed |
 | Webhook 429 | `Retry-After` header and `retry_after` field | `retry_after` field only |
+
+---
+
+**Back to**: [API Documentation](../README.md)

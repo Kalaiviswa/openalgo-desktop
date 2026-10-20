@@ -416,3 +416,7 @@ them. No `/notify` call is needed.
 
 Over the limit the answer is 429 with the web's body, for example
 `{"message": "30 per 1 minute"}`.
+
+---
+
+**Back to**: [API Documentation](../README.md)

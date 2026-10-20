@@ -420,4 +420,4 @@ page; the old token stops working immediately.
 
 ---
 
-**Back to**: [Strategy Module API](./README.md)
+**Back to**: [Strategy Module API](./README.md), [API Documentation](../README.md)

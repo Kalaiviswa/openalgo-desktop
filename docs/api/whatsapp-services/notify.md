@@ -212,3 +212,7 @@ Reasons that can appear in `data.failed[].error`:
   paired device logged out by WhatsApp.
 - The 5-recipient cap is a safety guardrail for WhatsApp's terms of service.
   Use the official WhatsApp Business API for genuine mass messaging.
+
+---
+
+**Back to**: [WhatsApp API](./README.md), [API Documentation](../README.md)
