@@ -911,6 +911,139 @@ async fn telegram_hundred_start_stop_cycles_leave_no_tasks_or_descriptors() {
     assert_eq!(h.ctx.task_count(), tasks_before);
 }
 
+/// What the Telegram notify endpoint answers once the API key checked
+/// out, for a request without a username: 409 while the bot is off, 400
+/// (the request is looked at) while it is on.
+async fn notify_sees_bot_on(h: &H) -> bool {
+    let (s, v) = h
+        .api(
+            "/api/v1/telegram/notify",
+            json!({"apikey": h.key, "message": "x"}),
+        )
+        .await;
+    match s {
+        StatusCode::BAD_REQUEST => true,
+        StatusCode::CONFLICT => false,
+        _ => panic!("notify answered {} {}", s, v),
+    }
+}
+
+/// Another program holds `openalgo.db`'s write lock for `hold`.
+fn hold_main_db(h: &H, hold: Duration) -> std::thread::JoinHandle<()> {
+    let path = h.ctx.data_dir.join("openalgo.db");
+    let (locked, wait) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(hold);
+        c.execute_batch("COMMIT").unwrap();
+    });
+    wait.recv().unwrap();
+    holder
+}
+
+/// A start answers "started" only once the flag the notify endpoint reads
+/// is saved. It answered as soon as polling began, while saving the flag
+/// could still be waiting for the database, so a notify sent right after
+/// "started" was refused as "bot is stopped" (a Windows CI failure of
+/// `telegram_notify_endpoint`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notify_right_after_started_finds_the_bot_on() {
+    let _serial = SERIAL.lock().await;
+    let h = H::new(false);
+    let (_fake, base, _j) = spawn_fake().await;
+    let tg = &h.ctx.messaging.telegram;
+    tg.set_api_base(&base);
+    let (s, v) = h.post("/telegram/config", json!({"token": TOKEN})).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let token = openalgo_desktop_lib::security::Secret::new(TOKEN);
+    assert!(tg.initialize(&h.ctx, &token).await.0);
+    // The database is busy for a moment while the bot starts.
+    let holder = hold_main_db(&h, Duration::from_millis(1500));
+    let (ok, msg) = tg.start(&h.ctx).await;
+    assert!(ok, "{}", msg);
+    assert!(
+        notify_sees_bot_on(&h).await,
+        "refused as stopped after \"{}\"",
+        msg
+    );
+    holder.join().unwrap();
+    assert!(tg.stop(&h.ctx).await.0);
+}
+
+/// A start whose "on" cannot be saved does not run, and says why; a stop
+/// whose "off" cannot be saved leaves the bot as it was, and says why. A
+/// stop answered "stopped" is never followed by an accepted notify. Before,
+/// both answered success over a failed save: a bot "started" that notify
+/// refused, and a bot "stopped" that notify still accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_or_stop_that_cannot_save_its_state_says_so() {
+    let _serial = SERIAL.lock().await;
+    let h = H::new(false);
+    let (_fake, base, _j) = spawn_fake().await;
+    let tg = &h.ctx.messaging.telegram;
+    let refuse = |when_active: i32| {
+        h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_state BEFORE UPDATE OF is_active ON bot_config \
+                 WHEN NEW.is_active = {} BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                when_active
+            ))
+            .unwrap();
+    };
+    let allow = || {
+        h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute_batch("DROP TRIGGER refuse_state")
+            .unwrap();
+    };
+
+    // Start: "on" cannot be saved.
+    tg.set_api_base(&base);
+    let (s, v) = h.post("/telegram/config", json!({"token": TOKEN})).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    refuse(1);
+    let (s, v) = h.post("/telegram/bot/start", json!({})).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(
+        v["message"],
+        openalgo_desktop_lib::messaging::telegram::START_NOT_SAVED
+    );
+    assert!(!tg.is_running());
+    assert!(
+        tg.wait_task_end(Duration::from_secs(5)).await,
+        "a task is left"
+    );
+    assert!(!notify_sees_bot_on(&h).await);
+    allow();
+
+    // Stop: "off" cannot be saved.
+    h.start_telegram(&base).await;
+    assert!(notify_sees_bot_on(&h).await);
+    refuse(0);
+    let (s, v) = h.post("/telegram/bot/stop", json!({})).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(
+        v["message"],
+        openalgo_desktop_lib::messaging::telegram::STOP_NOT_SAVED
+    );
+    assert!(
+        tg.is_running(),
+        "a stop that could not save stopped the bot"
+    );
+    assert!(notify_sees_bot_on(&h).await);
+    allow();
+    let (s, v) = h.post("/telegram/bot/stop", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert!(!notify_sees_bot_on(&h).await, "accepted after \"stopped\"");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn telegram_notify_endpoint() {
     let _serial = SERIAL.lock().await;

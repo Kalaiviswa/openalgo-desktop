@@ -43,6 +43,12 @@ pub const BOT_BUSY_MESSAGE: &str =
     "The bot is still starting or stopping. Check its status in a few seconds.";
 /// Connection attempts before a start gives up (web `max_retries`).
 const START_MAX_RETRIES: u32 = 5;
+/// What a start is told when the started state could not be saved.
+pub const START_NOT_SAVED: &str = "The bot could not be started because OpenAlgo could not save \
+that it is on. Try again in a moment; if it keeps happening, check the Logs page.";
+/// What a stop is told when the stopped state could not be saved.
+pub const STOP_NOT_SAVED: &str = "The bot is still running because OpenAlgo could not save that \
+it is off. Try again in a moment; if it keeps happening, check the Logs page.";
 
 /// Timings, adjustable by tests.
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +89,8 @@ pub struct TelegramService {
     lifecycle: tokio::sync::Mutex<Option<PollRun>>,
     /// Polls completed, for tests and diagnostics.
     polls: Arc<AtomicU64>,
+    /// Why the last start's task gave up, when it knows.
+    start_failure: Arc<parking_lot::Mutex<Option<&'static str>>>,
 }
 
 impl Default for TelegramService {
@@ -100,6 +108,7 @@ impl TelegramService {
             gen: AtomicU64::new(0),
             lifecycle: tokio::sync::Mutex::new(None),
             polls: Arc::new(AtomicU64::new(0)),
+            start_failure: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -157,6 +166,21 @@ impl TelegramService {
     fn config(ctx: &AppState) -> crate::error::Result<db::BotConfig> {
         let conn = ctx.sqlite.conn()?;
         db::get_bot_config(&conn, &ctx.security)
+    }
+
+    /// Save whether the bot is on: the flag the notify endpoints, order
+    /// alerts and the sign-in auto-start read (web `is_active`).
+    fn save_active(ctx: &AppState, active: bool) -> crate::error::Result<()> {
+        let conn = ctx.sqlite.conn()?;
+        db::update_bot_config(
+            &conn,
+            &ctx.security,
+            db::ConfigUpdate {
+                is_active: Some(active),
+                ..Default::default()
+            },
+            ctx.now(),
+        )
     }
 
     fn update_config(ctx: &AppState, u: db::ConfigUpdate) {
@@ -244,6 +268,7 @@ impl TelegramService {
         };
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(false, Ordering::SeqCst);
+        *self.start_failure.lock() = None;
         let cancel = ctx.shutdown.child_token();
         let task = PollTask {
             ctx: Arc::downgrade(ctx),
@@ -253,6 +278,7 @@ impl TelegramService {
             timing: self.timing(),
             running: self.running.clone(),
             polls: self.polls.clone(),
+            start_failure: self.start_failure.clone(),
         };
         let join = tokio::spawn(task.run());
         *lc = Some(PollRun { gen, cancel, join });
@@ -274,6 +300,9 @@ impl TelegramService {
         }
         if self.is_running() {
             return (true, "Bot started successfully".into());
+        }
+        if let Some(why) = self.start_failure.lock().take() {
+            return (false, why.into());
         }
         (false, "Bot failed to start within timeout".into())
     }
@@ -302,6 +331,13 @@ impl TelegramService {
             }
             return (false, "Bot is not running".into());
         }
+        // Saved before anything stops: from here the notify endpoints and
+        // order alerts treat the bot as off, so none is accepted against
+        // it once "stopped" is answered. A save that fails changes nothing.
+        if let Err(e) = Self::save_active(ctx, false) {
+            tracing::error!("Could not save that the Telegram bot is off: {}", e);
+            return (false, STOP_NOT_SAVED.into());
+        }
         if let Some(run) = lc.take() {
             let gen = run.gen;
             Self::end_run(run).await;
@@ -311,13 +347,6 @@ impl TelegramService {
         }
         self.running.store(false, Ordering::SeqCst);
         drop(lc);
-        Self::update_config(
-            ctx,
-            db::ConfigUpdate {
-                is_active: Some(false),
-                ..Default::default()
-            },
-        );
         tracing::info!("Telegram bot stopped");
         (true, "Bot stopped successfully".into())
     }
@@ -431,6 +460,7 @@ struct PollTask {
     timing: Timing,
     running: Arc<AtomicBool>,
     polls: Arc<AtomicU64>,
+    start_failure: Arc<parking_lot::Mutex<Option<&'static str>>>,
 }
 
 impl PollTask {
@@ -490,14 +520,16 @@ impl PollTask {
         }
         let current = ctx.messaging.telegram.gen.load(Ordering::SeqCst) == self.gen;
         if current {
+            // Saved before the bot counts as running, which is what a start
+            // answers on: a notify sent right after "started" reads the
+            // saved flag (it was refused as stopped while this write was
+            // still waiting for the database). Not saved, nothing runs.
+            if let Err(e) = TelegramService::save_active(&ctx, true) {
+                tracing::error!("Could not save that the Telegram bot is on: {}", e);
+                *self.start_failure.lock() = Some(START_NOT_SAVED);
+                return;
+            }
             self.running.store(true, Ordering::SeqCst);
-            TelegramService::update_config(
-                &ctx,
-                db::ConfigUpdate {
-                    is_active: Some(true),
-                    ..Default::default()
-                },
-            );
             tracing::info!("Telegram bot started and is polling for updates");
         }
         drop(ctx);
