@@ -255,7 +255,11 @@ unchanged:
 - **Match a fill to the order it belongs to, not to the leg.**
 - **A caller that has already decided the destination says so.** Code exiting a
   position it opened passes `force_live` rather than re-reading the global
-  analyzer toggle.
+  analyzer toggle. Semi-Auto keeps that decision for an order it queues
+  (`pending_orders.force_live`), and a Live OpenScript run follows its
+  queued order through the Action Center's own record
+  (`trading/runner/approval.rs`: bound, rejected or unconfirmed), never by a
+  number it does not have (LOG-04; the web follows neither).
 - A stop whose exit orders were refused leaves the run open and managed.
 - **A placement has three outcomes, never two** (`brokers/common/outcome`):
   accepted (an order id), refused (provably never sent, or the broker said
