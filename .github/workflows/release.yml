@@ -10,7 +10,9 @@ name: Release
 # (docs/release/updates.md).
 #
 # Release gate (the `verify` job, which every other job waits for): the tag
-# must point at a commit on master, the CI workflow's `ci-ok` check must have
+# must point at a commit on master, its dependencies must pass a fresh
+# advisory scan (cargo-deny, cargo-audit and npm audit against today's
+# databases, as security.yml gates), the CI workflow's `ci-ok` check must have
 # succeeded on that exact commit, the newest CI run of a push of that commit
 # to master that was not cancelled must have passed its installed-app jobs
 # (install, start and first sign-in on Linux, Windows Server 2022 and 2025
@@ -96,7 +98,7 @@ env:
 
 jobs:
   verify:
-    name: verify (tag on master, ci-ok and install smoke green, version)
+    name: verify (tag on master, ci-ok and install smoke green, version, fresh advisory scan)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -171,6 +173,34 @@ jobs:
         run: python3 scripts/ci/smoke_gate.py release "$SHA"
       - name: The tag equals the app version everywhere
         run: python3 .claude/skills/version-bump/check_versions.py --tag "$TAG"
+      # NEW-VER-03: the tagged commit's dependencies are scanned now, at
+      # release time, with the same gating as security.yml: a green CI run
+      # or last week's scan can predate an advisory published since.
+      # Accepted advisories are the documented ignores in .github/deny.toml;
+      # anything else fails the release before anything is built.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: 1.92.0
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-deny,cargo-audit
+      - name: No unaccepted advisory, license or source (cargo-deny, today's database)
+        run: |
+          cargo deny --manifest-path src-tauri/Cargo.toml --config .github/deny.toml --locked \
+            check advisories bans licenses sources
+      - name: No unaccepted vulnerability (cargo-audit, today's database)
+        run: |
+          ignore_args=()
+          while IFS= read -r id; do
+            ignore_args+=(--ignore "$id")
+          done < <(grep -vE '^[[:space:]]*#' .github/deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' | sort -u)
+          echo "Advisories accepted in deny.toml: $(( ${#ignore_args[@]} / 2 ))"
+          cargo audit --file src-tauri/Cargo.lock "${ignore_args[@]}"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: No high or critical advisory in the shipped JavaScript (npm audit)
+        run: npm audit --omit=dev --audit-level=high
       - name: The update signing key is configured
         # Every release carries signed update bundles; without the key the
         # build fails late, on every platform. Only whether it is set is
