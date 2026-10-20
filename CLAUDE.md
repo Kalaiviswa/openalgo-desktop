@@ -721,6 +721,13 @@ worktree onto master. CI builds fresh and is unaffected.
   connection for a moment after it returned, so `db::upgrade`'s restore
   retries a replace or removal for up to ten seconds while the file is in
   use.
+- Tests run unoptimized, where one Argon2 run costs about 0.5 s instead of
+  30 ms. `every_way_to_create_a_broker_session_refuses_a_forged_attempt`,
+  which creates an account 31 times, took 175 to 300 s on the Windows runner
+  and was killed at nextest's five-minute limit, so `argon2`, `blake2` and
+  `zeroize` are built optimized in the dev profile. Do not remove those
+  overrides; raise a slow test's timeout only after finding what it spends
+  the time on.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
 - In-app update bundles are made only by the release workflow, which adds

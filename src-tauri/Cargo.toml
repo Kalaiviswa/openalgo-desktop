@@ -204,3 +204,16 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# Password hashing optimized in debug and test builds too: unoptimized, one
+# Argon2 run (19 MiB, two passes) takes about 0.5 s instead of 30 ms, and the
+# sign-in and key-vault tests run hundreds, so the slowest of them came
+# within reach of CI's five-minute limit on Windows. Release is unchanged.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.zeroize]
+opt-level = 3
