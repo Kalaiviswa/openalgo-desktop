@@ -83,6 +83,7 @@ pub async fn runtime_busy<F: std::future::Future>(fut: F) -> (F::Output, std::ti
 }
 
 mod api_v1_support;
+mod broker_support;
 mod feed_support;
 mod mcp_support;
 mod sandbox_support;

@@ -10,92 +10,11 @@
 //! are uncertain (the order may exist); only the broker's explicit failure
 //! is refused.
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Router;
+use crate::broker_support::{answer, fake, symbols, Fake};
 use openalgo_desktop_lib::brokers::common::outcome::{classify, placing, PlaceOutcome};
-use openalgo_desktop_lib::brokers::common::symbols::{SymToken, SymbolResolver};
+use openalgo_desktop_lib::brokers::common::symbols::SymbolResolver;
 use openalgo_desktop_lib::brokers::types::*;
 use openalgo_desktop_lib::brokers::Broker;
-use parking_lot::Mutex;
-use std::sync::Arc;
-
-/// What the fake answers to every request.
-#[derive(Clone)]
-struct Answer {
-    status: u16,
-    body: String,
-}
-
-struct Fake {
-    answer: Arc<Mutex<Answer>>,
-    /// Answers for the paths that contain a key, before `answer`.
-    routes: Arc<Mutex<Vec<(&'static str, Answer)>>>,
-    base: String,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for Fake {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn fake() -> Fake {
-    let answer = Arc::new(Mutex::new(Answer {
-        status: 200,
-        body: "{}".into(),
-    }));
-    let a = answer.clone();
-    let routes: Arc<Mutex<Vec<(&'static str, Answer)>>> = Arc::default();
-    let r = routes.clone();
-    let app = Router::new().fallback(move |uri: axum::http::Uri| {
-        let a = r
-            .lock()
-            .iter()
-            .find(|(p, _)| uri.path().contains(p))
-            .map(|(_, a)| a.clone())
-            .unwrap_or_else(|| a.lock().clone());
-        async move {
-            let r: Response = (
-                StatusCode::from_u16(a.status).unwrap(),
-                [("content-type", "application/json")],
-                a.body,
-            )
-                .into_response();
-            r
-        }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    Fake {
-        answer,
-        routes,
-        base,
-        task,
-    }
-}
-
-fn symbols() -> SymbolResolver {
-    let r = SymbolResolver::new();
-    r.load(vec![SymToken {
-        symbol: "SBIN".into(),
-        brsymbol: "SBIN-EQ".into(),
-        name: "SBIN".into(),
-        exchange: "NSE".into(),
-        brexchange: "NSE".into(),
-        token: "3045".into(),
-        expiry: String::new(),
-        strike: 0.0,
-        lot_size: 1,
-        instrument_type: "EQ".into(),
-        tick_size: 0.05,
-    }]);
-    r
-}
 
 fn order(symbols: &SymbolResolver) -> ResolvedOrder {
     ResolvedOrder::resolve(
@@ -134,10 +53,7 @@ async fn attempt(
     status: u16,
     body: &str,
 ) -> PlaceOutcome {
-    *f.answer.lock() = Answer {
-        status,
-        body: body.to_string(),
-    };
+    f.reply(status, body);
     let o = order(&symbols());
     classify(&placing(b.place_order(auth, &o)).await)
 }
@@ -464,13 +380,6 @@ fn market_order(symbols: &SymbolResolver) -> ResolvedOrder {
         symbols,
     )
     .unwrap()
-}
-
-fn answer(status: u16, body: &str) -> Answer {
-    Answer {
-        status,
-        body: body.to_string(),
-    }
 }
 
 /// Review P2-3: the quote a MARKET order is priced from is read before the
