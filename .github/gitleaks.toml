@@ -35,3 +35,20 @@ regexes = [
   # Made-up Groww order id used by the adapter tests.
   '''GMK39038RDT490CCVRP''',
 ]
+
+[[allowlists]]
+description = "Argon2id known-answer vectors in the password hashing tests"
+# Only these exact test values, and only in this file: two fixed test salts,
+# and the PHC hash and key-vault key the reference implementation gives for
+# the test password and pepper (security::hashing::tests). They protect
+# nothing.
+condition = "AND"
+paths = ['''^src-tauri/src/security/hashing\.rs$''']
+regexes = [
+  '''^c29tZXNhbHRzb21lc2FsdA$''',
+  '''^MTIzNDU2Nzg5MGFiY2RlZg$''',
+  # The same salt as gitleaks decodes it from base64.
+  '''^1234567890abcdef$''',
+  '''^EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA$''',
+  '''^aa11986f53323c413e6844bf08de8d0900cb42b5af9b3c88f960319d7d992e62$''',
+]
