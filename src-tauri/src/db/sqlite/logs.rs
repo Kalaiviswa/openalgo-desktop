@@ -120,7 +120,7 @@ impl LogsDb {
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        conn.execute_batch("BEGIN")?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
         for (t, req, resp, at) in rows {
             let req = serde_json::from_str::<Value>(&req)
                 .map(|v| redact(v).to_string())

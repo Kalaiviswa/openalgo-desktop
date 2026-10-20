@@ -239,8 +239,8 @@ impl Store {
 
     /// Create or update one leg's row and return it as stored.
     pub fn upsert_sl(&self, u: &SlUpsert) -> Result<SlState> {
-        let mut conn = self.db.conn()?;
-        let tx = conn.transaction()?;
+        let conn = self.db.conn()?;
+        let tx = crate::db::sqlite::write_transaction(&conn)?;
         let id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM scalping_sl_state
@@ -416,5 +416,59 @@ impl Store {
             [mode],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Another connection holds `openalgo.db`'s write lock for `hold`;
+    /// returns once it has the lock, and the thread that releases it.
+    fn hold_write_lock(path: &std::path::Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let path = path.to_path_buf();
+        let (locked, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let c = Connection::open(path).unwrap();
+            c.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(hold);
+            c.execute_batch("COMMIT").unwrap();
+        });
+        wait.recv().unwrap();
+        holder
+    }
+
+    /// A stop saved while another writer holds the database waits for it
+    /// and is saved. Opened deferred, the save read first and then asked
+    /// to write, and SQLite refused that upgrade at once ("database is
+    /// locked") without the busy handler's wait.
+    #[test]
+    fn a_stop_saved_while_another_write_holds_the_database_waits_and_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openalgo.db");
+        let store = Store::new(Arc::new(SqliteDb::new(&path).unwrap()));
+        let leg = SlUpsert {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            product: "MIS".into(),
+            mode: MODE_LIVE.into(),
+            side: Some("BUY".into()),
+            entry_price: Some(800.0),
+            quantity: Some(10),
+            initial_sl: Some(790.0),
+            is_active: Some(true),
+            ..Default::default()
+        };
+        let hold = Duration::from_millis(300);
+        let holder = hold_write_lock(&path, hold);
+        let t = Instant::now();
+        let saved = store.upsert_sl(&leg);
+        holder.join().unwrap();
+        let row = saved.expect("the stop is saved once the other write ends");
+        assert_eq!(row.initial_sl, Some(790.0));
+        assert!(t.elapsed() >= hold / 2, "it waited for the other writer");
+        assert_eq!(store.active_sl(None).unwrap().len(), 1);
     }
 }

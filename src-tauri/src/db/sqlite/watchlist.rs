@@ -98,7 +98,7 @@ pub fn create(
     if name.is_empty() {
         return Ok(None);
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = super::write_transaction(conn)?;
     let clash = tx
         .query_row(
             "SELECT 1 FROM watchlists WHERE user_id = ?1 AND name = ?2",
@@ -168,7 +168,7 @@ pub fn delete(conn: &Connection, user: &str, id: i64) -> Result<bool> {
     if !owned(conn, user, id)? {
         return Ok(false);
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = super::write_transaction(conn)?;
     tx.execute(
         "DELETE FROM watchlist_items WHERE watchlist_id = ?1",
         params![id],
@@ -266,7 +266,7 @@ pub fn reorder(conn: &Connection, user: &str, id: i64, order: &[i64]) -> Result<
         }
     }
     sequence.extend(remaining);
-    let tx = conn.unchecked_transaction()?;
+    let tx = super::write_transaction(conn)?;
     for (pos, iid) in sequence.iter().enumerate() {
         tx.execute(
             "UPDATE watchlist_items SET position = ?1 WHERE id = ?2",
@@ -310,5 +310,35 @@ mod tests {
             assert!(create(&c, "u", &format!("L{i}"), &[]).unwrap().is_some());
         }
         assert!(create(&c, "u", "one more", &[]).unwrap().is_none());
+    }
+
+    /// A list created while another writer holds the database waits for
+    /// it and is saved. Opened deferred, the create read first and then
+    /// asked to write, and SQLite refused that upgrade at once ("database
+    /// is locked") without the busy handler's wait.
+    #[test]
+    fn a_list_created_while_another_write_holds_the_database_waits_and_is_saved() {
+        use crate::db::sqlite::{open_pool, Durability};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let pool = open_pool(&path, 2, Durability::MAIN).unwrap();
+        let c = pool.get().unwrap();
+        migrate(&c).unwrap();
+        let (locked, wait) = std::sync::mpsc::channel();
+        let held = path.clone();
+        let holder = std::thread::spawn(move || {
+            let h = Connection::open(held).unwrap();
+            h.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            h.execute_batch("COMMIT").unwrap();
+        });
+        wait.recv().unwrap();
+        let made = create(&c, "u", "Main", &[("SBIN".into(), "NSE".into())]);
+        holder.join().unwrap();
+        assert!(
+            made.expect("saved once the other write ends").is_some(),
+            "the list is created"
+        );
     }
 }

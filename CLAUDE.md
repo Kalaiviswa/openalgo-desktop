@@ -808,6 +808,15 @@ Every flaky test found so far was a race, not a slow machine:
   so a migration that changes its indexes goes through
   `master_swap::create_indexes`; a view or trigger on `symtoken` would follow
   the rename to the dropped table, so add none.
+- **Open a writing transaction IMMEDIATE** (`db::sqlite::write_transaction`,
+  or `BEGIN IMMEDIATE`). A read transaction that upgrades to a write is not
+  retried by the busy handler: a deferred transaction that reads first
+  takes the write lock only at its first write, and SQLite refuses that
+  upgrade with "database is locked" at once while another connection
+  writes, so `retry_busy` never runs. A scalping stop saved beside ordinary
+  order traffic was refused that way (found by `tests/it/perf`).
+  `db::sqlite::transaction_guard` fails on a deferred transaction outside
+  its allowlist of read-only ones, each with its reason.
 - A fold that writes a position and its watermark (the strategy book)
   commits both, and the buffered row it drains, in one transaction; a process
   lock orders callers but does not survive a crash (DB-02).

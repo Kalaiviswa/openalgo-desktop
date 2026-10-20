@@ -62,6 +62,20 @@ pub fn open_pool(
     Ok(pool)
 }
 
+/// Open a transaction that writes: `BEGIN IMMEDIATE`, which takes the
+/// write lock at the start, where the busy handler (`retry_busy`) waits
+/// for another writer. A deferred transaction (`Connection::transaction`)
+/// that reads first takes the lock only at its first write, and SQLite
+/// answers that upgrade from a read "database is locked" at once, without
+/// calling the busy handler: a scalping stop saved while another writer
+/// held `openalgo.db` was refused that way (found by `tests/it/perf`).
+/// `transaction_guard` keeps deferred transactions out of the code.
+pub(crate) fn write_transaction(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 /// How long a statement waits for another writer before it fails busy.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -168,6 +182,9 @@ impl SqliteDb {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod transaction_guard;
 
 #[cfg(test)]
 mod tests {

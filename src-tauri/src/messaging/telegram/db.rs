@@ -650,7 +650,7 @@ pub fn update_preferences(
     prefs: &[(&'static str, Value)],
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = crate::db::sqlite::write_transaction(conn)?;
     tx.execute(
         "INSERT OR IGNORE INTO user_preferences (telegram_id) VALUES (?1)",
         params![telegram_id],

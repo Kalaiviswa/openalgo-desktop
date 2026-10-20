@@ -348,8 +348,8 @@ impl Store {
 
     /// Delete a strategy and its mappings. True when it existed.
     pub fn delete(&self, id: i64) -> Result<bool> {
-        let mut conn = self.db.conn()?;
-        let tx = conn.transaction()?;
+        let conn = self.db.conn()?;
+        let tx = crate::db::sqlite::write_transaction(&conn)?;
         tx.execute(
             "DELETE FROM chartink_symbol_mappings WHERE strategy_id = ?1",
             [id],
@@ -365,8 +365,8 @@ impl Store {
         rows: &[NewMapping],
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let mut conn = self.db.conn()?;
-        let tx = conn.transaction()?;
+        let conn = self.db.conn()?;
+        let tx = crate::db::sqlite::write_transaction(&conn)?;
         let ts = stamp(now);
         for m in rows {
             tx.execute(

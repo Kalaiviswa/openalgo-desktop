@@ -33,7 +33,7 @@ pub fn read_all(conn: &Connection, user: &str) -> Result<BTreeMap<String, Option
 /// Save `prefs` for `user` in one transaction: a key already saved takes the
 /// new value, a new key is added, other keys are kept.
 pub fn save(conn: &mut Connection, user: &str, prefs: &[(String, Option<String>)]) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = super::write_transaction(conn)?;
     {
         let mut stmt = tx.prepare(
             "INSERT INTO chart_prefs (user_id, key, value, updated_at)
