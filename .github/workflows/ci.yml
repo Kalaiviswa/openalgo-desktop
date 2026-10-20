@@ -251,6 +251,17 @@ jobs:
         # scripts/certify/broker_certify.py (BR-06) against a fake app on
         # ephemeral loopback ports; it never reaches a broker.
         run: python3 -I scripts/certify/test_broker_certify.py
+      - name: E2E test build checks
+        # scripts/ci/check_no_e2e_build.py (the release build's check before
+        # bundling, its backstop, the install smoke's check), and release.yml
+        # running it inside tauri-action's build before anything is bundled.
+        run: |
+          python3 scripts/ci/test_check_no_e2e_build.py
+          python3 scripts/ci/test_release_workflow.py
+      - name: Native E2E order book check tests
+        # scripts/ci/native_e2e_sandbox.py, the sandbox order's check in
+        # native-e2e-test-build.yml.
+        run: python3 scripts/ci/test_native_e2e_sandbox.py
       - name: Biome (lint, format, import order)
         run: npx biome ci --reporter=github ./src
       - name: Type check

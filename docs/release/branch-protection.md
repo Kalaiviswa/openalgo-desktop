@@ -211,20 +211,36 @@ commit the run built).
   account creation, a refused wrong password, sign-in, the signed-in shell
   and sign-out, against the app's real server and session cookie.
 
-Outside `ci-ok`, after every push to `master` and by hand:
-`.github/workflows/native-e2e-windows.yml` runs the same native script on
-Windows Server 2025. msedgedriver needs WebView2's remote debugging port,
-which the release app does not open, so the job builds a **test-only**
-binary with the `e2e-debug-port` feature (`src-tauri/src/e2e.rs`): its main
-window opens the port the script gives it (`OPENALGO_E2E_DEBUG_PORT`, a
-free port per run, on 127.0.0.1 only, which the script checks). Guardrails:
-the feature does not compile outside a debug build without
-`OPENALGO_E2E_BUILD=1`, which only this job sets; `release.yml` never builds
-it; and the install smoke and `release.yml` check the shipped Windows binary
-for its strings (`scripts/ci/check_no_e2e_build.py`), a check this job runs
-on its own build to show it finds them. It builds a second Windows release
-binary (39 minutes on 2026-10-20, run 39373651570), which is why it is not a
-pull request job.
+Outside `ci-ok`, after every push to `master`, by hand, and on pull
+requests that change the harness itself:
+`.github/workflows/native-e2e-test-build.yml` runs the same native script on
+Linux (tauri-driver) and Windows Server 2025 (msedgedriver) against a
+**test-only** build (`src-tauri/src/e2e.rs`, the `e2e` profile: the release
+settings without link-time optimization), and adds a sandbox order
+(`scripts/ci/native_e2e_sandbox.py`): log in to a scripted broker
+(`src-tauri/src/brokers/scripted.rs`, the `e2e-broker` feature, in the place
+of Dhan (Sandbox)) with its saved keys, check the API key is there, switch to
+analyzer mode, place the ATM call from the Option Chain's order form, find
+it in the Order Book with a sandbox order id, read it through
+`/api/v1/orderbook` in the web's analyze-mode shape, and show by the
+scripted broker's own count (read out at the test build's
+`GET /e2e/scripted-broker`) that no order reached it. On Windows the build also has
+the `e2e-debug-port` feature: msedgedriver needs WebView2's remote debugging
+port, which the release app does not open, so the main window opens the
+port the script gives it (`OPENALGO_E2E_DEBUG_PORT`, a free port per run, on
+127.0.0.1 only, which the script checks). Guardrails: neither feature
+compiles outside a debug build without `OPENALGO_E2E_BUILD=1`, which only
+this workflow sets (its Linux job shows the same build failing on the guard
+without it); with the feature on, the broker catalogue, the sign-in table
+and every adapter but the one slot are unchanged (its lint job runs those
+tests with the feature); `release.yml` never builds them; and the install smoke
+and `release.yml` check every shipped binary for their strings
+(`scripts/ci/check_no_e2e_build.py`), a check this workflow runs on its own
+builds to show it finds them. It builds a second binary per system (the
+Windows release-profile build took 39 minutes on 2026-10-20, run
+39373651570), which is why it is not a job of every pull request; every pull
+request runs the scripted market through the same routes in-process
+(`src-tauri/tests/it/e2e_scripted_broker.rs`).
 
 Cost: each job takes about a minute once its bundle exists (2026-10-20:
 25-45 s of steps per install smoke job, about 70 s for the native run), so
@@ -243,6 +259,13 @@ succeeded (a skipped or missing one fails). A `master` run cancelled because
 its pull request had already been tested has no verdict: re-run it (Re-run
 all jobs) before tagging. To try a run's bundles again, re-run its
 installed-app jobs; the bundles are kept 7 days.
+
+The gate also requires the native order journey
+(`native-e2e-test-build.yml`, outside `ci-ok`) green on the tagged commit:
+the newest run of it for that commit on `master` that was not cancelled,
+started by the push or by hand, with all three of its jobs passed. On
+`master` every commit gets its own run of it (a newer push never cancels an
+older one), so a failed or cancelled one is re-run, not waited out.
 
 ## Checking that it holds
 

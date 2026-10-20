@@ -15,8 +15,8 @@ name: Native E2E
 # not take that switch from the environment: on Windows Server 2025 the
 # WebView2 processes ran and loaded the app, but no debugging port opened,
 # launched by msedgedriver or by hand (2026-10-12, runs 38275143364 and
-# 38280440540). That is right for a release build; a test-only build that
-# opens the port itself comes with the scripted-broker build below.
+# 38280440540). That is right for a release build; the test build that
+# opens the port itself runs in native-e2e-test-build.yml.
 #
 # macOS has no WebDriver for WKWebView; the install smoke's HTTP sign-in is
 # what covers it there.
@@ -25,9 +25,10 @@ name: Native E2E
 # ci-ok needs it), on the .deb that run built, with this workflow and the
 # script from the same commit; the job names that commit in its summary.
 #
-# Next step (needs a Rust change): a test-only build with a scripted broker,
-# so one order can be placed in sandbox mode through the UI and seen in the
-# order book; the release app has no broker to quote from in CI.
+# A sandbox order through the order form needs a broker to quote from,
+# which the release app has none of in CI: native-e2e-test-build.yml places
+# one on Linux and Windows against a test build with a scripted broker,
+# after pushes to master.
 
 on:
   workflow_call:

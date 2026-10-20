@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """End-to-end through the installed app's own window, by WebDriver.
 
-    python3 scripts/ci/native_e2e.py <app binary>
+    python3 scripts/ci/native_e2e.py [--sandbox-order] <app binary>
 
 CI only: the app binds the shipped ports 5000 and 8765 and the WebDriver
 server binds 4444. macOS has no WebDriver for WKWebView.
 
-- Linux (.github/workflows/native-e2e.yml): the installed .deb, started by
-  `tauri-driver` (on PATH) with WebKitWebDriver.
-- Windows (.github/workflows/native-e2e-windows.yml): the e2e-debug-port
-  test build (src-tauri/src/e2e.rs), never a release. MSEDGEDRIVER names
-  the msedgedriver of the installed WebView2's version. The script picks a
+- Linux: `tauri-driver` (on PATH) starts the app with WebKitWebDriver: the
+  installed .deb in every CI run (.github/workflows/native-e2e.yml), the
+  E2E test build after pushes to master
+  (.github/workflows/native-e2e-test-build.yml).
+- Windows (native-e2e-test-build.yml): the E2E test build
+  (src-tauri/src/e2e.rs), never a release. MSEDGEDRIVER names the
+  msedgedriver of the installed WebView2's version. The script picks a
   free port, starts the app with OPENALGO_E2E_DEBUG_PORT set to it, checks
   the webview's debugging server listens on 127.0.0.1 only, and attaches
   msedgedriver to it (debuggerAddress).
@@ -23,7 +25,10 @@ against its real Rust server, sign-in and session cookie:
 2. a wrong password is refused and leaves the trader on the sign-in page;
 3. the right one signs in; the signed-in shell (the navigation bar) shows on
    Profile, and the dashboard sends a trader with no broker to Connect;
-4. after sign-out the dashboard sends the trader back to sign in.
+4. with --sandbox-order (the test build only): a sandbox order placed
+   from the order form, found in the order book, never at the broker
+   (scripts/ci/native_e2e_sandbox.py);
+5. after sign-out the dashboard sends the trader back to sign in.
 
 The app gets a fresh, empty home and data folder. The password is random
 per run and never printed.
@@ -88,6 +93,11 @@ def wait_http(url: str, deadline_s: float) -> bool:
 
 
 def main(argv: list[str]) -> int:
+    # A Windows runner's console is cp1252: print what it cannot show (the
+    # order book's rupee sign) escaped, rather than stop on it.
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sandbox_order = "--sandbox-order" in argv
+    argv = [a for a in argv if a != "--sandbox-order"]
     if len(argv) != 1:
         print(__doc__)
         return 2
@@ -187,7 +197,13 @@ def main(argv: list[str]) -> int:
         wait.until(lambda d: path() == "/broker")
         print("dashboard without a broker: sent to /broker")
 
-        # 4. Sign out.
+        # 4. A sandbox order, in the test build.
+        if sandbox_order:
+            import native_e2e_sandbox
+
+            problems += native_e2e_sandbox.run(session, wait, BASE, path)
+
+        # 5. Sign out.
         session.get(BASE + "/auth/logout")
         session.get(BASE + "/dashboard")
         wait.until(lambda d: path() == "/login")
@@ -197,6 +213,10 @@ def main(argv: list[str]) -> int:
         if session is not None:
             try:
                 print(f"at {session.current_url}")
+                # What the window showed, for the workflow's failure artifact.
+                shot = os.path.join(os.environ.get("RUNNER_TEMP", home), "native-e2e-failure.png")
+                session.save_screenshot(shot)
+                print(f"screenshot: {shot}")
             except Exception:  # noqa: BLE001
                 pass
     finally:
@@ -224,7 +244,8 @@ def main(argv: list[str]) -> int:
         print(f"FAILED: {p}")
     if problems:
         return 1
-    print("OK: setup, refused wrong password, sign-in, signed-in shell and sign-out in the native window.")
+    sandbox = " a sandbox order from the order form," if sandbox_order else ""
+    print(f"OK: setup, refused wrong password, sign-in, signed-in shell,{sandbox} and sign-out in the native window.")
     return 0
 
 

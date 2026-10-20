@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeBundleCommand": "python scripts/ci/check_no_e2e_build.py --tauri-hook"
+  }
+}

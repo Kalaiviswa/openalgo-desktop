@@ -394,6 +394,11 @@ jobs:
           "TAURI_EXTRA_ARGS=--config $configArg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Windows signing configured."
 
+      - uses: actions/setup-python@v6
+        # The check before bundling (below) runs as `python` on every system.
+        with:
+          python-version: "3.12"
+
       - name: Build and upload to the draft release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -402,7 +407,12 @@ jobs:
           tauriScript: npx tauri
           # updater-artifacts.conf.json: the signed update bundles, made
           # only here (CI and local builds have no signing key).
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci --config src-tauri/updater-artifacts.conf.json ${{ env.TAURI_EXTRA_ARGS }}
+          # release-checks.conf.json: between compiling and bundling, in
+          # this same build, the binary is checked not to be CI's E2E test
+          # build (src-tauri/src/e2e.rs, scripts/ci/check_no_e2e_build.py
+          # --tauri-hook). A refused binary stops the build: nothing is
+          # bundled or uploaded.
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci --config src-tauri/updater-artifacts.conf.json --config src-tauri/release-checks.conf.json ${{ env.TAURI_EXTRA_ARGS }}
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           # The update bundles and their .sig files go up; latest.json is
@@ -410,6 +420,15 @@ jobs:
           # jobs each rewriting it would race).
           uploadUpdaterSignatures: true
           uploadUpdaterJson: false
+
+      - name: The bundled binary is the one checked before bundling
+        # A backstop, after the upload: the binary must still have the code
+        # digest the check recorded (Windows' in-place signature aside), and
+        # a missing record means the check did not run. Either fails the job.
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python scripts/ci/check_no_e2e_build.py --same-as-checked "src-tauri/target/${TARGET}/release/openalgo-desktop${EXE}"
 
       - name: The update bundle is signed
         env:
@@ -432,15 +451,6 @@ jobs:
       - name: Remove notarization key
         if: always() && runner.os == 'macOS'
         run: rm -f "${RUNNER_TEMP}"/AuthKey_*.p8
-
-      - name: The Windows binary is not the E2E test build
-        # src-tauri/src/e2e.rs: only CI's Windows native E2E builds the
-        # e2e-debug-port feature (a WebView2 debugging port); a release
-        # binary carrying its strings fails here.
-        if: runner.os == 'Windows'
-        env:
-          TARGET: ${{ matrix.target }}
-        run: python scripts/ci/check_no_e2e_build.py "src-tauri/target/${TARGET}/release/openalgo-desktop.exe"
 
       - name: Check the installer signature
         # What the release notes say about signing comes from this check, not

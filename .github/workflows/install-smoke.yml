@@ -95,6 +95,10 @@ jobs:
           fi
           sudo apt-get install -y --no-install-recommends "./${debs[0]}" xvfb
           dpkg -L open-algo-desktop | grep -E '^/usr/bin/'
+      - name: The installed binary is not the E2E test build
+        # src-tauri/src/e2e.rs: the test-only build signs in to a scripted
+        # broker; a shipped binary carries none of its strings.
+        run: python3 scripts/ci/check_no_e2e_build.py /usr/bin/openalgo-desktop
       - name: The .deb depends on what the binary links
         run: |
           shopt -s nullglob
@@ -172,7 +176,8 @@ jobs:
           "APP_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: The installed binary is not the E2E test build
         # src-tauri/src/e2e.rs: the test-only build opens a WebView2
-        # debugging port; a shipped binary carries none of its strings.
+        # debugging port and signs in to a scripted broker; a shipped binary
+        # carries none of their strings.
         run: python scripts/ci/check_no_e2e_build.py "$APP_EXE"
       - name: Windows version
         shell: pwsh
@@ -239,6 +244,9 @@ jobs:
           bin="${RUNNER_TEMP}/Applications/$(basename "${apps[0]}")/Contents/MacOS/openalgo-desktop"
           test -x "$bin"
           echo "APP_BIN=${bin}" >> "$GITHUB_ENV"
+      - name: The installed binary is not the E2E test build
+        # src-tauri/src/e2e.rs: no shipped binary carries its strings.
+        run: python3 scripts/ci/check_no_e2e_build.py "$APP_BIN"
       - name: Download the Intel bundle
         uses: actions/download-artifact@v7
         with:
