@@ -13,7 +13,7 @@ use axum::{
     http::StatusCode,
     response::Response,
 };
-use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -119,11 +119,12 @@ fn export_line(l: &LatencyRow) -> String {
     ])
 }
 
-/// GET /latency/export: every call, streamed a page at a time (DB-03).
+/// GET /latency/export: every call, streamed a page at a time and each
+/// page formatted on the blocking pool with its read (DB-03).
 pub async fn export(State(ctx): Ctx) -> Response {
     let header = csv_row(&EXPORT_HEADER.map(String::from));
-    let rows = latency_service::export_pages(ctx)
-        .map_ok(|page| page.iter().map(export_line).collect::<String>());
+    let rows =
+        latency_service::export_pages(ctx, |page| page.iter().map(export_line).collect::<String>());
     download_stream(
         stream::once(async { Ok(header) }).chain(rows),
         "text/csv",

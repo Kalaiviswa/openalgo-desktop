@@ -64,6 +64,24 @@ pub async fn runtime_stall<F: std::future::Future>(fut: F) -> (F::Output, std::t
     (out, worst)
 }
 
+/// Run `fut` and return how long its polls took in all: the time it kept
+/// this test's runtime thread busy, however finely it split the work. Work
+/// done a little per poll on the async worker (a page of an export
+/// formatted per poll) never shows as one long hold in [`runtime_stall`],
+/// whose bound must leave room for a loaded runner, but adds up here.
+pub async fn runtime_busy<F: std::future::Future>(fut: F) -> (F::Output, std::time::Duration) {
+    let mut fut = std::pin::pin!(fut);
+    let mut busy = std::time::Duration::ZERO;
+    let out = std::future::poll_fn(|cx| {
+        let t = std::time::Instant::now();
+        let r = fut.as_mut().poll(cx);
+        busy += t.elapsed();
+        r
+    })
+    .await;
+    (out, busy)
+}
+
 mod api_v1_support;
 mod feed_support;
 mod mcp_support;

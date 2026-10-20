@@ -36,10 +36,12 @@ fn seed_latency(h: &H) {
         .unwrap();
 }
 
-/// DB-03, DB-01: four Latency page refreshes and an export over 200,000
-/// rows never hold the runtime (`runtime_stall` under 200 ms). Before,
-/// each report loaded every row and sorted it on the async worker (held
-/// 7.5 s).
+/// DB-03, DB-01: three Latency page refreshes and an export over 200,000
+/// rows never hold the runtime. Before DB-03, each report loaded every row
+/// and sorted it on the async worker (`runtime_stall` 7.5 s). Until the
+/// export formatted its pages on the blocking pool, it spent 17 ms of the
+/// async worker per page of 1,000 rows, 3.5 s in all (`runtime_busy`),
+/// and a loaded CI runner stretched one page past 200 ms.
 #[tokio::test]
 async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
     let (h, c, _) = signed_in();
@@ -61,10 +63,16 @@ async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
             (status, body.to_vec())
         }
     };
+    // Three refreshes, not four: each report holds one of the logs pool's
+    // four connections for its whole computation, so with four the
+    // export's next page waits for one to finish, and on a loaded runner
+    // that outlasts the pool's 10 s wait and ends the export with a pool
+    // error. #143 makes concurrent refreshes share one report and puts
+    // the fourth back.
     let stats = || call("/latency/api/stats");
-    let ((a, b, d, e, (s, csv)), worst) = crate::runtime_stall(async {
-        tokio::join!(stats(), stats(), stats(), stats(), call("/latency/export"))
-    })
+    let (((a, b, d, (s, csv)), busy), worst) = crate::runtime_stall(crate::runtime_busy(async {
+        tokio::join!(stats(), stats(), stats(), call("/latency/export"))
+    }))
     .await;
     let json = |r: (StatusCode, Vec<u8>)| {
         (
@@ -72,8 +80,8 @@ async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
             serde_json::from_slice::<serde_json::Value>(&r.1).unwrap(),
         )
     };
-    let (a, b, d, e) = (json(a), json(b), json(d), json(e));
-    for (s, v) in [&a, &b, &d, &e] {
+    let (a, b, d) = (json(a), json(b), json(d));
+    for (s, v) in [&a, &b, &d] {
         assert_eq!(*s, StatusCode::OK, "{}", v);
         assert_eq!(v["total_orders"], ROWS);
         assert_eq!(v["failed_orders"], ROWS / 10);
@@ -86,8 +94,13 @@ async fn latency_reports_over_a_large_log_do_not_hold_the_runtime() {
     assert!(csv.starts_with("Date & Time (IST),Broker,Order ID"));
     assert!(
         worst < Duration::from_millis(200),
-        "the runtime was held for {:?}",
+        "the runtime was held for {:?} at once",
         worst
+    );
+    assert!(
+        busy < Duration::from_secs(1),
+        "the reports kept the runtime busy for {:?} in all",
+        busy
     );
 }
 

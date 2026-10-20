@@ -746,6 +746,12 @@ Every flaky test found so far was a race, not a slow machine:
   lost order fact). A test that counts order-book reads, or needs a gap to
   stay open, makes the book read fail until it has asserted, or drives
   `ctx.reconciler.pass()` itself.
+- A `runtime_stall` bound that fails only on a loaded runner can be product
+  work split into many small holds: the latency export formatted each
+  1,000-row page on the async worker, 17 ms at a time and 3.5 s in all, and
+  a loaded runner stretched one page past 200 ms. Format with the read on
+  the blocking pool, and assert the total with `runtime_busy` as well as
+  the worst gap.
 
 ### Data and migrations
 

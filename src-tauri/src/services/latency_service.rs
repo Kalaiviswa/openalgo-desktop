@@ -64,26 +64,35 @@ pub async fn recent(ctx: &Arc<AppState>, limit: i64) -> Result<Vec<LatencyRow>> 
 const EXPORT_PAGE: i64 = 1_000;
 
 /// Every call, newest first, a page at a time (web `/latency/export` reads
-/// them all at once). Each page is read off the async workers when the
-/// download asks for it, so at most one page is held (DB-03).
-pub fn export_pages(ctx: Arc<AppState>) -> impl Stream<Item = Result<Vec<LatencyRow>>> + Send {
-    stream::try_unfold(Some((ctx, None)), |state| async move {
-        let Some((ctx, before)) = state else {
+/// them all at once), each page turned into text by `render`. A page is
+/// read and rendered off the async workers when the download asks for it,
+/// so at most one page is held (DB-03) and the runtime never formats one:
+/// rendered there, a page of 1,000 rows held it 17 ms in a debug build,
+/// 3.5 s over a 200,000-row export.
+pub fn export_pages<F>(ctx: Arc<AppState>, render: F) -> impl Stream<Item = Result<String>> + Send
+where
+    F: Fn(&[LatencyRow]) -> String + Send + Sync + 'static,
+{
+    stream::try_unfold(Some((ctx, None, Arc::new(render))), |state| async move {
+        let Some((ctx, before, render)) = state else {
             return Ok(None);
         };
-        let page = ctx
+        let r = render.clone();
+        let (out, last) = ctx
             .blocking(move |c| {
                 if before.is_none() {
                     c.monitor.drain_now(c);
                 }
-                store::latency_page(&*c.logs.conn()?, before, EXPORT_PAGE)
+                let page = store::latency_page(&*c.logs.conn()?, before, EXPORT_PAGE)?;
+                // A short page is the last one.
+                let last = page
+                    .last()
+                    .filter(|_| page.len() as i64 == EXPORT_PAGE)
+                    .map(|l| l.id);
+                Ok((r(&page), last))
             })
             .await?;
-        let next = match page.last() {
-            Some(last) if page.len() as i64 == EXPORT_PAGE => Some((ctx, Some(last.id))),
-            _ => None,
-        };
-        Ok(Some((page, next)))
+        Ok(Some((out, last.map(|id| (ctx, Some(id), render)))))
     })
 }
 
