@@ -11,7 +11,6 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::{self, Stream};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Percentiles cover this many days (web `PERCENTILE_WINDOW_DAYS`).
 const PERCENTILE_DAYS: i64 = 30;
@@ -110,31 +109,11 @@ fn sorted(mut v: Vec<f64>) -> Vec<f64> {
     v
 }
 
-/// One Latency report computed at a time, shared by every request that
-/// arrives while it is computed (single flight). Each report holds a logs
-/// connection for its whole computation, and the logs pool has four, so
-/// four refreshes computing at once left none for the traffic, latency,
-/// error and order log writers. Shared, they hold one.
-#[derive(Default)]
-pub struct ReportFlight {
-    /// The last report and when it finished; locked while one is computed.
-    last: tokio::sync::Mutex<Option<(Instant, Value)>>,
-}
-
 /// Web `OrderLatency.get_latency_stats` plus `broker_histograms`, read off
 /// the async workers. A request that arrives while a report is computed
-/// waits for it and answers with it ([`ReportFlight`]).
+/// waits for it and answers with it (`ReportFlight`).
 pub async fn stats(ctx: &Arc<AppState>) -> Result<Value> {
-    let asked = Instant::now();
-    let mut last = ctx.latency_reports.last.lock().await;
-    if let Some((done, report)) = last.as_ref() {
-        if *done >= asked {
-            return Ok(report.clone());
-        }
-    }
-    let report = ctx.blocking(stats_now).await?;
-    *last = Some((Instant::now(), report.clone()));
-    Ok(report)
+    ctx.latency_reports.share(ctx, stats_now).await
 }
 
 fn stats_now(ctx: &AppState) -> Result<Value> {

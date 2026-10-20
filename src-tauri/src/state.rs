@@ -111,7 +111,7 @@ pub struct AppState {
     /// Traffic, latency and security monitoring (bounded queue + writer).
     pub monitor: crate::services::monitor::Monitor,
     /// The Latency page's report, one computation for concurrent requests.
-    pub latency_reports: crate::services::latency_service::ReportFlight,
+    pub latency_reports: crate::services::report_flight::ReportFlight,
     /// The sandbox (analyzer mode) engine, in its own `sandbox.db`.
     pub sandbox: crate::sandbox::Sandbox,
     /// Telegram and WhatsApp bots and their alerts.
