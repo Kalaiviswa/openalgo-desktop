@@ -39,6 +39,9 @@ r2d2_sqlite = "0.25"
 # Security
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 argon2 = "0.5"
+# Argon2's working memory in pages of its own, returned when a run ends
+# (security::hashing::Workspace).
+memmap2 = "0.9"
 aes-gcm = "0.10"
 # The AES key schedule is zeroed when the data key leaves memory at logout
 # (KEY-01).

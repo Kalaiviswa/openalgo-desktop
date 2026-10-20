@@ -3,12 +3,13 @@
 
 use crate::error::{AppError, Result};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2, Params, Version,
+    password_hash::{rand_core::OsRng, Output, ParamsString, PasswordHash, SaltString},
+    Algorithm, Argon2, Block, Params, Version,
 };
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 pub const PEPPER_SIZE: usize = 32;
 
@@ -18,11 +19,7 @@ fn argon2() -> Result<Argon2<'static>> {
     ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let params = Params::new(19456, 2, 1, None)
         .map_err(|e| AppError::Internal(format!("argon2 params: {}", e)))?;
-    Ok(Argon2::new(
-        argon2::Algorithm::Argon2id,
-        Version::V0x13,
-        params,
-    ))
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 /// The password with the pepper appended, as the web hashes it. Zeroed when
@@ -36,23 +33,117 @@ fn peppered(pepper: &[u8], password: &str) -> zeroize::Zeroizing<String> {
     s
 }
 
+/// One Argon2 run's working memory (19 MiB with the account's parameters)
+/// in pages of its own, mapped for the run and unmapped when it ends, zeroed
+/// first. Taken from the allocator instead, glibc kept the freed block in
+/// the thread's malloc arena once the first one had raised its mmap
+/// threshold, so every thread that ever hashed held on to up to ~19 MiB,
+/// some several (weekly soak, 2026-10-18: +115 MB).
+struct Workspace {
+    map: memmap2::MmapMut,
+    blocks: usize,
+}
+
+impl Workspace {
+    fn new(params: &Params) -> Result<Self> {
+        let blocks = params.block_count();
+        let map = memmap2::MmapMut::map_anon(blocks * Block::SIZE)
+            .map_err(|e| AppError::Internal(format!("argon2 working memory: {}", e)))?;
+        Ok(Self { map, blocks })
+    }
+}
+
+impl AsMut<[Block]> for Workspace {
+    fn as_mut(&mut self) -> &mut [Block] {
+        // SAFETY: the map is `blocks * Block::SIZE` bytes, page aligned (a
+        // Block needs 64) and zero-filled by the system; a Block is plain
+        // u64s, valid for any bytes; the slice borrows `self` mutably, so
+        // nothing else reaches the map while it lives.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.map.as_mut_ptr().cast::<Block>(), self.blocks)
+        }
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        self.map[..].zeroize();
+    }
+}
+
+/// `argon.hash_password_into` with the working memory in a [`Workspace`].
+fn run(argon: &Argon2<'_>, pwd: &[u8], salt: &[u8], out: &mut [u8]) -> Result<()> {
+    let memory = Workspace::new(argon.params())?;
+    argon
+        .hash_password_into_with_memory(pwd, salt, out, memory)
+        .map_err(|e| AppError::Internal(format!("argon2: {}", e)))
+}
+
+fn phc_error(e: argon2::password_hash::Error) -> AppError {
+    AppError::Internal(format!("invalid password hash: {}", e))
+}
+
 pub fn hash_password(pepper: &[u8], password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    argon2()?
-        .hash_password(peppered(pepper, password).as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| AppError::Internal(format!("password hashing failed: {}", e)))
+    hash_with_salt(pepper, password, &salt)
+}
+
+/// The PHC string the argon2 crate's `PasswordHasher` makes, with the run's
+/// memory from [`run`].
+fn hash_with_salt(pepper: &[u8], password: &str, salt: &SaltString) -> Result<String> {
+    let argon = argon2()?;
+    let mut salt_buf = [0u8; 64];
+    let salt_bytes = salt
+        .as_salt()
+        .decode_b64(&mut salt_buf)
+        .map_err(phc_error)?;
+    let mut out = [0u8; Params::DEFAULT_OUTPUT_LEN];
+    run(
+        &argon,
+        peppered(pepper, password).as_bytes(),
+        salt_bytes,
+        &mut out,
+    )?;
+    let phc = PasswordHash {
+        algorithm: Algorithm::Argon2id.ident(),
+        version: Some(Version::V0x13.into()),
+        params: ParamsString::try_from(argon.params()).map_err(phc_error)?,
+        salt: Some(salt.as_salt()),
+        hash: Some(Output::new(&out).map_err(phc_error)?),
+    };
+    out.zeroize();
+    Ok(phc.to_string())
 }
 
 pub fn verify_password(pepper: &[u8], password: &str, hash: &str) -> Result<bool> {
     ARGON2_RUNS.with(|n| n.set(n.get() + 1));
-    let parsed = PasswordHash::new(hash)
-        .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
-    match Argon2::default().verify_password(peppered(pepper, password).as_bytes(), &parsed) {
-        Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
-        Err(e) => Err(AppError::Internal(format!("password verification: {}", e))),
-    }
+    let parsed = PasswordHash::new(hash).map_err(phc_error)?;
+    // As the crate's PasswordVerifier: a hash without a salt or an output
+    // matches no password.
+    let (Some(expected), Some(salt)) = (parsed.hash, parsed.salt) else {
+        return Ok(false);
+    };
+    let algorithm = Algorithm::try_from(parsed.algorithm).map_err(phc_error)?;
+    let version = match parsed.version {
+        Some(v) => {
+            Version::try_from(v).map_err(|e| AppError::Internal(format!("argon2: {}", e)))?
+        }
+        None => Version::default(),
+    };
+    let params = Params::try_from(&parsed).map_err(phc_error)?;
+    let mut salt_buf = [0u8; 64];
+    let salt_bytes = salt.decode_b64(&mut salt_buf).map_err(phc_error)?;
+    let mut out = vec![0u8; expected.len()];
+    run(
+        &Argon2::new(algorithm, version, params),
+        peppered(pepper, password).as_bytes(),
+        salt_bytes,
+        &mut out,
+    )?;
+    // Output's equality is constant-time.
+    let same = Output::new(&out).map_err(phc_error)? == expected;
+    out.zeroize();
+    Ok(same)
 }
 
 /// Deterministic, indexable digest of an API key: HMAC-SHA256 keyed with the
@@ -73,8 +164,7 @@ pub fn lookup_hmac(pepper: &[u8], api_key: &str) -> String {
 /// (KEY-01).
 pub fn derive_kek(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
-    argon2()?
-        .hash_password_into(password.as_bytes(), salt, &mut out)
+    run(&argon2()?, password.as_bytes(), salt, &mut out)
         .map_err(|e| AppError::Encryption(format!("key derivation failed: {}", e)))?;
     Ok(out)
 }
@@ -165,6 +255,91 @@ mod tests {
         assert_ne!(a, lookup_hmac(&[1u8; 32], "key2"));
         assert_eq!(a.len(), 64);
     }
+
+    /// The crate's own PasswordHasher, as this file used it before the
+    /// run's memory moved to a [`Workspace`].
+    fn crate_hash(pepper: &[u8], password: &str, salt: &SaltString) -> String {
+        use argon2::password_hash::PasswordHasher;
+        argon2()
+            .unwrap()
+            .hash_password(peppered(pepper, password).as_bytes(), salt)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn hashes_are_the_crates_own_byte_for_byte() {
+        let pepper = [7u8; 32];
+        for (password, salt) in [
+            ("Secret@123", "c29tZXNhbHRzb21lc2FsdA"),
+            ("Market#2026", "MTIzNDU2Nzg5MGFiY2RlZg"),
+        ] {
+            let salt = SaltString::from_b64(salt).unwrap();
+            assert_eq!(
+                hash_with_salt(&pepper, password, &salt).unwrap(),
+                crate_hash(&pepper, password, &salt)
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_made_before_the_change_still_verifies() {
+        // BEFORE comes from the reference implementation (libargon2 through
+        // argon2-cffi 23.1.0) with the same inputs; the crate's own hasher,
+        // which made every stored hash before the run's memory moved to a
+        // Workspace, gives the same string.
+        let pepper = [7u8; 32];
+        assert_eq!(
+            crate_hash(
+                &pepper,
+                "Secret@123",
+                &SaltString::from_b64("c29tZXNhbHRzb21lc2FsdA").unwrap()
+            ),
+            BEFORE
+        );
+        assert!(verify_password(&pepper, "Secret@123", BEFORE).unwrap());
+        assert!(!verify_password(&pepper, "Secret@124", BEFORE).unwrap());
+        assert!(!verify_password(&[8u8; 32], "Secret@123", BEFORE).unwrap());
+    }
+
+    const BEFORE: &str =
+        "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$EOS7b0Gy28yNMM9Y3Eb0xS8WgPgz2iXnO87OMlG2usA";
+
+    #[test]
+    fn verification_follows_the_parameters_in_the_hash() {
+        // Another cost and output length, made by the crate: verification
+        // reads them from the PHC string, as the crate's verifier did.
+        use argon2::password_hash::PasswordHasher;
+        let pepper = [7u8; 32];
+        let params = Params::new(4096, 1, 1, Some(40)).unwrap();
+        let salt = SaltString::from_b64("c29tZXNhbHRzb21lc2FsdA").unwrap();
+        let other = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password(peppered(&pepper, "pw").as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+        assert!(other.contains("m=4096,t=1,p=1"));
+        assert!(verify_password(&pepper, "pw", &other).unwrap());
+        assert!(!verify_password(&pepper, "pW", &other).unwrap());
+        // No salt or no output matches nothing, as with the crate's verifier.
+        assert!(!verify_password(&pepper, "pw", "$argon2id$v=19$m=4096,t=1,p=1").unwrap());
+        assert!(verify_password(&pepper, "pw", "not a hash").is_err());
+    }
+
+    #[test]
+    fn kek_is_the_crates_own_and_unchanged() {
+        let mut crate_out = [0u8; 32];
+        argon2()
+            .unwrap()
+            .hash_password_into(b"pw", b"0123456789abcdef", &mut crate_out)
+            .unwrap();
+        let ours = derive_kek("pw", b"0123456789abcdef").unwrap();
+        assert_eq!(ours, crate_out);
+        // From the reference implementation as above: a vault wrapped before
+        // this change still opens.
+        assert_eq!(hex::encode(ours), KEK_BEFORE);
+    }
+
+    const KEK_BEFORE: &str = "aa11986f53323c413e6844bf08de8d0900cb42b5af9b3c88f960319d7d992e62";
 
     #[test]
     fn kek_depends_on_password_and_salt() {

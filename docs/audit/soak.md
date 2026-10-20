@@ -17,6 +17,9 @@ named). Each scheduled run uploads its log as the `soak-log` artifact.
 
 | Date | Commit | Where | Session soak (150 cycles) | Feed soak (1000 clients) | Run |
 | --- | --- | --- | --- | --- | --- |
+| 2026-10-20 | this change on `92689307` | CI, ubuntu-22.04, debug build, dispatch | AFTER_ROW | not run | AFTER_RUN |
+| 2026-10-20 | `92689307` plus per-cycle diagnostics | CI, ubuntu-22.04, debug build, dispatch | diagnostic: the 2026-10-18 step reproduced in the warm-up (RSS 174,712 KiB at cycle 1 to 273,320 at cycle 9 in five steps of about 19,600 KiB, then flat); heap in use 10 to 12 MiB throughout; see below | not run | [39358239967](https://github.com/marketcalls/openalgo-desktop/actions/runs/39358239967) |
+| 2026-10-18 | `32fcbcf` | CI, ubuntu-22.04, debug build, scheduled | **fail**: memory grew 118,504 KiB over the run (bound 48 MiB): RSS 232,532 KiB at cycle 10 to 350,180 at cycle 20, then flat to 351,036 (+384 KiB in the second half); descriptors 41 flat, pool 8 flat, tasks 23 flat. Cause below: Argon2 working memory kept by glibc, not a leak | pass: descriptors 11 -> 11, RSS +2,292 KiB | [39090876797](https://github.com/marketcalls/openalgo-desktop/actions/runs/39090876797) |
 | 2026-10-11 | `272d460` | CI, ubuntu-22.04, debug build | pass: descriptors 31 -> 30, pool 3 -> 3, RSS 265,180 -> 305,952 KiB (plateau from cycle 40), tasks 21 -> 22 | pass: descriptors 11 -> 11, RSS +2,416 KiB | [38106625181](https://github.com/marketcalls/openalgo-desktop/actions/runs/38106625181) |
 | 2026-10-08 | not recorded | macOS 14 (Apple Silicon), debug build | pass (below) | not recorded | local |
 
@@ -56,6 +59,42 @@ the resident set on Linux and Windows and the physical footprint on macOS
 (`proc_pid_rusage`, resident plus compressed): macOS compresses idle pages,
 so its resident set alone falls and rises with no change in use, and an
 earlier run asserting on it failed on that noise.
+
+### 2026-10-18 failure: Argon2's working memory kept by glibc (fixed)
+
+The scheduled run at `32fcbcf` failed its memory bound with a step, not a
+line: about 118 MB between cycles 10 and 20, then flat. A dispatched run
+with per-cycle diagnostics (run 39358239967: `mallinfo2`, SQLite's own
+`sqlite3_memory_used`, `/proc/self/status` threads and `/proc/self/smaps`)
+named it:
+
+- Heap in use (`uordblks`) stayed between 10 and 12 MiB over 160 cycles;
+  SQLite's own memory stayed at about 2.3 MiB; 16 threads throughout. No
+  object was leaked, and no cache grew.
+- What grew was free memory that glibc kept (`arena` and `fordblks` rose
+  together), in steps of about 19,600 KiB: one Argon2id working set
+  (`security/hashing.rs`, 19,456 KiB with the account's parameters) plus
+  bookkeeping. The anonymous mappings holding it were glibc's per-thread
+  arena heaps, two of them at about 58 MB each at the plateau.
+- Why: the first 19 MiB block came from `mmap` and was returned, but freeing
+  it raised glibc's dynamic mmap threshold (and its trim threshold to about
+  38 MiB), so every later block came from the running thread's arena and
+  stayed there after it was freed, some arenas keeping several. The plateau
+  depends on which threads ran the hashes, which is why it fell inside the
+  warm-up in one run and after it in another.
+- Why since `272d460`: KEY-01 derives the key-vault key with Argon2 at each
+  sign-in, and its security review pads every sign-in to the same number of
+  Argon2 runs, so each soak cycle runs several more 19 MiB hashes, on more
+  threads.
+
+macOS and Windows return large frees to the system by themselves; this is
+glibc only. The bound was right and stays. The fix: each Argon2 run gets its
+working memory in pages of its own (an anonymous map, zeroed and unmapped
+when the run ends, `security::hashing::Workspace`), so it never enters the
+allocator. Regression: `security_memory::argon2_runs_on_many_threads_give_their_memory_back`
+(Linux, its own process: twelve runs, four threads at a time, must leave
+RSS within one run's 19 MiB). Hashes are byte for byte the argon2 crate's
+own (known-answer tests, and a hash made before the change still verifies).
 
 ### 2026-10-11, CI (ubuntu-22.04), debug build, commit 272d460
 

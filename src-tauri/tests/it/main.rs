@@ -149,6 +149,7 @@ mod sandbox_restart;
 mod sandbox_schedule;
 mod sandbox_web_scenarios;
 mod scalping;
+mod security_memory;
 mod soak;
 mod strategy;
 mod tools;
