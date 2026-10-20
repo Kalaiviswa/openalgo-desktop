@@ -456,6 +456,8 @@ pub struct OrderReconciler {
     gap_seq: AtomicU64,
     wake: Notify,
     task: Mutex<Option<JoinHandle<()>>>,
+    /// Stopped for good (shutdown).
+    stopped: std::sync::atomic::AtomicBool,
     /// One pass at a time.
     pass_lock: tokio::sync::Mutex<()>,
     pub stats: ReconcileStats,
@@ -487,6 +489,7 @@ impl OrderReconciler {
             gap_seq: AtomicU64::new(0),
             wake: Notify::new(),
             task: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             pass_lock: tokio::sync::Mutex::new(()),
             stats: ReconcileStats::default(),
             feeds: Mutex::new(Vec::new()),
@@ -800,10 +803,10 @@ impl OrderReconciler {
 
     // ------------------------------------------------------------ lifecycle
 
-    /// Start the owned task (idempotent).
+    /// Start the owned task (idempotent; never once stopped).
     pub fn start(self: &Arc<Self>) {
         let mut task = self.task.lock();
-        if task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if self.stopped.load(Ordering::SeqCst) || task.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
         }
         let weak = Arc::downgrade(self);
@@ -855,8 +858,14 @@ impl OrderReconciler {
         }));
     }
 
-    /// Abort the owned task (shutdown).
+    /// Abort the owned task for good (shutdown). A session change already on
+    /// the bus is handled after this and must not start it again.
     pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.abort();
+    }
+
+    fn abort(&self) {
         if let Some(t) = self.task.lock().take() {
             t.abort();
         }
@@ -865,7 +874,7 @@ impl OrderReconciler {
     /// A broker session changed (logout, switch, sign-in): abort any pass in
     /// flight so it cannot apply the old session's facts, and start again.
     pub fn restart(self: &Arc<Self>) {
-        self.stop();
+        self.abort();
         self.start();
     }
 
@@ -1305,8 +1314,8 @@ mod tests {
         r.register(a);
         r.start();
         assert!(until(|| r.stats.passes.load(Ordering::SeqCst) >= 1).await);
-        // The task is stopped (a restart under way) when the loss arrives.
-        r.stop();
+        // The task is aborted (a restart under way) when the loss arrives.
+        r.abort();
         bus.report_fact_loss(crate::events::bus::FactLoss::Event);
         r.start();
         assert!(
@@ -1314,6 +1323,39 @@ mod tests {
             "the new task acts on the loss"
         );
         r.stop();
+    }
+
+    /// A broker session change still on the bus at shutdown is handled
+    /// after the reconciler has stopped: it must not start a task that
+    /// outlives the app's state. Delivered straight to the subscriber, as
+    /// the bus would deliver it late.
+    #[tokio::test]
+    async fn a_session_change_after_stop_does_not_start_it_again() {
+        let gw = Arc::new(Gw::default());
+        let clock =
+            crate::clock::ManualClock::new(Utc.with_ymd_and_hms(2026, 10, 7, 4, 30, 0).unwrap());
+        let r = OrderReconciler::new(gw, clock, Some(Arc::new(EventBus::new())));
+        r.start();
+        assert!(r.is_running());
+        r.stop();
+        let lifecycle = Lifecycle {
+            reconciler: Arc::downgrade(&r),
+        };
+        let events = [
+            Event::BrokerConnected {
+                broker: "zerodha".into(),
+                user_id: None,
+            },
+            Event::BrokerSessionEnded {
+                reason: crate::events::SessionEndReason::Logout,
+            },
+        ];
+        for event in events {
+            lifecycle.handle(Arc::new(event)).await;
+            assert!(!r.is_running(), "a stopped reconciler stays stopped");
+        }
+        r.start();
+        assert!(!r.is_running(), "start after stop does nothing");
     }
 
     /// Review: an event loss and a relay lag seen in the same pass open
