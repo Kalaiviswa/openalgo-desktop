@@ -164,8 +164,13 @@ impl Runner {
     /// many stay unresolved.
     pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
         // Judged against the session the book was read through, not the one
-        // connected by the time it is folded.
-        let rows = match self.unconfirmed_here(mode, book.session.as_ref()) {
+        // connected by the time it is folded. Read on the blocking pool: a
+        // pass runs on an async worker (PROD-REL-02).
+        let session = book.session.clone();
+        let read = self
+            .blocking(move |me| me.unconfirmed_here(mode, session.as_ref()))
+            .await;
+        let rows = match read.and_then(|rows| rows) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(

@@ -25,7 +25,7 @@
 
 use super::dispatch::RunMode;
 use super::engine::{ORDER_UNCONFIRMED, UNCONFIRMED};
-use super::store::{EventFields, OrderRow, RunRow, StrategyRow};
+use super::store::{EventFields, OrderRow, RunRow, Store, StrategyRow};
 use super::StrategyModule;
 use crate::services::order_reconciler::{
     held_message, Absence, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
@@ -74,19 +74,46 @@ fn placed_at(o: &OrderRow) -> Option<chrono::DateTime<chrono::Utc>> {
     None
 }
 
+/// The open runs of `mode`; none when they cannot be read.
+fn open_runs_of(store: &Store, mode: RunMode) -> Vec<RunRow> {
+    store
+        .list_open_runs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| RunMode::parse(&r.mode) == Some(mode))
+        .collect()
+}
+
 impl StrategyModule {
-    fn open_runs_of(&self, mode: RunMode) -> Vec<RunRow> {
-        self.store
-            .list_open_runs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| RunMode::parse(&r.mode) == Some(mode))
-            .collect()
+    /// The open runs of `mode`, each with its orders (or why they could not
+    /// be read), read on the blocking pool: the order reconciler asks every
+    /// few seconds while a strategy order works, from an async worker
+    /// (PROD-REL-02).
+    async fn open_runs_with_orders(
+        &self,
+        mode: RunMode,
+    ) -> Vec<(RunRow, crate::error::Result<Vec<OrderRow>>)> {
+        let read = self
+            .store
+            .blocking(move |s| {
+                Ok(open_runs_of(s, mode)
+                    .into_iter()
+                    .map(|run| {
+                        let orders = s.list_orders(run.id);
+                        (run, orders)
+                    })
+                    .collect())
+            })
+            .await;
+        read.unwrap_or_else(|e| {
+            tracing::error!("Strategy runs could not be read to reconcile: {}", e);
+            Vec::new()
+        })
     }
 
     /// Whether any open run of `mode` has a working or unconfirmed order.
     pub fn has_open_orders(&self, mode: RunMode) -> bool {
-        self.open_runs_of(mode).iter().any(|run| {
+        open_runs_of(&self.store, mode).iter().any(|run| {
             self.store
                 .list_orders(run.id)
                 .unwrap_or_default()
@@ -195,8 +222,8 @@ impl StrategyModule {
         let mut unresolved = 0;
         let mut live_keys = HashSet::new();
         let mut claimed: HashSet<String> = HashSet::new();
-        for run in self.open_runs_of(mode) {
-            let rows = match self.store.list_orders(run.id) {
+        for (run, rows) in self.open_runs_with_orders(mode).await {
+            let rows = match rows {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(

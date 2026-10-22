@@ -353,21 +353,17 @@ impl OrderOwner for ScalpingOrders {
         let Some(ctx) = self.ctx.upgrade() else {
             return 0;
         };
-        let conn = match ctx.sqlite.conn() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Scalping orders could not be read to reconcile: {}", e);
-                return 0;
-            }
-        };
-        let rows = match open_rows(&conn, mode_word(mode)) {
+        // On the blocking pool: a pass runs on an async worker (PROD-REL-02).
+        let rows = match ctx
+            .blocking(move |c| pending(&c.sqlite, mode_word(mode)))
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Scalping orders could not be read to reconcile: {}", e);
                 return 0;
             }
         };
-        drop(conn);
         let scope = format!("{}:", mode.as_str());
         let mut live: HashSet<String> = HashSet::new();
         let mut claimed: HashSet<String> = HashSet::new();

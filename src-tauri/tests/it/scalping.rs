@@ -2316,6 +2316,215 @@ async fn a_trailing_stop_save_never_holds_the_runtime() {
     assert_eq!(m.store.active_sl(None).unwrap()[0].current_sl, Some(105.0));
 }
 
+/// Every connection of `db`'s pool held on another thread for `ms`; the
+/// thread, to join. Returns once they are all held.
+fn hold_the_pool(db: &Arc<SqliteDb>, ms: u64) -> std::thread::JoinHandle<()> {
+    let db = db.clone();
+    let (held, ready) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let conns: Vec<_> = (0..8).map(|_| db.conn().unwrap()).collect();
+        held.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(ms));
+        drop(conns);
+    });
+    ready.recv().unwrap();
+    holder
+}
+
+/// Wait on this thread, never yielding to the runtime, until `f` holds.
+fn wait_here(f: impl Fn() -> bool) {
+    for _ in 0..5000 {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the condition never held");
+}
+
+/// PROD-REL-02 follow-up: a sync reads the saved stops on the blocking pool
+/// and outside the monitor's lock. It read them on the async worker under
+/// that lock, so while every pooled connection was taken (long reports, a
+/// busy disk) the runtime that judges the ticks waited with it. Now a held
+/// leg's tick is judged while the read waits, and once the database answers
+/// the new stop is installed and its breach sends exactly one exit, to its
+/// own side.
+#[test]
+fn a_sync_waiting_for_the_database_never_holds_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let m = monitor();
+        m.store.upsert_sl(&leg("live")).unwrap();
+        m.mon.sync().await;
+        // Its high is noted (and saved) now: the same price again moves
+        // nothing, so judging it needs no database.
+        m.mon.process_tick(OPT, "NFO", 96.0).await;
+        let mut sandbox = leg("analyze");
+        sandbox.initial_sl = Some(97.0);
+        m.store.upsert_sl(&sandbox).unwrap();
+        let holder = hold_the_pool(&m.db, 600);
+        let mon = m.mon.clone();
+        let (waited, hold) = runtime
+            .longest_hold(async {
+                let sync = tokio::spawn(async move { mon.sync().await });
+                tokio::task::yield_now().await;
+                m.mon.process_tick(OPT, "NFO", 96.0).await;
+                let waited = !sync.is_finished();
+                sync.await.unwrap();
+                waited
+            })
+            .await;
+        holder.join().unwrap();
+        assert!(
+            hold < Duration::from_millis(200),
+            "the runtime was held for {:?}",
+            hold
+        );
+        assert!(waited, "a held leg's tick was judged while the sync waited");
+        assert_eq!(m.mon.leg_count(), 2);
+        m.mon.process_tick(OPT, "NFO", 96.5).await;
+        m.mon.wait_idle().await;
+        let placed = m.gw.placed.lock().clone();
+        assert_eq!(placed.len(), 1, "{:?}", placed);
+        assert_eq!(placed[0].0, RunMode::Sandbox);
+        assert_eq!(
+            (placed[0].1.action.as_str(), placed[0].1.quantity),
+            ("SELL", 65)
+        );
+    })
+}
+
+/// PROD-REL-02 follow-up: a read of the stops is installed only if no leg
+/// was cleared while it ran. Here the leg's exit fills and the book shows it
+/// flat after the sync has read its row and before it installs what it
+/// read: the stops are read again, and the closed leg is not brought back
+/// (nor its price subscription), so nothing more is sent for it.
+#[tokio::test]
+async fn a_leg_cleared_while_the_stops_are_read_is_not_brought_back() {
+    let m = monitor();
+    m.store.upsert_sl(&leg("live")).unwrap();
+    m.mon.sync().await;
+    m.mon.process_tick(OPT, "NFO", 95.0).await;
+    m.mon.wait_idle().await;
+    assert_eq!(m.gw.placed.lock().len(), 1);
+    *m.gw.net.lock() = 0;
+    let reads = m.mon.stop_reads();
+    let mon = m.mon.clone();
+    let sync = tokio::spawn(async move { mon.sync().await });
+    // The sync begins its read; it cannot install what it read until this
+    // test yields.
+    tokio::task::yield_now().await;
+    wait_here(|| m.mon.stop_reads() > reads);
+    assert!(!sync.is_finished());
+    m.mon
+        .reconcile_book(
+            RunMode::Live,
+            &book(vec![order_row("X1", "SELL", 65, "complete")], m.clock.now()),
+        )
+        .await;
+    assert_eq!(m.mon.leg_count(), 0, "cleared");
+    assert!(m.store.active_sl(None).unwrap().is_empty());
+    sync.await.unwrap();
+    assert_eq!(m.mon.leg_count(), 0, "the closed leg is not brought back");
+    assert!(m.mon.subscribed().is_empty());
+    assert_eq!(m.mon.stop_reads(), reads + 2, "read again");
+    m.clock.advance(chrono::Duration::seconds(10));
+    m.mon.process_tick(OPT, "NFO", 90.0).await;
+    m.mon.wait_idle().await;
+    assert_eq!(m.gw.placed.lock().len(), 1);
+}
+
+/// A sync never puts back an older trail over the one this monitor moved:
+/// the row gets a move only every PERSIST_THROTTLE_MS. A sync between two
+/// moves set the stop back to the last one written, and the pull-back
+/// through the newer stop sent no exit.
+#[tokio::test]
+async fn a_sync_keeps_the_trail_the_monitor_moved() {
+    let m = monitor();
+    let mut l = leg("analyze");
+    l.trailing_enabled = Some(true);
+    l.trailing_step = Some(5.0);
+    m.store.upsert_sl(&l).unwrap();
+    m.mon.sync().await;
+    m.mon.process_tick(OPT, "NFO", 110.0).await;
+    m.mon.process_tick(OPT, "NFO", 112.0).await;
+    assert_eq!(m.store.active_sl(None).unwrap()[0].current_sl, Some(105.0));
+    m.mon.sync().await;
+    let s = m.mon.leg("analyze", OPT, "NFO", "MIS").unwrap();
+    assert_eq!((s.current_sl, s.highest_price), (Some(107.0), Some(112.0)));
+    m.mon.process_tick(OPT, "NFO", 107.0).await;
+    m.mon.wait_idle().await;
+    let placed = m.gw.placed.lock().clone();
+    assert_eq!(placed.len(), 1, "{:?}", placed);
+    assert_eq!(
+        (
+            placed[0].0,
+            placed[0].1.action.as_str(),
+            placed[0].1.quantity
+        ),
+        (RunMode::Sandbox, "SELL", 65)
+    );
+}
+
+/// PROD-REL-02 follow-up: the order reconciler asks its owners whether they
+/// hold open orders (the scalping page, the runner and the strategies answer
+/// from their saved rows) on the blocking pool. It asked on its async worker
+/// every pass, so with every pooled connection taken the runtime waited
+/// with it. Afterwards the unconfirmed entry is settled from the book once,
+/// and the page trades again.
+#[test]
+fn a_reconcile_pass_waiting_for_the_database_never_holds_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = H::new().await;
+        h.ctx.reconciler.stop();
+        let (cookie, csrf) = session(&h);
+        h.mock.after_send.lock().push_back((
+            openalgo_desktop_lib::brokers::mock::AfterSend::Dropped,
+            "complete",
+        ));
+        *h.mock.after_send_time.lock() = "2026-10-03 09:42:05".into();
+        let order = || {
+            req(
+                Method::POST,
+                "/scalping/api/order",
+                Some(page_entry()),
+                Some(&cookie),
+                Some(&csrf),
+            )
+        };
+        let (s, b) = call(&h, order()).await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{}", b);
+        runtime.until_idle().await;
+        let holder = hold_the_pool(&h.ctx.sqlite, 600);
+        let (_, hold) = runtime.longest_hold(h.ctx.reconciler.pass()).await;
+        holder.join().unwrap();
+        assert!(
+            hold < Duration::from_millis(200),
+            "the runtime was held for {:?}",
+            hold
+        );
+        let (_, b) = call(
+            &h,
+            req(
+                Method::GET,
+                "/scalping/api/tracked",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            b["data"],
+            json!([{"symbol": OPT, "exchange": "NFO", "product": "NRML", "mode": "live"}])
+        );
+        assert_eq!(placed(&h).len(), 1, "settled from the book, not sent again");
+        let (s, b) = call(&h, order()).await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        assert_eq!(placed(&h).len(), 2);
+        h.shutdown().await;
+    })
+}
+
 /// LOG-07 defence in depth: a Live stop set while Zerodha (AB1234) was
 /// connected is not exited through another account's session. Nothing is
 /// read or sent there, the stop stays and the trader is told; back on its

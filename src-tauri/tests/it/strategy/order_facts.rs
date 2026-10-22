@@ -101,7 +101,7 @@ async fn a_lost_fill_is_applied_once_and_health_shows_the_gap_until_then() {
     // The entry fills at the broker, and its order update is lost: a
     // critical delivery was dropped. The book cannot be read yet.
     *a.mock.order_book.lock() = Some(Err("The broker is busy".into()));
-    a.ctx.reconciler.report_fact_loss(false);
+    a.ctx.reconciler.report_fact_loss(false).await;
     assert!(a.ctx.reconciler.gap_open(RunMode::Live));
     a.ctx.reconciler.pass().await;
     assert!(

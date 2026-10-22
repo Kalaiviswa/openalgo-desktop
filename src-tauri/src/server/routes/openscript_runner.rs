@@ -514,17 +514,16 @@ async fn book(ctx: &AppState, name: &str, which: &str) -> Response {
         return refusal(name);
     }
     let runner = &ctx.trading.runner;
-    let run_id = runner.as_run_id(name);
-    let tag = if is_deployment_id(&run_id) {
-        run_id.clone()
-    } else {
-        String::new()
-    };
     // One destination, read once: the rows and the book it filters are the
     // same side and the same broker account (NEW-TR-01).
-    let destination = match runner.book_destination(name) {
-        Ok(at) => at,
+    let (run_id, destination) = match runner.book_target(name).await {
+        Ok(target) => target,
         Err(why) => return err(409, why),
+    };
+    let tag = if is_deployment_id(&run_id) {
+        run_id
+    } else {
+        String::new()
     };
     let mode: RunMode = destination.mode;
     // A ledger that cannot be read is said so, never shown as an empty book.

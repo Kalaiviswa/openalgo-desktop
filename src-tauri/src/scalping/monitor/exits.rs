@@ -510,6 +510,9 @@ impl RiskMonitor {
             let mut inner = self.inner.lock();
             if inner.states.get(key).map(|l| l.gen) == Some(gen) {
                 inner.states.remove(key);
+                // A sync reading the stops now may have read this row
+                // before its delete: it reads again (`install`).
+                inner.clears += 1;
             }
             inner.prune();
             let needed = inner.wanted().contains(&symkey);

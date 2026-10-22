@@ -849,9 +849,17 @@ Every flaky test found so far was a race, not a slow machine:
   the blocking pool (`ApiKeyService::check_off_runtime`); `polled_reads`
   counts Argon2 runs on the runtime thread (`hashing::argon2_runs`). A
   runtime test that starts its clock right after `H::new()` also times the
-  app starting (the scalping stops and the order reconciler read the
-  database on the runtime on their first pass): start it after
+  app starting (the first passes of its background tasks): start it after
   `IdleLog::until_idle`.
+- A risk owner reads the database on the blocking pool and never under the
+  lock guarding its state (PROD-REL-02): the scalping stops' sync read
+  them on the runtime under the monitor's lock, and the order reconciler
+  asked its owners about their saved rows on the runtime every pass, so a
+  pool with no free connection held the runtime that judges the ticks for
+  the whole wait. A read made outside the lock can be overtaken: install it
+  only if nothing changed the state meanwhile (`RiskMonitor::install`
+  reads again after a clear), and never over newer state (a held leg keeps
+  the trail it moved).
 
 ### Data and migrations
 

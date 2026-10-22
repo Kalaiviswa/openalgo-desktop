@@ -57,6 +57,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinSet;
@@ -235,6 +236,9 @@ struct Inner {
     /// entry's row can lag the book, so zero is flat only after
     /// BOOK_LAG_GRACE_MS of zero reads (review P1-4).
     zero_since: HashMap<String, DateTime<Utc>>,
+    /// Legs cleared so far (`clear`). A sync installs a read of the stops
+    /// only if none was cleared while it ran (see `install`).
+    clears: u64,
 }
 
 impl Inner {
@@ -261,6 +265,26 @@ impl Inner {
 /// Where the monitor's trader alerts go (the Health page in the app).
 pub type MonitorAlert = Arc<dyn Fn(String) + Send + Sync>;
 
+/// How many reads of the stops one sync makes while legs keep being
+/// cleared under it, before it leaves the rest to the next sync.
+const SYNC_READS: usize = 4;
+
+/// The saved stops as one read found them, and the clear count it began
+/// at.
+struct StopsRead {
+    rows: Vec<SlState>,
+    clears: u64,
+}
+
+/// What installing a read of the stops changed: the price subscriptions to
+/// add and drop, and the legs whose stored exit orders could not be read
+/// back.
+struct Installed {
+    add: Vec<Key>,
+    remove: Vec<Key>,
+    unreadable: Vec<(String, String)>,
+}
+
 pub struct RiskMonitor {
     store: Store,
     gateway: Arc<dyn OrderGateway>,
@@ -278,6 +302,8 @@ pub struct RiskMonitor {
     /// Reads that missed an unconfirmed exit order (pruned every pass).
     absence: AbsenceTracker,
     alert: std::sync::OnceLock<MonitorAlert>,
+    /// Reads of the saved stops done, counted on the thread that read.
+    stop_reads: Arc<AtomicU64>,
 }
 
 fn elapsed_ms(now: DateTime<Utc>, then: Option<&DateTime<Utc>>) -> i64 {
@@ -319,6 +345,7 @@ impl RiskMonitor {
             sync_lock: tokio::sync::Mutex::new(()),
             absence: AbsenceTracker::new(),
             alert: std::sync::OnceLock::new(),
+            stop_reads: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -554,6 +581,12 @@ impl RiskMonitor {
             + self.absence.len()
     }
 
+    /// Reads of the saved stops done so far (tests: one that ran while a
+    /// leg was cleared).
+    pub fn stop_reads(&self) -> u64 {
+        self.stop_reads.load(Ordering::SeqCst)
+    }
+
     /// Wait until no exit is in flight (tests).
     pub async fn wait_idle(&self) {
         for _ in 0..2000 {
@@ -619,51 +652,32 @@ impl RiskMonitor {
     /// Reconcile the managed legs and the price subscriptions with the
     /// stored stops (every mode: a live leg stays protected while analyzer
     /// mode is on, and the other way round).
+    ///
+    /// The stops are read on the blocking pool and outside the monitor's
+    /// lock (PROD-REL-02): a busy pool or a slow disk holds neither the
+    /// async worker that judges the ticks nor the legs a tick judges. A
+    /// read that a clear overtook is read again, never installed.
     pub async fn sync(&self) {
         let _serial = self.sync_lock.lock().await;
-        let (to_add, to_remove, unreadable) = {
-            let mut inner = self.inner.lock();
-            // The read happens under the lock: an exit that clears a leg
-            // deletes its row first and then takes this lock, so a stale
-            // row can never be reinstalled after its exit.
-            let rows = match self.store.active_sl(None) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("Scalping stops could not be loaded: {}", e);
-                    return;
-                }
+        let mut installed = None;
+        for _ in 0..SYNC_READS {
+            let Some(read) = self.read_stops().await else {
+                return;
             };
-            let mut states = HashMap::with_capacity(rows.len());
-            let mut unreadable = Vec::new();
-            for sl in rows {
-                let key = slkey(&sl.mode, &sl.symbol, &sl.exchange, &sl.product);
-                // An attempt survives a restart on its row; the one in memory
-                // is newer while the monitor runs.
-                if !inner.attempts.contains_key(&key) && self.restore_attempt(&mut inner, &key, &sl)
-                {
-                    unreadable.push((key.clone(), sl.symbol.clone()));
-                }
-                states.insert(
-                    key,
-                    Leg {
-                        gen: (sl.id, sl.version),
-                        sl,
-                    },
-                );
+            installed = self.install(read);
+            if installed.is_some() {
+                break;
             }
-            inner.states = states;
-            // `inflight` is the workers' own: never pruned here (LOG-06).
-            inner.prune();
-            let wanted = inner.wanted();
-            let add: Vec<Key> = wanted.difference(&inner.subscribed).cloned().collect();
-            let remove: Vec<Key> = inner.subscribed.difference(&wanted).cloned().collect();
-            for k in &add {
-                inner.subscribed.insert(k.clone());
-            }
-            for k in &remove {
-                inner.subscribed.remove(k);
-            }
-            (add, remove, unreadable)
+        }
+        let Some(Installed {
+            add,
+            remove,
+            unreadable,
+        }) = installed
+        else {
+            tracing::warn!("Scalping stops kept being cleared while they were read; reading them again shortly");
+            self.request_sync();
+            return;
         };
         // Held exits of a stop that is gone are no longer the trader's to
         // decide here.
@@ -683,13 +697,84 @@ impl RiskMonitor {
             );
         }
         if let Some(src) = &self.prices {
-            if !to_add.is_empty() {
-                src.subscribe(&to_add).await;
+            if !add.is_empty() {
+                src.subscribe(&add).await;
             }
-            if !to_remove.is_empty() {
-                src.unsubscribe(&to_remove).await;
+            if !remove.is_empty() {
+                src.unsubscribe(&remove).await;
             }
         }
+    }
+
+    /// The saved stops, read on the blocking pool; `None` when they could
+    /// not be read (the legs held stay as they are).
+    async fn read_stops(&self) -> Option<StopsRead> {
+        let clears = self.inner.lock().clears;
+        let (store, reads) = (self.store.clone(), self.stop_reads.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            let rows = store.active_sl(None);
+            reads.fetch_add(1, Ordering::SeqCst);
+            rows
+        })
+        .await;
+        match read
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+        {
+            Ok(rows) => Some(StopsRead { rows, clears }),
+            Err(e) => {
+                tracing::error!("Scalping stops could not be loaded: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Install a read of the stops as the managed legs, in one hold of the
+    /// lock. `None` when a leg was cleared since the read began: an exit
+    /// deletes its stop's row and then forgets the leg here, so a row read
+    /// before that delete would bring a closed leg back. A leg held at the
+    /// same row and version keeps the trail this monitor moved: its row
+    /// gets a move only every PERSIST_THROTTLE_MS, and a read may begin
+    /// before the last one was written.
+    fn install(&self, read: StopsRead) -> Option<Installed> {
+        let mut inner = self.inner.lock();
+        if inner.clears != read.clears {
+            return None;
+        }
+        let mut states = HashMap::with_capacity(read.rows.len());
+        let mut unreadable = Vec::new();
+        for mut sl in read.rows {
+            let key = slkey(&sl.mode, &sl.symbol, &sl.exchange, &sl.product);
+            let gen = (sl.id, sl.version);
+            if let Some(held) = inner.states.get(&key).filter(|l| l.gen == gen) {
+                sl.current_sl = held.sl.current_sl;
+                sl.highest_price = held.sl.highest_price;
+                sl.lowest_price = held.sl.lowest_price;
+            }
+            // An attempt survives a restart on its row; the one in memory
+            // is newer while the monitor runs.
+            if !inner.attempts.contains_key(&key) && self.restore_attempt(&mut inner, &key, &sl) {
+                unreadable.push((key.clone(), sl.symbol.clone()));
+            }
+            states.insert(key, Leg { gen, sl });
+        }
+        inner.states = states;
+        // `inflight` is the workers' own: never pruned here (LOG-06).
+        inner.prune();
+        let wanted = inner.wanted();
+        let add: Vec<Key> = wanted.difference(&inner.subscribed).cloned().collect();
+        let remove: Vec<Key> = inner.subscribed.difference(&wanted).cloned().collect();
+        for k in &add {
+            inner.subscribed.insert(k.clone());
+        }
+        for k in &remove {
+            inner.subscribed.remove(k);
+        }
+        Some(Installed {
+            add,
+            remove,
+            unreadable,
+        })
     }
 
     // ------------------------------------------------------------ ticks

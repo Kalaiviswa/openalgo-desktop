@@ -2205,7 +2205,7 @@ async fn new_entries_wait_while_order_facts_are_repaired() {
 
     // An order fact is lost while someone holds open orders.
     reconciler.register(Arc::new(Holder));
-    reconciler.report_fact_loss(false);
+    reconciler.report_fact_loss(false).await;
     assert!(reconciler.gap_open(RunMode::Sandbox));
 
     // A new entry waits, and the script is told why.
@@ -2227,7 +2227,7 @@ async fn new_entries_wait_while_order_facts_are_repaired() {
 
     // Stop is never held by a gap.
     t.h.ctx.trading.runner.pump_once(&id).await;
-    reconciler.report_fact_loss(false);
+    reconciler.report_fact_loss(false).await;
     assert!(reconciler.gap_open(RunMode::Sandbox));
     let (s, v) = t.close(&id).await;
     assert_eq!(s, StatusCode::OK, "{}", v);

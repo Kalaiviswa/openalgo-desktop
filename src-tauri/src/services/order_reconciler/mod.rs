@@ -56,6 +56,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 mod matching;
+mod owners;
 mod session;
 mod shape;
 
@@ -603,7 +604,7 @@ impl OrderReconciler {
 
     /// An order fact may have been lost: raise the health alert and open a
     /// gap for each destination someone holds orders in.
-    pub fn report_fact_loss(&self, relay: bool) {
+    pub async fn report_fact_loss(&self, relay: bool) {
         let cause = if relay {
             GapCause::RelayLagged
         } else {
@@ -615,10 +616,10 @@ impl OrderReconciler {
         }
         if relay {
             // The broker relay carries Live updates only.
-            self.open_gap(RunMode::Live, cause);
+            self.open_gap(RunMode::Live, cause).await;
         } else {
             for m in MODES {
-                self.open_gap(m, cause);
+                self.open_gap(m, cause).await;
             }
         }
     }
@@ -641,8 +642,8 @@ impl OrderReconciler {
     /// Open a gap for one destination (or keep the open one) and reconcile
     /// at once. A destination where nobody holds a working or unconfirmed
     /// order has nothing a lost fact could belong to: no gap, only a pass.
-    pub fn open_gap(&self, mode: RunMode, cause: GapCause) {
-        if !self.owners().iter().any(|o| o.has_open_orders(mode)) {
+    pub async fn open_gap(&self, mode: RunMode, cause: GapCause) {
+        if !owners::any_holding(&self.owners(), mode).await {
             self.wake.notify_one();
             return;
         }
@@ -701,15 +702,11 @@ impl OrderReconciler {
         let seq_at_start = self.gap_seq.load(Ordering::SeqCst);
         self.stats.passes.fetch_add(1, Ordering::Relaxed);
         let owners = self.owners();
+        let holding = owners::holding(&owners).await;
         let mut report = serde_json::Map::new();
         let mut unresolved_total = 0usize;
         for mode in MODES {
-            let mut holders = Vec::new();
-            for o in &owners {
-                if o.has_open_orders(mode) {
-                    holders.push(o.clone());
-                }
-            }
+            let holders = &holding[slot(mode)];
             let read_ok = if holders.is_empty() {
                 true
             } else {
@@ -727,7 +724,7 @@ impl OrderReconciler {
                             .with_held_alert(self.held_alert())
                             .with_session(session);
                         book.owners = owners.clone();
-                        for o in &holders {
+                        for o in holders {
                             unresolved_total += o.reconcile(mode, &book).await;
                         }
                         true
@@ -783,7 +780,7 @@ impl OrderReconciler {
         // Every held order settled (found, released or confirmed). Read
         // from the owners, never from this pass's count: a pass whose book
         // read failed settled nothing (review P2-1).
-        if self.held_orders().is_empty() && self.held_alerting.swap(false, Ordering::SeqCst) {
+        if owners::none_held(&owners).await && self.held_alerting.swap(false, Ordering::SeqCst) {
             if let Some(sink) = self.alert_sink.get() {
                 sink(FactAlert::HeldResolved);
             }
@@ -845,7 +842,7 @@ impl OrderReconciler {
                     _ = me.wake.notified() => {}
                     _ = lost => {}
                     _ = reconnect => {
-                        me.open_gap(RunMode::Live, GapCause::OrderFeedReconnected);
+                        me.open_gap(RunMode::Live, GapCause::OrderFeedReconnected).await;
                     }
                 }
                 if let Some(b) = &bus {
@@ -861,10 +858,10 @@ impl OrderReconciler {
                     let new_total =
                         total.saturating_sub(me.gaps_seen.swap(total, Ordering::SeqCst));
                     if new_total > new_relay {
-                        me.report_fact_loss(false);
+                        me.report_fact_loss(false).await;
                     }
                     if new_relay > 0 {
-                        me.report_fact_loss(true);
+                        me.report_fact_loss(true).await;
                     }
                 }
                 me.pass().await;
@@ -1405,7 +1402,7 @@ mod tests {
             crate::clock::ManualClock::new(Utc.with_ymd_and_hms(2026, 10, 7, 4, 30, 0).unwrap());
         let r = OrderReconciler::new(gw.clone(), clock, None);
         r.register(Arc::new(Holder::default()));
-        r.open_gap(RunMode::Live, GapCause::EventLoss);
+        r.open_gap(RunMode::Live, GapCause::EventLoss).await;
         assert!(!r.gap_open(RunMode::Live));
         assert!(r.entry_refusal(RunMode::Live).is_none());
         r.pass().await;
