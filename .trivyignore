@@ -1,10 +1,15 @@
 # Accepted findings for `trivy fs` (see .github/workflows/security.yml).
-# Every entry says why it is accepted and what would let it be removed.
+# Every entry says why it is accepted, what would let it be removed, the date
+# it was accepted (and last re-checked) and a review date. The dispositions
+# are recorded in docs/audit/<date>/ (latest:
+# docs/audit/2026-10-22/scanner-triage.md).
 
 # glib 0.18.5, GHSA-wrw7-89jp-8q8g (MEDIUM): unsound VariantStrIter iterator.
 # glib arrives only through Tauri's Linux GTK stack (tauri -> muda -> gtk 0.18
 # -> glib 0.18), which Tauri pins; the app never iterates glib Variant
 # strings. Remove when Tauri moves to gtk-rs 0.20 or later.
+# Accepted 2026-10-07; re-checked 2026-10-22 (tauri 2.12.2 still pulls gtk
+# 0.18.2 and glib 0.18.5); review by 2027-01-31.
 GHSA-wrw7-89jp-8q8g
 
 # rustls-webpki 0.102.8 (GHSA-82j2-j2ch-gfr8 HIGH, GHSA-pwjx-qhcg-rvj4 MEDIUM,
@@ -16,6 +21,9 @@ GHSA-wrw7-89jp-8q8g
 # runs. Same entries as .github/deny.toml. Remove when rumqttc moves to 0.103.
 # CVE-2026-111943 also names RUSTSEC-2026-0381 (webpki-roots), which is fixed
 # by webpki-roots 1.0.10, not accepted; cargo-deny and cargo-audit still gate it.
+# Accepted 2026-10-08 (CVE-2026-111943: 2026-10-22); re-checked 2026-10-22
+# (rumqttc 0.25.1 is still the latest release and its main branch still pins
+# 0.102.8); review by 2027-01-31.
 GHSA-82j2-j2ch-gfr8
 GHSA-pwjx-qhcg-rvj4
 GHSA-965h-392x-2mh5

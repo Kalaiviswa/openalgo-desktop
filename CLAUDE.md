@@ -1198,9 +1198,20 @@ and add each new one here.
   `ignore` in `.github/deny.toml` with the reason and a review date, the same
   IDs in `.trivyignore`, and the Dependabot alert dismissed as "not used" with
   the same reason.
-- Dismiss a CodeQL alert as "used in tests" only after checking that it sits
-  in a `#[cfg(test)]` module. A variable named `iv` that means interval trips
-  the hard-coded-crypto rule; rename it.
+- A CodeQL alert in an inline `#[cfg(test)]` module is fixed by moving the
+  module to its own `tests.rs` (`foo.rs` declares `#[cfg(test)] mod tests;`,
+  the body goes in `foo/tests.rs`), which `.github/codeql/codeql-config.yml`
+  excludes by path; dismiss as "used in tests" only where it cannot move,
+  after checking the line really sits in the test module. A variable named
+  `iv` that means interval trips the hard-coded-crypto rule; rename it.
+- Read a CodeQL taint alert's path (the SARIF's code flow, `gh api
+  .../code-scanning/analyses/<id>` with `Accept: application/sarif+json`)
+  before changing the sink. CodeQL resolves a call on `Box<dyn BrokerFeed>`
+  to every implementation and taints every field read of a tainted value,
+  so one feed holding a user id taints another feed's `self` (#226/#227:
+  Angel's client code "reaching" the XTS subscription address). And
+  `rust/cleartext-transmission` checks no scheme: an https-only type does not
+  end it, since `Url::parse` carries the taint.
 - Check a fix by disabling it locally and watching its test fail; never
   commit or push the disabled state, not even to a wip branch.
 - Behind a tunnel or proxy on the same machine (ngrok, cloudflared) every

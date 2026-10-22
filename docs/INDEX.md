@@ -133,6 +133,7 @@ desktop counterpart.
 | Golden fixtures recorded from OpenAlgo web, and the web defects not reproduced | `tests/fixtures/web/INDEX.md` |
 | Security residuals: what is reduced but not closed | [security/known-residuals.md](security/known-residuals.md) |
 | Audits: the baseline audit of 2026-10-03, performance, soak and fault drills | [audit/2026-10-03/README.md](audit/2026-10-03/README.md) · [audit/perf.md](audit/perf.md) · [audit/soak.md](audit/soak.md) · [audit/fault-drill.md](audit/fault-drill.md) |
+| Scanner triage: every open CodeQL alert's disposition, the accepted Rust and Trivy advisories with their dates, the npm full report | [audit/2026-10-22/scanner-triage.md](audit/2026-10-22/scanner-triage.md) |
 | CI, the release gate and repository rules | [release/branch-protection.md](release/branch-protection.md) |
 | Release checklists: platforms and brokers | [release/platform-qualification.md](release/platform-qualification.md) · [release/broker-certification.md](release/broker-certification.md) |
 | How a release reaches installed copies (the updater and its signing key) | [release/updates.md](release/updates.md) |

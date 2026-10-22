@@ -6,7 +6,9 @@
 #
 # RUSTSEC ids listed under [advisories].ignore are also ignored by the
 # cargo-audit job in security.yml (it greps this file), so this is the single
-# place an advisory is accepted. Every ignore needs a reason and a review date.
+# place an advisory is accepted. Every ignore needs a reason, the date it was
+# accepted (and last re-checked) and a review date; the dispositions are
+# recorded in docs/audit/<date>/ (latest: docs/audit/2026-10-22/scanner-triage.md).
 
 [graph]
 # Only the platforms we ship. Prunes Android/iOS/wasm-only crates from every
@@ -30,11 +32,11 @@ unsound = "workspace"
 yanked = "warn"
 ignore = [
   # rustls-webpki 0.102.8 via rumqttc: the 0.102 verifier is never called.
-  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103; review by 2027-01-31" },
-  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103; review by 2027-01-31" },
-  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103; review by 2027-01-31" },
-  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103; review by 2027-01-31" },
-  { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103; review by 2027-01-31" },
+  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103. Accepted 2026-10-08; re-checked 2026-10-22 (rumqttc 0.25.1 is still the latest release and its main branch still pins 0.102.8); review by 2027-01-31" },
+  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103. Accepted 2026-10-08; re-checked 2026-10-22 (rumqttc 0.25.1 is still the latest release and its main branch still pins 0.102.8); review by 2027-01-31" },
+  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103. Accepted 2026-10-08; re-checked 2026-10-22 (rumqttc 0.25.1 is still the latest release and its main branch still pins 0.102.8); review by 2027-01-31" },
+  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103. Accepted 2026-10-08; re-checked 2026-10-22 (rumqttc 0.25.1 is still the latest release and its main branch still pins 0.102.8); review by 2027-01-31" },
+  { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102.8 comes only from rumqttc 0.25.1 (IIFL Capital feed), which pins ^0.102.8 even on its main branch. rumqttc only names webpki::Error; the feed passes TlsConfiguration::Rustls with our own rustls 0.23 config, which verifies with the patched rustls-webpki 0.103.16 (mqtt_relay.rs tls_config). Remove when rumqttc moves to 0.103. Accepted 2026-10-22; re-checked 2026-10-22 (rumqttc 0.25.1 is still the latest release and its main branch still pins 0.102.8); review by 2027-01-31" },
 ]
 
 [licenses]
