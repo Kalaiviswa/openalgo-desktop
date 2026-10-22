@@ -68,9 +68,23 @@ fn write(state: &AppState, counts: &Counts) -> Result<()> {
     Ok(())
 }
 
+/// One save at a time, each reading the counts while it holds the turn: a
+/// periodic save whose write waited behind a busy database or a slow disk
+/// cannot land after a later save with the older counts it was started
+/// with. Counts only grow within a day, so the last write is the newest.
+static SAVING: parking_lot::Mutex<()> = parking_lot::const_mutex(());
+
+/// Save every adapter's counts as they are now; the counts written.
+fn save_current(state: &AppState) -> Result<Counts> {
+    let _turn = SAVING.lock();
+    let now = current(state);
+    write(state, &now)?;
+    Ok(now)
+}
+
 /// Save every adapter's counts now (at quit).
 pub fn save(state: &AppState) -> Result<()> {
-    write(state, &current(state))
+    save_current(state).map(|_| ())
 }
 
 /// Save the counts whenever they changed, at most [`SAVE_EVERY`] apart, in
@@ -84,13 +98,11 @@ pub fn start(ctx: &Arc<AppState>) {
         loop {
             tick.tick().await;
             let Some(ctx) = weak.upgrade() else { return };
-            let now = current(&ctx);
-            if now == saved {
+            if current(&ctx) == saved {
                 continue;
             }
-            let counts = now.clone();
-            match ctx.blocking(move |s| write(s, &counts)).await {
-                Ok(()) => saved = now,
+            match ctx.blocking(save_current).await {
+                Ok(written) => saved = written,
                 Err(e) => tracing::warn!("Broker request counts could not be saved: {}", e),
             }
         }
@@ -202,6 +214,56 @@ mod tests {
         assert_eq!(data_sent(&second), 3, "the restart forgot the day's count");
         let _ = second.get_quote(&auth, &key).await;
         assert_eq!(data_sent(&second), 4);
+        close(ctx).await;
+        server.abort();
+    }
+
+    /// A save that waits behind a busy database never writes older counts
+    /// after a later save (Windows CI: the quit saved 3, then a periodic
+    /// write started earlier saved 1, and the restart gave back 1). Each
+    /// round holds the database's write lock while a save starts, counts
+    /// one more request, starts a second save, then lets both through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delayed_save_never_overwrites_newer_counts() {
+        let (base, server) = refusing_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryKeyStore::new());
+        let auth = AuthToken::new("APPID-100:tok");
+        let key = QuoteKey::new("NSE", "SBIN");
+        let b = fyers(&base);
+        let ctx = open(dir.path(), &store, b.clone());
+        let _ = b.get_quote(&auth, &key).await;
+        let pause = std::time::Duration::from_millis(50);
+        for round in 0..20 {
+            let holder = ctx.sqlite.conn().unwrap();
+            holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let c = ctx.clone();
+            let early = std::thread::spawn(move || super::save(&c));
+            std::thread::sleep(pause);
+            let _ = b.get_quote(&auth, &key).await;
+            let c = ctx.clone();
+            let late = std::thread::spawn(move || super::save(&c));
+            std::thread::sleep(pause);
+            holder.execute_batch("COMMIT").unwrap();
+            early.join().unwrap().unwrap();
+            late.join().unwrap().unwrap();
+            let conn = ctx.sqlite.conn().unwrap();
+            let stored = crate::db::sqlite::request_count::on_day(
+                &conn,
+                b.id(),
+                crate::brokers::common::ratelimit::today_ist(),
+            )
+            .unwrap()
+            .iter()
+            .find(|c| c.category == "data")
+            .map_or(0, |c| c.sent);
+            assert_eq!(
+                stored,
+                data_sent(&b),
+                "round {}: a save wrote older counts after a newer one",
+                round
+            );
+        }
         close(ctx).await;
         server.abort();
     }
