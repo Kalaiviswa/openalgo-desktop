@@ -224,6 +224,7 @@ mod mcp_subcommand;
 mod mcp_transport;
 mod messaging;
 mod options_destination;
+mod options_uncertainty;
 mod order_identity;
 mod order_quantity_safety;
 mod order_split_bounds;

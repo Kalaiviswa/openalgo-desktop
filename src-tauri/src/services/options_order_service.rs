@@ -7,6 +7,11 @@
 //! every leg and chunk goes where that decision said, whatever either
 //! toggle does while they are resolved and sent. The web reads both again
 //! for each order it places.
+//!
+//! An order with no definite answer from the broker may have been placed
+//! (LOG-08): a split holds back the chunks after it, and the reply carries
+//! that outcome (`Reply::placement`) beside the web's wire shape, for the
+//! Action Center and every other in-process caller (PROD-TR-02).
 
 use super::batch_order_service::{
     buy_then_sell, split_chunks, too_many_orders, SplitRows, SPLIT_PAUSE,
@@ -153,7 +158,9 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
     if let Some(mode) = r.body.get("mode") {
         m.insert("mode".into(), mode.clone());
     }
-    Reply::new(r.status, Value::Object(m))
+    let mut reply = Reply::new(r.status, Value::Object(m));
+    reply.placement = r.placement;
+    reply
 }
 
 /// `optionsmultiorder`.
@@ -187,14 +194,17 @@ pub async fn options_multi_order(ctx: &AppState, req: &Value, route: Route) -> R
         shared_ltp,
     };
     let mut results: Vec<(i64, Value)> = Vec::with_capacity(legs.len());
+    let mut uncertain = Vec::new();
     let has_split = legs.iter().any(|l| i(l, "splitsize") > 0);
     for (n, leg) in buy_then_sell(&legs).iter().enumerate() {
         if n > 0 && has_split {
             tokio::time::sleep(SPLIT_PAUSE).await;
         }
-        results.push((i(leg, "_leg"), order.leg(leg).await));
+        let (entry, unknown) = order.leg(leg).await;
+        uncertain.extend(unknown);
+        results.push((i(leg, "_leg"), entry));
     }
-    multi_order_reply(ctx, req, results, shared_ltp, analyze)
+    multi_order_reply(ctx, req, results, &uncertain, shared_ltp, analyze)
 }
 
 /// The legs of a multi-order, each numbered in `_leg` (from 1) in request
@@ -246,6 +256,10 @@ struct MultiOrder<'a> {
     shared_ltp: Option<f64>,
 }
 
+/// A leg's entry in the reply, and those of its orders that have no
+/// definite answer from the broker: they may have been placed (LOG-08).
+type LegOutcome = (Value, Vec<String>);
+
 /// What a leg's reply entry repeats from the leg.
 struct LegHead {
     leg_no: i64,
@@ -255,8 +269,8 @@ struct LegHead {
 }
 
 impl MultiOrder<'_> {
-    /// Resolve and place one leg; its entry in the reply.
-    async fn leg(&self, leg: &Value) -> Value {
+    /// Resolve and place one leg.
+    async fn leg(&self, leg: &Value) -> LegOutcome {
         let head = LegHead {
             leg_no: i(leg, "_leg"),
             offset: s(leg, "offset"),
@@ -278,67 +292,95 @@ impl MultiOrder<'_> {
         match resolve_option(self.ctx, self.h, &pick).await {
             Ok(opt) if i(leg, "splitsize") > 0 => self.place_split_leg(leg, &opt, &head).await,
             Ok(opt) => self.place_leg(leg, &opt, &head).await,
-            Err(r) => json!({
-                "leg": leg_no, "offset": offset, "strike": null, "option_type": ot,
-                "action": action, "status": "error", "message": r.message(),
-            }),
+            Err(r) => (
+                json!({
+                    "leg": leg_no, "offset": offset, "strike": null, "option_type": ot,
+                    "action": action, "status": "error", "message": r.message(),
+                }),
+                Vec::new(),
+            ),
         }
     }
 
     /// One leg in chunks of its `splitsize`.
-    async fn place_split_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> Value {
+    async fn place_split_leg(
+        &self,
+        leg: &Value,
+        opt: &ResolvedOption,
+        head: &LegHead,
+    ) -> LegOutcome {
         let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
         let qty = i(leg, "quantity");
         let size = i(leg, "splitsize");
         let Some(chunks) = split_chunks(qty, size) else {
-            return json!({
+            let entry = json!({
                 "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
                 "strike": null, "option_type": ot, "action": action, "status": "error",
                 "message": "Split orders would exceed maximum limit of 100 per leg",
             });
+            return (entry, Vec::new());
         };
-        let split = place_split(self.ctx, self.analyze, self.req, leg, opt, &chunks)
-            .await
-            .results;
-        let any_ok = split.iter().any(|r| r["status"] == "success");
-        json!({
+        let split = place_split(self.ctx, self.analyze, self.req, leg, opt, &chunks).await;
+        let any_ok = split.results.iter().any(|r| r["status"] == "success");
+        let uncertain = split
+            .uncertain
+            .iter()
+            .map(|order| format!("leg {} {}", leg_no, order))
+            .collect();
+        let entry = json!({
             "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
             "product": s(leg, "product"), "offset": offset, "strike": null,
             "option_type": ot, "action": action,
             "status": if any_ok { "success" } else { "error" },
-            "total_quantity": qty, "split_size": size, "split_results": split,
+            "total_quantity": qty, "split_size": size, "split_results": split.results,
             "mode": if self.analyze { "analyze" } else { "live" },
-        })
+        });
+        (entry, uncertain)
     }
 
     /// One leg as one order.
-    async fn place_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> Value {
+    async fn place_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> LegOutcome {
         let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
         let body = order_body(self.req, leg, opt, i(leg, "quantity"));
         let r = place_admitted(self.ctx, &body, self.analyze, false).await;
+        let uncertain = r
+            .is_uncertain()
+            .then(|| {
+                format!(
+                    "leg {} ({} {} {})",
+                    leg_no, action, opt.symbol, opt.exchange
+                )
+            })
+            .into_iter()
+            .collect();
         if r.is_success() {
-            return json!({
+            let entry = json!({
                 "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
                 "product": s(leg, "product"), "offset": offset, "strike": null,
                 "option_type": ot, "action": action, "status": "success",
                 "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null),
                 "mode": r.body.get("mode").cloned().unwrap_or(json!("live")),
             });
+            return (entry, uncertain);
         }
         let msg = r.message();
-        json!({
+        let entry = json!({
             "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
             "strike": null, "option_type": ot, "action": action, "status": "error",
             "message": if msg.is_empty() { "Order placement failed".to_string() } else { msg },
-        })
+        });
+        (entry, uncertain)
     }
 }
 
 /// The `optionsmultiorder` reply, legs in request order, and its event.
+/// Orders with no definite answer (`uncertain`) travel beside the web's
+/// shape (P1-5).
 fn multi_order_reply(
     ctx: &AppState,
     req: &Value,
     mut results: Vec<(i64, Value)>,
+    uncertain: &[String],
     shared_ltp: Option<f64>,
     analyze: bool,
 ) -> Reply {
@@ -357,7 +399,8 @@ fn multi_order_reply(
     if analyze {
         m.insert("mode".into(), json!("analyze"));
     }
-    let reply = Reply::ok(Value::Object(m));
+    let mut reply = Reply::ok(Value::Object(m));
+    reply.placement = uncertain_legs(uncertain);
     let request = if analyze {
         analyzer_request(req, "optionsmultiorder")
     } else {
