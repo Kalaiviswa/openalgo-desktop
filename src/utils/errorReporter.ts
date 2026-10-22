@@ -2,7 +2,7 @@
  * Browser error reporter.
  *
  * Routes uncaught errors and unhandled promise rejections to the backend so
- * they land in log/errors.jsonl alongside server errors. Designed to never
+ * they land in the error log (`error_logs` in logs.db) alongside server errors. Designed to never
  * crash the app — every codepath is wrapped, and the reporter refuses to
  * recurse into itself.
  *

@@ -9,10 +9,13 @@
  * run on a commodity future saw the stock orders the same file had placed that
  * morning, with nothing to say which position they were reading.
  *
- * Every row here is a process on the server, not a thing in this tab. A run
- * outlives the page: closing the browser stops nothing, and this panel is a
- * view of what is already happening rather than the thing making it happen.
- * That is the whole reason live execution is server side.
+ * Every row here runs in a hidden window of the app (the runner host), not in
+ * this page. A run outlives the page: leaving it, or closing it in a browser,
+ * stops nothing, and this panel is a view of what is already happening rather
+ * than the thing making it happen. Closing or quitting the app, signing out or
+ * an update restart pauses every run (`Runner::pause_all`), leaving its
+ * positions as they are. The page loads the script's compiled program once,
+ * at start, so a saved change applies from the next start.
  *
  * **It is modelled on the alerts panel and differs in one place on purpose.**
  * An alert that misfires costs a notification; a strategy that misfires costs a
@@ -22,8 +25,10 @@
  * something is holding a position, and "working on it" is not an answer to that.
  *
  * **Where the orders go is stated, not implied.** A run sends through the
- * platform's own order path, so it trades live while the platform is live and
- * sandbox while it is in analyzer mode. That is the intended behaviour and it
+ * platform's own order path, live when it was started in live mode and sandbox
+ * when it was started in analyzer mode, and keeps that side until it ends (the
+ * runner fixes it at start; a later mode switch does not move it, so its exits
+ * go where its entries went). That is the intended behaviour and it
  * is also the thing a trader must not have to infer: the same button, pressed
  * on the same strategy, either simulates or spends money depending on a setting
  * made somewhere else on the site. So the mode is on the header, and the start
@@ -960,13 +965,13 @@ export function StrategiesPanel({ getChartContext }: Props) {
         <p className="mt-auto text-[10px] leading-relaxed text-muted-foreground">
           Pause ends a strategy and leaves its position for you to manage. Stop closes what it is
           holding first, which spends a spread and cannot be taken back, so it asks before it does.
-          A run is a process on the server and outlives this page: closing the browser stops
-          nothing. Orders go through this platform's own order path, so a run trades with your
-          broker while the platform is in live mode and against the sandbox while it is in analyzer
-          mode, the same as every other surface here. That setting is made elsewhere on the site and
-          is shown above. A run stops itself if it changes while the run is holding a position,
-          because an exit sent somewhere the entry never went would leave a position nothing is
-          managing.
+          A run lives in a hidden window of OpenAlgo, not in this page: leaving this page, or
+          closing it in a browser, stops nothing, but closing or quitting OpenAlgo, signing out or
+          restarting for an update pauses every run and leaves its positions as they are. A run
+          trades on the side it was started on, with your broker if it started in live mode and
+          against the sandbox if it started in analyzer mode; switching the mode later does not move
+          it, so its exits go where its entries went. A run keeps the script as it was when it
+          started: changes you save apply the next time it starts.
         </p>
       </div>
     </PanelShell>

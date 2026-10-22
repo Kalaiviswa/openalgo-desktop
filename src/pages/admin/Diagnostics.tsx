@@ -544,7 +544,7 @@ export default function Diagnostics() {
       <Section
         icon={AlertCircle}
         title="Errors"
-        description="Browse the tail of log/errors.jsonl, grouped by fingerprint or as a chronological list. Browser errors land here too."
+        description="Browse the errors OpenAlgo saved in its logs database (logs.db), newest first or grouped where the same error repeats. Errors in the app's pages land here too."
       >
         {errorStats ? (
           <div className="flex flex-wrap gap-2 mb-4">

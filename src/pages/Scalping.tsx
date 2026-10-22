@@ -1060,7 +1060,7 @@ export default function Scalping() {
             <span className="font-mono text-xs text-muted-foreground">order {lastLatencyMs}ms</span>
           )}
           <Badge variant={armed ? 'destructive' : 'secondary'}>
-            One-Click {armed ? 'ARMED' : 'off'}
+            One-Click {armed ? 'on' : 'off'}
           </Badge>
           <Badge variant={wsBadge.variant}>{wsBadge.label}</Badge>
         </div>

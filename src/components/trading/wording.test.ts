@@ -25,6 +25,8 @@ const TRADING = [
   join(process.cwd(), 'src', 'components', 'trading'),
   join(process.cwd(), 'src', 'lib', 'trading'),
   join(process.cwd(), 'src', 'pages', 'Trading.tsx'),
+  // The scalping page has the same One-Click control; its badge said ARMED.
+  join(process.cwd(), 'src', 'pages', 'Scalping.tsx'),
 ]
 
 /** Words banned from anything a trader reads, and what to say instead. */
