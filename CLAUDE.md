@@ -933,6 +933,12 @@ Every flaky test found so far was a race, not a slow machine:
   "not found" (SM-04). The web's store turns it into an empty success; the
   desktop's `/api/v1/strategy` runs, orders and events answer the web's
   500 "An unexpected error occurred" instead.
+- An OpenScript run trades the inputs its start read (PROD-TR-06, as the
+  web's `start` hands them to the run): its page is served the snapshot
+  kept on the run (`RunEntry::inputs`), never a later read of the saved
+  settings, which answered a failure as `{}` and so ran the script's
+  default quantity and risk. The page loads nothing from an answer that
+  carries no inputs, and ends the run saying so.
 - A strategy order is Live or Sandbox by the run that placed it
   (`strategy/store/by_mode.rs`, SM-03, SM-05). A book of one mode is
   attributed only to that mode's orders, and the Detail page lists the

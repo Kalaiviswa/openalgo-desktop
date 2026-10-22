@@ -120,6 +120,8 @@ export const MOVING_REFUSAL =
 export const HALTED_REFUSAL = 'this run is stopping, so nothing further is sent'
 export const WAITING_REFUSAL =
   'an earlier order of this run has not been confirmed by the app yet, so nothing new is sent'
+export const INPUTS_UNREADABLE =
+  'the inputs it was saved with did not reach it, so nothing was sent. Start it again.'
 /** How long the page waits before asking the app again about a batch it
  * has no answer for, attempt by attempt; the last delay repeats. */
 export const RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000]
@@ -205,9 +207,17 @@ export class Driver {
     }
   }
 
-  /** Load the program. False when the engine refused it. */
+  /**
+   * Load the program. False when the engine refused it, or when the app's
+   * answer carries no inputs: the run's saved inputs were not delivered, and
+   * loading without them would trade the script's defaults (PROD-TR-06).
+   */
   load(): boolean {
     const { run, facts } = this.spec
+    if (!isInputs(this.spec.inputs)) {
+      this.stop(`${run.file} was not started: ${INPUTS_UNREADABLE}`)
+      return false
+    }
     const instrument = {
       ...(facts?.instrument ?? {}),
       symbol: run.symbol,
@@ -489,6 +499,11 @@ export class Refused extends Error {
     super(message)
     this.name = 'Refused'
   }
+}
+
+/** Whether the app's answer carries a run's inputs (an object; `{}` when none were saved). */
+function isInputs(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** A batch as the run's log names it. */

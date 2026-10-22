@@ -222,6 +222,11 @@ impl RunInfo {
 
 struct RunEntry {
     info: RunInfo,
+    /// The script's parameters as saved when the run started, which its
+    /// page is served (web `start`: read once and handed to the run). Never
+    /// read again: an edit applies at the next start, and a later read that
+    /// fails cannot turn them into the script's defaults (PROD-TR-06).
+    inputs: serde_json::Map<String, Value>,
     token: String,
     inbox: Inbox,
     halted: AtomicBool,

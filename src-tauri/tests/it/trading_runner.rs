@@ -1415,6 +1415,61 @@ async fn an_order_with_no_number_blocks_stop_after_a_restart() {
     trading.shutdown().await;
 }
 
+/// PROD-TR-06: the page is served the inputs its run started with. Its
+/// later read of the saved settings once answered a failure as no inputs
+/// (`{}`), so the engine traded the script's default quantity and risk.
+/// Now an unreadable settings table after the start changes nothing the
+/// page gets; readable again, it is the same; and an edit made while the run
+/// goes on waits for the next start, as on the web (its `start` hands the
+/// run the inputs it read).
+#[tokio::test]
+async fn the_page_gets_the_inputs_its_run_started_with() {
+    let t = setup().await;
+    let id = t.deploy("SBIN").await;
+    let save = |inputs: Value| {
+        let body = json!({"symbol": "SBIN", "exchange": "NSE", "interval": "1m",
+            "product": "MIS", "deployment": id, "inputs": inputs});
+        t.call(
+            Method::POST,
+            "/openscript/runner/config/t.oscript",
+            Some(body),
+        )
+    };
+    let readable = |yes: bool| {
+        let (from, to) = (
+            "openscript_deployments",
+            "openscript_deployments_unreadable",
+        );
+        let (from, to) = if yes { (to, from) } else { (from, to) };
+        let sql = format!("ALTER TABLE {} RENAME TO {}", from, to);
+        t.h.ctx.sqlite.conn().unwrap().execute_batch(&sql).unwrap()
+    };
+    let saved = json!({"qty": 7, "stop_pct": 1.5, "trail": true, "label": "wide"});
+    let (s, v) = save(saved.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    t.start(&id).await;
+
+    readable(false);
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], saved, "never the script's defaults");
+
+    readable(true);
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], saved);
+
+    let (s, v) = save(json!({"qty": 1})).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let (_, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(spec["inputs"], saved, "an edit waits for the next start");
+    assert!(t.fake.placed.lock().is_empty());
+    t.h.ctx.trading.runner.pause(&id).unwrap();
+    t.start(&id).await;
+    let (_, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(spec["inputs"], json!({"qty": 1}));
+}
+
 /// LOG-09: a start decides its side from analyzer mode. Unreadable, it was
 /// taken as off, so a deployment meant for the sandbox started live while a
 /// broker was connected.

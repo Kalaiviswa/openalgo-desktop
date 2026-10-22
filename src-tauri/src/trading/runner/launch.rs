@@ -12,6 +12,7 @@ use crate::strategy::dispatch::RunMode;
 use crate::trading::names::names_something;
 use chrono_tz::Asia::Kolkata;
 use parking_lot::Mutex;
+use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -148,7 +149,7 @@ impl Runner {
             destination,
             incarnation,
         };
-        let entry = self.new_entry(&info);
+        let entry = self.new_entry(&info, saved.inputs.clone());
         let mut lines = vec![format!(
             "=== Run started at {} on the {} side ===",
             started
@@ -269,10 +270,12 @@ impl Runner {
         }
     }
 
-    /// A new run's registry entry, with its page secret and an empty inbox.
-    fn new_entry(&self, info: &RunInfo) -> Arc<RunEntry> {
+    /// A new run's registry entry, with the inputs it started with, its page
+    /// secret and an empty inbox.
+    fn new_entry(&self, info: &RunInfo, inputs: Map<String, Value>) -> Arc<RunEntry> {
         Arc::new(RunEntry {
             info: info.clone(),
+            inputs,
             token: random_token(),
             inbox: Inbox::new(info.incarnation),
             halted: AtomicBool::new(false),
