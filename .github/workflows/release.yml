@@ -1,13 +1,28 @@
 name: Release
 
-# Builds OpenAlgo Desktop for every supported platform when a v* tag is pushed
-# and attaches the installers, the in-app update bundles with their
-# signatures, latest.json (the update manifest) and a SHA256SUMS.txt covering
-# them all to a DRAFT GitHub release. A maintainer reviews the draft and
+# Releases OpenAlgo Desktop for every supported platform when a v* tag is
+# pushed: a DRAFT GitHub release with the installers, the in-app update
+# bundles with their signatures, latest.json (the update manifest) and a
+# SHA256SUMS.txt covering them all. A maintainer reviews the draft and
 # publishes it by hand. Publishing is what makes the update visible to
 # installed copies: they ask releases/latest/download/latest.json, which
 # GitHub serves from the newest published, non-prerelease release only
 # (docs/release/updates.md).
+#
+# The installers are the files CI built for the tagged commit and the
+# install smoke installed (the `ci-bundles` job): this workflow downloads
+# the bundles of the CI run the gate approved, checks each is the file
+# GitHub recorded for that run, signs the update bundles with the update
+# key and attaches them. Nothing is compiled, so a release takes minutes,
+# and what a trader downloads is byte for byte what passed CI's
+# installed-app checks (docs/release/release-workflow.md).
+#
+# The full rebuild (the `build` job) is the fallback, started by hand:
+# Actions > Release > Run workflow, with the tag and build: rebuild. Use it
+# when CI's bundles have expired (CI keeps them 7 days) or once Apple or
+# Windows code signing is configured, since that signature goes inside the
+# app at build time and the rebuilt installers are then not the files the
+# install smoke tested.
 #
 # Release gate (the `verify` job, which every other job waits for): the tag
 # must point at a commit on master, its dependencies must pass a fresh
@@ -23,12 +38,17 @@ name: Release
 # the tag must equal v<version> with the
 # same version in src-tauri/Cargo.toml, src-tauri/tauri.conf.json,
 # package.json, both lockfiles and the newest CHANGELOG.md section
-# (.claude/skills/version-bump/check_versions.py). This workflow does not
-# re-run the test suite; the gate is what ties a release to a green CI run.
-# To run the gate alone, with nothing built or published: Actions > Release >
-# Run workflow, with the tag to check.
+# (.claude/skills/version-bump/check_versions.py). Unless rebuilding, that
+# CI run's own ci-ok, builds (with the check before bundling and its
+# backstop) and unexpired bundles must be there too
+# (scripts/ci/release_bundles.py check). This workflow does not re-run the
+# test suite; the gate is what ties a release to a green CI run. To run the
+# gate alone, with nothing built or published: Actions > Release > Run
+# workflow, with the tag to check and build: none (the default).
+# scripts/release/preflight.sh makes most of the same checks before tagging.
 #
-# Installers per platform (the matrix `bundles` below):
+# Installers per platform (the rebuild's matrix `bundles` below; CI builds
+# every bundle type, and scripts/ci/release_bundles.py picks these):
 #   Windows x64            NSIS setup .exe (per-user install)
 #   macOS Apple Silicon    .dmg
 #   macOS Intel            .dmg
@@ -55,12 +75,14 @@ name: Release
 # In-app update signing (REQUIRED: the release gate fails without it):
 #   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 #   The private half of the key in src-tauri/tauri.conf.json
-#   (plugins.updater.pubkey). Release builds add
-#   src-tauri/updater-artifacts.conf.json (createUpdaterArtifacts), so each
-#   platform also produces its update bundle (.app.tar.gz, the NSIS
-#   -setup.exe, the AppImage) and a .sig. The checksums job builds
-#   latest.json from those and refuses a signature that does not verify
-#   against the key built into the app.
+#   (plugins.updater.pubkey). CI's builds add
+#   src-tauri/updater-artifacts.conf.json (createUpdaterArtifacts) with
+#   --no-sign, so each platform also produces its update bundle
+#   (.app.tar.gz, the NSIS -setup.exe, the AppImage), unsigned; the
+#   ci-bundles job signs each (`tauri signer sign --app-version`), the
+#   rebuild signs in its own build. The checksums job builds latest.json
+#   from those and refuses a signature that does not verify against the
+#   key built into the app.
 #
 # Empty secrets are never exported: Tauri treats a present-but-empty
 # APPLE_CERTIFICATE or APPLE_ID as "configured" and would fail the build.
@@ -70,7 +92,9 @@ name: Release
 # Authenticode on Windows). A platform whose signing secrets are configured
 # but whose installer is not signed fails its build. The release notes then
 # state, per platform, what that check found; they never say "signed" for an
-# installer that was not.
+# installer that was not. CI's installers carry no code signature (CI has no
+# certificate), so with Apple or Windows signing configured the gate refuses
+# the ci-bundles path, and the notes of a ci-bundles release say so.
 
 on:
   push:
@@ -78,15 +102,27 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to check (v1.2.3). Runs only the release gate; nothing is built or published."
+        description: "Release tag (v1.2.3)"
         required: true
         type: string
+      build:
+        description: >-
+          none: run the release gate only; nothing is built or published.
+          ci-bundles: release the bundles CI tested, as a tag push does.
+          rebuild: build every platform again (CI's bundles expired, or
+          code signing is configured).
+        required: true
+        default: none
+        type: choice
+        options: [none, ci-bundles, rebuild]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Per tag, so a tag push and a run by hand for the same tag never fill
+  # one draft at once.
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -101,24 +137,53 @@ env:
 
 jobs:
   verify:
-    name: verify (tag on master, ci-ok, install smoke and native order journey green, version, fresh advisory scan)
+    name: verify (tag on master, ci-ok, install smoke and native order journey green, CI's bundles, version, fresh advisory scan)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: read
       actions: read
+    outputs:
+      tag: ${{ steps.mode.outputs.tag }}
+      mode: ${{ steps.mode.outputs.mode }}
+      sha: ${{ steps.commit.outputs.sha }}
+      ci_run_id: ${{ steps.bundles.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.bundles.outputs.ci_run_attempt }}
     env:
       # The pushed tag, or the tag named when the gate is run by hand.
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
-      - name: The tag name is a release tag
+      - name: The tag name is a release tag, and what this run does
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          BUILD: ${{ inputs.build }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error title=Release gate::'${TAG}' is not a release tag (v<major>.<minor>.<patch>)."
             exit 1
           fi
+          # A tag push releases the bundles CI tested; a run by hand does
+          # what its `build` input says.
+          if [ "$EVENT" = "push" ]; then
+            mode=ci-bundles
+          else
+            mode="${BUILD:-none}"
+          fi
+          case "$mode" in
+            none | ci-bundles | rebuild) ;;
+            *) echo "::error title=Release gate::Unknown build '${mode}'."; exit 1 ;;
+          esac
+          # A run by hand that publishes runs master's copy of this workflow,
+          # not a branch's.
+          if [ "$mode" != "none" ] && [ "$EVENT" != "push" ] && [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "::error title=Release gate::Run the release from master (Use workflow from: master), not ${GITHUB_REF}."
+            exit 1
+          fi
+          echo "${TAG}: ${mode}"
+          { echo "tag=${TAG}"; echo "mode=${mode}"; } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ env.TAG }}
@@ -176,6 +241,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}
         run: python3 scripts/ci/smoke_gate.py release "$SHA"
+      - name: CI's tested bundles of this commit are there to sign
+        id: bundles
+        # The installers a release ships are the bundles of the CI run the
+        # step above approved. In that run, ci-ok and every tauri-build job
+        # must have succeeded, with the check before bundling, its backstop
+        # and the unsigned update bundle, and each bundles-<platform>
+        # artifact must be that run's, unexpired, with a sha256 digest
+        # (scripts/ci/release_bundles.py check, tested by
+        # test_release_bundles.py in CI). Its id and attempt pass to the
+        # ci-bundles job. The rebuild does not need them.
+        if: steps.mode.outputs.mode != 'rebuild'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: python3 scripts/ci/release_bundles.py check "$SHA"
       - name: The tag equals the app version everywhere
         run: python3 .claude/skills/version-bump/check_versions.py --tag "$TAG"
       # NEW-VER-03: the tagged commit's dependencies are scanned now, at
@@ -212,12 +292,26 @@ jobs:
             echo "::error title=Release gate::The TAURI_SIGNING_PRIVATE_KEY secret is not set. In-app updates are signed with it; see docs/release/updates.md."
             exit 1
           fi
+      - name: No code signing is configured that CI's installers lack
+        # CI has no Apple or Windows certificate, so its installers carry no
+        # code signature, and adding one afterwards would change the files
+        # the install smoke tested. With either configured, the release
+        # builds again (build: rebuild). Only whether the secrets are set is
+        # read here.
+        if: steps.mode.outputs.mode != 'rebuild'
+        env:
+          HAS_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' || secrets.WINDOWS_CERTIFICATE != '' }}
+        run: |
+          if [ "$HAS_CODE_SIGNING" = "true" ]; then
+            echo "::error title=Release gate::Apple or Windows code signing is configured, and CI's installers are not code-signed. Release with Actions > Release > Run workflow, build: rebuild."
+            exit 1
+          fi
 
   create-release:
     name: create draft release
     needs: verify
-    # A hand-run gate check stops after verify.
-    if: github.event_name == 'push'
+    # A gate-only run stops after verify.
+    if: needs.verify.outputs.mode != 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -229,7 +323,7 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
           prerelease=false
@@ -247,7 +341,7 @@ jobs:
               -f body="$(printf '%s\n\n%s\n%s\n%s\n' \
                 'Installers for Windows, macOS (Apple Silicon and Intel), Linux x64 and Linux arm64. SHA256SUMS.txt lists the checksum of every file. Installed copies of OpenAlgo Desktop offer this version as an in-app update once the release is published (latest.json).' \
                 '<!-- signing:start -->' \
-                'Code signing: not checked yet. This note is replaced once every installer is built and its signature checked.' \
+                'Code signing: not checked yet. This note is replaced once every installer is attached and its signature known.' \
                 '<!-- signing:end -->')" \
               -F draft=true \
               -F prerelease="$prerelease" \
@@ -257,9 +351,152 @@ jobs:
           fi
           echo "release_id=${id}" >> "$GITHUB_OUTPUT"
 
+  ci-bundles:
+    # The default path: the installers are CI's, as the install smoke
+    # tested them; only the update signatures are new.
+    name: sign and attach the bundles CI tested
+    needs: [verify, create-release]
+    if: needs.verify.outputs.mode == 'ci-bundles'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      SHA: ${{ needs.verify.outputs.sha }}
+      RUN_ID: ${{ needs.verify.outputs.ci_run_id }}
+      RUN_ATTEMPT: ${{ needs.verify.outputs.ci_run_attempt }}
+    steps:
+      # The tagged commit: the manifest's public key, the product name and
+      # the scripts are the ones the bundles were built with.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Download the bundles of the CI run the gate approved
+        # The run is read again by its id and must still be the gated
+        # attempt, green, with its checks; each artifact must hash to the
+        # sha256 GitHub recorded when CI uploaded it
+        # (scripts/ci/release_bundles.py download).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/release_bundles.py download "$SHA" --run "$RUN_ID" --attempt "$RUN_ATTEMPT" --out "${RUNNER_TEMP}/ci-bundles"
+      - name: Choose the release files, under the names GitHub publishes
+        # The installers and update bundles of each platform, copied
+        # unchanged; only the macOS update bundle is renamed, as
+        # tauri-action always named it (<product>_<version>_<arch>.app.tar.gz).
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/release_bundles.py stage "${RUNNER_TEMP}/ci-bundles" \
+            --version "${TAG#v}" --config src-tauri/tauri.conf.json \
+            --out "${RUNNER_TEMP}/release" --sign-list "${RUNNER_TEMP}/to-sign.txt" \
+            | tee "${RUNNER_TEMP}/staged.tsv"
+          {
+            echo "### Installers of ${TAG}: CI run ${RUN_ID} (attempt ${RUN_ATTEMPT}) of ${SHA}"
+            echo
+            echo "| Platform | File | SHA-256 |"
+            echo "| --- | --- | --- |"
+            while IFS=$'\t' read -r platform file digest; do
+              echo "| ${platform} | ${file} | ${digest#sha256:} |"
+            done < "${RUNNER_TEMP}/staged.tsv"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install the Tauri CLI the lockfile pins
+        # No install script runs; the update key reaches only the next step.
+        run: npm ci --ignore-scripts
+      - name: Sign the update bundles with the update key
+        # --app-version binds the version into each signature, which the app
+        # requires (requireSignedVersion). The checksums job verifies every
+        # signature against the key built into the app before latest.json
+        # is attached.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          UPDATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # An empty password secret is not passed on (a key without one).
+          if [ -n "$UPDATE_KEY_PASSWORD" ]; then
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$UPDATE_KEY_PASSWORD"
+          fi
+          while IFS= read -r bundle; do
+            ./node_modules/.bin/tauri signer sign --app-version "${TAG#v}" "$bundle" < /dev/null
+            if [ ! -s "${bundle}.sig" ]; then
+              echo "::error::No signature was written for $(basename "$bundle")."
+              exit 1
+            fi
+            echo "Signed $(basename "$bundle")"
+          done < "${RUNNER_TEMP}/to-sign.txt"
+      - name: Record that CI's installers carry no code signature
+        # For the release notes (checksums job). CI has no code-signing
+        # certificate, and the gate refused this path if one is configured.
+        run: |
+          set -euo pipefail
+          mkdir -p signing
+          for name in windows-x86_64 macos-aarch64 macos-x86_64; do
+            echo "not code-signed (built by CI, which has no code-signing certificate)" > "signing/${name}.txt"
+          done
+          for name in linux-x86_64 linux-aarch64; do
+            echo "not code-signed; check the download against SHA256SUMS.txt" > "signing/${name}.txt"
+          done
+      - name: Upload the signature check
+        uses: actions/upload-artifact@v6
+        with:
+          name: signing-ci-bundles
+          path: signing/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attach to the draft release
+        # A file an earlier attempt attached under the same name is replaced.
+        # Each attached file must then have the size and, where GitHub
+        # reports one, the sha256 of the file it came from.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          assets="repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
+          upload_url=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .upload_url)
+          upload_url="${upload_url%%\{*}"
+          attach() {
+            local file="$1" name id
+            name=$(basename "$file")
+            # Names are [A-Za-z0-9._-] only (release_bundles.py stage).
+            for id in $(gh api --paginate "$assets" --jq ".[] | select(.name == \"${name}\") | .id"); do
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${id}"
+            done
+            gh api -X POST "${upload_url}?name=${name}" -H "Content-Type: application/octet-stream" \
+              --input "$file" --jq .name
+          }
+          for file in "${RUNNER_TEMP}"/release/*; do
+            attach "$file" || { sleep 15; attach "$file"; } || { sleep 60; attach "$file"; }
+          done
+          gh api --paginate "$assets" --jq '.[] | "\(.name)\t\(.size)\t\(.digest // "")"' > "${RUNNER_TEMP}/attached.tsv"
+          for file in "${RUNNER_TEMP}"/release/*; do
+            name=$(basename "$file")
+            line=$(awk -F '\t' -v n="$name" '$1 == n' "${RUNNER_TEMP}/attached.tsv")
+            IFS=$'\t' read -r _ size digest <<< "$line"
+            if [ "${size:-}" != "$(stat -c %s "$file")" ]; then
+              echo "::error::${name} is attached with ${size:-no} bytes, not $(stat -c %s "$file")."
+              exit 1
+            fi
+            if [ -n "${digest:-}" ] && [ "$digest" != "sha256:$(sha256sum "$file" | cut -d' ' -f1)" ]; then
+              echo "::error::${name} is attached as ${digest}, not the file CI built."
+              exit 1
+            fi
+            echo "${name}: ${size} bytes ${digest:-(no digest reported)}"
+          done
+
   build:
+    # The fallback, by hand (build: rebuild): every platform built again,
+    # signed in its own build.
     name: build (${{ matrix.name }})
-    needs: create-release
+    needs: [verify, create-release]
+    if: needs.verify.outputs.mode == 'rebuild'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     permissions:
@@ -294,6 +531,8 @@ jobs:
             bundles: app,dmg
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-tauri-deps
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
@@ -417,7 +656,7 @@ jobs:
           # bundled or uploaded.
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci --config src-tauri/updater-artifacts.conf.json --config src-tauri/release-checks.conf.json ${{ env.TAURI_EXTRA_ARGS }}
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ needs.verify.outputs.tag }}
           # The update bundles and their .sig files go up; latest.json is
           # built once, from every platform, by the checksums job (parallel
           # jobs each rewriting it would race).
@@ -566,16 +805,27 @@ jobs:
 
   checksums:
     name: update manifest, checksums and signing notes
-    needs: [create-release, build]
+    needs: [verify, create-release, ci-bundles, build]
+    # After whichever of ci-bundles and build ran, once it succeeded.
+    if: >-
+      !cancelled() && needs.create-release.result == 'success' &&
+      (needs.ci-bundles.result == 'success' || needs.build.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     steps:
-      # The app's public key, CHANGELOG.md and the manifest script.
+      # The app's public key, CHANGELOG.md and the manifest script, of the
+      # tagged commit.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
       - name: Install minisign
         run: |
+          # A stalled mirror fails the request and retries (as in
+          # .github/actions/linux-tauri-deps) instead of holding the job.
+          printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99ci-network >/dev/null
           sudo apt-get update -q
           sudo apt-get install -y -q minisign
           minisign -v
@@ -615,7 +865,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP}/release-assets"
@@ -669,7 +919,7 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           set -euo pipefail
-          section="Code signing, as checked on each installer after it was built:"
+          section="Code signing of each installer:"
           warn=false
           for row in \
             "windows-x86_64|Windows x64" \

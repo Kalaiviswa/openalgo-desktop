@@ -35,7 +35,13 @@ job waits for. On a pushed `v*` tag it refuses to build unless:
   CI run or yesterday's scan can predate an advisory;
 - the tag equals `v<version>` and every version location agrees
   (`.claude/skills/version-bump/check_versions.py --tag <tag>`), including a
-  `## <version>` section at the top of `CHANGELOG.md`.
+  `## <version>` section at the top of `CHANGELOG.md`;
+- unless the release is rebuilt by hand, that same CI run's `ci-ok` and
+  `tauri-build` jobs succeeded, the latter with the check before bundling
+  and its backstop, and its bundles are there and unexpired: the release
+  ships those very files, checked against the sha256 GitHub recorded for
+  them (`scripts/ci/release_bundles.py`,
+  [Cutting a release](release-workflow.md)).
 
 The gate can be run alone, without building or publishing anything:
 Actions > Release > Run workflow, with the tag to check.

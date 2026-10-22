@@ -165,7 +165,7 @@ def run_jobs(r: str, run_id: int) -> list[dict]:
 
 def verdict(gate: Gate, r: str, sha: str) -> tuple[dict, list[dict]]:
     """The run that decides `gate` for `sha` and its jobs, once it passed;
-    Refused otherwise."""
+    Refused otherwise. release_bundles.py ships the bundles of this run."""
     runs = master_runs(gate, r, sha)
     decided = [run for run in runs if run.get("conclusion") != "cancelled"]
     if not decided:

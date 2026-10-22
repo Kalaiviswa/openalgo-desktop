@@ -9,6 +9,8 @@ name: CI
 #   tauri-build --> install-smoke (install, start, sign in: Linux x64 and
 #               |   arm64, Windows Server 2022 and 2025, macOS)
 #               \-> native-e2e (the installed app's window by WebDriver)
+#   (a release ships tauri-build's bundles of its master run, signed for
+#   in-app updates by release.yml, not rebuilt: scripts/ci/release_bundles.py)
 #   e2e (Playwright against vite preview)
 #   secret-scan (gitleaks, full history)
 #   code-health (size, dead code and suppression ratchet; CLAUDE.md "Code health")
@@ -241,8 +243,11 @@ jobs:
       - run: npm ci
       - name: Release and install-smoke gate tests
         # scripts/ci/smoke_gate.py decides which install smoke runs a
-        # release may rely on; its tests use fabricated API answers.
-        run: python3 scripts/ci/test_smoke_gate.py
+        # release may rely on, and release_bundles.py which CI bundles it
+        # ships; their tests use fabricated API answers.
+        run: |
+          python3 scripts/ci/test_smoke_gate.py
+          python3 scripts/ci/test_release_bundles.py
       - name: Update manifest tests
         # scripts/ci/updater_manifest.py builds a release's latest.json.
         run: python3 scripts/ci/test_updater_manifest.py
@@ -258,9 +263,10 @@ jobs:
         # ephemeral loopback ports; it never reaches a broker.
         run: python3 -I scripts/certify/test_broker_certify.py
       - name: E2E test build checks
-        # scripts/ci/check_no_e2e_build.py (the release build's check before
-        # bundling, its backstop, the install smoke's check), and release.yml
-        # running it inside tauri-action's build before anything is bundled.
+        # scripts/ci/check_no_e2e_build.py (the check before bundling, its
+        # backstop, the install smoke's check), tauri-build and release.yml
+        # running it inside tauri-action's build before anything is bundled,
+        # and the rest of the release workflow's wiring.
         run: |
           python3 scripts/ci/test_check_no_e2e_build.py
           python3 scripts/ci/test_release_workflow.py
@@ -480,11 +486,58 @@ jobs:
         # the tauri crate and @tauri-apps/api is visible in the log.
         continue-on-error: true
         run: npx tauri info
+      - uses: actions/setup-python@v6
+        # The check before bundling (below) runs as `python` on every system.
+        with:
+          python-version: "3.12"
+      # The steps named in scripts/ci/release_bundles.py (TAURI_BUILD_STEPS)
+      # must succeed for a release to ship this run's bundles: a release
+      # signs these very files for in-app updates and attaches them, it does
+      # not build again. Renaming one means renaming it there.
       - name: Build bundles (no publishing)
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           tauriScript: npx tauri
-          args: --target ${{ matrix.target }} --ci
+          # updater-artifacts.conf.json: the in-app update bundles too (the
+          # macOS .app.tar.gz; the NSIS installer and the AppImage are their
+          # own), unsigned: --no-sign leaves out the update signature, which
+          # needs the private key no CI run holds, and code signing, which
+          # CI has no certificate for either. release.yml signs them.
+          # release-checks.conf.json: between compiling and bundling, in
+          # this same build, the binary is checked not to be the E2E test
+          # build (scripts/ci/check_no_e2e_build.py --tauri-hook); a
+          # refused binary stops the build before anything is bundled.
+          args: --target ${{ matrix.target }} --ci --no-sign --config src-tauri/updater-artifacts.conf.json --config src-tauri/release-checks.conf.json
+      - name: The bundled binary is the one checked before bundling
+        # A backstop: the binary must still have the code digest the check
+        # recorded (Windows' in-place signature aside), and a missing record
+        # means the check did not run. Either fails the job.
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python scripts/ci/check_no_e2e_build.py --same-as-checked "src-tauri/target/${TARGET}/release/openalgo-desktop${EXE}"
+      - name: The update bundle is built, unsigned
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundle="src-tauri/target/${TARGET}/release/bundle"
+          case "$RUNNER_OS" in
+            macOS) updates=("$bundle"/macos/*.app.tar.gz) ;;
+            Windows) updates=("$bundle"/nsis/*-setup.exe) ;;
+            *) updates=("$bundle"/appimage/*.AppImage) ;;
+          esac
+          if [ "${#updates[@]}" -ne 1 ]; then
+            echo "::error::Expected one update bundle in ${bundle}, found ${#updates[@]}."
+            exit 1
+          fi
+          sigs=("$bundle"/*/*.sig)
+          if [ "${#sigs[@]}" -ne 0 ]; then
+            echo "::error::CI signed ${sigs[*]}: a CI build must never hold the update key."
+            exit 1
+          fi
+          echo "Update bundle, unsigned (release.yml signs it): ${updates[0]}"
       - name: Upload bundles
         uses: actions/upload-artifact@v6
         with:
@@ -496,6 +549,7 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
           retention-days: 7
 

@@ -783,13 +783,19 @@ worktree onto master. CI builds fresh and is unaffected.
   the time on.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
-- In-app update bundles are made only by the release workflow, which adds
-  `src-tauri/updater-artifacts.conf.json` to the build. Never put
-  `createUpdaterArtifacts` in `tauri.conf.json`: CI and local bundle builds
-  have no signing key, and the Tauri build fails without one. The update
-  plugin's own commands are granted to no page (a test pins it): pages reach
-  updates through `/api/update/*` and the `restart_to_update` command.
-  `docs/release/updates.md` has the whole chain.
+- A release ships the bundles CI's `tauri-build` made for the tagged commit
+  (the files the install smoke tested), and only signs their update bundles;
+  it does not build again (`docs/release/release-workflow.md`). So
+  `tauri-build` builds as the release did: `updater-artifacts.conf.json`
+  with `--no-sign` (unsigned update bundles; no CI run ever holds the key,
+  a test pins it) and `release-checks.conf.json` (the check before
+  bundling), and the steps named in `scripts/ci/release_bundles.py`
+  (`TAURI_BUILD_STEPS`) keep their names. Never put `createUpdaterArtifacts`
+  in `tauri.conf.json`: a local bundle build has no signing key and fails
+  without one. The update plugin's own commands are granted to no page (a
+  test pins it): pages reach updates through `/api/update/*` and the
+  `restart_to_update` command. `docs/release/updates.md` has the whole
+  chain.
 - `tauri` carries its `test` feature as a dev-dependency off Windows (the
   mock runtime the updater tests drive the real plugin with), so
   `clippy --all-targets` and the test builds compile `tauri` a second time.

@@ -14,6 +14,11 @@
 - The advisory scans: the release gate, the daily security.yml run and
   scripts/release/preflight.sh all run scripts/ci/advisory_scan.sh, which
   accepts exactly the advisories .github/deny.toml ignores.
+- A tag push ships CI's tested bundles: CI's tauri-build makes them the way
+  the release build did (the update bundles, unsigned; the check before
+  bundling and its backstop), and release.yml's ci-bundles job signs and
+  attaches them without building; the rebuild runs only by hand; the update
+  key reaches only the steps that sign.
 
 Read as text, so no YAML library is needed.
 """
@@ -25,12 +30,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.dont_write_bytecode = True  # leave no __pycache__ in the checkout
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 RELEASE = os.path.join(ROOT, ".github", "workflows", "release.yml")
+CI = os.path.join(ROOT, ".github", "workflows", "ci.yml")
 SECURITY = os.path.join(ROOT, ".github", "workflows", "security.yml")
 PREFLIGHT = os.path.join(ROOT, "scripts", "release", "preflight.sh")
 SCAN = os.path.join(ROOT, "scripts", "ci", "advisory_scan.sh")
@@ -44,13 +51,29 @@ def read(path: str) -> str:
         return f.read()
 
 
-def job_steps(text: str, job: str) -> list[str]:
-    """The steps of `job`, each as its text, in order."""
+def job_text(text: str, job: str) -> str:
+    """The whole of `job`, its header included."""
     start = text.index(f"\n  {job}:\n")
     end = re.search(r"\n  [a-z][a-z0-9_-]*:\n", text[start + 1 :])
-    body = text[start : start + 1 + end.start()] if end else text[start:]
+    return text[start : start + 1 + end.start()] if end else text[start:]
+
+
+def job_steps(text: str, job: str) -> list[str]:
+    """The steps of `job`, each as its text, in order."""
+    body = job_text(text, job)
     steps = body[body.index("\n    steps:\n") :]
     return re.split(r"\n      - ", steps)[1:]
+
+
+def job_if(text: str, job: str) -> str:
+    m = re.search(r"\n    if: (.+)", job_text(text, job))
+    return m.group(1).strip() if m else ""
+
+
+def script(step: str) -> str:
+    """The `run: |` block of a step, unindented."""
+    body = step[step.index("run: |\n") + len("run: |\n") :]
+    return "\n".join(line[4:] for line in body.splitlines())
 
 
 def index(steps: list[str], pred) -> int:
@@ -108,6 +131,130 @@ class ReleaseBuild(unittest.TestCase):
         self.assertIn("scripts/ci/check_no_e2e_build.py --same-as-checked", backstop)
         self.assertIn('"src-tauri/target/${TARGET}/release/openalgo-desktop${EXE}"', backstop)
         self.assertNotIn("\n        if:", backstop)
+
+
+class CiBuildsWhatShips(unittest.TestCase):
+    """CI's tauri-build makes the files a release ships, so it builds them as
+    the release build did, with the same checks."""
+
+    def setUp(self):
+        self.text = read(CI)
+        self.steps = job_steps(self.text, "tauri-build")
+        self.action = index(self.steps, lambda s: "tauri-apps/tauri-action@" in s)
+
+    def test_the_update_bundles_are_built_unsigned_with_the_check_before_bundling(self):
+        args = re.search(r"\n\s+args: (.*)", self.steps[self.action]).group(1)
+        for flag in (
+            "--no-sign",
+            "--config src-tauri/updater-artifacts.conf.json",
+            "--config src-tauri/release-checks.conf.json",
+        ):
+            self.assertIn(flag, args)
+        with open(os.path.join(ROOT, "src-tauri", "updater-artifacts.conf.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"bundle": {"createUpdaterArtifacts": True}})
+        self.assertGreaterEqual(index(self.steps, lambda s: "actions/setup-python@" in s), 0)
+        self.assertLess(index(self.steps, lambda s: "actions/setup-python@" in s), self.action)
+
+    def test_the_backstop_runs_right_after_the_build_on_every_target(self):
+        backstop = self.steps[self.action + 1]
+        self.assertIn("scripts/ci/check_no_e2e_build.py --same-as-checked", backstop)
+        self.assertIn('"src-tauri/target/${TARGET}/release/openalgo-desktop${EXE}"', backstop)
+        self.assertNotIn("\n        if:", backstop)
+
+    def test_the_steps_a_release_requires_are_there_and_unconditional(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import release_bundles
+
+        for name in release_bundles.TAURI_BUILD_STEPS:
+            step = step_named(self.steps, name)
+            self.assertNotIn("\n        if:", step, name)
+            self.assertNotIn("continue-on-error", step, name)
+
+    def test_the_macos_update_bundle_is_uploaded(self):
+        upload = step_named(self.steps, "Upload bundles")
+        self.assertIn("src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz", upload)
+
+    def test_ci_never_holds_the_update_key(self):
+        self.assertNotIn("TAURI_SIGNING_PRIVATE_KEY", self.text)
+
+
+class ReleaseShipsWhatCiTested(unittest.TestCase):
+    def setUp(self):
+        self.text = read(RELEASE)
+
+    def mode(self, event, build="", ref="refs/heads/master", tag="v1.2.3"):
+        """Run the gate's first step as the workflow would."""
+        step = step_named(job_steps(self.text, "verify"), "The tag name is a release tag, and what this run does")
+        with tempfile.NamedTemporaryFile("r", suffix=".out") as out:
+            env = dict(os.environ, TAG=tag, EVENT=event, BUILD=build, GITHUB_REF=ref, GITHUB_OUTPUT=out.name)
+            r = subprocess.run(["bash", "-c", script(step)], env=env, capture_output=True, text=True)
+            return r.returncode, dict(line.split("=", 1) for line in out.read().split())
+
+    def test_a_tag_push_ships_ci_bundles_and_a_run_by_hand_does_what_it_says(self):
+        self.assertEqual(self.mode("push", ref="refs/tags/v1.2.3"), (0, {"tag": "v1.2.3", "mode": "ci-bundles"}))
+        self.assertEqual(self.mode("workflow_dispatch", "none")[1]["mode"], "none")
+        self.assertEqual(self.mode("workflow_dispatch", "rebuild")[1]["mode"], "rebuild")
+        self.assertEqual(self.mode("workflow_dispatch", "ci-bundles")[1]["mode"], "ci-bundles")
+        # A gate-only run may come from any branch; a release only from master.
+        self.assertEqual(self.mode("workflow_dispatch", "none", ref="refs/heads/x")[0], 0)
+        self.assertEqual(self.mode("workflow_dispatch", "rebuild", ref="refs/heads/x")[0], 1)
+        self.assertEqual(self.mode("workflow_dispatch", "nonsense")[0], 1)
+        self.assertEqual(self.mode("push", tag="1.2.3")[0], 1)
+
+    def test_each_path_runs_only_in_its_mode(self):
+        self.assertEqual(job_if(self.text, "create-release"), "needs.verify.outputs.mode != 'none'")
+        self.assertEqual(job_if(self.text, "ci-bundles"), "needs.verify.outputs.mode == 'ci-bundles'")
+        self.assertEqual(job_if(self.text, "build"), "needs.verify.outputs.mode == 'rebuild'")
+        checksums = job_text(self.text, "checksums")
+        self.assertIn("needs: [verify, create-release, ci-bundles, build]", checksums)
+        self.assertIn("needs.ci-bundles.result == 'success' || needs.build.result == 'success'", checksums)
+        self.assertIn("--minisign minisign", checksums)
+
+    def test_the_gate_checks_ci_bundles_unless_rebuilding(self):
+        steps = job_steps(self.text, "verify")
+        bundles = step_named(steps, "CI's tested bundles of this commit are there to sign")
+        self.assertIn('run: python3 scripts/ci/release_bundles.py check "$SHA"', bundles)
+        self.assertIn("if: steps.mode.outputs.mode != 'rebuild'", bundles)
+        self.assertNotIn("continue-on-error", bundles)
+        signing = step_named(steps, "No code signing is configured that CI's installers lack")
+        self.assertIn("if: steps.mode.outputs.mode != 'rebuild'", signing)
+        self.assertLess(
+            index(steps, lambda s: "scripts/ci/smoke_gate.py release" in s), steps.index(bundles)
+        )
+
+    def test_the_fast_path_never_builds_and_ships_the_gated_run(self):
+        job = job_text(self.text, "ci-bundles")
+        for building in ("tauri-apps/tauri-action@", "tauri build", "cargo ", "linux-tauri-deps"):
+            self.assertNotIn(building, job)
+        steps = job_steps(self.text, "ci-bundles")
+        download = step_named(steps, "Download the bundles of the CI run the gate approved")
+        self.assertIn('release_bundles.py download "$SHA" --run "$RUN_ID" --attempt "$RUN_ATTEMPT"', download)
+        self.assertIn("RUN_ID: ${{ needs.verify.outputs.ci_run_id }}", job)
+        self.assertIn("RUN_ATTEMPT: ${{ needs.verify.outputs.ci_run_attempt }}", job)
+        self.assertIn("SHA: ${{ needs.verify.outputs.sha }}", job)
+        sign = step_named(steps, "Sign the update bundles with the update key")
+        self.assertIn('tauri signer sign --app-version "${TAG#v}" "$bundle" < /dev/null', sign)
+        self.assertLess(steps.index(download), steps.index(sign))
+        self.assertLess(index(steps, lambda s: "npm ci --ignore-scripts" in s), steps.index(sign))
+
+    def test_every_job_after_the_gate_checks_out_the_gated_commit(self):
+        for job in ("ci-bundles", "build", "checksums"):
+            checkout = next(s for s in job_steps(self.text, job) if s.startswith("uses: actions/checkout@"))
+            self.assertIn("ref: ${{ needs.verify.outputs.sha }}", checkout, job)
+
+    def test_the_update_key_reaches_only_the_steps_that_sign(self):
+        allowed = {
+            ("verify", "The update signing key is configured"),
+            ("build", "Export configured signing secrets"),
+            ("ci-bundles", "Sign the update bundles with the update key"),
+        }
+        found = set()
+        for job in ("verify", "create-release", "ci-bundles", "build", "checksums"):
+            self.assertNotRegex(job_text(self.text, job).split("\n    steps:\n")[0], "TAURI_SIGNING", job)
+            for step in job_steps(self.text, job):
+                if "secrets.TAURI_SIGNING" in step:
+                    found.add((job, re.match(r"(?:name: |uses: )(.+)", step).group(1)))
+        self.assertEqual(found, allowed)
 
 
 class AdvisoryScans(unittest.TestCase):

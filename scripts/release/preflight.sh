@@ -20,6 +20,11 @@
 #   CI on GitHub    with the gh CLI signed in, read-only: the commit's
 #                   install smoke and native order journey on master
 #                   (scripts/ci/smoke_gate.py, the gate's own check)
+#   CI's bundles    the same way: the bundles a tag push will sign and
+#                   attach are there, from that CI run, not expired
+#                   (scripts/ci/release_bundles.py check); if they are
+#                   not, release with Actions > Release > Run workflow,
+#                   build: rebuild
 #
 # It never tags, pushes or starts a workflow. Needs git, python3, npm and
 # cargo with cargo-deny and cargo-audit
@@ -66,21 +71,23 @@ on_master() {
   echo "${sha} is on origin/master."
 }
 
-ci_on_github() {
+# Runs a gate script against GitHub, read-only, when gh is signed in.
+on_github() {
   if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
     echo "Skipped: the gh CLI is not installed or not signed in."
     return 0
   fi
   local repo
   repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner) || return 1
-  GITHUB_REPOSITORY="$repo" python3 scripts/ci/smoke_gate.py release "$sha"
+  GITHUB_REPOSITORY="$repo" python3 "$@"
 }
 
 check "clean checkout" clean_checkout
 check "versions" python3 .claude/skills/version-bump/check_versions.py --tag "$tag"
 check "on master" on_master
 check "advisories" scripts/ci/advisory_scan.sh all
-check "CI on GitHub" ci_on_github
+check "CI on GitHub" on_github scripts/ci/smoke_gate.py release "$sha"
+check "CI's bundles" on_github scripts/ci/release_bundles.py check "$sha"
 
 echo
 if [ "${#failed[@]}" -ne 0 ]; then

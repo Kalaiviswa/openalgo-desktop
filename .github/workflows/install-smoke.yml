@@ -36,9 +36,11 @@ name: Install smoke
 # ci-ok needs it), so a pull request is tested installed before it merges,
 # with the bundles, this workflow and these scripts all from the commit
 # under test. Each job names that commit in its summary. release.yml refuses
-# to build a tag unless the newest CI push run of that commit on master
-# passed every job here (scripts/ci/smoke_gate.py release). To try an
-# older run's bundles again, re-run its jobs (the bundles are kept 7 days).
+# a tag unless the newest CI push run of that commit on master passed every
+# job here (scripts/ci/smoke_gate.py release), and then ships that run's
+# bundles, the files installed here (scripts/ci/release_bundles.py). To try
+# an older run's bundles again, re-run its jobs (the bundles are kept 7
+# days), before tagging: a re-run after the gate makes the release refuse.
 #
 # The app binds the shipped ports 5000 and 8765 here, which is fine on a CI
 # runner and is why scripts/ci/launch_smoke.py refuses to run outside CI.
