@@ -35,6 +35,10 @@ cargo audit --file src-tauri/Cargo.lock "${ignore_args[@]}"
 # JavaScript: production dependencies, fail on high or critical
 npm audit --omit=dev --audit-level=high
 npm audit --omit=dev --json > /tmp/npm-audit.json   # triage moderate and low too
+# Every dependency, dev tooling included: never a gate, always in the report.
+# Name the chain (`npm ls <pkg> --all`) and whether untrusted input reaches it;
+# fixAvailable is not proof of a patched release (PROD-SEC-02).
+npm audit --json > /tmp/npm-audit-all.json
 
 # Secrets in the full history, and in a branch's own commits
 gitleaks git --no-banner -c .github/gitleaks.toml --redact .
@@ -182,6 +186,10 @@ unreachable, is accepted in writing, never by silence:
   in section 1.
 - **npm advisory** in a production dependency at high or critical: not
   accepted; upgrade or replace. Moderate and low: list them in the report.
+  A dev-only one is removed by moving the enclosing tool to a release that
+  drops it (a lockfile update, or a scoped `overrides` entry); when none
+  exists, a dated acceptance in the audit report names the chain, shows no
+  untrusted input reaches it and sets a review date.
 
 Every review date that has passed is a finding in the next audit.
 
