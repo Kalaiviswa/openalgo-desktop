@@ -1400,6 +1400,209 @@ async fn api_keeps_every_other_exchange_whole_and_the_sandbox_whole() {
     app.shutdown().await;
 }
 
+fn smart_body(symbol: &str, product: &str, position_size: Value) -> Value {
+    json!({
+        "strategy": "crypto-test",
+        "exchange": "CRYPTO",
+        "symbol": symbol,
+        "action": "BUY",
+        "quantity": 0,
+        "position_size": position_size,
+        "pricetype": "MARKET",
+        "product": product,
+    })
+}
+
+/// A live CRYPTO smart order decides and sends in exact sizes, the held
+/// size included. Holding 2 ETH, a target of 0.5 sells 1.5 (it used to be
+/// read as 0 and sold all 2); holding 0.01 BTC, a target of 0.5 buys 0.49
+/// and a target of 0 sells the 0.01 (it used to be read as no position).
+#[tokio::test]
+async fn api_smart_order_reaches_a_fractional_crypto_target_exactly() {
+    let m = books_mock();
+    for id in [7401, 7402, 7403] {
+        m.on(
+            "POST",
+            "/v2/orders",
+            200,
+            format!(
+                r#"{{"success":true,"result":{{"id":{},"product_id":1601}}}}"#,
+                id
+            ),
+        );
+    }
+    let s = serve(&m).await;
+    let app = app::App::new(&s).await;
+    for (symbol, target) in [
+        ("ETHINR", json!(0.5)),
+        ("BTCINR", json!(0.5)),
+        ("BTCINR", json!(0)),
+    ] {
+        let (status, body) = app
+            .post(
+                "/api/v1/placesmartorder",
+                smart_body(symbol, "CNC", target.clone()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{} {} -> {}", symbol, target, body);
+    }
+    let sent: Vec<(Value, Value, Value)> = m
+        .calls("POST", "/v2/orders")
+        .iter()
+        .map(Seen::json)
+        .map(|o| {
+            (
+                o["product_symbol"].clone(),
+                o["side"].clone(),
+                o["size"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (json!("ETH_INR"), json!("sell"), json!(1.5)),
+            (json!("BTC_INR"), json!("buy"), json!(0.49)),
+            (json!("BTC_INR"), json!("sell"), json!(0.01)),
+        ]
+    );
+    app.shutdown().await;
+}
+
+/// Holding 6 BTCUSD contracts, a target of 0.5 needs 5.5, which a
+/// derivative cannot take: refused with Delta's reason and nothing is sent.
+/// It used to be read as 0 and sold all 6.
+#[tokio::test]
+async fn api_smart_order_refuses_a_fractional_target_a_contract_cannot_take() {
+    let m = books_mock();
+    m.on(
+        "POST",
+        "/v2/orders",
+        200,
+        r#"{"success":true,"result":{"id":7404,"product_id":27}}"#,
+    );
+    let s = serve(&m).await;
+    let app = app::App::new(&s).await;
+    let (status, body) = app
+        .post(
+            "/api/v1/placesmartorder",
+            smart_body("BTCUSDFUT", "NRML", json!(0.5)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("whole numbers"),
+        "{}",
+        body
+    );
+    assert!(m.calls("POST", "/v2/orders").is_empty(), "nothing was sent");
+    app.shutdown().await;
+}
+
+async fn sandbox_held(app: &app::App, symbol: &str) -> i64 {
+    app.ctx
+        .sandbox
+        .open_position(symbol, "CRYPTO", "NRML")
+        .await
+        .unwrap()
+        .quantity
+}
+
+/// The sandbox carries whole units: holding 6 contracts there, a target of
+/// 0.5 is refused and the position stays 6 (it used to be read as 0 and
+/// closed the position). A whole target still trades.
+#[tokio::test]
+async fn sandbox_smart_order_refuses_a_fractional_crypto_target() {
+    let m = Mock::default();
+    m.on(
+        "GET",
+        "/v2/tickers/BTCUSD",
+        200,
+        fixture("ticker_btcusd.json"),
+    );
+    let s = serve(&m).await;
+    let app = app::App::new(&s).await;
+    app.ctx.sqlite.set_analyze_mode(true).unwrap();
+    let (status, body) = app
+        .post("/api/v1/placeorder", place_body("BTCUSDFUT", json!(6)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(sandbox_held(&app, "BTCUSDFUT").await, 6);
+
+    let (status, body) = app
+        .post(
+            "/api/v1/placesmartorder",
+            smart_body("BTCUSDFUT", "NRML", json!(0.5)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("whole-number position size"),
+        "{}",
+        body
+    );
+    assert_eq!(sandbox_held(&app, "BTCUSDFUT").await, 6, "untouched");
+
+    let (status, body) = app
+        .post(
+            "/api/v1/placesmartorder",
+            smart_body("BTCUSDFUT", "NRML", json!(2)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(sandbox_held(&app, "BTCUSDFUT").await, 2);
+    assert!(m.calls("POST", "/v2/orders").is_empty());
+    app.shutdown().await;
+}
+
+/// In the sandbox a fractional CRYPTO GTT used to become a GTT for 0 with
+/// nothing blocked. It is refused, placed or modified; a whole one is
+/// placed and keeps its quantity when a fractional modify is refused.
+#[tokio::test]
+async fn sandbox_gtt_refuses_a_fractional_crypto_quantity() {
+    let fake = Mock::default();
+    fake.on(
+        "GET",
+        "/v2/tickers/BTCUSD",
+        200,
+        fixture("ticker_btcusd.json"),
+    );
+    let s = serve(&fake).await;
+    let app = app::App::new(&s).await;
+    app.ctx.sqlite.set_analyze_mode(true).unwrap();
+    let gtt = |quantity: Value| {
+        json!({"strategy": "crypto-test", "trigger_type": "SINGLE", "exchange": "CRYPTO",
+            "symbol": "BTCUSDFUT", "action": "BUY", "product": "NRML", "quantity": quantity,
+            "pricetype": "LIMIT", "price": 50000.0, "triggerprice_sl": 50000.0})
+    };
+    let (status, body) = app.post("/api/v1/placegttorder", gtt(json!(0.5))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    let (_, book) = app.post("/api/v1/gttorderbook", json!({})).await;
+    assert_eq!(book["data"], json!([]), "no GTT was made: {}", book);
+
+    let (status, body) = app.post("/api/v1/placegttorder", gtt(json!(2))).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let mut modify = gtt(json!(0.5));
+    modify["trigger_id"] = body["trigger_id"].clone();
+    let (status, body) = app.post("/api/v1/modifygttorder", modify).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    let (_, book) = app.post("/api/v1/gttorderbook", json!({})).await;
+    assert_eq!(
+        book["data"][0]["legs"][0]["quantity"],
+        json!(2),
+        "unchanged: {}",
+        book
+    );
+    assert!(fake.calls("POST", "/v2/orders").is_empty());
+    app.shutdown().await;
+}
+
 #[tokio::test]
 async fn capabilities_advertise_crypto_and_leverage() {
     let m = Mock::default();

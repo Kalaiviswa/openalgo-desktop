@@ -619,6 +619,16 @@ impl Broker for DeltaBroker {
         orders::get_open_position(self, auth, symbol, exchange).await
     }
 
+    async fn get_open_position_exact(
+        &self,
+        auth: &AuthToken,
+        symbol: &str,
+        exchange: Exchange,
+        _product: Product,
+    ) -> Result<rust_decimal::Decimal> {
+        orders::get_open_position_exact(self, auth, symbol, exchange).await
+    }
+
     async fn get_order_book(&self, auth: &AuthToken) -> Result<Vec<Order>> {
         orders::get_order_book(self, auth).await
     }
