@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CurrentMetrics, EmptyHealthStats } from '@/api/health'
-import { render, screen, userEvent } from '@/test/test-utils'
+import { render, screen, userEvent, waitFor } from '@/test/test-utils'
 import HealthMonitor from './HealthMonitor'
 
 const api = vi.hoisted(() => ({
@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   getActiveAlerts: vi.fn(),
   getHeldOrders: vi.fn(),
   markHeldOrderNotPlaced: vi.fn(),
+  acknowledgeAlert: vi.fn(),
+  resolveAlert: vi.fn(),
 }))
 
 vi.mock('@/api/health', async (importOriginal) => ({
@@ -58,6 +60,8 @@ describe('Health Monitor', () => {
     api.getActiveAlerts.mockResolvedValue([])
     api.getHeldOrders.mockResolvedValue([])
     api.markHeldOrderNotPlaced.mockResolvedValue(undefined)
+    api.acknowledgeAlert.mockResolvedValue(undefined)
+    api.resolveAlert.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -163,5 +167,59 @@ describe('Health Monitor', () => {
     expect(api.markHeldOrderNotPlaced).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Confirm not placed' }))
     expect(api.markHeldOrderNotPlaced).toHaveBeenCalledWith('strategy', '42')
+  })
+
+  // The resolve endpoint existed with nothing calling it: an alert only the
+  // trader settles (lost records) stayed on the page for good.
+  it('resolves an alert only the trader settles, and offers no Resolve on one OpenAlgo clears', async () => {
+    const alert = (id: number, alert_type: string, resolvable: boolean) => ({
+      id,
+      timestamp: '2026-10-20T10:00:00+05:30',
+      alert_type,
+      severity: 'warn' as const,
+      metric_name: alert_type,
+      metric_value: 1,
+      threshold_value: 0,
+      message: `${alert_type} message`,
+      acknowledged: true,
+      resolved: false,
+      resolvable,
+    })
+    api.getActiveAlerts.mockResolvedValue([
+      alert(7, 'records_not_saved', true),
+      alert(8, 'fd_count_warn', false),
+    ])
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('records_not_saved message')).toBeInTheDocument()
+    expect(screen.getByText('fd_count_warn message')).toBeInTheDocument()
+    const resolve = screen.getAllByRole('button', { name: 'Resolve' })
+    expect(resolve).toHaveLength(1)
+    api.getActiveAlerts.mockResolvedValue([alert(8, 'fd_count_warn', false)])
+    await userEvent.click(resolve[0])
+    expect(api.resolveAlert).toHaveBeenCalledWith(7)
+    await waitFor(() =>
+      expect(screen.queryByText('records_not_saved message')).not.toBeInTheDocument()
+    )
+  })
+
+  it('draws the app checks the sample carries, with a warning where something was missed', async () => {
+    api.getCurrentMetrics.mockResolvedValue(
+      metrics({
+        records: {
+          status: 'warn',
+          order_logs_dropped: 2,
+          order_logs_failed: 0,
+          monitoring_dropped: 0,
+          monitoring_lost: 0,
+          monitoring_retried_batches: 1,
+        },
+      })
+    )
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('Records Saved')).toBeInTheDocument()
+    expect(screen.getByText('2 not saved')).toBeInTheDocument()
+    expect(screen.getByText(/Some records were not saved/)).toBeInTheDocument()
   })
 })

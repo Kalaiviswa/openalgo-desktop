@@ -70,6 +70,10 @@ export interface CurrentMetrics extends SampleFreshness {
     total: number
     connections: Record<string, number>
     status: HealthLevel
+    /** Desktop: each data file's size in MB. */
+    sizes_mb?: Record<string, number> | null
+    /** Desktop: how the data files grew since the oldest sample kept. */
+    growth?: DataGrowth
   }
   websocket: {
     total: number
@@ -91,6 +95,86 @@ export interface CurrentMetrics extends SampleFreshness {
     memory_percent: number
   }>
   overall_status: HealthLevel
+  /** Desktop: the order reconciler and the event bus (`order_facts_json`). */
+  order_facts?: OrderFacts
+  /** Desktop: records that could not be saved (`record_loss::json`). */
+  records?: RecordLosses
+  /** Desktop: prices for strategy risk management (`strategy_ticks::json`). */
+  strategy_ticks?: StrategyTicks
+  /** Desktop: market data skipped per feed and to apps on 8765 (`feed_losses::json`). */
+  market_data?: MarketDataLosses
+}
+
+/** Sizes and growth of one data file, or of all of them. */
+export interface StoreGrowth {
+  size_mb: number | null
+  growth_mb: number | null
+  per_day_mb: number | null
+}
+
+export interface DataGrowth {
+  window_hours: number
+  since: string | null
+  stores: Record<string, StoreGrowth>
+  total: StoreGrowth
+}
+
+export interface OrderFacts {
+  status: 'pass' | 'fail'
+  gaps: Array<{ mode: string; cause: string; since: string }>
+  running: boolean
+  passes: number
+  book_reads: number
+  book_read_failures: number
+  book_reads_discarded: number
+  gaps_opened: number
+  gaps_closed: number
+  unconfirmed_orders: number
+  bus?: {
+    published: number
+    dropped: number
+    critical_dropped: number
+    closed_sends: number
+    panics: number
+    critical_panics: number
+    stale_dropped: number
+    relay_lagged: number
+  }
+  critical_queues?: Array<{ name: string; depth: number; capacity: number }>
+}
+
+export interface RecordLosses {
+  status: 'pass' | 'warn'
+  order_logs_dropped: number
+  order_logs_failed: number
+  monitoring_dropped: number
+  monitoring_lost: number
+  monitoring_retried_batches: number
+}
+
+export interface StrategyTicks {
+  status: 'pass' | 'warn'
+  ticks_queued: number
+  ticks_folded: number
+  ticks_missed: number
+  symbols_waiting: number
+}
+
+export interface BrokerFeedLosses {
+  name: string
+  connected: boolean
+  connected_for_s: number | null
+  last_update_age_s: number | null
+  received_since_connect: number
+  /** Per reader: strategy, scalping, sandbox, feed_clients, order_relay. */
+  skipped_since_connect: Record<string, number>
+  skipped_total_since_connect: number
+}
+
+export interface MarketDataLosses {
+  status: 'pass' | 'warn'
+  broker_feeds: BrokerFeedLosses[]
+  feed_clients: { coalesced: number; dropped: number; skipped: number }
 }
 
 export interface HistoricalMetric {
@@ -177,6 +261,11 @@ export interface HealthAlert {
   message: string
   acknowledged: boolean
   resolved: boolean
+  /**
+   * Desktop: true when only the trader settles it (lost records, missed
+   * strategy prices, bans); false when OpenAlgo resolves it itself.
+   */
+  resolvable?: boolean
 }
 
 /**

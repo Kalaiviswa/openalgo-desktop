@@ -50,7 +50,9 @@ import {
   type HeldOrder,
   type HistoricalMetric,
   hasHealthSamples,
+  resolveAlert,
 } from '@/api/health'
+import { AppHealthCards } from '@/components/desktop/health/AppHealthCards'
 import { NoHealthSamples } from '@/components/desktop/health/NoHealthSamples'
 import { formatAge, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
 import { UnconfirmedOrders } from '@/components/desktop/health/UnconfirmedOrders'
@@ -421,6 +423,18 @@ export default function HealthMonitor() {
     }
   }
 
+  // Desktop: alerts only the trader settles (lost records, missed prices,
+  // bans) can be resolved here; the others OpenAlgo resolves itself.
+  const handleResolveAlert = async (alertId: number) => {
+    try {
+      await resolveAlert(alertId)
+      showToast.success('Alert resolved', 'monitoring')
+      fetchData()
+    } catch (_error) {
+      showToast.error('Could not resolve the alert. Try again.', 'monitoring')
+    }
+  }
+
   const handleExport = () => {
     window.open(exportMetricsCSV(24), '_blank')
     showToast.success('Exporting metrics to CSV', 'monitoring')
@@ -555,6 +569,8 @@ export default function HealthMonitor() {
           loading={!currentMetrics}
         />
       </div>
+
+      <AppHealthCards metrics={currentMetrics} />
 
       {/* Charts - Placed above Top Memory Processes */}
       <div className="grid gap-4 lg:grid-cols-2">
@@ -736,7 +752,9 @@ export default function HealthMonitor() {
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Top Memory Processes</CardTitle>
-          <CardDescription>Highest RSS memory usage across the host</CardDescription>
+          <CardDescription>
+            Memory used by OpenAlgo's own process, not the rest of the computer
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {currentMetrics?.processes && currentMetrics.processes.length > 0 ? (
@@ -838,15 +856,26 @@ export default function HealthMonitor() {
                       <p className="text-sm text-muted-foreground">{alert.message}</p>
                     </div>
                   </div>
-                  {!alert.acknowledged && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleAcknowledgeAlert(alert.id)}
-                    >
-                      Acknowledge
-                    </Button>
-                  )}
+                  <div className="flex shrink-0 gap-2">
+                    {!alert.acknowledged && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleAcknowledgeAlert(alert.id)}
+                      >
+                        Acknowledge
+                      </Button>
+                    )}
+                    {alert.resolvable && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleResolveAlert(alert.id)}
+                      >
+                        Resolve
+                      </Button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

@@ -220,6 +220,14 @@ fn broker_feed(ctx: &AppState) -> (Map<String, Value>, i64, i64) {
     (ws, ws_total, symbols)
 }
 
+/// The levels each sample measures. The sampler raises their alerts and
+/// resolves them itself once a level is back under its warning.
+const FD_METRIC: &str = "fd_count";
+const MEMORY_METRIC: &str = "memory_rss_mb";
+const DB_METRIC: &str = "db_connections_total";
+const THREAD_METRIC: &str = "thread_count";
+const SAMPLED_METRICS: [&str; 4] = [FD_METRIC, MEMORY_METRIC, DB_METRIC, THREAD_METRIC];
+
 /// Raise or resolve the alert of each measured level in `row`.
 fn sample_alerts(
     conn: &rusqlite::Connection,
@@ -230,7 +238,7 @@ fn sample_alerts(
     alerts(
         conn,
         now,
-        "fd_count",
+        FD_METRIC,
         "Open files",
         row.fd_count.map(|v| v as f64),
         (fd_levels.0 as f64, fd_levels.1 as f64),
@@ -239,7 +247,7 @@ fn sample_alerts(
     alerts(
         conn,
         now,
-        "memory_rss_mb",
+        MEMORY_METRIC,
         "Memory use",
         row.memory_rss_mb,
         MEMORY_LEVELS_MB,
@@ -248,7 +256,7 @@ fn sample_alerts(
     alerts(
         conn,
         now,
-        "db_connections_total",
+        DB_METRIC,
         "Database connections",
         row.db_connections_total.map(|v| v as f64),
         (DB_LEVELS.0 as f64, DB_LEVELS.1 as f64),
@@ -257,7 +265,7 @@ fn sample_alerts(
     alerts(
         conn,
         now,
-        "thread_count",
+        THREAD_METRIC,
         "Threads",
         row.thread_count.map(|v| v as f64),
         (THREAD_LEVELS.0 as f64, THREAD_LEVELS.1 as f64),
@@ -693,6 +701,25 @@ pub fn stats_json(rows: &[HealthRow], hours: i64) -> Value {
     })
 }
 
+/// Whether OpenAlgo resolves alerts of `metric` itself once the cause is
+/// gone: the sampled levels, the order facts and held orders, the OpenScript
+/// order wait, the market data feed and the master contract. The Health
+/// page offers Resolve on the others (lost records, missed strategy prices,
+/// bans, a recovered Historify log, a scalping stop kept), which stay until
+/// the trader has read them. The web page offers no Resolve at all, so an
+/// alert nothing resolves stays listed there for good.
+fn resolves_itself(metric: &str) -> bool {
+    SAMPLED_METRICS.contains(&metric)
+        || [
+            ORDER_FACTS_METRIC,
+            ORDER_HELD_METRIC,
+            OPENSCRIPT_ALERT,
+            crate::feed::FEED_ALERT_METRIC,
+            crate::services::master_contract_service::MASTER_ALERT_METRIC,
+        ]
+        .contains(&metric)
+}
+
 pub fn alerts_json(rows: &[AlertRow]) -> Value {
     Value::Array(
         rows.iter()
@@ -708,6 +735,7 @@ pub fn alerts_json(rows: &[AlertRow]) -> Value {
                     "message": a.message,
                     "acknowledged": a.acknowledged,
                     "resolved": a.resolved,
+                    "resolvable": !resolves_itself(&a.metric_name),
                 })
             })
             .collect(),
@@ -788,6 +816,46 @@ mod tests {
             assert!(s.fd_count.unwrap_or(0) > 0);
             assert!(s.threads.unwrap_or(0) > 0);
         }
+    }
+
+    /// Resolve is offered on what stays until the trader reads it, never on
+    /// what OpenAlgo raises again or clears itself.
+    #[test]
+    fn resolve_is_offered_only_where_nothing_resolves_it() {
+        for m in SAMPLED_METRICS {
+            assert!(resolves_itself(m), "{}", m);
+        }
+        for m in [
+            ORDER_FACTS_METRIC,
+            ORDER_HELD_METRIC,
+            OPENSCRIPT_ALERT,
+            "market_data_feed",
+            "master_contract",
+        ] {
+            assert!(resolves_itself(m), "{}", m);
+        }
+        for m in [
+            crate::services::record_loss::ALERT,
+            crate::services::strategy_ticks::ALERT,
+            "automatic_bans",
+            "banned_devices_on_network",
+            "historify_recovery",
+            SCALPING_METRIC,
+        ] {
+            assert!(!resolves_itself(m), "{}", m);
+        }
+        let shown = alerts_json(&[
+            AlertRow {
+                metric_name: FD_METRIC.into(),
+                ..Default::default()
+            },
+            AlertRow {
+                metric_name: "automatic_bans".into(),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(shown[0]["resolvable"], false);
+        assert_eq!(shown[1]["resolvable"], true);
     }
 
     #[test]

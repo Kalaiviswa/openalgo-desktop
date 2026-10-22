@@ -111,7 +111,8 @@ Your Historify data from before that session is intact. Open **Historify**,
 check your watchlist, and download the most recent data again. The unsaved
 changes are kept, not deleted, in a file named
 `historify.duckdb.wal.unreplayable-<date and time>` in your data folder; you
-can delete it once you are satisfied nothing is missing.
+can delete it once you are satisfied nothing is missing. Then choose
+**Resolve** on the alert to clear it from the Health Monitor page.
 
 ## Quitting OpenAlgo, and when the computer sleeps
 
