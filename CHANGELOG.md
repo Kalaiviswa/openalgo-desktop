@@ -3,6 +3,70 @@
 All notable changes to OpenAlgo Desktop are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 1.0.1
+
+The first update after 1.0.0. It fixes the limitations listed in 1.0.0,
+makes busy pages stop slowing the app's handling of market ticks, and shows
+more of the app's own health. If you run 1.0.0, OpenAlgo offers this update
+in the app; choose Update when no live strategy is running.
+
+### Order safety
+
+- Delta Exchange: a smart order with a fractional target position is decided
+  in exact quantities (holding 2 with a target of 0.5 sells exactly 1.5),
+  never rounded down. Everywhere else, and in sandbox mode, a fractional
+  target is refused instead of rounded.
+- A GTT order with a fractional quantity is refused, when placing and when
+  modifying, live and in sandbox mode.
+- An options split order holds back its remaining chunks after one whose
+  outcome is unknown, as a split order already did; check the order book
+  before sending them again.
+- Options orders, options multi-order legs and GTT orders refuse a quantity
+  above 2,147,483,647, as placing an order already did.
+
+### Security
+
+- Your OpenAlgo API key is no longer saved in the app window's browser
+  storage on disk. It is kept in memory while you are signed in, and a copy
+  left there by 1.0.0 is erased the first time 1.0.1 starts.
+- After you generate a new API key, the books and order forms use it at once;
+  before, they kept sending the old key until the window was reloaded.
+
+### Speed under load
+
+- The log, traffic, health, security, diagnostics, MCP audit and analyzer
+  pages read, shape and send their answers off the threads that carry the
+  market data feed. With a large log open in several browsers, strategy
+  decisions were lost before; now none are, with decisions in about 5 ms.
+- Strategy order books and history, OpenScript deployment books, the Action
+  Center, the analyzer status and the Telegram and WhatsApp statistics do the
+  same, and pages that refresh the same data share one read.
+- The first API call after a start, a sign-in or a new key checks the key
+  off the threads that carry the market data feed, so a burst of API calls
+  no longer delays the handling of market ticks.
+
+### Health
+
+- The Health page shows each database's size and growth, what each reader of
+  a broker feed had to skip, records that could not be saved, strategy price
+  counts and order tracking, and turns amber or red with a plain sentence
+  when anything was skipped or lost.
+- Alerts that nothing clears on its own have a Resolve button. An open alert
+  shows what is wrong now, not what was wrong when it opened.
+- Health and Run diagnostics count market data dropped for apps on the 8765
+  feed, and the size of every database including sandbox and Historify.
+- The analyzer status and the WhatsApp statistics answer "could not be read"
+  when their log cannot be read, instead of showing zero.
+
+### Accessibility and wording
+
+- Every signed-in page passes an accessibility scan with no exceptions, in
+  light and dark: clearer contrast for margin values, statuses, password
+  rules, toast messages and the Tools tiles, and labels for screen readers.
+- The strategies panel says what is true in the desktop: a live run is a
+  hidden app window, and quitting or signing out pauses every run and leaves
+  its positions. The scalping badge reads One-Click on or off.
+
 ## 1.0.0
 
 The first release of OpenAlgo Desktop: a single-user desktop version of
