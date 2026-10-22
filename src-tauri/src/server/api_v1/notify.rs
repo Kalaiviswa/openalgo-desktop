@@ -46,7 +46,7 @@ pub(super) async fn body_and_key(
         .filter(|k| !k.is_empty())
         .or(header_key)
         .unwrap_or_default();
-    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly) {
+    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly).await {
         return Err(error(StatusCode::UNAUTHORIZED, BAD_KEY));
     }
     Ok(body)

@@ -147,7 +147,7 @@ pub async fn pnl_symbols(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request) 
         .get("apikey")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !super::authorize(&ctx, key, ip, Auth::KeyOnly) {
+    if !super::authorize(&ctx, key, ip, Auth::KeyOnly).await {
         return json_response(
             StatusCode::FORBIDDEN,
             json!({"status": "error", "message": "Invalid API key", "mode": "analyze"}),

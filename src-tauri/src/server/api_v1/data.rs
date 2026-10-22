@@ -159,7 +159,7 @@ pub async fn instruments(
         .get("apikey")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !authorize(&ctx, key, ip, Auth::KeyOnly) {
+    if !authorize(&ctx, key, ip, Auth::KeyOnly).await {
         return send(crate::services::Reply::error(
             403,
             crate::services::core::INVALID_API_KEY,
@@ -218,7 +218,9 @@ pub async fn ticker(
         schemas::history(),
         Style::Object,
         Auth::Broker,
-    ) {
+    )
+    .await
+    {
         Ok(v) => v,
         Err(r) if txt => {
             let status = r.status();

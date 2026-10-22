@@ -60,8 +60,8 @@ fn unknown(f: &mut FieldErrors, body: &Map<String, Value>, allowed: &[&str]) {
 
 /// A valid API key; no broker session is needed for calendar data. Same
 /// failure throttle as every other `/api/v1` route.
-fn key_ok(ctx: &AppState, key: &str, ip: IpAddr) -> bool {
-    crate::server::api_v1::authorize(ctx, key, ip, crate::server::api_v1::Auth::KeyOnly)
+async fn key_ok(ctx: &AppState, key: &str, ip: IpAddr) -> bool {
+    crate::server::api_v1::authorize(ctx, key, ip, crate::server::api_v1::Auth::KeyOnly).await
 }
 
 fn unexpected(e: impl std::fmt::Display) -> Response {
@@ -123,7 +123,7 @@ pub async fn holidays(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request) -> 
     let Some(key) = key else {
         return f.into_response();
     };
-    if !key_ok(&ctx, &key, ip) {
+    if !key_ok(&ctx, &key, ip).await {
         return error(StatusCode::FORBIDDEN, INVALID_API_KEY);
     }
     match svc::holidays_api(&ctx, year.map(|y| y as i32)) {
@@ -162,7 +162,7 @@ pub async fn timings(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request) -> R
     let (Some(key), Some(date)) = (key, date) else {
         return f.into_response();
     };
-    if !key_ok(&ctx, &key, ip) {
+    if !key_ok(&ctx, &key, ip).await {
         return error(StatusCode::FORBIDDEN, INVALID_API_KEY);
     }
     let Ok(d) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {

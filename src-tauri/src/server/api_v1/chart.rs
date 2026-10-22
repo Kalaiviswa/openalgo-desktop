@@ -34,7 +34,7 @@ pub async fn get_preferences(
     if key.is_empty() {
         return error(StatusCode::BAD_REQUEST, "Missing apikey parameter");
     }
-    if !authorize(&ctx, &key, ip, Auth::KeyOnly) {
+    if !authorize(&ctx, &key, ip, Auth::KeyOnly).await {
         return send(Reply::error(403, INVALID_API_KEY));
     }
     send(prefs::get_reply(&ctx, &key))
@@ -71,7 +71,7 @@ pub async fn update_preferences(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Re
         Ok(p) => p,
         Err(refused) => return send(refused),
     };
-    if !authorize(&ctx, &key, ip, Auth::KeyOnly) {
+    if !authorize(&ctx, &key, ip, Auth::KeyOnly).await {
         return send(Reply::error(403, INVALID_API_KEY));
     }
     send(prefs::update_reply(&ctx, &key, preferences))

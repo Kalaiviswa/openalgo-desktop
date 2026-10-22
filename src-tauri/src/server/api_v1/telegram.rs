@@ -26,7 +26,7 @@ type Ctx = State<Arc<AppState>>;
 
 /// The query of a GET, its key taken from the header or the query and
 /// checked (401 otherwise).
-fn query_and_key(
+async fn query_and_key(
     ctx: &AppState,
     ip: IpAddr,
     headers: &HeaderMap,
@@ -40,7 +40,7 @@ fn query_and_key(
         .or_else(|| args.get("apikey").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
-    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly) {
+    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly).await {
         return Err(Box::new(error(StatusCode::UNAUTHORIZED, BAD_KEY)));
     }
     Ok(args)
@@ -57,7 +57,7 @@ async fn optional_body_and_key(ctx: &AppState, ip: IpAddr, req: Request) -> Resu
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly) {
+    if key.is_empty() || !authorize(ctx, &key, ip, Auth::KeyOnly).await {
         return Err(error(StatusCode::UNAUTHORIZED, BAD_KEY));
     }
     Ok(())
@@ -70,7 +70,7 @@ pub async fn config(
     headers: HeaderMap,
     RawQuery(q): RawQuery,
 ) -> Response {
-    match query_and_key(&ctx, ip, &headers, q) {
+    match query_and_key(&ctx, ip, &headers, q).await {
         Ok(_) => send(admin::config_reply(&ctx)),
         Err(r) => *r,
     }
@@ -107,7 +107,7 @@ pub async fn users(
     headers: HeaderMap,
     RawQuery(q): RawQuery,
 ) -> Response {
-    let args = match query_and_key(&ctx, ip, &headers, q) {
+    let args = match query_and_key(&ctx, ip, &headers, q).await {
         Ok(a) => a,
         Err(r) => return *r,
     };
@@ -139,7 +139,7 @@ pub async fn stats(
     headers: HeaderMap,
     RawQuery(q): RawQuery,
 ) -> Response {
-    match query_and_key(&ctx, ip, &headers, q) {
+    match query_and_key(&ctx, ip, &headers, q).await {
         Ok(args) => {
             // A year of the command log at most, read on the blocking pool.
             let days = args.get("days").and_then(Value::as_str).map(String::from);
@@ -160,7 +160,7 @@ pub async fn preferences(
     headers: HeaderMap,
     RawQuery(q): RawQuery,
 ) -> Response {
-    match query_and_key(&ctx, ip, &headers, q) {
+    match query_and_key(&ctx, ip, &headers, q).await {
         Ok(args) => {
             let id = args
                 .get("telegram_id")

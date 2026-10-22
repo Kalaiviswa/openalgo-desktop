@@ -174,7 +174,7 @@ fn lenient_body(bytes: &Bytes) -> Map<String, Value> {
 
 /// Validate, authenticate the key, and (when asked) load the strategy. The
 /// error reply is boxed: a reply is large.
-fn resolve(
+async fn resolve(
     ctx: &AppState,
     ip: IpAddr,
     bytes: &Bytes,
@@ -192,7 +192,7 @@ fn resolve(
         }
     };
     let key = data["apikey"].as_str().unwrap_or_default();
-    if !authorize(ctx, key, ip, Auth::KeyOnly) {
+    if !authorize(ctx, key, ip, Auth::KeyOnly).await {
         return Err(Box::new(failure(
             INVALID_API_KEY,
             StatusCode::FORBIDDEN,
@@ -268,7 +268,7 @@ async fn stop_current(
 
 /// POST /api/v1/strategy/list
 pub async fn list(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, user, _) = match resolve(&ctx, ip, &body, &list_schema(), false) {
+    let (data, user, _) = match resolve(&ctx, ip, &body, &list_schema(), false).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -288,7 +288,7 @@ pub async fn list(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
 
 /// POST /api/v1/strategy/status
 pub async fn status(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (_, _, row) = match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
+    let (_, _, row) = match resolve(&ctx, ip, &body, &ref_schema(vec![]), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -305,7 +305,7 @@ pub async fn status(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
 
 /// POST /api/v1/strategy/start
 pub async fn start(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, user, row) = match resolve(&ctx, ip, &body, &start_schema(), true) {
+    let (data, user, row) = match resolve(&ctx, ip, &body, &start_schema(), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -340,7 +340,7 @@ pub async fn start(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Resp
 
 /// POST /api/v1/strategy/stop
 pub async fn stop(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
+    match resolve(&ctx, ip, &body, &ref_schema(vec![]), true).await {
         Ok((_, user, Some(row))) => stop_current(&ctx, &row, &user, false).await,
         Ok(_) => failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null),
         Err(r) => *r,
@@ -349,7 +349,7 @@ pub async fn stop(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
 
 /// POST /api/v1/strategy/close_all
 pub async fn close_all(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    match resolve(&ctx, ip, &body, &ref_schema(vec![]), true) {
+    match resolve(&ctx, ip, &body, &ref_schema(vec![]), true).await {
         Ok((_, user, Some(row))) => stop_current(&ctx, &row, &user, true).await,
         Ok(_) => failure(NOT_FOUND, StatusCode::NOT_FOUND, Value::Null),
         Err(r) => *r,
@@ -358,7 +358,7 @@ pub async fn close_all(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
 
 /// POST /api/v1/strategy/close_leg
 pub async fn close_leg(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, user, row) = match resolve(&ctx, ip, &body, &close_leg_schema(), true) {
+    let (data, user, row) = match resolve(&ctx, ip, &body, &close_leg_schema(), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -388,7 +388,7 @@ pub async fn close_leg(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> 
 
 /// POST /api/v1/strategy/runs
 pub async fn runs(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, _, row) = match resolve(&ctx, ip, &body, &runs_schema(), true) {
+    let (data, _, row) = match resolve(&ctx, ip, &body, &runs_schema(), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -403,7 +403,7 @@ pub async fn runs(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Respo
 
 /// POST /api/v1/strategy/orders
 pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, _, row) = match resolve(&ctx, ip, &body, &orders_schema(), true) {
+    let (data, _, row) = match resolve(&ctx, ip, &body, &orders_schema(), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -427,7 +427,7 @@ pub async fn orders(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Res
 
 /// POST /api/v1/strategy/events
 pub async fn events(State(ctx): Ctx, ClientIp(ip): ClientIp, body: Bytes) -> Response {
-    let (data, _, row) = match resolve(&ctx, ip, &body, &events_schema(), true) {
+    let (data, _, row) = match resolve(&ctx, ip, &body, &events_schema(), true).await {
         Ok(v) => v,
         Err(r) => return *r,
     };

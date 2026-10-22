@@ -813,6 +813,18 @@ Every flaky test found so far was a race, not a slow machine:
   remainder, bound the test with `on_watched_runtime` and
   `IdleLog::longest_hold`, the longest the runtime thread ran without going
   idle, instead of raising the bound.
+- An `/api/v1` call with a key no cache knows yet (the first after a start,
+  a sign-out, a new key or a broker session change) verifies it: an index
+  query, one Argon2 run and a `last_used_at` write. Inline in
+  `api_v1::authorize` that held the runtime for 30-45 ms on an M1 and about
+  200 ms on a loaded macOS runner, where only the bot statistics' test
+  failed (run 39737924664). `authorize` is async and checks such a key on
+  the blocking pool (`ApiKeyService::check_off_runtime`); `polled_reads`
+  counts Argon2 runs on the runtime thread (`hashing::argon2_runs`). A
+  runtime test that starts its clock right after `H::new()` also times the
+  app starting (the scalping stops and the order reconciler read the
+  database on the runtime on their first pass): start it after
+  `IdleLog::until_idle`.
 
 ### Data and migrations
 

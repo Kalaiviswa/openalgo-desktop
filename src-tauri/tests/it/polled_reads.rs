@@ -14,6 +14,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
+use openalgo_desktop_lib::security::hashing;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -99,6 +100,11 @@ struct Held {
     at_once: Duration,
     /// Each request's polls in all ([`crate::runtime_busy`]).
     each: Vec<Duration>,
+    /// Argon2 runs on the runtime thread meanwhile. A key's first check
+    /// (the `/api/v1` requests here) verifies it on the blocking pool; on
+    /// the runtime that one run held it for 30-45 ms in a debug build and
+    /// about 200 ms on a loaded macOS runner.
+    argon2: u32,
 }
 
 /// [`all_at_once`] on the watched runtime; the replies and what they held
@@ -112,6 +118,7 @@ async fn held_at_once(
     app: &App,
     reqs: Vec<Request<Body>>,
 ) -> (Vec<Reply>, Held) {
+    let argon2 = hashing::argon2_runs();
     let each = reqs
         .into_iter()
         .map(|r| crate::runtime_busy(send(h, app, r)));
@@ -119,10 +126,23 @@ async fn held_at_once(
         .longest_hold(futures_util::future::join_all(each))
         .await;
     let (replies, each) = replies.into_iter().unzip();
-    (replies, Held { at_once, each })
+    let argon2 = hashing::argon2_runs() - argon2;
+    (
+        replies,
+        Held {
+            at_once,
+            each,
+            argon2,
+        },
+    )
 }
 
 fn assert_runtime_free(what: &str, held: &Held) {
+    assert_eq!(
+        held.argon2, 0,
+        "{}: a key was verified on the runtime",
+        what
+    );
     let busy: Duration = held.each.iter().sum();
     eprintln!(
         "{}: the runtime was held for {:?} at most, busy {:?} in all (each request {:?})",

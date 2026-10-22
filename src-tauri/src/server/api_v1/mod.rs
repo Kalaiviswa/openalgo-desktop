@@ -167,7 +167,12 @@ fn schema_error(
 /// `middleware::api_rate_limit`); `/mcp` and the feed share the failure
 /// budget ([`crate::server::middleware::failures_exhausted`]), which only
 /// ever refuses invalid keys.
-pub fn authorize(ctx: &AppState, key: &str, ip: IpAddr, auth: Auth) -> bool {
+///
+/// A key the caches do not know yet is checked on the blocking pool
+/// ([`ApiKeyService::check_off_runtime`]); what is counted and charged is
+/// decided here, in the call's own task, which carries
+/// `middleware::API_CALL`.
+pub async fn authorize(ctx: &AppState, key: &str, ip: IpAddr, auth: Auth) -> bool {
     use crate::server::middleware::{
         count_failure, failures_exhausted, limiter_key, API_CALL, PROXIED_CALLER,
     };
@@ -176,7 +181,7 @@ pub fn authorize(ctx: &AppState, key: &str, ip: IpAddr, auth: Auth) -> bool {
     // for an invented key (Argon2 only on a hit). A logout that locked the
     // keys after the route's lock check refuses without counting: nothing
     // was checked (KEY-01).
-    let checked = ApiKeyService::check(ctx, key);
+    let checked = ApiKeyService::check_off_runtime(ctx, key).await;
     if checked == KeyCheck::Locked {
         return false;
     }
@@ -224,7 +229,7 @@ fn auth_failure(auth: Auth) -> Response {
 }
 
 /// Validate a body already read and check its key.
-pub fn check(
+pub async fn check(
     ctx: &AppState,
     ip: IpAddr,
     body: &Map<String, Value>,
@@ -240,7 +245,7 @@ pub fn check(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    if !authorize(ctx, &key, ip, auth) {
+    if !authorize(ctx, &key, ip, auth).await {
         return Err(auth_failure(auth).into());
     }
     Ok(Value::Object(loaded))
@@ -256,7 +261,9 @@ pub async fn load(
     auth: Auth,
 ) -> Result<Value, Response> {
     let body = read_json_object(req, &()).await?;
-    check(ctx, ip, &body, schema, style, auth).map_err(|r| *r)
+    check(ctx, ip, &body, schema, style, auth)
+        .await
+        .map_err(|r| *r)
 }
 
 /// Query string as the web's `request.args` (`None` for absent keys).

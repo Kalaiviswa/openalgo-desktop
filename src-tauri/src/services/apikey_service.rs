@@ -252,6 +252,31 @@ impl ApiKeyService {
         answer
     }
 
+    /// [`Self::check`] for a caller on an async worker. A key the caches
+    /// already answer for is answered here; any other is checked on the
+    /// blocking pool, where its query, its Argon2 run and its
+    /// `last_used_at` write cannot hold the runtime that carries the feed
+    /// and the risk owners (DB-01). Inline, the first `/api/v1` call with a
+    /// key held it for 30-45 ms in a debug build on an M1 and about 200 ms
+    /// on a loaded macOS runner, once after every start and every clearing
+    /// of the caches (a sign-out, a new key, a broker session that starts or
+    /// ends).
+    pub async fn check_off_runtime(state: &AppState, api_key: &str) -> KeyCheck {
+        let answered_here = api_key.is_empty()
+            || !state.security.is_unlocked()
+            || state.api_keys.get(api_key, Instant::now()).is_some();
+        let Some(ctx) = state.arc().filter(|_| !answered_here) else {
+            return Self::check(state, api_key);
+        };
+        let key = Secret::new(api_key);
+        ctx.blocking(move |s| Ok(Self::check(s, key.expose())))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("API key check did not complete: {}", e);
+                KeyCheck::Invalid
+            })
+    }
+
     /// The account the key belongs to, or None when it is not the stored
     /// key.
     fn verify_uncached(state: &AppState, api_key: &str) -> Result<Option<String>> {
