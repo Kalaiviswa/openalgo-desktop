@@ -173,3 +173,78 @@ async fn a_fractional_gtt_never_reaches_the_broker() {
     assert_eq!(gtt_calls(&h), 1);
     h.shutdown().await;
 }
+
+// -- options splits ----------------------------------------------------------
+
+/// 195 NIFTY ATM calls in three chunks of 65.
+fn options_split() -> Value {
+    json!({"strategy": "t", "underlying": "NIFTY", "exchange": "NSE_INDEX",
+        "expiry_date": "06OCT26", "offset": "ATM", "option_type": "CE", "action": "BUY",
+        "quantity": 195, "splitsize": 65, "product": "NRML"})
+}
+
+fn messages(rows: &Value) -> Vec<&str> {
+    rows.as_array()
+        .map(|r| {
+            r.iter()
+                .map(|x| x["message"].as_str().unwrap_or("sent"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// LOG-08 P1-5 for options: after a chunk whose answer was lost (it may be
+/// at the broker) the rest are held back and answered as `splitorder`
+/// answers them; they used to be sent. The reply carries the unknown
+/// outcome. A multi-order leg in chunks holds back the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_options_split_holds_back_after_a_chunk_with_no_definite_answer() {
+    use openalgo_desktop_lib::brokers::mock::AfterSend;
+    use openalgo_desktop_lib::services::batch_order_service::SPLIT_HELD;
+    use openalgo_desktop_lib::services::{options_order_service as options, Route};
+    let h = H::new().await;
+    h.analyze(false);
+    h.mock
+        .after_send
+        .lock()
+        .push_back((AfterSend::Dropped, "open"));
+    let r = options::options_order(&h.ctx, &h.with_key(options_split()), Route::API).await;
+    assert_eq!(
+        placed(&h).len(),
+        1,
+        "nothing after the lost chunk: {}",
+        r.body
+    );
+    let rows = &r.body["results"];
+    assert_eq!(rows[0]["status"], "error", "{}", r.body);
+    assert_eq!(messages(rows)[1..], [SPLIT_HELD, SPLIT_HELD], "{}", r.body);
+    assert!(r.is_uncertain(), "the reply carries the unknown outcome");
+
+    h.mock
+        .after_send
+        .lock()
+        .push_back((AfterSend::Dropped, "open"));
+    let multi = json!({"strategy": "t", "underlying": "NIFTY", "exchange": "NSE_INDEX",
+        "expiry_date": "06OCT26", "legs": [{"offset": "ATM", "option_type": "CE",
+        "action": "BUY", "quantity": 195, "splitsize": 65, "product": "NRML"}]});
+    let r = options::options_multi_order(&h.ctx, &h.with_key(multi), Route::API).await;
+    assert_eq!(placed(&h).len(), 2, "one more chunk only: {}", r.body);
+    let rows = &r.body["results"][0]["split_results"];
+    assert_eq!(messages(rows)[1..], [SPLIT_HELD, SPLIT_HELD], "{}", r.body);
+    h.shutdown().await;
+}
+
+/// In analyzer mode every chunk goes to the sandbox, whose answer is always
+/// definite, and none to the broker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_options_split_in_the_sandbox_places_every_chunk() {
+    let h = H::new().await;
+    h.analyze(true);
+    let (s, v) = post(&h, "/api/v1/optionsorder", options_split()).await;
+    assert_eq!((s, &v["mode"]), (200, &json!("analyze")), "{}", v);
+    assert_eq!(messages(&v["results"]), ["sent", "sent", "sent"], "{}", v);
+    let (_, book) = post(&h, "/api/v1/orderbook", json!({})).await;
+    assert_eq!(book["data"]["orders"].as_array().map(Vec::len), Some(3));
+    assert!(placed(&h).is_empty(), "nothing reached the broker");
+    h.shutdown().await;
+}
