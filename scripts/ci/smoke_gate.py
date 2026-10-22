@@ -119,29 +119,54 @@ def master_run_of(run: dict, r: str, sha: str, gate: Gate) -> bool:
     )
 
 
-def check(gate: Gate, r: str, sha: str) -> str:
-    """The gate's verdict on `sha`: what passed, or Refused."""
+def master_runs(gate: Gate, r: str, sha: str) -> list[dict]:
+    """The gate's runs of `sha` on master."""
     event = f"&event={gate.events[0]}" if len(gate.events) == 1 else ""
-    listed = api(
-        f"repos/{r}/actions/workflows/{gate.workflow}/runs?branch={DEFAULT_BRANCH}{event}&head_sha={sha}&per_page=100"
-    )
-    runs = [run for run in listed.get("workflow_runs", []) if master_run_of(run, r, sha, gate)]
+    path = f"repos/{r}/actions/workflows/{gate.workflow}/runs?branch={DEFAULT_BRANCH}{event}&head_sha={sha}&per_page=100"
+    return [run for run in api(path).get("workflow_runs", []) if master_run_of(run, r, sha, gate)]
+
+
+def finished(gate: Gate, run: dict, sha: str) -> None:
+    """Refused unless `run` completed with success."""
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        raise Refused(
+            f"the newest {gate.what} run of {sha} on {DEFAULT_BRANCH} is "
+            f"{run.get('status')}/{run.get('conclusion')}: {run.get('html_url')}"
+        )
+
+
+def jobs_passed(gate: Gate, run: dict, jobs: list[dict], sha: str) -> None:
+    """Refused unless every job the gate needs succeeded in `run`."""
+    by_name = {j.get("name"): j.get("conclusion") for j in jobs}
+    missing = [f"{name}: {by_name.get(name, 'absent')}" for name in gate.jobs if by_name.get(name) != "success"]
+    if missing:
+        raise Refused(f"the {gate.what} checks of {sha} did not all pass ({', '.join(missing)}): {run.get('html_url')}")
+
+
+def run_jobs(r: str, run_id: int) -> list[dict]:
+    """The jobs of a run's latest attempt, each with its steps."""
+    return api(f"repos/{r}/actions/runs/{run_id}/jobs?per_page=100").get("jobs", [])
+
+
+def verdict(gate: Gate, r: str, sha: str) -> tuple[dict, list[dict]]:
+    """The run that decides `gate` for `sha` and its jobs, once it passed;
+    Refused otherwise."""
+    runs = master_runs(gate, r, sha)
     decided = [run for run in runs if run.get("conclusion") != "cancelled"]
     if not decided:
         what = "only cancelled ones; re-run one" if runs else "none"
         raise Refused(f"no {gate.what} run of {sha} on {DEFAULT_BRANCH} has a verdict ({what})")
     newest = max(decided, key=lambda run: (run.get("created_at") or "", run["id"]))
-    url = newest.get("html_url")
-    if newest.get("status") != "completed" or newest.get("conclusion") != "success":
-        raise Refused(
-            f"the newest {gate.what} run of {sha} on {DEFAULT_BRANCH} is "
-            f"{newest.get('status')}/{newest.get('conclusion')}: {url}"
-        )
-    jobs = {j.get("name"): j.get("conclusion") for j in api(f"repos/{r}/actions/runs/{newest['id']}/jobs?per_page=100").get("jobs", [])}
-    missing = [f"{name}: {jobs.get(name, 'absent')}" for name in gate.jobs if jobs.get(name) != "success"]
-    if missing:
-        raise Refused(f"the {gate.what} checks of {sha} did not all pass ({', '.join(missing)}): {url}")
-    return gate.passed.format(sha=sha, url=url)
+    finished(gate, newest, sha)
+    jobs = run_jobs(r, newest["id"])
+    jobs_passed(gate, newest, jobs, sha)
+    return newest, jobs
+
+
+def check(gate: Gate, r: str, sha: str) -> str:
+    """The gate's verdict on `sha`: what passed, or Refused."""
+    run, _jobs = verdict(gate, r, sha)
+    return gate.passed.format(sha=sha, url=run.get("html_url"))
 
 
 def release(sha: str) -> int:
