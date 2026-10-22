@@ -130,14 +130,18 @@ pub fn latest_health(conn: &Connection) -> Result<Option<HealthRow>> {
         .optional()?)
 }
 
-/// The oldest sample kept that recorded the database sizes: its timestamp
-/// and the sizes (MB by store).
-pub fn oldest_db_sizes(conn: &Connection) -> Result<Option<(String, Value)>> {
+/// The oldest sample kept that recorded the database sizes, taken at or
+/// after `since` when given: its timestamp and the sizes (MB by store).
+pub fn oldest_db_sizes(
+    conn: &Connection,
+    since: Option<DateTime<Utc>>,
+) -> Result<Option<(String, Value)>> {
     let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT timestamp, db_sizes FROM health_metrics WHERE db_sizes IS NOT NULL
+            "SELECT timestamp, db_sizes FROM health_metrics
+             WHERE db_sizes IS NOT NULL AND (?1 IS NULL OR timestamp >= ?1)
              ORDER BY timestamp, id LIMIT 1",
-            [],
+            [since.map(ts)],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;

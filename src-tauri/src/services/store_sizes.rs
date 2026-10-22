@@ -5,7 +5,8 @@
 //!
 //! Every health sample stores the sizes (`health_metrics.db_sizes`), so the
 //! growth over the monitoring window (the samples' retention, 7 days) is
-//! the newest sample's sizes against the oldest one kept.
+//! the newest sample's sizes against the oldest one kept, and the growth
+//! over the last day the newest against the oldest of the last 24 hours.
 
 use crate::db::sqlite::monitor::{self as store, HealthRow};
 use crate::services::health_service::iso_ist;
@@ -75,21 +76,40 @@ pub fn sizes(ctx: &AppState) -> Map<String, Value> {
         .collect()
 }
 
-/// Growth of each store and of all of them from the oldest sample kept to
-/// `latest`: `{window_hours, since, stores: {name: {size_mb, growth_mb,
-/// per_day_mb}}, total: {...}}`. Growth is null without an earlier sample
-/// that recorded sizes, and the daily rate is null over less than an hour,
-/// where a rate would mislead.
+/// A daily rate needs a day of samples: over a few hours it would stretch
+/// one trading session's writes over the whole day.
+const RATE_AFTER_HOURS: f64 = 24.0;
+
+/// Growth of each store and of all of them over two windows ending at
+/// `latest` (PROD-REL-05): every sample kept (the monitoring window, up to
+/// 7 days) at the top level, and the last day under `last_day`. Each is
+/// `{window_hours, since, stores: {name: {size_mb, growth_mb, per_day_mb}},
+/// total: {...}}`; growth is null without an earlier sample that recorded
+/// sizes, and the daily rate is null over less than a day.
 pub fn growth_json(ctx: &AppState, latest: &HealthRow) -> Value {
-    let now = latest.db_sizes.as_ref().and_then(Value::as_object);
-    let oldest = ctx
+    let day_start = store::parse_ts(&latest.timestamp).map(|t| t - chrono::Duration::hours(24));
+    let (kept, last_day) = ctx
         .logs
         .conn()
-        .and_then(|c| store::oldest_db_sizes(&c))
+        .and_then(|c| {
+            Ok((
+                store::oldest_db_sizes(&c, None)?,
+                store::oldest_db_sizes(&c, day_start)?,
+            ))
+        })
         .unwrap_or_else(|e| {
             tracing::debug!("Database growth not read: {}", e);
-            None
+            (None, None)
         });
+    let mut v = window_json(latest, kept);
+    v["last_day"] = window_json(latest, last_day);
+    v
+}
+
+/// Each store's growth from `oldest` (a sample's timestamp and sizes) to
+/// `latest`.
+fn window_json(latest: &HealthRow, oldest: Option<(String, Value)>) -> Value {
+    let now = latest.db_sizes.as_ref().and_then(Value::as_object);
     let window_hours = oldest
         .as_ref()
         .and_then(|(ts, _)| {
@@ -98,7 +118,9 @@ pub fn growth_json(ctx: &AppState, latest: &HealthRow) -> Value {
         })
         .unwrap_or(0.0);
     let then = oldest.as_ref().and_then(|(_, v)| v.as_object());
-    let rate = |growth: f64| (window_hours >= 1.0).then(|| round2(growth * 24.0 / window_hours));
+    let rate = |growth: f64| {
+        (window_hours >= RATE_AFTER_HOURS).then(|| round2(growth * 24.0 / window_hours))
+    };
     let mut stores = Map::new();
     let (mut total_now, mut total_then) = (0.0, 0.0);
     for &(name, _) in DATABASES {

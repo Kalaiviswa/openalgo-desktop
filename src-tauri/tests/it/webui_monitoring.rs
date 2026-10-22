@@ -739,7 +739,9 @@ async fn health_sampler_endpoints_and_alerts() {
 
 /// NEW-REL-05: health shows what the broker feed delivered since it
 /// connected and what each reader skipped, and what the apps on the market
-/// data feed were not sent; a skip makes the block a warning.
+/// data feed were not sent; a skip makes the block a warning. PROD-REL-05:
+/// each reader's skips since OpenAlgo started are there too, so a
+/// reconnect cannot hide them (`feed_losses` tests the reconnect).
 #[tokio::test]
 async fn health_shows_market_data_its_readers_skipped() {
     let (h, c, _) = signed_in();
@@ -767,30 +769,29 @@ async fn health_shows_market_data_its_readers_skipped() {
     assert_eq!(feed["skipped_since_connect"]["scalping"], 7, "{}", feed);
     assert_eq!(feed["skipped_since_connect"]["strategy"], 0, "{}", feed);
     assert_eq!(feed["skipped_total_since_connect"], 7, "{}", feed);
+    assert_eq!(feed["skipped_since_start"]["scalping"], 7, "{}", feed);
+    assert_eq!(feed["skipped_since_start"]["sandbox"], 0, "{}", feed);
+    assert_eq!(feed["skipped_total_since_start"], 7, "{}", feed);
 }
 
 /// NEW-REL-05: health shows each database's size and how much it grew over
 /// the monitoring window (the oldest sample kept against the newest), the
-/// order and analyzer logs being kept forever as on the web.
+/// order and analyzer logs being kept forever as on the web. PROD-REL-05:
+/// and over the last day, with no daily rate stretched from fewer hours.
 #[tokio::test]
 async fn health_shows_each_databases_growth_over_the_monitoring_window() {
     let (h, c, _) = signed_in();
-    // Two days ago, when the stores were smaller.
-    let then = h.ctx.now() - chrono::Duration::hours(48);
+    // Two days ago, when the stores were smaller, and 12 hours ago.
+    let sample = |hours_ago: i64, mb: f64| store::HealthRow {
+        timestamp: store::ts(h.ctx.now() - chrono::Duration::hours(hours_ago)),
+        db_sizes: Some(json!({"openalgo": mb, "logs": mb, "sandbox": mb, "historify": mb})),
+        overall_status: Some("pass".into()),
+        ..Default::default()
+    };
     {
         let conn = h.ctx.logs.conn().unwrap();
-        store::insert_health(
-            &conn,
-            &store::HealthRow {
-                timestamp: store::ts(then),
-                db_sizes: Some(
-                    json!({"openalgo": 0.01, "logs": 0.01, "sandbox": 0.01, "historify": 0.01}),
-                ),
-                overall_status: Some("pass".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        store::insert_health(&conn, &sample(48, 0.01)).unwrap();
+        store::insert_health(&conn, &sample(12, 0.005)).unwrap();
     }
     openalgo_desktop_lib::services::health_service::sample_once(&h.ctx).unwrap();
     let (s, v) = h.json(with(get("/health/api/current"), &c, None)).await;
@@ -809,6 +810,16 @@ async fn health_shows_each_databases_growth_over_the_monitoring_window() {
         assert!((per_day - growth / 2.0).abs() < 0.011, "{}: {}", db, st);
     }
     assert!(g["total"]["growth_mb"].as_f64().unwrap() > 0.0, "{}", g);
+    let day = &g["last_day"];
+    assert_eq!(day["window_hours"], 12.0, "{}", day);
+    for db in ["openalgo", "logs", "sandbox", "historify"] {
+        let st = &day["stores"][db];
+        let size = st["size_mb"].as_f64().unwrap();
+        let growth = st["growth_mb"].as_f64().unwrap();
+        assert!((growth - (size - 0.005)).abs() < 0.011, "{}: {}", db, st);
+        assert!(st["per_day_mb"].is_null(), "{}: {}", db, st);
+    }
+    assert!(day["total"]["per_day_mb"].is_null(), "{}", day);
 }
 
 /// DIA-01: no sample, a stale one or an unreadable one used to answer
