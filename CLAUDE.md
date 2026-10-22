@@ -960,6 +960,12 @@ Every flaky test found so far was a race, not a slow machine:
   "not found" (SM-04). The web's store turns it into an empty success; the
   desktop's `/api/v1/strategy` runs, orders and events answer the web's
   500 "An unexpected error occurred" instead.
+- The same holds on a page (PROD-PAR-01): a read that fails keeps what the
+  page last showed, marked with when it was read, and a list never read
+  says it is not known; neither is shown as empty. The Health page once
+  read its unconfirmed orders as `[]` on any failure, so a held order
+  vanished after one failed refresh. Each of its reads settles on its own
+  (`components/desktop/health/useHealthReads.ts`), not all or nothing.
 - An OpenScript run trades the inputs its start read (PROD-TR-06, as the
   web's `start` hands them to the run): its page is served the snapshot
   kept on the run (`RunEntry::inputs`), never a later read of the saved

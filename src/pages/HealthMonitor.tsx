@@ -37,25 +37,18 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import {
   acknowledgeAlert,
-  type CurrentMetrics,
-  type EmptyHealthStats,
   exportMetricsCSV,
-  getActiveAlerts,
-  getCurrentMetrics,
-  getHealthStats,
-  getHeldOrders,
-  getMetricsHistory,
   type HealthAlert,
-  type HealthStats,
-  type HeldOrder,
   type HistoricalMetric,
   hasHealthSamples,
   resolveAlert,
 } from '@/api/health'
 import { AppHealthCards } from '@/components/desktop/health/AppHealthCards'
 import { NoHealthSamples } from '@/components/desktop/health/NoHealthSamples'
+import { NotRefreshed, NotRefreshedCard } from '@/components/desktop/health/NotRefreshed'
 import { formatAge, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
 import { UnconfirmedOrders } from '@/components/desktop/health/UnconfirmedOrders'
+import { useHealthReads } from '@/components/desktop/health/useHealthReads'
 // Alert components removed - using custom styled divs for theme compatibility
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -75,6 +68,8 @@ const AUTO_REFRESH_INTERVAL = 10000 // 10 seconds
 const HISTORY_HOURS = 24
 const CHART_HOURS = 6
 const MAX_CHART_POINTS = 1200
+const NO_HISTORY: HistoricalMetric[] = []
+const NO_ALERTS: HealthAlert[] = []
 
 interface MetricCardProps {
   title: string
@@ -88,8 +83,8 @@ interface MetricCardProps {
 function MetricCard({ title, icon: Icon, value, subtitle, status, loading }: MetricCardProps) {
   // Color mappings matching Latency Dashboard style
   const valueColors = {
-    pass: 'text-green-500',
-    warn: 'text-yellow-500',
+    pass: 'text-green-700 dark:text-green-500',
+    warn: 'text-yellow-800 dark:text-yellow-500',
     fail: 'text-red-500',
     unknown: 'text-primary',
   }
@@ -158,11 +153,13 @@ function isDarkMode(): boolean {
 }
 
 export default function HealthMonitor() {
-  const [currentMetrics, setCurrentMetrics] = useState<CurrentMetrics | null>(null)
-  const [historicalMetrics, setHistoricalMetrics] = useState<HistoricalMetric[]>([])
-  const [stats, setStats] = useState<HealthStats | EmptyHealthStats | null>(null)
-  const [alerts, setAlerts] = useState<HealthAlert[]>([])
-  const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([])
+  // Desktop: each read keeps its last answer and says when a refresh of it
+  // failed, instead of all or nothing (PROD-PAR-01).
+  const { reads, refresh } = useHealthReads(CHART_HOURS, HISTORY_HOURS)
+  const currentMetrics = reads.current.data
+  const historicalMetrics = reads.history.data ?? NO_HISTORY
+  const stats = reads.stats.data
+  const alerts = reads.alerts.data ?? NO_ALERTS
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -181,25 +178,17 @@ export default function HealthMonitor() {
     try {
       setRefreshing(true)
 
-      const [metricsData, historyData, statsData, alertsData, heldData] = await Promise.all([
-        getCurrentMetrics(),
-        getMetricsHistory(CHART_HOURS),
-        getHealthStats(HISTORY_HOURS),
-        getActiveAlerts(),
-        getHeldOrders().catch(() => [] as HeldOrder[]),
-      ])
+      // Desktop: resolves to how many reads failed; it never rejects.
+      const failed = await refresh()
 
-      setCurrentMetrics(metricsData)
-      setHistoricalMetrics(historyData)
-      setStats(statsData)
-      setAlerts(alertsData)
-      setHeldOrders(heldData)
-
-      if (displayToast) {
+      if (failed > 0) {
+        showToast.error(
+          'Could not read part of the health page. What it could not read is marked.',
+          'monitoring'
+        )
+      } else if (displayToast) {
         showToast.success('Metrics refreshed', 'monitoring')
       }
-    } catch (_error) {
-      showToast.error('Failed to fetch health metrics', 'monitoring')
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -449,7 +438,8 @@ export default function HealthMonitor() {
   }
 
   // Desktop: a missing or stale sample is UNKNOWN, never the PASS it last showed.
-  const { overallStatus, sampleAge, staleReason, cardStatus } = sampleFreshness(currentMetrics)
+  const { overallStatus, sampleAge, staleReason, cardStatus } = sampleFreshness(reads.current)
+  const metricsPending = !currentMetrics && reads.current.failedAt === null
 
   return (
     <div className="container mx-auto p-6 space-y-6">
@@ -482,7 +472,7 @@ export default function HealthMonitor() {
       </div>
 
       {/* Overall Status Banner */}
-      {currentMetrics && (
+      {(currentMetrics || staleReason) && (
         <div
           className={cn(
             'rounded-lg border p-4 flex items-center gap-4',
@@ -495,11 +485,17 @@ export default function HealthMonitor() {
           <StatusIcon status={overallStatus} />
           <div>
             <p className="font-semibold">System Status: {overallStatus.toUpperCase()}</p>
-            <p className="text-sm text-muted-foreground">
-              Last updated (IST): {formatIstDateTime(currentMetrics.timestamp)}
-              {sampleAge !== null && ` (${formatAge(sampleAge)})`}
-            </p>
-            {staleReason && <p className="text-sm text-muted-foreground">{staleReason}</p>}
+            {currentMetrics && (
+              <p className="text-sm text-neutral-600 dark:text-muted-foreground">
+                Last updated (IST): {formatIstDateTime(currentMetrics.timestamp)}
+                {sampleAge !== null && ` (${formatAge(sampleAge)})`}
+              </p>
+            )}
+            {staleReason && (
+              <p className="text-sm text-neutral-600 dark:text-muted-foreground">{staleReason}</p>
+            )}
+            <NotRefreshed read={reads.stats} what="the statistics" />
+            <NotRefreshed read={reads.history} what="the charts and recent samples" />
           </div>
         </div>
       )}
@@ -524,7 +520,7 @@ export default function HealthMonitor() {
               : undefined
           }
           status={cardStatus(currentMetrics?.fd.status)}
-          loading={!currentMetrics}
+          loading={metricsPending}
         />
         <MetricCard
           title="Memory Usage"
@@ -536,41 +532,43 @@ export default function HealthMonitor() {
               : undefined
           }
           status={cardStatus(currentMetrics?.memory.status)}
-          loading={!currentMetrics}
+          loading={metricsPending}
         />
         <MetricCard
           title="Database Connections"
           icon={Database}
-          value={currentMetrics?.database.total || 0}
+          value={currentMetrics?.database.total ?? '-'}
           subtitle="Active connections"
           status={cardStatus(currentMetrics?.database.status)}
-          loading={!currentMetrics}
+          loading={metricsPending}
         />
         <MetricCard
           title="WebSocket Connections"
           icon={Network}
-          value={currentMetrics?.websocket.total || 0}
+          value={currentMetrics?.websocket.total ?? '-'}
           subtitle={
             currentMetrics ? `${currentMetrics.websocket.total_symbols} symbols` : undefined
           }
           status={cardStatus(currentMetrics?.websocket.status)}
-          loading={!currentMetrics}
+          loading={metricsPending}
         />
         <MetricCard
           title="Active Threads"
           icon={Server}
-          value={currentMetrics?.threads.count || 0}
+          value={currentMetrics?.threads.count ?? '-'}
           subtitle={
-            currentMetrics && currentMetrics.threads.stuck > 0
-              ? `${currentMetrics.threads.stuck} stuck`
-              : 'None stuck'
+            currentMetrics
+              ? currentMetrics.threads.stuck > 0
+                ? `${currentMetrics.threads.stuck} stuck`
+                : 'None stuck'
+              : undefined
           }
           status={cardStatus(currentMetrics?.threads.status)}
-          loading={!currentMetrics}
+          loading={metricsPending}
         />
       </div>
 
-      <AppHealthCards metrics={currentMetrics} />
+      <AppHealthCards read={reads.current} />
 
       {/* Charts - Placed above Top Memory Processes */}
       <div className="grid gap-4 lg:grid-cols-2">
@@ -824,7 +822,9 @@ export default function HealthMonitor() {
         </CardContent>
       </Card>
 
-      <UnconfirmedOrders orders={heldOrders} onResolved={() => fetchData()} />
+      <UnconfirmedOrders read={reads.held} onResolved={() => fetchData()} />
+
+      <NotRefreshedCard title="Active Alerts" read={reads.alerts} what="the alerts" />
 
       {/* Active Alerts */}
       {alerts.length > 0 && (
@@ -835,6 +835,7 @@ export default function HealthMonitor() {
               Active Alerts ({alerts.length})
             </CardTitle>
             <CardDescription>System health alerts requiring attention</CardDescription>
+            <NotRefreshed read={reads.alerts} what="the alerts" />
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -853,7 +854,9 @@ export default function HealthMonitor() {
                       <p className="font-medium">
                         {alert.alert_type.replace(/_/g, ' ').toUpperCase()}
                       </p>
-                      <p className="text-sm text-muted-foreground">{alert.message}</p>
+                      <p className="text-sm text-neutral-600 dark:text-muted-foreground">
+                        {alert.message}
+                      </p>
                     </div>
                   </div>
                   <div className="flex shrink-0 gap-2">

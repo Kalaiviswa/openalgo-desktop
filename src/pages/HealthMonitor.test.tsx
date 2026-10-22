@@ -40,6 +40,40 @@ function metrics(overrides: Partial<CurrentMetrics> = {}): CurrentMetrics {
   }
 }
 
+/** A Live order held for the trader (P0-3). */
+const HELD = {
+  owner: 'strategy',
+  id: '42',
+  symbol: 'NIFTY07OCT2624500CE',
+  exchange: 'NFO',
+  action: 'BUY',
+  quantity: 65,
+  since: '2026-10-07 10:00:20',
+  message: 'It may still be at the broker.',
+}
+
+function alert(id: number, alert_type: string, resolvable: boolean) {
+  return {
+    id,
+    timestamp: '2026-10-20T10:00:00+05:30',
+    alert_type,
+    severity: 'warn' as const,
+    metric_name: alert_type,
+    metric_value: 1,
+    threshold_value: 0,
+    message: `${alert_type} message`,
+    acknowledged: true,
+    resolved: false,
+    resolvable,
+  }
+}
+
+async function refresh(times: number) {
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  await waitFor(() => expect(api.getCurrentMetrics).toHaveBeenCalledTimes(times))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+}
+
 /** What the server answers for a window with no samples (`stats_json` on no rows). */
 const NO_SAMPLES: EmptyHealthStats = {
   total_samples: 0,
@@ -147,18 +181,7 @@ describe('Health Monitor', () => {
   // P0-3: a live order held for the trader is listed with a two-step
   // "not placed" action that names the order's owner and id.
   it('lists held orders and marks one not placed after confirmation', async () => {
-    api.getHeldOrders.mockResolvedValue([
-      {
-        owner: 'strategy',
-        id: '42',
-        symbol: 'NIFTY07OCT2624500CE',
-        exchange: 'NFO',
-        action: 'BUY',
-        quantity: 65,
-        since: '2026-10-07 10:00:20',
-        message: 'It may still be at the broker.',
-      },
-    ])
+    api.getHeldOrders.mockResolvedValue([HELD])
     render(<HealthMonitor />)
 
     expect(await screen.findByText('Unconfirmed Orders (1)')).toBeInTheDocument()
@@ -172,19 +195,6 @@ describe('Health Monitor', () => {
   // The resolve endpoint existed with nothing calling it: an alert only the
   // trader settles (lost records) stayed on the page for good.
   it('resolves an alert only the trader settles, and offers no Resolve on one OpenAlgo clears', async () => {
-    const alert = (id: number, alert_type: string, resolvable: boolean) => ({
-      id,
-      timestamp: '2026-10-20T10:00:00+05:30',
-      alert_type,
-      severity: 'warn' as const,
-      metric_name: alert_type,
-      metric_value: 1,
-      threshold_value: 0,
-      message: `${alert_type} message`,
-      acknowledged: true,
-      resolved: false,
-      resolvable,
-    })
     api.getActiveAlerts.mockResolvedValue([
       alert(7, 'records_not_saved', true),
       alert(8, 'fd_count_warn', false),
@@ -221,5 +231,201 @@ describe('Health Monitor', () => {
     expect(await screen.findByText('Records Saved')).toBeInTheDocument()
     expect(screen.getByText('2 not saved')).toBeInTheDocument()
     expect(screen.getByText(/Some records were not saved/)).toBeInTheDocument()
+  })
+
+  it('reaches Resolve from the keyboard and resolves with Enter', async () => {
+    api.getActiveAlerts.mockResolvedValue([alert(7, 'records_not_saved', true)])
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('records_not_saved message')).toBeInTheDocument()
+    const resolve = screen.getByRole('button', { name: 'Resolve' })
+    for (let i = 0; i < 40 && document.activeElement !== resolve; i++) {
+      await userEvent.tab()
+    }
+    expect(resolve).toHaveFocus()
+    await userEvent.keyboard('{Enter}')
+    expect(api.resolveAlert).toHaveBeenCalledWith(7)
+  })
+
+  // The audit's first probe: an overall FAIL with the order tracking reason
+  // and the records and strategy price blocks in the same answer.
+  it('shows the order tracking reason behind a FAIL beside the records and strategy prices', async () => {
+    api.getCurrentMetrics.mockResolvedValue(
+      metrics({
+        overall_status: 'fail',
+        order_facts: {
+          status: 'fail',
+          gaps: [{ mode: 'live', cause: 'event_loss', since: new Date().toISOString() }],
+          running: true,
+          passes: 0,
+          book_reads: 0,
+          book_read_failures: 11,
+          book_reads_discarded: 0,
+          gaps_opened: 1,
+          gaps_closed: 0,
+          unconfirmed_orders: 0,
+        },
+        records: {
+          status: 'warn',
+          order_logs_dropped: 17,
+          order_logs_failed: 0,
+          monitoring_dropped: 0,
+          monitoring_lost: 0,
+          monitoring_retried_batches: 0,
+        },
+        strategy_ticks: {
+          status: 'warn',
+          ticks_queued: 30,
+          ticks_folded: 0,
+          ticks_missed: 19,
+          exits_waiting: 0,
+          oldest_exit_wait_s: null,
+          exits_slow: false,
+        },
+      })
+    )
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText(/System Status: FAIL/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/an order update could not be delivered inside OpenAlgo/)
+    ).toBeInTheDocument()
+    expect(screen.getByText('17 not saved')).toBeInTheDocument()
+    expect(screen.getByText(/Strategy risk management missed some prices/)).toBeInTheDocument()
+  })
+})
+
+// PROD-PAR-01: a failed read must never empty what the page last showed,
+// and a list never read is not a list with nothing in it.
+describe('Health Monitor when a read fails', () => {
+  beforeEach(() => {
+    api.getCurrentMetrics.mockResolvedValue(metrics())
+    api.getMetricsHistory.mockResolvedValue([])
+    api.getHealthStats.mockResolvedValue(NO_SAMPLES)
+    api.getActiveAlerts.mockResolvedValue([])
+    api.getHeldOrders.mockResolvedValue([])
+    api.markHeldOrderNotPlaced.mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  // The audit's second probe: one held order, then one failed refresh of
+  // the list while every other read succeeds.
+  it('keeps an unconfirmed order listed, marked, when a refresh of the list fails', async () => {
+    api.getHeldOrders.mockResolvedValueOnce([HELD]).mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('Unconfirmed Orders (1)')).toBeInTheDocument()
+    await refresh(2)
+
+    expect(api.getHeldOrders).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('Unconfirmed Orders (1)')).toBeInTheDocument()
+    expect(screen.getByText('BUY 65 NIFTY07OCT2624500CE (NFO)')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Could not refresh this list at .* IST; shown as read at/)
+    ).toBeInTheDocument()
+    // A failed read decides nothing: the order is not released.
+    expect(api.markHeldOrderNotPlaced).not.toHaveBeenCalled()
+
+    // Read again and empty: the broker settled it, and nothing is shown.
+    api.getHeldOrders.mockResolvedValue([])
+    await refresh(3)
+    expect(screen.queryByText(/Unconfirmed Orders/)).not.toBeInTheDocument()
+    expect(api.markHeldOrderNotPlaced).not.toHaveBeenCalled()
+  })
+
+  it('says the unconfirmed orders are not known when their first read fails, until one succeeds', async () => {
+    api.getHeldOrders.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('Unconfirmed Orders: not known')).toBeInTheDocument()
+    expect(
+      screen.getByText(/could not read the orders waiting for your decision/)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Unconfirmed Orders \(/)).not.toBeInTheDocument()
+
+    api.getHeldOrders.mockResolvedValue([])
+    await refresh(2)
+    expect(screen.queryByText(/Unconfirmed Orders/)).not.toBeInTheDocument()
+  })
+
+  it('says a list that was empty may no longer be, when its refresh fails', async () => {
+    api.getHeldOrders.mockResolvedValueOnce([]).mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    await screen.findByText(/System Status: PASS/)
+    expect(screen.queryByText(/Unconfirmed Orders/)).not.toBeInTheDocument()
+    await refresh(2)
+    expect(screen.getByText('Unconfirmed Orders: not known')).toBeInTheDocument()
+    expect(screen.getByText(/There were none when last read at/)).toBeInTheDocument()
+  })
+
+  it('keeps the health figures and checks on screen, UNKNOWN and marked, when a refresh fails', async () => {
+    api.getCurrentMetrics
+      .mockResolvedValueOnce(
+        metrics({
+          sample_age_s: 5,
+          records: {
+            status: 'warn',
+            order_logs_dropped: 2,
+            order_logs_failed: 0,
+            monitoring_dropped: 0,
+            monitoring_lost: 0,
+            monitoring_retried_batches: 0,
+          },
+        })
+      )
+      .mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText(/System Status: PASS/)).toBeInTheDocument()
+    await refresh(2)
+
+    expect(screen.getByText(/System Status: UNKNOWN/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Could not refresh health at .* IST; shown as read at/)
+    ).toBeInTheDocument()
+    expect(screen.getByText('Records Saved')).toBeInTheDocument()
+    expect(screen.getByText('2 not saved')).toBeInTheDocument()
+    expect(
+      screen.getAllByText(/^As read at .* IST; the refresh at .* IST failed\.$/).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('shows UNKNOWN and the checks as not known when health was never read', async () => {
+    api.getCurrentMetrics.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText(/System Status: UNKNOWN/)).toBeInTheDocument()
+    expect(screen.getByText('Could not read health. Refresh to try again.')).toBeInTheDocument()
+    expect(screen.getByText('Order Tracking')).toBeInTheDocument()
+    expect(screen.getAllByText('Not known')).toHaveLength(4)
+    expect(screen.queryByText('None stuck')).not.toBeInTheDocument()
+  })
+
+  it('keeps alerts listed, marked, when their refresh fails', async () => {
+    api.getActiveAlerts
+      .mockResolvedValueOnce([alert(7, 'records_not_saved', true)])
+      .mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('records_not_saved message')).toBeInTheDocument()
+    await refresh(2)
+    expect(screen.getByText('records_not_saved message')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Could not refresh the alerts at .* IST; shown as read at/)
+    ).toBeInTheDocument()
+  })
+
+  it('says the alerts could not be read instead of showing none', async () => {
+    api.getActiveAlerts.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(
+      await screen.findByText('Could not read the alerts. Refresh to try again.')
+    ).toBeInTheDocument()
+    expect(screen.getByText('Active Alerts')).toBeInTheDocument()
   })
 })
