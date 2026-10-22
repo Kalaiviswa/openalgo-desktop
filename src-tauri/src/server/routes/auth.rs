@@ -686,11 +686,13 @@ pub async fn analyzer_toggle(State(ctx): Ctx) -> Response {
     if !ctx.is_broker_connected() {
         return error(StatusCode::UNAUTHORIZED, "Broker not connected");
     }
+    // The mode stored; the switch does not count the analyzer log (web
+    // `toggle_analyzer_mode_session`).
     match crate::services::AnalyzerService::toggle_mode(&ctx).await {
-        Ok(s) => ok(json!({"status": "success", "data": {
-            "mode": s.mode,
-            "analyze_mode": s.analyze_mode,
-            "message": format!("Switched to {} mode", if s.analyze_mode {"Analyze"} else {"Live"}),
+        Ok(on) => ok(json!({"status": "success", "data": {
+            "mode": if on { "analyze" } else { "live" },
+            "analyze_mode": on,
+            "message": format!("Switched to {} mode", if on {"Analyze"} else {"Live"}),
         }})),
         Err(e) => e.into_response(),
     }

@@ -33,9 +33,14 @@ const BOT_COMMANDS: i64 = 200_000;
 
 /// The signed-in browser's cookie.
 fn cookie(h: &H) -> String {
+    signed_in(h).0
+}
+
+/// The signed-in browser's cookie and CSRF token.
+fn signed_in(h: &H) -> (String, String) {
     let s = h.ctx.sessions.create(h.ctx.now());
     h.ctx.sessions.update(&s.id, |x| x.user = Some(USER.into()));
-    format!("session={}", s.id)
+    (format!("session={}", s.id), s.csrf_token)
 }
 
 /// A page's GET, as the signed-in browser.
@@ -564,5 +569,83 @@ async fn whatsapp_statistics_read_their_window_through_an_index() {
         "{:?}",
         plan
     );
+    h.shutdown().await;
+}
+
+/// An analyzer log that cannot be read answers an error, as on the web
+/// (`get_analyzer_status_with_auth` and `toggle_analyzer_mode_with_auth`
+/// answer 500), never a log of zero. The app's switch does not count the
+/// log (web `toggle_analyzer_mode_session`), so it still works.
+#[tokio::test]
+async fn an_unreadable_analyzer_log_is_an_error_not_zero() {
+    let h = H::new().await;
+    let app = openalgo_desktop_lib::server::app(h.ctx.clone());
+    h.ctx
+        .logs
+        .conn()
+        .unwrap()
+        .execute_batch("DROP TABLE analyzer_logs")
+        .unwrap();
+    let status = send(&h, &app, api(&h, "/api/v1/analyzer", json!({}))).await;
+    let v = json_of(&status);
+    assert_eq!(status.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(v["status"], "error");
+    assert_eq!(
+        v["message"],
+        "The analyzer status could not be read just now. Try again."
+    );
+    assert!(v.get("data").is_none(), "{}", v);
+    let toggle = send(
+        &h,
+        &app,
+        api(&h, "/api/v1/analyzer/toggle", json!({"mode": true})),
+    )
+    .await;
+    let v = json_of(&toggle);
+    assert_eq!(toggle.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(
+        v["message"],
+        "Analyzer mode switched to analyze. The analyzer log could not be read just now."
+    );
+    assert!(
+        h.ctx.sqlite.get_analyze_mode().unwrap(),
+        "the change was made before the count, as on the web"
+    );
+    let (c, csrf) = signed_in(&h);
+    let mut switch = page("/auth/analyzer-toggle", &c);
+    *switch.method_mut() = Method::POST;
+    switch
+        .headers_mut()
+        .insert("x-csrftoken", csrf.parse().unwrap());
+    let switched = send(&h, &app, switch).await;
+    let v = json_of(&switched);
+    assert_eq!(switched.0, StatusCode::OK, "{}", v);
+    assert_eq!(v["data"]["analyze_mode"], false);
+    assert_eq!(v["data"]["mode"], "live");
+    h.shutdown().await;
+}
+
+/// WhatsApp statistics that cannot be read answer an error. The web answers
+/// zero commands, which reads as a bot nobody used (lead, 2026-10-20).
+#[tokio::test]
+async fn unreadable_whatsapp_statistics_are_an_error_not_zero() {
+    let h = H::new().await;
+    let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
+    h.ctx
+        .sqlite
+        .conn()
+        .unwrap()
+        .execute_batch("DROP TABLE whatsapp_command_logs")
+        .unwrap();
+    let r = send(&h, &app, page("/whatsapp/stats?days=7", &c)).await;
+    let v = json_of(&r);
+    assert_eq!(r.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", v);
+    assert_eq!(v["status"], "error");
+    assert!(
+        v["message"].as_str().unwrap().contains("could not be read"),
+        "{}",
+        v
+    );
+    assert!(v.get("data").is_none(), "{}", v);
     h.shutdown().await;
 }

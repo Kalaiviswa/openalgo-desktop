@@ -931,18 +931,9 @@ impl Bot {
         let changed = crate::services::AnalyzerService::set_mode(ctx, requested).await;
         Self::log(ctx, from.id, data, chat);
         match changed {
-            Ok(s) => {
-                crate::messaging::emit(
-                    ctx,
-                    "app_mode_changed",
-                    json!({"analyze_mode": s.analyze_mode}),
-                )
-                .await;
-                let label = if s.analyze_mode {
-                    "Analyze Mode"
-                } else {
-                    "Live Mode"
-                };
+            Ok(on) => {
+                crate::messaging::emit(ctx, "app_mode_changed", json!({"analyze_mode": on})).await;
+                let label = if on { "Analyze Mode" } else { "Live Mode" };
                 self.edit(
                     chat,
                     mid,
