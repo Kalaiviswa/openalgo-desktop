@@ -389,11 +389,34 @@ fn canonical_ban_addresses(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migration `013_alert_severity_warn` of `logs.db`: the ban alerts that
+/// earlier builds raised with severity "warning" become "warn", the web's
+/// level and the one the Health page colours (they showed no colour). An
+/// open one would keep "warning" for good, since raising it again updates
+/// the open row. Recorded once.
+fn warn_severity(conn: &Connection) -> Result<()> {
+    if applied(conn, "013_alert_severity_warn")? {
+        return Ok(());
+    }
+    let tx = super::write_transaction(conn)?;
+    tx.execute(
+        "UPDATE health_alerts SET severity = 'warn' WHERE severity = 'warning'",
+        [],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (name) VALUES ('013_alert_severity_warn')",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Schema for the monitoring tables (idempotent). Runs on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
     create_tables(conn)?;
     redact_stored_paths(conn)?;
-    canonical_ban_addresses(conn)
+    canonical_ban_addresses(conn)?;
+    warn_severity(conn)
 }
 
 fn create_tables(conn: &Connection) -> Result<()> {
@@ -778,10 +801,11 @@ mod tests {
         assert_eq!(in_force(), 3);
         assert!(!ban("192.168.1.80", 3));
         assert_eq!(in_force(), 3, "no ban was lifted to make room");
+        // "warn", the severity the Health page colours (it said "warning").
         assert!(active_alerts(&c)
             .unwrap()
             .iter()
-            .any(|a| a.alert_type == "ban_list_full"));
+            .any(|a| a.alert_type == "ban_list_full" && a.severity == "warn"));
         assert!(ban("192.168.1.80", 4));
     }
 
@@ -821,6 +845,12 @@ mod tests {
         )
         .unwrap());
         assert_eq!(alerts(), 1);
+        let severity = active_alerts(&c)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.alert_type == "banned_devices_on_network")
+            .map(|a| a.severity);
+        assert_eq!(severity.as_deref(), Some("warn"));
         let whole: i64 = c
             .query_row(
                 "SELECT COUNT(*) FROM ip_bans WHERE ip_address = '2001:db8:aa:bb::'",
@@ -1023,5 +1053,68 @@ mod tests {
         );
         assert_eq!(track_invalid_api_key(&c, "10.0.0.2", now()).unwrap(), 1);
         assert_eq!(track_invalid_api_key(&c, "10.0.0.2", now()).unwrap(), 2);
+    }
+
+    fn logs_db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+             applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+        )
+        .unwrap();
+        create_tables(&c).unwrap();
+        c
+    }
+
+    /// Ban alerts that earlier builds raised as "warning" become "warn",
+    /// once, on a populated database; others keep theirs.
+    #[test]
+    fn alerts_stored_as_warning_become_warn() {
+        let c = logs_db();
+        c.execute(
+            "INSERT INTO health_alerts (timestamp, alert_type, severity, message)
+             VALUES ('t', 'ban_list_full', 'warning', 'm'), ('t', 'fd_count_fail', 'fail', 'm')",
+            [],
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap();
+        let severities: Vec<String> = c
+            .prepare("SELECT severity FROM health_alerts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(severities, ["warn", "fail"]);
+    }
+
+    /// An open alert raised again shows what is wrong now: its message and
+    /// level, not the first one's (a count, a broker, a cause).
+    #[test]
+    fn an_open_alert_raised_again_says_what_is_wrong_now() {
+        let c = logs_db();
+        let raise = |value: f64, message: &str| {
+            raise_alert(
+                &c,
+                &AlertRow {
+                    alert_type: "strategy_ticks_missed".into(),
+                    severity: "warn".into(),
+                    metric_name: "strategy_ticks_missed".into(),
+                    metric_value: value,
+                    threshold_value: value - 1.0,
+                    message: message.into(),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .unwrap()
+        };
+        raise(3.0, "missed 3 prices");
+        raise(9.0, "missed 9 prices");
+        let open = active_alerts(&c).unwrap();
+        assert_eq!(open.len(), 1, "one open alert per type");
+        assert_eq!(open[0].message, "missed 9 prices");
+        assert_eq!((open[0].metric_value, open[0].threshold_value), (9.0, 8.0));
     }
 }

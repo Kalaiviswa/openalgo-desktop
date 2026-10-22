@@ -168,7 +168,12 @@ pub struct AlertRow {
     pub resolved: bool,
 }
 
-/// Raise an alert, or refresh the open one of the same type.
+/// Raise an alert, or refresh the open one of the same type: its time,
+/// value, threshold and message become the new ones, so the message says
+/// what is wrong now (a count, a level, a cause) rather than what it was
+/// when first raised. The web's `create_alert` refreshes only the time and
+/// value, so its page keeps the first message: a deliberate difference.
+/// The severity stays; each alert type is raised at one severity.
 pub fn raise_alert(conn: &Connection, a: &AlertRow, now: DateTime<Utc>) -> Result<()> {
     let open: Option<i64> = conn
         .query_row(
@@ -180,8 +185,9 @@ pub fn raise_alert(conn: &Connection, a: &AlertRow, now: DateTime<Utc>) -> Resul
     match open {
         Some(id) => {
             conn.execute(
-                "UPDATE health_alerts SET timestamp = ?1, metric_value = ?2 WHERE id = ?3",
-                params![ts(now), a.metric_value, id],
+                "UPDATE health_alerts SET timestamp = ?1, metric_value = ?2, threshold_value = ?3,
+                    message = ?4 WHERE id = ?5",
+                params![ts(now), a.metric_value, a.threshold_value, a.message, id],
             )?;
         }
         None => {

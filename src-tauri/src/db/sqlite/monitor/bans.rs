@@ -174,7 +174,7 @@ pub fn auto_ban(
                 conn,
                 &AlertRow {
                     alert_type: "ban_list_full".into(),
-                    severity: "warning".into(),
+                    severity: "warn".into(),
                     metric_name: "automatic_bans".into(),
                     metric_value: active as f64,
                     threshold_value: cap as f64,
@@ -242,7 +242,7 @@ fn alert_on_banned_network(
             conn,
             &AlertRow {
                 alert_type: "banned_devices_on_network".into(),
-                severity: "warning".into(),
+                severity: "warn".into(),
                 metric_name: "banned_devices_on_network".into(),
                 metric_value: banned as f64,
                 threshold_value: BANNED_DEVICES_ALERT as f64,
