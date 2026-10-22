@@ -248,3 +248,73 @@ async fn an_options_split_in_the_sandbox_places_every_chunk() {
     assert!(placed(&h).is_empty(), "nothing reached the broker");
     h.shutdown().await;
 }
+
+// -- the quantity cap --------------------------------------------------------
+
+/// API-02 for options and GTT: a quantity above what any broker takes (a
+/// 32-bit integer) is refused by the schema with placeorder's error, live
+/// and in analyzer mode, before a contract is resolved or anything is sent
+/// or simulated. Options used to reach the order path (a multi-order leg
+/// answered 200), and a GTT reached the broker or the sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversize_options_or_gtt_quantity_is_refused_by_the_schema() {
+    let h = H::new().await;
+    let big = json!(2_147_483_648u64);
+    let validation = |field: &str, message: &str| {
+        json!({"status": "error", "message": "Validation error",
+            "errors": {field: [message]}})
+    };
+    let quantity_error = validation("quantity", "Quantity is larger than any exchange accepts.");
+    let mut single = options_split();
+    single["quantity"] = big.clone();
+    if let Some(m) = single.as_object_mut() {
+        m.remove("splitsize");
+    }
+    let mut disclosed = options_split();
+    disclosed["disclosed_quantity"] = big.clone();
+    let multi = json!({"strategy": "t", "underlying": "NIFTY", "exchange": "NSE_INDEX",
+        "expiry_date": "06OCT26", "legs": [{"offset": "ATM", "option_type": "CE",
+        "action": "BUY", "quantity": big, "product": "NRML"}]});
+    let mut sbin_gtt = gtt(big.clone());
+    sbin_gtt["exchange"] = json!("NSE");
+    sbin_gtt["symbol"] = json!("SBIN");
+    sbin_gtt["product"] = json!("CNC");
+    let mut modify = sbin_gtt.clone();
+    modify["trigger_id"] = json!("GTT-1");
+    for analyze in [false, true] {
+        h.analyze(analyze);
+        let (s, v) = post(&h, "/api/v1/optionsorder", single.clone()).await;
+        assert_eq!((s, &v), (400, &quantity_error), "analyze {}", analyze);
+        let (s, v) = post(&h, "/api/v1/optionsorder", disclosed.clone()).await;
+        let want = validation(
+            "disclosed_quantity",
+            "Disclosed quantity is larger than any exchange accepts.",
+        );
+        assert_eq!((s, &v), (400, &want), "analyze {}", analyze);
+        let (s, v) = post(&h, "/api/v1/optionsmultiorder", multi.clone()).await;
+        let want = json!({"status": "error", "message": "Validation error",
+            "errors": {"legs": {"0": {"quantity": ["Quantity is larger than any exchange accepts."]}}}});
+        assert_eq!((s, &v), (400, &want), "analyze {}", analyze);
+        for (path, body) in [
+            ("/api/v1/placegttorder", &sbin_gtt),
+            ("/api/v1/modifygttorder", &modify),
+        ] {
+            let (s, v) = post(&h, path, body.clone()).await;
+            assert_eq!(s, 400, "{} analyze {} -> {}", path, analyze, v);
+            assert!(
+                v.to_string().contains(TOO_LARGE),
+                "{} analyze {} -> {}",
+                path,
+                analyze,
+                v
+            );
+        }
+    }
+    assert!(placed(&h).is_empty(), "no order reached the broker");
+    assert_eq!(gtt_calls(&h), 0, "no GTT reached the broker");
+    let (_, book) = post(&h, "/api/v1/orderbook", json!({})).await;
+    assert_eq!(book["data"]["orders"], json!([]), "none in the sandbox");
+    let (_, book) = post(&h, "/api/v1/gttorderbook", json!({})).await;
+    assert_eq!(book["data"], json!([]), "no sandbox GTT: {}", book);
+    h.shutdown().await;
+}
