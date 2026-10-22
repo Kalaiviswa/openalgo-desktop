@@ -31,6 +31,7 @@ and the release page carries the same text.
 | Step | Read |
 | --- | --- |
 | Bump the version in every file that carries it and write the `CHANGELOG.md` section | the `version-bump` skill, [.claude/skills/version-bump/SKILL.md](../../.claude/skills/version-bump/SKILL.md) |
+| What to check before pushing the tag (`scripts/release/preflight.sh`), the daily advisory scan, and what the release workflow does after the tag | [Cutting a release](../release/release-workflow.md) |
 | What the release workflow checks before it builds (a green `ci-ok` on the tagged commit, the installed-app jobs, a fresh advisory scan, matching versions) and the repository rules that back it | [Branch and tag protection](../release/branch-protection.md) |
 | What the workflow produces (installers, update bundles, signatures, `latest.json`, `SHA256SUMS.txt`), why publishing the draft is what makes an update visible, and the signing key | [In-app updates](../release/updates.md) |
 | The hands-on checklist for each release and each supported system | [Platform qualification](../release/platform-qualification.md) |

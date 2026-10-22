@@ -19,21 +19,16 @@ that did not run is reported as not run.
 ## 1. Dependency and secret scanners
 
 Run each, record the command, the tool version and the result. CI runs the
-same set in `.github/workflows/security.yml` (weekly and on lockfile
+same set in `.github/workflows/security.yml` (daily and on lockfile
 changes), `ci.yml` (gitleaks on every push) and `codeql.yml`.
 
 ```bash
-# Rust advisories, licenses, bans, sources (the single place advisories are accepted)
-cargo deny --manifest-path src-tauri/Cargo.toml --config .github/deny.toml --locked \
-  check advisories bans licenses sources
-
-# RustSec, with the ignores taken from deny.toml (exactly what security.yml does)
-ignore_args=(); while IFS= read -r id; do ignore_args+=(--ignore "$id"); done \
-  < <(grep -vE '^[[:space:]]*#' .github/deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' | sort -u)
-cargo audit --file src-tauri/Cargo.lock "${ignore_args[@]}"
-
-# JavaScript: production dependencies, fail on high or critical
-npm audit --omit=dev --audit-level=high
+# The release gate's three scans, exactly as release.yml and security.yml
+# run them (scripts/ci/advisory_scan.sh): cargo-deny (advisories, licenses,
+# bans, sources; deny.toml is the single place advisories are accepted),
+# cargo-audit with the ignores taken from deny.toml, npm audit of the
+# production dependencies failing on high or critical
+scripts/ci/advisory_scan.sh all
 npm audit --omit=dev --json > /tmp/npm-audit.json   # triage moderate and low too
 # Every dependency, dev tooling included: never a gate, always in the report.
 # Name the chain (`npm ls <pkg> --all`) and whether untrusted input reaches it;

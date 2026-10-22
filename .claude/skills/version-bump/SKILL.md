@@ -98,8 +98,12 @@ dependencies pass a
 fresh advisory scan (cargo-deny, cargo-audit, npm audit, run by the gate
 itself), and `check_versions.py --tag` passes (this script, run in CI). A master run cancelled because the same
 commit was already tested on its pull request has no verdict: re-run it
-and wait for it before tagging. Run that gate alone before tagging for
-real: Actions > Release > Run workflow, with the tag name. The release notes
+and wait for it before tagging. Before tagging, run
+`scripts/release/preflight.sh v<new>` in a clean checkout of the commit:
+the gate's version, master, advisory (the same `scripts/ci/advisory_scan.sh`)
+and install-smoke checks, with today's advisory databases
+(`docs/release/release-workflow.md`). The gate alone can also be run on
+GitHub: Actions > Release > Run workflow, with the tag name. The release notes
 say per platform whether the installer was found signed; they are generated
 from a check of each installer, not from the presence of secrets. Branch and
 tag protection the maintainer should enable: `docs/release/branch-protection.md`.
