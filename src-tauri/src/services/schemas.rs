@@ -153,6 +153,38 @@ pub fn coerce_quantity(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
     Ok(())
 }
 
+/// The refusal for a `position_size` above [`MAX_BROKER_QUANTITY`].
+pub(crate) const POSITION_TOO_LARGE: &str = "Position size is larger than any exchange accepts.";
+
+/// `coerce_quantity`, and the target position held to what an exchange
+/// takes. Desktop addition: outside CRYPTO a fractional `position_size`, or
+/// one above [`MAX_BROKER_QUANTITY`], is refused like a fractional
+/// quantity. The web keeps it a float and its brokers and sandbox truncate
+/// it (`int(position_size)`), so 0.5 became 0 and closed the position.
+fn coerce_smart_order(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
+    coerce_quantity(m)?;
+    let exchange = m.get("exchange").and_then(Value::as_str).unwrap_or("");
+    if CRYPTO_EXCHANGES.contains(&exchange) {
+        return Ok(());
+    }
+    let Some(p) = m.get("position_size").and_then(Value::as_f64) else {
+        return Ok(());
+    };
+    if p.fract() != 0.0 {
+        return Err(FieldErrors::single(
+            "position_size",
+            format!(
+                "Fractional position size ({}) is not allowed for non-crypto exchanges.",
+                py_float_repr(p)
+            ),
+        ));
+    }
+    if p.abs() > MAX_BROKER_QUANTITY as f64 {
+        return Err(FieldErrors::single("position_size", POSITION_TOO_LARGE));
+    }
+    Ok(())
+}
+
 /// Python `repr(float)` for the values a client sends (`1.5`, `2.25`).
 pub fn py_float_repr(x: f64) -> String {
     if x.fract() == 0.0 && x.abs() < 1e16 {
@@ -200,7 +232,7 @@ schema!(
         trigger_price(),
         disclosed_quantity(),
     ])
-    .post_load(coerce_quantity)
+    .post_load(coerce_smart_order)
 );
 
 schema!(
@@ -951,6 +983,45 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(ok["quantity"], json!(0.5));
+    }
+
+    /// A target position outside CRYPTO is whole and within what an
+    /// exchange takes; the web truncates 0.5 to 0 (a closed position).
+    #[test]
+    fn smart_order_position_size_is_whole_outside_crypto() {
+        let base = json!({"apikey": "k", "strategy": "s", "exchange": "NSE", "symbol": "SBIN",
+            "action": "BUY", "quantity": 1, "position_size": 5});
+        let with = |k: &str, v: Value| {
+            let mut m = obj(base.clone());
+            m.insert(k.into(), v);
+            m
+        };
+        let e = smart_order()
+            .load(&with("position_size", json!(0.5)))
+            .unwrap_err();
+        assert_eq!(
+            e.to_python(),
+            "{'position_size': ['Fractional position size (0.5) is not allowed for non-crypto exchanges.']}"
+        );
+        for big in [
+            json!(2_147_483_648u64),
+            json!(-2_147_483_648i64),
+            json!(1e30),
+        ] {
+            let e = smart_order().load(&with("position_size", big)).unwrap_err();
+            assert_eq!(e.messages("position_size"), [POSITION_TOO_LARGE]);
+        }
+        let ok = smart_order()
+            .load(&with("position_size", json!(-3)))
+            .unwrap();
+        assert_eq!(ok["position_size"], json!(-3.0));
+        // CRYPTO keeps its exact target for the live broker.
+        let mut crypto = with("position_size", json!(0.5));
+        crypto.insert("exchange".into(), json!("CRYPTO"));
+        assert_eq!(
+            smart_order().load(&crypto).unwrap()["position_size"],
+            json!(0.5)
+        );
     }
 
     #[test]

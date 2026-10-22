@@ -325,6 +325,23 @@ pub trait Broker: Send + Sync {
             .unwrap_or(0))
     }
 
+    /// `get_open_position` with the exact signed size: a crypto spot
+    /// balance can be fractional (0.0005 BTC), which the whole-unit answer
+    /// truncates. A live CRYPTO smart order decides on this. Default: the
+    /// whole-unit answer.
+    async fn get_open_position_exact(
+        &self,
+        auth: &AuthToken,
+        symbol: &str,
+        exchange: Exchange,
+        product: Product,
+    ) -> Result<rust_decimal::Decimal> {
+        let units = self
+            .get_open_position(auth, symbol, exchange, product)
+            .await?;
+        Ok(rust_decimal::Decimal::from(units))
+    }
+
     // ---- books (OpenAlgo symbols, lowercase statuses) ----
 
     async fn get_order_book(&self, auth: &AuthToken) -> Result<Vec<Order>>;

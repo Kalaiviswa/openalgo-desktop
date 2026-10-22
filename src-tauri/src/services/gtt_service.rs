@@ -10,7 +10,7 @@ use super::core::{
     analyze_mode, analyzer_request, broker_handle, f, i, meta, mode_of, publish, s, safe_request,
     Reply,
 };
-use super::order_service::{route_to_pending, Route};
+use super::order_service::{fractional_refusal, route_to_pending, Route, FRACTIONAL_REFUSED};
 use crate::brokers::types::{GttOrder, GttRequest, GttTriggerType, QuoteKey};
 use crate::error::AppError;
 use crate::events::{Event, GttKind};
@@ -26,9 +26,17 @@ fn opt_dec(v: &Value, k: &str) -> Option<rust_decimal::Decimal> {
         .map(dec_from_f64)
 }
 
+// No GTT carries a fractional size: the sandbox's and every broker's GTT
+// take whole units (Delta, the CRYPTO venue, has none). A fractional CRYPTO
+// quantity is refused, as `placeorder` refuses it where it cannot be
+// carried, never truncated to a GTT for 0.
+
 /// The sandbox request for a loaded GTT body.
-pub fn sandbox_gtt(req: &Value) -> crate::sandbox::GttRequest {
-    crate::sandbox::GttRequest {
+pub fn sandbox_gtt(req: &Value) -> Result<crate::sandbox::GttRequest, Reply> {
+    if let Some(refused) = fractional_refusal(req) {
+        return Err(refused);
+    }
+    Ok(crate::sandbox::GttRequest {
         trigger_type: s(req, "trigger_type"),
         symbol: s(req, "symbol"),
         exchange: s(req, "exchange"),
@@ -49,11 +57,14 @@ pub fn sandbox_gtt(req: &Value) -> crate::sandbox::GttRequest {
             .get("expires_at")
             .and_then(Value::as_str)
             .map(str::to_string),
-    }
+    })
 }
 
 /// The broker request for a loaded GTT body.
 pub fn broker_gtt(req: &Value) -> Result<GttRequest, AppError> {
+    if fractional_refusal(req).is_some() {
+        return Err(AppError::Validation(FRACTIONAL_REFUSED.into()));
+    }
     let parse = |k: &str| AppError::Validation(format!("Invalid {}", k));
     Ok(GttRequest {
         key: QuoteKey::new(s(req, "exchange"), s(req, "symbol")),
@@ -141,9 +152,12 @@ pub async fn place_gtt_with(ctx: &AppState, req: &Value, route: Route) -> Reply 
         Err(r) => return r,
     };
     if analyze {
-        let reply = match ctx.sandbox.place_gtt(sandbox_gtt(req)).await {
-            Ok(r) => Reply::from_ser(&r),
-            Err(e) => Reply::sandbox(&e),
+        let reply = match sandbox_gtt(req) {
+            Ok(g) => match ctx.sandbox.place_gtt(g).await {
+                Ok(r) => Reply::from_ser(&r),
+                Err(e) => Reply::sandbox(&e),
+            },
+            Err(refused) => refused,
         };
         let id = s(&reply.body, "trigger_id");
         let kind = if reply.is_success() {
@@ -222,9 +236,12 @@ pub async fn modify_gtt_with(ctx: &AppState, req: &Value, route: Route) -> Reply
         return reply;
     }
     if analyze {
-        let reply = match ctx.sandbox.modify_gtt(&trigger_id, sandbox_gtt(req)).await {
-            Ok(r) => Reply::from_ser(&r),
-            Err(e) => Reply::sandbox(&e),
+        let reply = match sandbox_gtt(req) {
+            Ok(g) => match ctx.sandbox.modify_gtt(&trigger_id, g).await {
+                Ok(r) => Reply::from_ser(&r),
+                Err(e) => Reply::sandbox(&e),
+            },
+            Err(refused) => refused,
         };
         let kind = if reply.is_success() {
             GttKind::Modified
@@ -455,11 +472,33 @@ mod tests {
             "product": "CNC", "quantity": 2, "pricetype": "LIMIT", "price": 900.0,
             "triggerprice_sl": 850.0, "stoploss": 849.0, "triggerprice_tg": 1000.0, "target": 1001.0,
             "trigger_price": 1000.0, "strategy": "s"});
-        let g = sandbox_gtt(&req);
+        let g = sandbox_gtt(&req).unwrap();
         assert_eq!(g.action, "SELL");
         assert_eq!(g.quantity, 2);
         let b = broker_gtt(&req).unwrap();
         assert_eq!(b.trigger_type, GttTriggerType::Oco);
         assert_eq!(b.target, 1001.0);
+    }
+
+    /// A fractional CRYPTO quantity is refused by both conversions, never
+    /// truncated to a GTT for 0.
+    #[test]
+    fn a_fractional_quantity_makes_no_gtt() {
+        let req = json!({"trigger_type": "SINGLE", "symbol": "BTCUSDFUT", "exchange": "CRYPTO",
+            "action": "BUY", "product": "NRML", "quantity": 0.5, "pricetype": "LIMIT",
+            "price": 60000.0, "triggerprice_sl": 59000.0, "trigger_price": 59000.0});
+        let refused = sandbox_gtt(&req).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.message()),
+            (400, FRACTIONAL_REFUSED.to_string())
+        );
+        match broker_gtt(&req) {
+            Err(AppError::Validation(m)) => assert_eq!(m, FRACTIONAL_REFUSED),
+            other => panic!("{:?}", other.map(|g| g.quantity)),
+        }
+        let whole = json!({"exchange": "CRYPTO", "quantity": 2.0, "action": "BUY",
+            "product": "NRML", "pricetype": "LIMIT"});
+        assert_eq!(sandbox_gtt(&whole).unwrap().quantity, 2);
+        assert_eq!(broker_gtt(&whole).unwrap().quantity, 2);
     }
 }

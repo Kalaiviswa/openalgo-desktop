@@ -949,6 +949,14 @@ and add each new one here.
   the trading calendar to every book. CRYPTO has no square-off time, so no
   MIS sweep and no leftover-MIS settlement at the 03:00 boundary touches a
   crypto position.
+- **A size is never truncated.** A fractional smart-order `position_size`
+  or GTT quantity is refused wherever it cannot be carried exactly: in the
+  sandbox, on every venue but CRYPTO, and for any GTT
+  (`order_service::smart`, `gtt_service`, `schemas::coerce_smart_order`).
+  Only a live CRYPTO smart order carries a fraction, decided and sent in
+  exact decimals. The web truncates (`int(position_size)`,
+  `int(quantity)`), so a target of 0.5 closed the position and a 0.5 GTT
+  became one for 0 with nothing blocked.
 
 ### Symbol master and the option tools
 

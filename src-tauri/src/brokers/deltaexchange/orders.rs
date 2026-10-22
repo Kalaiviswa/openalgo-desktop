@@ -311,14 +311,14 @@ pub async fn get_positions_exact(
 }
 
 /// Net size of one instrument, matched on the broker symbol whatever the
-/// product (web `get_open_position`: Delta has no product types). Whole
-/// units; a fractional spot balance is truncated.
-pub async fn get_open_position(
+/// product (web `get_open_position`: Delta has no product types), exact: a
+/// spot balance can be fractional. Read strictly, for a decision to trade.
+pub async fn get_open_position_exact(
     b: &DeltaBroker,
     auth: &AuthToken,
     symbol: &str,
     exchange: Exchange,
-) -> Result<i64> {
+) -> Result<rust_decimal::Decimal> {
     let br = b
         .resolver()
         .br_symbol(symbol, exchange.as_str())
@@ -327,11 +327,21 @@ pub async fn get_open_position(
     Ok(raw
         .iter()
         .find(|p| p.product_symbol == br)
-        .map(|p| {
-            use rust_decimal::prelude::ToPrimitive;
-            p.size.trunc().to_i64().unwrap_or(0)
-        })
-        .unwrap_or(0))
+        .map(|p| p.size)
+        .unwrap_or_default())
+}
+
+/// [`get_open_position_exact`] in whole units; a fractional spot balance is
+/// truncated.
+pub async fn get_open_position(
+    b: &DeltaBroker,
+    auth: &AuthToken,
+    symbol: &str,
+    exchange: Exchange,
+) -> Result<i64> {
+    use rust_decimal::prelude::ToPrimitive;
+    let size = get_open_position_exact(b, auth, symbol, exchange).await?;
+    Ok(size.trunc().to_i64().unwrap_or(0))
 }
 
 /// Square off every derivative position and spot balance with a market
