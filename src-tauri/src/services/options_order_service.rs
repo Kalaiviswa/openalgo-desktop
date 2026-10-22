@@ -2,13 +2,15 @@
 //! `options_multiorder_service.py`): resolve the contract from an offset,
 //! then place through the order service (sandbox or live, decided once).
 
-use super::batch_order_service::{buy_then_sell, split_chunks, MAX_SPLIT_ORDERS, SPLIT_PAUSE};
+use super::batch_order_service::{
+    buy_then_sell, split_chunks, SplitRows, MAX_SPLIT_ORDERS, SPLIT_PAUSE,
+};
 use super::core::{
     analyzer_request, broker_handle, i, meta, mode_of, num, publish, s, safe_request, BrokerHandle,
     Reply,
 };
 use super::options_service::{resolve_option, OptionPick, ResolvedOption};
-use super::order_service::{place_order_with, route_to_pending, Route};
+use super::order_service::{place_order_with, route_to_pending, uncertain_legs, Route};
 use crate::events::Event;
 use crate::state::AppState;
 use serde_json::{json, Map, Value};
@@ -32,7 +34,9 @@ fn order_body(req: &Value, leg: &Value, opt: &ResolvedOption, quantity: i64) -> 
     })
 }
 
-/// Split one leg into chunks and place them one after another.
+/// Split one leg into chunks and place them one after another. After a
+/// chunk with no definite answer the rest are held back and answered as
+/// `splitorder` answers them (LOG-08 P1-5; the web keeps sending).
 async fn place_split(
     ctx: &AppState,
     route: Route,
@@ -41,24 +45,21 @@ async fn place_split(
     opt: &ResolvedOption,
     quantity: i64,
     size: i64,
-) -> Vec<Value> {
+) -> SplitRows {
     let chunks = split_chunks(quantity, size);
-    let mut out = Vec::with_capacity(chunks.len());
+    let mut rows = SplitRows::new(chunks.len());
     for (k, qty) in chunks.iter().enumerate() {
+        let order_num = k + 1;
+        if rows.hold(order_num, *qty) {
+            continue;
+        }
         if k > 0 {
             tokio::time::sleep(SPLIT_PAUSE).await;
         }
         let r = place_order_with(ctx, &order_body(req, leg, opt, *qty), route, false).await;
-        if r.is_success() {
-            out.push(
-                json!({"order_num": k + 1, "quantity": qty, "status": "success",
-                "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null)}),
-            );
-        } else {
-            out.push(json!({"order_num": k + 1, "quantity": qty, "status": "error", "message": r.message()}));
-        }
+        rows.record(order_num, *qty, &r);
     }
-    out
+    rows
 }
 
 /// `optionsorder`.
@@ -101,19 +102,24 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
                 ),
             );
         }
-        let results = place_split(ctx, route, req, req, &opt, quantity, splitsize).await;
-        let successful = results.iter().filter(|r| r["status"] == "success").count() as i64;
-        let total = results.len() as i64;
+        let split = place_split(ctx, route, req, req, &opt, quantity, splitsize).await;
+        let successful = split
+            .results
+            .iter()
+            .filter(|r| r["status"] == "success")
+            .count() as i64;
+        let total = split.results.len() as i64;
         let mut m = Map::new();
         m.insert("status".into(), json!("success"));
         common(&mut m);
         m.insert("total_quantity".into(), json!(quantity));
         m.insert("split_size".into(), json!(splitsize));
-        m.insert("results".into(), json!(results));
+        m.insert("results".into(), json!(split.results));
         if analyze {
             m.insert("mode".into(), json!("analyze"));
         }
-        let reply = Reply::ok(Value::Object(m));
+        let mut reply = Reply::ok(Value::Object(m));
+        reply.placement = uncertain_legs(&split.uncertain);
         publish(
             ctx,
             Event::OptionsCompleted {
@@ -293,7 +299,9 @@ impl MultiOrder<'_> {
                 "message": "Split orders would exceed maximum limit of 100 per leg",
             });
         }
-        let split = place_split(self.ctx, self.route, self.req, leg, opt, qty, size).await;
+        let split = place_split(self.ctx, self.route, self.req, leg, opt, qty, size)
+            .await
+            .results;
         let any_ok = split.iter().any(|r| r["status"] == "success");
         json!({
             "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,
