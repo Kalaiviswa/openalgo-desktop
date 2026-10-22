@@ -1110,6 +1110,13 @@ and add each new one here.
   closed them: parse each input once into a typed value, check limits on that
   value with checked arithmetic, and reserve one shared budget before any
   work starts.
+- **Count before allocating.** A size from a request bounds nothing until
+  it is checked: a split counts its chunks with checked arithmetic and
+  refuses more than 100 before building any (`batch_order_service::
+  split_chunks`, PROD-TR-03: a schema-valid 2147483647 in chunks of 1 asked
+  for 16 GiB first). A test holds such a path to a cap on its largest
+  allocation (`tests/it/alloc_support`), so a regression fails the test
+  instead of swapping the machine.
 - A route is public only if it is in the reviewed list in `server/tests.rs`,
   and a public route that changes state needs its own credential. A CSRF token
   is not one: `GET /auth/csrf-token` hands it to anyone.

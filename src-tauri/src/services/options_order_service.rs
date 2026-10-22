@@ -3,7 +3,7 @@
 //! then place through the order service (sandbox or live, decided once).
 
 use super::batch_order_service::{
-    buy_then_sell, split_chunks, SplitRows, MAX_SPLIT_ORDERS, SPLIT_PAUSE,
+    buy_then_sell, split_chunks, too_many_orders, SplitRows, SPLIT_PAUSE,
 };
 use super::core::{
     analyzer_request, broker_handle, i, meta, mode_of, num, publish, s, safe_request, BrokerHandle,
@@ -34,19 +34,17 @@ fn order_body(req: &Value, leg: &Value, opt: &ResolvedOption, quantity: i64) -> 
     })
 }
 
-/// Split one leg into chunks and place them one after another. After a
-/// chunk with no definite answer the rest are held back and answered as
-/// `splitorder` answers them (LOG-08 P1-5; the web keeps sending).
+/// Place one leg's chunks one after another. After a chunk with no
+/// definite answer the rest are held back and answered as `splitorder`
+/// answers them (LOG-08 P1-5; the web keeps sending).
 async fn place_split(
     ctx: &AppState,
     route: Route,
     req: &Value,
     leg: &Value,
     opt: &ResolvedOption,
-    quantity: i64,
-    size: i64,
+    chunks: &[i64],
 ) -> SplitRows {
-    let chunks = split_chunks(quantity, size);
     let mut rows = SplitRows::new(chunks.len());
     for (k, qty) in chunks.iter().enumerate() {
         let order_num = k + 1;
@@ -93,16 +91,10 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         );
     };
     if splitsize > 0 {
-        if split_chunks(quantity, splitsize).len() as i64 > MAX_SPLIT_ORDERS {
-            return Reply::error(
-                400,
-                format!(
-                    "Total number of orders would exceed maximum limit of {}",
-                    MAX_SPLIT_ORDERS
-                ),
-            );
-        }
-        let split = place_split(ctx, route, req, req, &opt, quantity, splitsize).await;
+        let Some(chunks) = split_chunks(quantity, splitsize) else {
+            return Reply::error(400, too_many_orders());
+        };
+        let split = place_split(ctx, route, req, req, &opt, &chunks).await;
         let successful = split
             .results
             .iter()
@@ -292,14 +284,14 @@ impl MultiOrder<'_> {
         let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
         let qty = i(leg, "quantity");
         let size = i(leg, "splitsize");
-        if split_chunks(qty, size).len() as i64 > MAX_SPLIT_ORDERS {
+        let Some(chunks) = split_chunks(qty, size) else {
             return json!({
                 "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange, "offset": offset,
                 "strike": null, "option_type": ot, "action": action, "status": "error",
                 "message": "Split orders would exceed maximum limit of 100 per leg",
             });
-        }
-        let split = place_split(self.ctx, self.route, self.req, leg, opt, qty, size)
+        };
+        let split = place_split(self.ctx, self.route, self.req, leg, opt, &chunks)
             .await
             .results;
         let any_ok = split.iter().any(|r| r["status"] == "success");

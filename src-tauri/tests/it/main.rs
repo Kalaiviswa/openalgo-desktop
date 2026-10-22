@@ -161,6 +161,7 @@ impl IdleLog {
     }
 }
 
+mod alloc_support;
 mod api_v1_support;
 mod broker_support;
 mod feed_support;
@@ -224,6 +225,7 @@ mod mcp_transport;
 mod messaging;
 mod order_identity;
 mod order_quantity_safety;
+mod order_split_bounds;
 mod perf;
 mod polled_reads;
 mod sandbox_concurrency;
