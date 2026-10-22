@@ -128,23 +128,38 @@ pub fn coerce_quantity(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
     if CRYPTO_EXCHANGES.contains(&exchange) {
         return Ok(());
     }
-    if let Some(q) = m.get("quantity").and_then(Value::as_f64) {
-        if q.fract() != 0.0 {
-            return Err(FieldErrors::single(
-                "quantity",
-                format!(
-                    "Fractional quantity ({}) is not allowed for non-crypto exchanges.",
-                    py_float_repr(q)
-                ),
-            ));
-        }
-        if q > MAX_BROKER_QUANTITY as f64 {
-            return Err(FieldErrors::single("quantity", QUANTITY_TOO_LARGE));
-        }
+    let quantity = m.get("quantity").and_then(Value::as_f64);
+    if let Some(q) = quantity.filter(|q| q.fract() != 0.0) {
+        return Err(FieldErrors::single(
+            "quantity",
+            format!(
+                "Fractional quantity ({}) is not allowed for non-crypto exchanges.",
+                py_float_repr(q)
+            ),
+        ));
+    }
+    cap_quantities(m)?;
+    if let Some(q) = quantity {
         m.insert("quantity".into(), json!(q as i64));
     }
-    let disclosed = m.get("disclosed_quantity").and_then(Value::as_f64);
-    if disclosed.is_some_and(|d| d > MAX_BROKER_QUANTITY as f64) {
+    Ok(())
+}
+
+/// The cap of [`coerce_quantity`] (API-02): a quantity or disclosed
+/// quantity above [`MAX_BROKER_QUANTITY`] is refused. The options schemas
+/// apply it on every exchange: their quantities are whole numbers, which
+/// the order path would refuse above the cap anyway, after resolving the
+/// contract.
+fn cap_quantities(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
+    let over = |k: &str| {
+        m.get(k)
+            .and_then(Value::as_f64)
+            .is_some_and(|q| q > MAX_BROKER_QUANTITY as f64)
+    };
+    if over("quantity") {
+        return Err(FieldErrors::single("quantity", QUANTITY_TOO_LARGE));
+    }
+    if over("disclosed_quantity") {
         return Err(FieldErrors::single(
             "disclosed_quantity",
             "Disclosed quantity is larger than any exchange accepts.",
@@ -384,6 +399,7 @@ schema!(
         trigger_price(),
         disclosed_quantity(),
     ])
+    .post_load(cap_quantities)
 );
 
 schema!(
@@ -406,6 +422,7 @@ schema!(
         trigger_price(),
         disclosed_quantity(),
     ])
+    .post_load(cap_quantities)
 );
 
 schema!(
@@ -560,21 +577,8 @@ pub fn gtt_post_process(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
         m.insert("target".into(), Value::Null);
         m.insert("trigger_price".into(), json!(resolved));
     }
-    let exchange = m.get("exchange").and_then(Value::as_str).unwrap_or("");
-    if !exchange.is_empty() && !CRYPTO_EXCHANGES.contains(&exchange) {
-        if let Some(q) = m.get("quantity").and_then(Value::as_f64) {
-            if q.fract() != 0.0 {
-                return Err(FieldErrors::single(
-                    "quantity",
-                    format!(
-                        "Fractional quantity ({}) is not allowed for non-crypto exchanges.",
-                        py_float_repr(q)
-                    ),
-                ));
-            }
-            m.insert("quantity".into(), json!(q as i64));
-        }
-    }
+    // placeorder's rule for the quantity: whole outside CRYPTO, and capped.
+    coerce_quantity(m)?;
     if let Some(a) = m.get("action").and_then(Value::as_str) {
         let up = a.to_ascii_uppercase();
         m.insert("action".into(), json!(up));
@@ -1022,6 +1026,59 @@ mod tests {
             smart_order().load(&crypto).unwrap()["position_size"],
             json!(0.5)
         );
+    }
+
+    /// API-02 in the options and GTT schemas: placeorder's cap and error.
+    #[test]
+    fn options_and_gtt_quantities_are_capped() {
+        let big = json!(2_147_483_648u64);
+        let options = json!({"apikey": "k", "strategy": "s", "underlying": "NIFTY",
+            "exchange": "NSE_INDEX", "offset": "ATM", "option_type": "CE", "action": "BUY",
+            "quantity": 65});
+        let with = |base: &Value, k: &str, v: &Value| {
+            let mut m = obj(base.clone());
+            m.insert(k.into(), v.clone());
+            m
+        };
+        let e = options_order()
+            .load(&with(&options, "quantity", &big))
+            .unwrap_err();
+        assert_eq!(e.to_json(), json!({"quantity": [QUANTITY_TOO_LARGE]}));
+        let e = options_order()
+            .load(&with(&options, "disclosed_quantity", &big))
+            .unwrap_err();
+        assert_eq!(
+            e.messages("disclosed_quantity"),
+            ["Disclosed quantity is larger than any exchange accepts."]
+        );
+        let leg = json!({"offset": "ATM", "option_type": "CE", "action": "BUY", "quantity": big});
+        let multi = json!({"apikey": "k", "strategy": "s", "underlying": "NIFTY",
+            "exchange": "NSE_INDEX", "legs": [leg]});
+        assert_eq!(
+            options_multi_order()
+                .load(&obj(multi))
+                .unwrap_err()
+                .to_json(),
+            json!({"legs": {"0": {"quantity": [QUANTITY_TOO_LARGE]}}})
+        );
+        let largest = json!(MAX_BROKER_QUANTITY);
+        assert!(options_order()
+            .load(&with(&options, "quantity", &largest))
+            .is_ok());
+
+        let gtt = json!({"apikey": "k", "strategy": "s", "trigger_type": "SINGLE",
+            "exchange": "NSE", "symbol": "SBIN", "action": "buy", "product": "CNC",
+            "quantity": 1, "price": 900, "triggerprice_sl": 905});
+        for schema in [place_gtt(), modify_gtt()] {
+            let mut m = with(&gtt, "quantity", &big);
+            m.insert("trigger_id".into(), json!("GTT-1"));
+            assert_eq!(
+                schema.load(&m).unwrap_err().to_python(),
+                "{'quantity': ['Quantity is larger than any exchange accepts.']}"
+            );
+        }
+        let ok = place_gtt().load(&with(&gtt, "quantity", &largest)).unwrap();
+        assert_eq!(ok["quantity"], largest);
     }
 
     #[test]
