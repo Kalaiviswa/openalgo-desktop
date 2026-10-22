@@ -82,6 +82,73 @@ pub async fn runtime_busy<F: std::future::Future>(fut: F) -> (F::Output, std::ti
     (out, busy)
 }
 
+/// Run `test` on a current-thread runtime, as `#[tokio::test]` does, that
+/// notes each time its thread goes idle and wakes, for
+/// [`IdleLog::longest_hold`].
+pub fn on_watched_runtime<F, Fut>(test: F) -> Fut::Output
+where
+    F: FnOnce(IdleLog) -> Fut,
+    Fut: std::future::Future,
+{
+    let log = IdleLog::default();
+    let (idle, woke) = (log.clone(), log.clone());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_park(move || idle.note(true))
+        .on_thread_unpark(move || woke.note(false))
+        .build()
+        .unwrap()
+        .block_on(test(log))
+}
+
+/// When the thread of an [`on_watched_runtime`] runtime went idle (`true`)
+/// and woke (`false`).
+#[derive(Clone, Default)]
+pub struct IdleLog(std::sync::Arc<parking_lot::Mutex<Vec<(std::time::Instant, bool)>>>);
+
+impl IdleLog {
+    fn note(&self, idle: bool) {
+        self.0.lock().push((std::time::Instant::now(), idle));
+    }
+
+    /// Run `fut` and return the longest the runtime thread ran meanwhile
+    /// without going idle: how long `fut`, or a task it started, held the
+    /// runtime at once. Unlike [`runtime_stall`], it leaves out the time an
+    /// idle thread waits for the operating system to run it again, which a
+    /// loaded runner stretches: a CI runner once left the 10 ms timer 374 ms
+    /// late while the requests it watched took 11.8 ms of polls in all.
+    pub async fn longest_hold<F: std::future::Future>(
+        &self,
+        fut: F,
+    ) -> (F::Output, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let out = fut.await;
+        let end = std::time::Instant::now();
+        let mut longest = std::time::Duration::ZERO;
+        // Running from `start`: this future is being polled.
+        let mut running_since = Some(start);
+        for &(at, idle) in self
+            .0
+            .lock()
+            .iter()
+            .filter(|(at, _)| (start..end).contains(at))
+        {
+            match (idle, running_since) {
+                (true, Some(since)) => {
+                    longest = longest.max(at - since);
+                    running_since = None;
+                }
+                (false, None) => running_since = Some(at),
+                _ => {}
+            }
+        }
+        if let Some(since) = running_since {
+            longest = longest.max(end - since);
+        }
+        (out, longest)
+    }
+}
+
 mod api_v1_support;
 mod broker_support;
 mod feed_support;

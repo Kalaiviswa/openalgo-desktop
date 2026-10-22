@@ -382,58 +382,77 @@ const REPORT_PAGES: &[&str] = &[
 /// in a debug build). Serializing the largest answers there (a week of
 /// samples, 10,000 analyzer requests) still held it for up to 0.46 s on a
 /// loaded machine, so they are serialized where they are read.
-#[tokio::test]
-async fn report_pages_over_a_large_log_do_not_hold_the_runtime() {
-    let (h, c, _) = signed_in();
-    seed_traffic(&h);
-    seed_order_logs(&h);
-    seed_health(&h);
-    seed_analyzer(&h);
-    let app = app(&h);
-    let all = REPORT_PAGES
-        .iter()
-        .chain(REPORT_PAGES)
-        .map(|p| fetch(&h, &app, &c, p));
-    let ((replies, busy), worst) =
-        crate::runtime_stall(crate::runtime_busy(futures_util::future::join_all(all))).await;
-    for (p, (s, body)) in REPORT_PAGES.iter().chain(REPORT_PAGES).zip(&replies) {
+///
+/// The hold is the longest the runtime thread ran without going idle. A
+/// 10 ms timer beside the pages ([`crate::runtime_stall`]) once ran 374 ms
+/// late on a CI runner while every page's polls took 11.8 ms in all: the
+/// runner had not run the idle thread, which no page can change.
+#[test]
+fn report_pages_over_a_large_log_do_not_hold_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let (h, c, _) = signed_in();
+        seed_traffic(&h);
+        seed_order_logs(&h);
+        seed_health(&h);
+        seed_analyzer(&h);
+        let app = app(&h);
+        let pages: Vec<&str> = REPORT_PAGES.iter().chain(REPORT_PAGES).copied().collect();
+        let each = pages
+            .iter()
+            .map(|p| crate::runtime_busy(fetch(&h, &app, &c, p)));
+        let (replies, held) = runtime
+            .longest_hold(futures_util::future::join_all(each))
+            .await;
+        for (p, ((s, body), _)) in pages.iter().zip(&replies) {
+            assert_eq!(
+                *s,
+                StatusCode::OK,
+                "{}: {}",
+                p,
+                String::from_utf8_lossy(body)
+            );
+        }
+        let body = |i: usize| &replies[i].0 .1;
+        let json = |i: usize| -> serde_json::Value { serde_json::from_slice(body(i)).unwrap() };
+        assert_eq!(json(0).as_array().unwrap().len(), 1000);
+        assert_eq!(json(1)["overall"]["total_requests"], TRAFFIC_ROWS);
+        assert_eq!(json(2)["logs"].as_array().unwrap().len(), 20);
+        assert!(json(3)["logs"].as_array().is_some_and(|l| !l.is_empty()));
+        assert!(json(4).as_array().unwrap().len() as i64 >= HEALTH_SAMPLES - 60);
+        assert!(json(5)["total_samples"].as_i64().unwrap() >= HEALTH_SAMPLES - 60);
+        let listed = json(6)["data"]["requests"].as_array().unwrap().len();
+        assert_eq!(listed as i64, ANALYZER_ROWS);
+        let csv = String::from_utf8_lossy(body(7)).into_owned();
         assert_eq!(
-            *s,
-            StatusCode::OK,
-            "{}: {}",
-            p,
-            String::from_utf8_lossy(body)
+            csv.lines().count() as i64,
+            ANALYZER_ROWS + 1,
+            "header and every request"
         );
-    }
-    let json = |i: usize| -> serde_json::Value { serde_json::from_slice(&replies[i].1).unwrap() };
-    assert_eq!(json(0).as_array().unwrap().len(), 1000);
-    assert_eq!(json(1)["overall"]["total_requests"], TRAFFIC_ROWS);
-    assert_eq!(json(2)["logs"].as_array().unwrap().len(), 20);
-    assert!(json(3)["logs"].as_array().is_some_and(|l| !l.is_empty()));
-    assert!(json(4).as_array().unwrap().len() as i64 >= HEALTH_SAMPLES - 60);
-    assert!(json(5)["total_samples"].as_i64().unwrap() >= HEALTH_SAMPLES - 60);
-    let listed = json(6)["data"]["requests"].as_array().unwrap().len();
-    assert_eq!(listed as i64, ANALYZER_ROWS);
-    let csv = String::from_utf8_lossy(&replies[7].1).into_owned();
-    assert_eq!(
-        csv.lines().count() as i64,
-        ANALYZER_ROWS + 1,
-        "header and every request"
-    );
-    eprintln!(
-        "report pages: the runtime was held for {:?} at most, busy {:?} in all",
-        worst, busy
-    );
-    assert!(
-        worst < Duration::from_millis(200),
-        "the runtime was held for {:?} at once",
-        worst
-    );
-    assert!(
-        busy < Duration::from_secs(1),
-        "the pages kept the runtime busy for {:?} in all",
-        busy
-    );
+        // Each page's polls on the runtime, for the next reader of a failure.
+        let busy: Duration = replies.iter().map(|r| r.1).sum();
+        let by_page: Vec<String> = pages
+            .iter()
+            .zip(&replies)
+            .map(|(p, r)| format!("{} {:?}", p, r.1))
+            .collect();
+        let by_page = by_page.join(", ");
+        eprintln!(
+            "report pages: the runtime was held for {:?} at most, busy {:?} in all ({})",
+            held, busy, by_page
+        );
+        assert!(
+            held < Duration::from_millis(200),
+            "the runtime was held for {:?} at once ({})",
+            held,
+            by_page
+        );
+        assert!(
+            busy < Duration::from_secs(1),
+            "the pages kept the runtime busy for {:?} in all ({})",
+            busy,
+            by_page
+        );
+    });
 }
 
 /// OBS-05: the Analyzer page's day statistics count every request of the

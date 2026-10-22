@@ -804,6 +804,15 @@ Every flaky test found so far was a race, not a slow machine:
   limit of 2048 threads per process, and r2d2's scheduled thread pool fails
   with WouldBlock. CI is not affected (nextest runs one process per test).
   Locally, run those modules with `--test-threads=2`, or use nextest.
+- A `runtime_stall` gap far above the measured work's own polls
+  (`runtime_busy`) is not that work: the report pages' test saw the timer
+  374 ms late on a macOS runner while all sixteen requests' polls took
+  11.8 ms, because the runner did not run the idle runtime thread again in
+  time. Instrument before blaming the code (each request's `runtime_busy`;
+  whether the thread was idle in the gap). Where the operating system is the
+  remainder, bound the test with `on_watched_runtime` and
+  `IdleLog::longest_hold`, the longest the runtime thread ran without going
+  idle, instead of raising the bound.
 
 ### Data and migrations
 
