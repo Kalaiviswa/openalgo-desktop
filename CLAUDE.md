@@ -1243,6 +1243,15 @@ and add each new one here.
   commit; logout, a password change or reset, a key rotation and a broker
   switch clear them. A new cache gets a race test and a row in the cache
   table of `docs/port/no-keychain.md`.
+- **Browser storage is a plain file on disk** (the WebView profile, or the
+  browser's for a dashboard opened in one). No secret goes into
+  `localStorage`, `sessionStorage`, IndexedDB or a zustand `persist` store:
+  1.0.0 kept the API key there, as the web does, beside a database in which
+  every other secret is encrypted. The key now lives in memory only
+  (`authStore` `partialize`) and AuthSync fetches it after each start. To
+  drop a field from a persisted store, bump its `version` with a `migrate`:
+  zustand rewrites storage on load only after a migration, so with
+  `partialize` alone the old value stays on disk until the next change.
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
 

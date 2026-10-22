@@ -118,6 +118,9 @@ export default function ApiKey() {
 
       if (data.api_key) {
         setApiKey(data.api_key)
+        // Desktop: the other pages read the key from memory (authStore), and
+        // the old one stops working now, so they move to the new one at once.
+        useAuthStore.getState().setApiKey(data.api_key)
         setHasApiKey(true)
         setShowApiKey(true)
         showToast.success('API key generated successfully', 'system')

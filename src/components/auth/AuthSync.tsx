@@ -29,6 +29,7 @@ export function AuthSync({ children }: AuthSyncProps) {
   const { setUser, setApiKey, logout } = useAuthStore()
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const apiKey = useAuthStore((s) => s.apiKey)
+  const apiKeyChecked = useAuthStore((s) => s.apiKeyChecked)
   const { fetchCapabilities, clearCapabilities } = useBrokerStore()
   const { setActiveSessionCount } = useSessionStore()
   const { syncAppMode } = useThemeStore()
@@ -89,6 +90,13 @@ export function AuthSync({ children }: AuthSyncProps) {
       // On error, don't change auth state - let existing state persist
     } finally {
       syncing.current = false
+      // Desktop: a page held back for the key (below) goes ahead now, with
+      // the key or without it: the trader may not have generated one yet, or
+      // the server could not be asked. A logout starts the wait again.
+      const auth = useAuthStore.getState()
+      if (auth.isAuthenticated && !auth.apiKeyChecked) {
+        useAuthStore.setState({ apiKeyChecked: true })
+      }
       setIsChecking(false)
     }
   }, [
@@ -119,8 +127,15 @@ export function AuthSync({ children }: AuthSyncProps) {
     syncSession()
   }, [isChecking, isAuthenticated, apiKey, pathname, syncSession])
 
+  // Desktop: the API key is kept in memory only (authStore), so after a
+  // sign-in that did not reload the page it is not there yet. A page that
+  // needs a broker waits for the check above, so the books, quotes and order
+  // forms never start without a key the trader has (an empty book, a
+  // "generate an API key" notice).
+  const awaitingKey = isAuthenticated && !apiKey && !apiKeyChecked && !beforeBroker(pathname)
+
   // Show nothing while checking - prevents flash of wrong content
-  if (isChecking) {
+  if (isChecking || awaitingKey) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>

@@ -11,8 +11,15 @@ interface User {
 
 interface AuthStore {
   user: User | null
+  /** Desktop: in memory only, never in storage (see `persist` below). */
   apiKey: string | null
   isAuthenticated: boolean
+  /**
+   * Desktop: whether AuthSync has asked the server for the API key since the
+   * last logout. Until it has, AuthSync holds back the pages that read the
+   * key, so none of them starts without a key the trader has. In memory only.
+   */
+  apiKeyChecked: boolean
 
   setUser: (user: User) => void
   setApiKey: (apiKey: string | null) => void
@@ -27,6 +34,7 @@ export const useAuthStore = create<AuthStore>()(
       user: null,
       apiKey: null,
       isAuthenticated: false,
+      apiKeyChecked: false,
 
       setUser: (user) => set({ user, isAuthenticated: user.isLoggedIn }),
 
@@ -43,7 +51,7 @@ export const useAuthStore = create<AuthStore>()(
       },
 
       logout: () => {
-        set({ user: null, isAuthenticated: false, apiKey: null })
+        set({ user: null, isAuthenticated: false, apiKey: null, apiKeyChecked: false })
         // The broker's capabilities belong to the session that just ended.
         useBrokerStore.getState().clearCapabilities()
       },
@@ -90,6 +98,18 @@ export const useAuthStore = create<AuthStore>()(
     }),
     {
       name: 'openalgo-auth',
+      // Desktop: the API key is never written here. This storage is a plain
+      // file in the WebView profile, while every other secret is encrypted at
+      // rest with the login password (KEY-01), so the key stays in memory and
+      // AuthSync asks the server for it after each start.
+      partialize: (state) => ({ user: state.user, isAuthenticated: state.isAuthenticated }),
+      version: 1,
+      // Version 0 (1.0.0) stored the key. A migration makes zustand write the
+      // store back at once, without it.
+      migrate: (stored) => {
+        const { user = null, isAuthenticated = false } = (stored ?? {}) as Partial<AuthStore>
+        return { user, isAuthenticated }
+      },
     }
   )
 )

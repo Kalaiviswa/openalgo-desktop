@@ -4,8 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAuthStore } from '@/stores/authStore'
 import { AuthSync, beforeBroker } from './AuthSync'
 
-/** Answers for /auth/session-status, in order; other URLs get a bare success. */
-let statusAnswers: Array<Record<string, unknown>> = []
+/**
+ * Answers for /auth/session-status, in order; other URLs get a bare success.
+ * A promise answers when it settles; one that rejects is a server that could
+ * not be reached.
+ */
+let statusAnswers: Array<Record<string, unknown> | Promise<Record<string, unknown>>> = []
 let statusCalls = 0
 
 function json(body: unknown) {
@@ -23,12 +27,28 @@ function Navigator() {
   return null
 }
 
+/** The key each render of the page saw, as the books, quotes and order pages read it. */
+let keysSeen: Array<string | null> = []
+function Page() {
+  keysSeen.push(useAuthStore((s) => s.apiKey))
+  return <div>page</div>
+}
+
+/** An answer held until the test releases it. */
+function held() {
+  let release!: (body: Record<string, unknown>) => void
+  const answer = new Promise<Record<string, unknown>>((resolve) => {
+    release = resolve
+  })
+  return { answer, release }
+}
+
 function renderAt(path: string) {
   render(
     <MemoryRouter initialEntries={[path]}>
       <AuthSync>
         <Navigator />
-        <div>page</div>
+        <Page />
       </AuthSync>
     </MemoryRouter>
   )
@@ -48,14 +68,20 @@ describe('AuthSync', () => {
   beforeEach(() => {
     statusAnswers = []
     statusCalls = 0
-    useAuthStore.setState({ user: null, apiKey: null, isAuthenticated: false })
+    keysSeen = []
+    useAuthStore.setState({
+      user: null,
+      apiKey: null,
+      isAuthenticated: false,
+      apiKeyChecked: false,
+    })
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input)
         if (url.includes('/auth/session-status')) {
           statusCalls += 1
-          return json(statusAnswers.shift() ?? NOT_SIGNED_IN)
+          return Promise.resolve(statusAnswers.shift() ?? NOT_SIGNED_IN).then(json)
         }
         return json({ status: 'success', data: {} })
       })
@@ -98,6 +124,86 @@ describe('AuthSync', () => {
     })
     expect(statusCalls).toBe(1)
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
+  })
+
+  // The key is kept in memory only, so after a sign-in it is not there until
+  // the check answers. A page that reads it must not start without it.
+  it('holds a page back until the API key is in memory', async () => {
+    const status = held()
+    statusAnswers.push(NOT_SIGNED_IN, status.answer)
+    renderAt('/login')
+    await screen.findByText('page')
+
+    keysSeen = []
+    act(() => {
+      useAuthStore.getState().login('trader', 'fyers')
+      navigateTo('/positions')
+    })
+    expect(screen.queryByText('page')).toBeNull()
+
+    await act(async () => status.release(SIGNED_IN_WITH_BROKER))
+    await screen.findByText('page')
+    expect(keysSeen.length).toBeGreaterThan(0)
+    expect(keysSeen.every((key) => key === 'KEY-1')).toBe(true)
+  })
+
+  it('lets the page through when the trader has no API key yet', async () => {
+    statusAnswers.push(NOT_SIGNED_IN, { ...SIGNED_IN_WITH_BROKER, api_key: null })
+    renderAt('/login')
+    await screen.findByText('page')
+
+    act(() => {
+      useAuthStore.getState().login('trader', 'fyers')
+      navigateTo('/positions')
+    })
+    await screen.findByText('page')
+    expect(useAuthStore.getState().apiKey).toBeNull()
+
+    // Not held back again on the next page; the check runs behind it.
+    act(() => navigateTo('/orderbook'))
+    expect(screen.getByText('page')).toBeInTheDocument()
+  })
+
+  it('lets the page through when the server cannot be asked', async () => {
+    const offline = Promise.reject(new Error('offline'))
+    offline.catch(() => {}) // Read by the stubbed fetch later, not unhandled.
+    statusAnswers.push(NOT_SIGNED_IN, offline)
+    renderAt('/login')
+    await screen.findByText('page')
+
+    act(() => {
+      useAuthStore.getState().login('trader', 'fyers')
+      navigateTo('/positions')
+    })
+    await screen.findByText('page')
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+  })
+
+  it('waits for the key again after a logout and a new sign-in', async () => {
+    const status = held()
+    statusAnswers.push(NOT_SIGNED_IN, { ...SIGNED_IN_WITH_BROKER, api_key: null }, status.answer)
+    renderAt('/login')
+    await screen.findByText('page')
+    act(() => {
+      useAuthStore.getState().login('trader', 'fyers')
+      navigateTo('/positions')
+    })
+    await screen.findByText('page')
+
+    act(() => {
+      useAuthStore.getState().logout()
+      navigateTo('/login')
+    })
+    keysSeen = []
+    act(() => {
+      useAuthStore.getState().login('trader', 'fyers')
+      navigateTo('/holdings')
+    })
+    expect(screen.queryByText('page')).toBeNull()
+
+    await act(async () => status.release(SIGNED_IN_WITH_BROKER))
+    await screen.findByText('page')
+    expect(keysSeen.every((key) => key === 'KEY-1')).toBe(true)
   })
 
   it('stops checking once the key is there', async () => {
