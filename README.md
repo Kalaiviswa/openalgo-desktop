@@ -1,45 +1,35 @@
-# OpenAlgo Desktop
+# OpenAlgo Desktop - Open Source Algorithmic Trading on Your Own Computer
 
 <div align="center">
 
 [![OpenAlgo Desktop downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmarketcalls%2Fopenalgo-desktop%2Fstats%2Fbadges%2Fdownloads.json)](https://github.com/marketcalls/openalgo-desktop/tree/stats)
 [![OpenAlgo Desktop downloads per month](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmarketcalls%2Fopenalgo-desktop%2Fstats%2Fbadges%2Fdownloads-month.json)](https://github.com/marketcalls/openalgo-desktop/tree/stats)
-[![GitHub Stars](https://img.shields.io/github/stars/marketcalls/openalgo?style=social)](https://github.com/marketcalls/openalgo)
 [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/openalgoHQ)](https://twitter.com/openalgoHQ)
-[![YouTube Channel Subscribers](https://img.shields.io/youtube/channel/subscribers/UCw7eVneIEyiTApy4RtxrJsQ)](https://www.youtube.com/@openalgo)
+[![YouTube: Subscribe](https://img.shields.io/badge/YouTube-Subscribe-FF0000)](https://www.youtube.com/@openalgo)
 [![Discord](https://img.shields.io/discord/1219847221055455263)](https://discord.com/invite/UPh7QPsNhP)
-
-**OpenAlgo on your own computer. Install, sign in, connect your broker, trade.**
 
 </div>
 
-OpenAlgo Desktop is a single-user desktop version of
+## What is OpenAlgo Desktop?
+
+**OpenAlgo on your own computer. Install, sign in, connect your broker, trade.**
+
+OpenAlgo Desktop is a free, open source, single-user desktop version of
 [OpenAlgo web](https://github.com/marketcalls/openalgo). It runs on Windows,
 macOS and Linux (x64 or ARM64), with the same screens, the same API and the
-same market data feed as the web version. There is no server to set up, no Python to
-install and no `.env` file: every setting and credential is entered inside the
-app, and secrets are kept encrypted with a key locked by your OpenAlgo password.
+same market data feed as the web version, and connects to all **37 brokers**
+of OpenAlgo web, Delta Exchange for crypto among them. There is no server to
+set up, no Python to install and no `.env` file: every setting and credential
+is entered inside the app, and secrets are kept encrypted with a key locked by
+your OpenAlgo password.
 
-## Contents
+Everything runs on your computer, in one app you open like any other: the
+dashboard, the REST API, the market data feed, the strategy module, the
+charting and scalping terminals, the options tools, sandbox mode (analyzer
+mode), and the Telegram, WhatsApp and MCP connections. It is built with
+Tauri 2 and a Rust backend around the OpenAlgo React interface.
 
-- [Works with everything that works with OpenAlgo web](#works-with-everything-that-works-with-openalgo-web)
-- [Supported systems](#supported-systems)
-- [Download and install](#download-and-install)
-- [Opening the app the first time (unsigned installers)](#opening-the-app-the-first-time-unsigned-installers)
-- [Running the app](#running-the-app)
-- [First run](#first-run)
-- [Connecting your broker](#connecting-your-broker)
-- [Sandbox mode (analyzer mode)](#sandbox-mode-analyzer-mode)
-- [Ports](#ports)
-- [Where your data lives, and backups](#where-your-data-lives-and-backups)
-- [Updating OpenAlgo Desktop](#updating-openalgo-desktop)
-- [Supported brokers](#supported-brokers)
-- [What is included, and what is not](#what-is-included-and-what-is-not)
-- [Guides](#guides)
-- [Running from source (developers)](#running-from-source-developers)
-- [License](#license)
-
-## Works with everything that works with OpenAlgo web
+### Works with everything that works with OpenAlgo web
 
 OpenAlgo Desktop listens on the same addresses as OpenAlgo web:
 
@@ -68,6 +58,69 @@ print(client.funds())
 
 Moving over from OpenAlgo web? See
 [Moving from OpenAlgo web](docs/user/moving-from-openalgo-web.md).
+
+## Ways to Trade with OpenAlgo Desktop
+
+| Surface | Route | Who it's for |
+| --- | --- | --- |
+| **Unified Broker API** | `/api/v1/` | External platforms and your own code: TradingView, Amibroker, Chartink, GoCharting, Excel, the Python SDK and the other official SDKs, and AI clients over MCP. One contract across 37 brokers, answering exactly as OpenAlgo web does. |
+| **Strategy Module and RMS** | `/strategy` | Traders who run multi-leg options strategies, or trade TradingView and GoCharting alerts one signal at a time, with stop, target and trailing rules decided by one risk engine. |
+| **Charting Terminal and OpenScript** | `/trading` | Traders who trade from the chart: a full-screen terminal with an order dock, custom indicators, and OpenScript studies and strategies that are backtested and run live on the same engine. |
+| **Scalping Terminal** | `/scalping` | Fast intraday trades in options, futures and equity from the keyboard, with stop-loss, target and trailing protection that OpenAlgo watches for you. |
+| **Options Trading Suite** | `/tools` | Options traders: sixteen tools (Strategy Builder with payoff diagrams and live Greeks, Strategy Portfolio, Option Chain, Option Greeks, OI Tracker, OI Range, Max Pain, Straddle Chart, Straddle PnL, Vol Surface, GEX Dashboard, Strike Profile, Gamma Density, IV Smile, OI Profile, Arbitrage). Each one uses your connected broker's data. |
+
+Every one of them can run in sandbox mode (analyzer mode) first: while it is
+on, every order from the app, the API, webhooks and MCP clients goes to the
+sandbox instead of your broker. Alerts, P&L tracking, latency and traffic
+monitoring and the MCP server use the same services as the screens.
+
+## Quick Links
+
+- **Download**: [GitHub Releases](https://github.com/marketcalls/openalgo-desktop/releases)
+- **Documentation map**: [docs/INDEX.md](docs/INDEX.md), every guide, the API reference and the developer docs
+- **User guide**: [docs/userguide/README.md](docs/userguide/README.md)
+- **API documentation**: [docs/api/README.md](docs/api/README.md)
+- **Moving from OpenAlgo web**: [docs/user/moving-from-openalgo-web.md](docs/user/moving-from-openalgo-web.md)
+- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
+
+## Download and install
+
+Download the installer for your computer from the
+[GitHub Releases page](https://github.com/marketcalls/openalgo-desktop/releases).
+Each release lists a `SHA256SUMS.txt` file so you can check a download.
+
+| Computer | File to download | How to install |
+| --- | --- | --- |
+| Windows 10 or 11 (64-bit) | ends in `_x64-setup.exe` | Run it. It installs for your user only and does not need administrator rights. |
+| Mac with Apple Silicon (M1 and later) | ends in `_aarch64.dmg` | Open it and drag OpenAlgo Desktop to Applications. |
+| Mac with an Intel processor | ends in `_x64.dmg` | Open it and drag OpenAlgo Desktop to Applications. |
+| Linux, 64-bit PC (Ubuntu, Debian, Mint) | ends in `_amd64.deb` or `_amd64.AppImage` | `.deb`: `sudo apt install ./<file>.deb`. AppImage: see below. |
+| Linux, 64-bit ARM (ARM64) | ends in `_arm64.deb` or `_aarch64.AppImage` | `.deb`: `sudo apt install ./<file>.deb`. AppImage: see below. |
+
+Not sure which Mac you have? Open the Apple menu, then About This Mac. "Chip:
+Apple M..." means Apple Silicon; "Processor: Intel" means Intel.
+
+OpenAlgo Desktop does not support Raspberry Pi. On a Pi, run
+[OpenAlgo web](https://github.com/marketcalls/openalgo) instead.
+
+To run an AppImage on Linux (x64 or ARM64), make it executable and start it:
+
+```bash
+chmod +x OpenAlgo*.AppImage
+./OpenAlgo*.AppImage
+```
+
+If it says FUSE is missing, install it with `sudo apt install libfuse2` (on
+Ubuntu 24.04 the package is `libfuse2t64`), or use the `.deb` instead.
+
+To check a download, compare its checksum with the line for that file in
+`SHA256SUMS.txt`:
+
+| System | Command |
+| --- | --- |
+| Windows (PowerShell) | `Get-FileHash .\<file> -Algorithm SHA256` |
+| macOS | `shasum -a 256 <file>` |
+| Linux (x64 or ARM64) | `sha256sum <file>` |
 
 ## Supported systems
 
@@ -114,45 +167,6 @@ Windows Server installs) cannot install it from the setup program: install
 the WebView2 "Evergreen Standalone Installer" from Microsoft first, then run
 the OpenAlgo setup.
 
-## Download and install
-
-Download the installer for your computer from the
-[GitHub Releases page](https://github.com/marketcalls/openalgo-desktop/releases).
-Each release lists a `SHA256SUMS.txt` file so you can check a download.
-
-| Computer | File to download | How to install |
-| --- | --- | --- |
-| Windows 10 or 11 (64-bit) | ends in `_x64-setup.exe` | Run it. It installs for your user only and does not need administrator rights. |
-| Mac with Apple Silicon (M1 and later) | ends in `_aarch64.dmg` | Open it and drag OpenAlgo Desktop to Applications. |
-| Mac with an Intel processor | ends in `_x64.dmg` | Open it and drag OpenAlgo Desktop to Applications. |
-| Linux, 64-bit PC (Ubuntu, Debian, Mint) | ends in `_amd64.deb` or `_amd64.AppImage` | `.deb`: `sudo apt install ./<file>.deb`. AppImage: see below. |
-| Linux, 64-bit ARM (ARM64) | ends in `_arm64.deb` or `_aarch64.AppImage` | `.deb`: `sudo apt install ./<file>.deb`. AppImage: see below. |
-
-Not sure which Mac you have? Open the Apple menu, then About This Mac. "Chip:
-Apple M..." means Apple Silicon; "Processor: Intel" means Intel.
-
-OpenAlgo Desktop does not support Raspberry Pi. On a Pi, run
-[OpenAlgo web](https://github.com/marketcalls/openalgo) instead.
-
-To run an AppImage on Linux (x64 or ARM64), make it executable and start it:
-
-```bash
-chmod +x OpenAlgo*.AppImage
-./OpenAlgo*.AppImage
-```
-
-If it says FUSE is missing, install it with `sudo apt install libfuse2` (on
-Ubuntu 24.04 the package is `libfuse2t64`), or use the `.deb` instead.
-
-To check a download, compare its checksum with the line for that file in
-`SHA256SUMS.txt`:
-
-| System | Command |
-| --- | --- |
-| Windows (PowerShell) | `Get-FileHash .\<file> -Algorithm SHA256` |
-| macOS | `shasum -a 256 <file>` |
-| Linux (x64 or ARM64) | `sha256sum <file>` |
-
 ## Opening the app the first time (unsigned installers)
 
 The installers are not yet code-signed, so Windows and macOS warn you the first
@@ -180,6 +194,320 @@ opened", it is the same check; in Terminal run
 it again.
 
 **Linux** (x64 or ARM64) shows no warning.
+
+## Supported Brokers
+
+All 37 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto.
+
+<details>
+<summary>View all supported brokers</summary>
+
+- 5 Paisa
+- 5 Paisa (XTS)
+- Alice Blue
+- Angel One
+- Arrow
+- CompositEdge
+- Definedge
+- Delta Exchange
+- Dhan
+- Dhan (Sandbox)
+- Firstock
+- Flattrade
+- Fyers
+- Groww
+- HDFC Securities
+- HDFC Sky
+- Ibulls
+- IIFL
+- IIFL Capital
+- IndMoney
+- JainamXts
+- Kotak Securities
+- Motilal Oswal
+- mStock by Mirae Asset
+- Nubra
+- Paytm Money
+- Pocketful
+- RMoney
+- Rupeezy
+- Samco
+- Shoonya
+- Tradejini
+- TradeSmart
+- Upstox
+- Wisdom Capital
+- Zebu
+- Zerodha
+
+</details>
+
+Every broker answers in OpenAlgo's common formats: orders, trades, positions
+and holdings come back with OpenAlgo symbols. Exchange coverage, the way you
+sign in, market data entitlement, GTT and other optional features still vary
+by broker and account; [Broker sign-in](docs/user/brokers.md) covers each
+kind of sign-in.
+
+## Core Features
+
+### Unified REST API Layer (`/api/v1/`)
+
+The same contract as OpenAlgo web, field for field, on
+`http://127.0.0.1:5000`, pinned by contract tests against answers recorded
+from a live web instance:
+
+- **Order management**: place, modify and cancel orders; smart, basket, split
+  and options orders; close positions; GTT orders
+- **Portfolio**: positions, holdings, order book, trade book, funds and margin
+- **Market data**: quotes, multi-quotes, market depth, history, intervals and
+  symbol search
+- **Options**: option symbols, option chain, Greeks, synthetic futures
+- **Strategies, Telegram and WhatsApp** over the API, and analyzer status and
+  toggle
+
+[API documentation](docs/api/README.md)
+
+### Real-Time WebSocket Streaming
+
+- The market data feed on `ws://127.0.0.1:8765` speaks the web's protocol
+- Subscribe to LTP, Quote or Depth (5, 20, 30 and 50 levels) for any symbol,
+  and to the order update stream
+- One broker feed shared by the app's screens, your scripts and the sandbox
+- Reconnects by itself after a network outage and when the computer wakes
+
+### Options & Strategy Analytics Tools (`/tools`)
+
+Sixteen tools for options trading and market analysis, on the **Tools** page.
+They use your connected broker's data; market data entitlement and exchange
+coverage still apply:
+
+| Tool | Route | What it does |
+| --- | --- | --- |
+| **Strategy Builder** | `/strategybuilder` | Build multi-leg option strategies with live Greeks, payoff diagram and what-if simulators |
+| **Strategy Portfolio** | `/strategybuilder/portfolio` | Saved strategies across MyTrades and Simulation watchlists |
+| **Option Chain** | `/optionchain` | Real-time option chain with live Greeks, OI data, and quick order placement |
+| **Option Greeks** | `/ivchart` | Historical IV, Delta, Theta, Vega, and Gamma charts for ATM options |
+| **OI Tracker** | `/oitracker` | Open Interest analysis with CE/PE OI bars, PCR overlay, and ATM strike marker |
+| **OI Range** | `/oirange` | Open Interest by strike for a custom range with ATM-relative quick selectors and optional 1-minute auto-refresh |
+| **Max Pain** | `/maxpain` | Max Pain strike calculation with visual pain distribution across strikes |
+| **Straddle Chart** | `/straddle` | Dynamic ATM Straddle chart with rolling strike, Spot, and Synthetic Futures overlay |
+| **Straddle PnL** | `/straddlepnl` | Simulated intraday ATM straddle P&L with automated N-point adjustments and trade log |
+| **Vol Surface** | `/volsurface` | 3D Implied Volatility surface across strikes and expiries using live option chain data |
+| **GEX Dashboard** | `/gex` | Gamma Exposure analysis with OI Walls, Net GEX per strike, and top gamma strikes |
+| **Strike Profile** | `/strikeprofile` | GEX and DEX heatmap by strike and expiry with per-expiry peaks, gamma flip, call and put walls |
+| **Gamma Density** | `/gammadensity` | Γ×OI density and convexity zones with intraday & to-expiry views, ATM IV, and ±1σ/±2σ expected-move bands |
+| **IV Smile** | `/ivsmile` | Implied Volatility smile with Call/Put IV curves, ATM IV, and skew analysis |
+| **OI Profile** | `/oiprofile` | Futures candlestick with OI butterfly and daily OI change across strikes |
+| **Arbitrage** | `/arbitrage` | Realtime futures calendar-spread scanner across NFO & MCX, ranked by executable bid/ask spread % with one-click two-leg orders |
+
+### Strategy Module and Risk Management (`/strategy`)
+
+- Multi-leg options strategies that enter and exit together, and a signal mode
+  that moves one leg per TradingView or GoCharting alert
+- Stop, target and trailing rules decided by one risk engine, which passes
+  OpenAlgo web's risk test vectors
+- Each Live strategy stays tied to the broker account it was started on
+
+[Strategy module and risk engine](docs/prompt/strategy_rms_documentation.md)
+
+### Charting Terminal and OpenScript (`/trading`)
+
+- A full-screen charting terminal on `openalgo-charts`, with an order dock and
+  keyboard shortcuts
+- Your own chart indicators, loaded from your data folder
+- OpenScript studies and strategies: backtests and live runs on the same
+  engine
+
+[Charting terminal](docs/userguide/32-charting-terminal/README.md) ·
+[Custom indicators](docs/custom-indicators.md) · [OpenScript](docs/openscript.md)
+
+### Scalping Terminal (`/scalping`)
+
+Keyboard-driven intraday trading in options, futures and equity, with
+stop-loss, target and trailing protection that OpenAlgo watches until the
+position is flat. [Scalping terminal](docs/scalping.md)
+
+### Sandbox testing
+
+Sandbox mode (analyzer mode) gives you 1 crore of simulated capital to test
+strategies, webhooks and API clients with real market prices, kept in its own
+database. See [Sandbox mode (analyzer mode)](#sandbox-mode-analyzer-mode).
+
+### Action Center
+
+Order approval for manual control:
+
+- **Auto mode**: orders go straight to your broker
+- **Semi-Auto mode**: orders wait in the Action Center for your approval
+- Approve or reject orders one at a time, or approve them all
+
+### ChartInk Integration
+
+Scanner alerts by webhook:
+
+- BUY, SELL, SHORT and COVER actions
+- Intraday strategies with a square-off time, and positional strategies
+- Symbols added one at a time or in bulk from CSV
+
+### TradingView and GoCharting
+
+The **Platforms** page builds the webhook address and the alert message for
+TradingView and GoCharting from the symbol and order you choose.
+
+### Historify
+
+Historical market data on your computer, in DuckDB: download jobs, a
+scheduler, exports and charts.
+
+### AI-Powered Trading (MCP Server)
+
+Connect AI clients to your account and market data:
+
+- Native MCP server with the web's 49 tools
+- Over stdio for Claude Desktop and Claude Code, and over HTTP at `/mcp`;
+  clients on another computer need Remote MCP turned on
+- Scoped tokens created on the API Key page, with per-token limits and an
+  audit log
+
+[Connecting Claude Desktop and Claude Code](docs/user/mcp.md) ·
+[MCP tool reference](docs/mcp-tool-reference.md)
+
+### Telegram Bot
+
+Native in the desktop, with no Python:
+
+- Order and trade alerts delivered to Telegram
+- Order book, trade book, positions, holdings and funds on demand
+- Intraday and daily charts
+- A button menu, and analytics of the bot's use
+
+### WhatsApp
+
+Native in the desktop: pair with a QR code or a pair code, then receive alerts
+and send commands.
+
+### Monitoring
+
+- **Latency Monitor**: order round-trip times by broker
+- **Traffic Monitor**: API use, errors and endpoint statistics
+- **Security log**: refused requests and address bans
+- **Health Monitor and diagnostics**: unconfirmed orders, alerts, and how
+  fresh each broker feed is ([Health monitoring](docs/health-monitoring.md))
+- **P&L Tracker**: profit and loss through the day on interactive charts
+
+### Security
+
+- **Your password locks your keys**: broker credentials and tokens are
+  encrypted with AES-256-GCM under a key locked by your OpenAlgo password
+  (Argon2id) and kept in your data folder; no OS keychain is used
+- **Locked until you sign in**: after a start or a logout the API, the feed,
+  webhooks and MCP stay off
+- **Two-factor sign-in** with an authenticator app (TOTP)
+- **Rate limits** on the API as on the web, sign-in and API key failures
+  throttled, and automatic bans of devices on your network that keep failing
+  (never this computer)
+- **Browser protection**: a strict Content Security Policy, exact origin
+  checks, CSRF protection, developer tools off in release builds
+- **Clean logs**: API keys, tokens, OAuth codes, passwords and TOTP secrets
+  are never written to a log
+- **No data collection**: the app sends no usage data. It talks to your
+  broker, to Telegram and WhatsApp when you turn them on, and to GitHub to
+  check for updates
+
+### Modern React Interface
+
+- The OpenAlgo web screens, carried over nearly verbatim: **React 19** with
+  TypeScript
+- **shadcn/ui** components with **Tailwind CSS 4**
+- **TanStack Query** for server state and **Zustand** for app state
+- **Real-time updates** over Socket.IO: pages refresh when an order or a
+  position changes, without polling
+- Light and dark themes with accent colors, and a dark purple look in
+  analyzer mode
+- Opens in the app's own window, and in any browser on the same computer
+
+## Supported Platforms
+
+Connect your strategies from any of these; they reach OpenAlgo Desktop
+through its API and webhooks:
+
+- **Amibroker**: AFL strategies through the REST API
+- **TradingView**: webhook alerts from Pine Script strategies
+- **GoCharting**: webhook alerts
+- **ChartInk**: scanner webhooks
+- **Python**: the official SDK
+- **Excel**: through the REST API
+- **AI clients**: Claude Desktop, Claude Code and other MCP clients
+
+TradingView, GoCharting and ChartInk send their alerts from their own servers,
+so they need a tunnel to your computer: see
+[Webhooks from the internet](docs/user/moving-from-openalgo-web.md#webhooks-from-the-internet).
+Programs on the same computer need none.
+
+Receive your strategy alerts on **Telegram** and **WhatsApp**.
+
+## Technology Stack
+
+### Desktop and Backend
+
+- **Tauri 2**: the desktop shell, window and installers
+- **Rust 1.92**: the whole backend, in one process
+- **tokio**: async runtime
+- **axum**: the HTTP server for the interface, `/api/v1` and webhooks
+- **socketioxide**: Socket.IO for real-time updates to the interface
+- **tokio-tungstenite**: the market data WebSocket and broker feeds
+- **reqwest**: broker and Telegram HTTP calls
+- **rmcp**: the MCP server
+- **Argon2id and AES-256-GCM** (RustCrypto): password hashing and encryption
+- **rust_decimal**: exact money arithmetic in the sandbox
+
+### Frontend
+
+- **React 19**: UI library
+- **TypeScript**: type-safe JavaScript
+- **Vite 8**: build tool
+- **Tailwind CSS 4**: utility-first CSS
+- **shadcn/ui**: components built on **Radix UI**
+- **TanStack Query**: server state
+- **Zustand**: client state
+
+### Data Visualization & Editors
+
+- **openalgo-charts**: the `/trading` charting terminal
+- **openalgo-script**: OpenScript, compiled and run in the app
+- **TradingView Lightweight Charts**: P&L and market data charts
+- **Plotly**: options analytics charts
+- **CodeMirror**: script and JSON editing
+
+### Testing & Quality
+
+- **cargo test** with **nextest** and **proptest**: Rust unit, contract and
+  property tests
+- **Vitest**: frontend unit and component tests
+- **Playwright**: end-to-end tests
+- **Biome**: linting and formatting
+- **axe-core**: accessibility testing
+
+### Databases
+
+- **SQLite** (WAL, r2d2 pool): 3 databases (main, logs, sandbox)
+- **DuckDB**: 1 historical market data store (Historify)
+
+## Official SDKs
+
+The official client libraries are written against the OpenAlgo API, so they
+work with OpenAlgo Desktop unchanged: set the host to `http://127.0.0.1:5000`
+and the WebSocket to `ws://127.0.0.1:8765`, and use the API key from the
+desktop's API Key page.
+
+| Language / Platform | Repository |
+| --- | --- |
+| Python | [openalgo-python-library](https://github.com/marketcalls/openalgo-python-library) |
+| Node.js | [openalgo-node](https://github.com/marketcalls/openalgo-node) |
+| Java | [openalgo-java](https://github.com/marketcalls/openalgo-java) |
+| Rust | [openalgo-rust](https://github.com/marketcalls/openalgo-rust) |
+| .NET / C# | [openalgo.NET](https://github.com/marketcalls/openalgo.NET) |
+| Go | [openalgo-go](https://github.com/marketcalls/openalgo-go) |
 
 ## Running the app
 
@@ -436,23 +764,6 @@ says so and changes nothing. Details:
 [Updating OpenAlgo Desktop](docs/user/updating.md). Maintainers:
 [how a release reaches installed copies](docs/release/updates.md).
 
-## Supported brokers
-
-All 37 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto:
-
-| | | | |
-| --- | --- | --- | --- |
-| 5 Paisa | 5 Paisa (XTS) | Alice Blue | Angel One |
-| Arrow | CompositEdge | Definedge | Delta Exchange |
-| Dhan | Dhan (Sandbox) | Firstock | Flattrade |
-| Fyers | Groww | HDFC Securities | HDFC Sky |
-| Ibulls | IIFL | IIFL Capital | IndMoney |
-| JainamXts | Kotak Securities | Motilal Oswal | mStock by Mirae Asset |
-| Nubra | Paytm Money | Pocketful | RMoney |
-| Rupeezy | Samco | Shoonya | Tradejini |
-| TradeSmart | Upstox | Wisdom Capital | Zebu |
-| Zerodha | | | |
-
 ## What is included, and what is not
 
 Included: everything you use in OpenAlgo web for trading. The dashboard, order
@@ -481,7 +792,16 @@ server.
 Other differences from the web: one user per installation, and one broker
 connected at a time.
 
-## Guides
+## API Documentation
+
+Complete API reference and examples:
+
+- **API documentation**: [docs/api/README.md](docs/api/README.md), one page per endpoint
+- **Symbol format**: [docs/prompt/symbol-format.md](docs/prompt/symbol-format.md)
+- **Python SDK**: [docs/prompt/openalgo python sdk.md](<docs/prompt/openalgo python sdk.md>)
+- **WebSocket format**: [docs/prompt/websockets-format.md](docs/prompt/websockets-format.md)
+
+## Documentation
 
 - [Documentation map](docs/INDEX.md): every guide, the API reference and the developer docs
 - [User guide](docs/userguide/README.md)
@@ -623,20 +943,104 @@ cargo test --locked               # Rust unit and integration tests
 | The browser at `127.0.0.1:5500` says the interface is not built | Run `npm run build` once; the server reads the built interface from `dist/` |
 | A build runs out of memory or disk | Rust builds need several GB of free memory and about 20 GB of disk. Close other heavy programs, or reduce parallel jobs with `CARGO_BUILD_JOBS=2` |
 
-Read [CLAUDE.md](CLAUDE.md) before contributing; it describes the
-compatibility contract with OpenAlgo web and the project conventions. Report
-problems on [GitHub Issues](https://github.com/marketcalls/openalgo-desktop/issues).
+## Contributing
 
-## Community
+We welcome contributions. Read [CLAUDE.md](CLAUDE.md) first: it describes the
+compatibility contract with OpenAlgo web and the project conventions. First-time
+setup is in [docs/contributing.md](docs/contributing.md). Then:
 
-- Discord: [Join our community](https://discord.com/invite/UPh7QPsNhP)
-- X: [@openalgoHQ](https://twitter.com/openalgoHQ)
-- YouTube: [@openalgo](https://www.youtube.com/@openalgo)
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes using [Conventional Commits](https://www.conventionalcommits.org/), for example:
+   ```bash
+   git commit -m "feat: add amazing feature"
+   ```
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## Community & Support
+
+- **Discord**: [Join our community](https://discord.com/invite/UPh7QPsNhP)
+- **Twitter/X**: [@openalgoHQ](https://twitter.com/openalgoHQ)
+- **YouTube**: [@openalgo](https://www.youtube.com/@openalgo)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/marketcalls/openalgo-desktop/issues)
 
 ## License
 
 OpenAlgo Desktop is released under the GNU Affero General Public License v3.0.
 See [License.md](License.md).
+
+## Credits & Acknowledgments
+
+OpenAlgo Desktop is built on OpenAlgo web and on the open source projects
+below. We are grateful to all of them.
+
+### Core Framework
+
+- **[OpenAlgo](https://github.com/marketcalls/openalgo)** - AGPL-3.0 - the web platform this app is the desktop version of, and its React interface
+- **[Tauri](https://tauri.app)** - Apache-2.0 or MIT - desktop shell, window and installers
+- **[React](https://react.dev)** - MIT License - UI library for building user interfaces
+- **[Tokio](https://tokio.rs)** - MIT License - asynchronous runtime for Rust
+- **[axum](https://github.com/tokio-rs/axum)** - MIT License - HTTP server
+
+### Backend Libraries
+
+- **[reqwest](https://github.com/seanmonstar/reqwest)** - MIT or Apache-2.0 - HTTP client
+- **[tokio-tungstenite](https://github.com/snapview/tokio-tungstenite)** - MIT License - WebSocket client and server
+- **[socketioxide](https://github.com/Totodore/socketioxide)** - MIT License - Socket.IO server
+- **[rusqlite](https://github.com/rusqlite/rusqlite)** - MIT License - SQLite for Rust, with **[r2d2](https://github.com/sfackler/r2d2)** (MIT or Apache-2.0) connection pools
+- **[DuckDB](https://duckdb.org)** - MIT License - analytical database behind Historify
+- **[rmcp](https://github.com/modelcontextprotocol/rust-sdk)** - Apache-2.0 - Model Context Protocol server
+- **[whatsapp-rust](https://github.com/marketcalls/whatsapp-rust)** - MIT License - WhatsApp client
+- **[RustCrypto](https://github.com/RustCrypto)** - MIT or Apache-2.0 - Argon2 and AES-GCM
+- **[rust_decimal](https://github.com/paupino/rust-decimal)** - MIT License - exact decimal arithmetic
+
+### UI Components & Styling
+
+- **[shadcn/ui](https://ui.shadcn.com)** - MIT License - components built with Radix UI and Tailwind CSS
+- **[Radix UI](https://www.radix-ui.com)** - MIT License - unstyled, accessible UI components
+- **[Tailwind CSS](https://tailwindcss.com)** - MIT License - utility-first CSS framework
+- **[Lucide](https://lucide.dev)** - ISC License - icon library
+
+### Data Visualization
+
+- **[openalgo-charts](https://www.npmjs.com/package/openalgo-charts)** - Apache-2.0 - the `/trading` charting terminal
+- **[TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)** - Apache-2.0 - financial charting library
+- **[Plotly](https://plotly.com/javascript/)** - MIT License - interactive charts for options analytics
+
+### Code Editors and OpenScript
+
+- **[CodeMirror](https://codemirror.net)** - MIT License - code editor
+- **[@uiw/react-codemirror](https://uiwjs.github.io/react-codemirror)** - MIT License - CodeMirror React wrapper with themes
+- **[openalgo-script](https://www.npmjs.com/package/openalgo-script)** - Apache-2.0 - the OpenScript compiler and engine
+
+### State Management & Data Fetching
+
+- **[TanStack Query](https://tanstack.com/query)** - MIT License - asynchronous state management
+- **[Zustand](https://zustand-demo.pmnd.rs)** - MIT License - lightweight state management
+- **[Axios](https://axios-http.com)** - MIT License - promise-based HTTP client
+
+### Real-Time Communication
+
+- **[Socket.IO](https://socket.io)** - MIT License - real-time event-based communication (the interface's client)
+
+### Build & Development Tools
+
+- **[Vite](https://vitejs.dev)** - MIT License - frontend build tool
+- **[TypeScript](https://www.typescriptlang.org)** - Apache-2.0 - JavaScript with syntax for types
+- **[Biome](https://biomejs.dev)** - MIT or Apache-2.0 - formatter and linter
+- **[Vitest](https://vitest.dev)** - MIT License - unit testing
+- **[Playwright](https://playwright.dev)** - Apache-2.0 - end-to-end testing
+- **[axe-core](https://github.com/dequelabs/axe-core)** - MPL-2.0 - accessibility testing
+
+### Additional Libraries
+
+- **[React Router](https://reactrouter.com)** - MIT License - routing for React
+- **[Sonner](https://sonner.emilkowal.ski)** - MIT License - toast notifications
+- **[cmdk](https://cmdk.paco.me)** - MIT License - command palette component
+- **[next-themes](https://github.com/pacocoursey/next-themes)** - MIT License - theme switching
+- **[react-resizable-panels](https://github.com/bvaughn/react-resizable-panels)** - MIT License - resizable panel layouts
+- **[html2canvas-pro](https://html2canvas.hertzen.com)** - MIT License - screenshot generation
 
 ## Disclaimer
 
