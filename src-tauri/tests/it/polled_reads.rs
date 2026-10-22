@@ -75,34 +75,72 @@ async fn send(h: &H, app: &App, mut req: Request<Body>) -> Reply {
     (status, body.to_vec())
 }
 
-/// Every request at once; the replies, the longest the runtime was held at
-/// once and how long it was kept busy in all.
-async fn all_at_once(
+/// The app, once the runtime has gone idle after opening it. The
+/// background tasks it starts (the scalping stops, the order reconciler)
+/// read the database on the runtime on their first pass. That is the app
+/// starting, not the reads timed here: run at the same time as the
+/// requests, it waited on the runtime for a connection while the pool was
+/// still opening them (30-63 ms on an M1).
+async fn started(runtime: &crate::IdleLog) -> H {
+    let h = H::new().await;
+    runtime.until_idle().await;
+    h
+}
+
+/// Every request at once; the replies.
+async fn all_at_once(h: &H, app: &App, reqs: Vec<Request<Body>>) -> Vec<Reply> {
+    futures_util::future::join_all(reqs.into_iter().map(|r| send(h, app, r))).await
+}
+
+/// What requests sent at once cost the runtime of [`crate::on_watched_runtime`].
+struct Held {
+    /// The longest its thread ran without going idle meanwhile
+    /// ([`crate::IdleLog::longest_hold`]).
+    at_once: Duration,
+    /// Each request's polls in all ([`crate::runtime_busy`]).
+    each: Vec<Duration>,
+}
+
+/// [`all_at_once`] on the watched runtime; the replies and what they held
+/// it for. A 10 ms timer beside the requests ([`crate::runtime_stall`])
+/// also counts the time a loaded runner leaves the idle runtime thread
+/// waiting to run again, which no request can change: the bot statistics'
+/// timer once ran 314 ms late on a macOS runner (run 39737924664).
+async fn held_at_once(
+    runtime: &crate::IdleLog,
     h: &H,
     app: &App,
     reqs: Vec<Request<Body>>,
-) -> (Vec<Reply>, Duration, Duration) {
-    let all = futures_util::future::join_all(reqs.into_iter().map(|r| send(h, app, r)));
-    let ((replies, busy), worst) = crate::runtime_stall(crate::runtime_busy(all)).await;
-    (replies, worst, busy)
+) -> (Vec<Reply>, Held) {
+    let each = reqs
+        .into_iter()
+        .map(|r| crate::runtime_busy(send(h, app, r)));
+    let (replies, at_once) = runtime
+        .longest_hold(futures_util::future::join_all(each))
+        .await;
+    let (replies, each) = replies.into_iter().unzip();
+    (replies, Held { at_once, each })
 }
 
-fn assert_runtime_free(what: &str, worst: Duration, busy: Duration) {
+fn assert_runtime_free(what: &str, held: &Held) {
+    let busy: Duration = held.each.iter().sum();
     eprintln!(
-        "{}: the runtime was held for {:?} at most, busy {:?} in all",
-        what, worst, busy
+        "{}: the runtime was held for {:?} at most, busy {:?} in all (each request {:?})",
+        what, held.at_once, busy, held.each
     );
     assert!(
-        worst < Duration::from_millis(200),
-        "{}: the runtime was held for {:?} at once",
+        held.at_once < Duration::from_millis(200),
+        "{}: the runtime was held for {:?} at once (each request {:?})",
         what,
-        worst
+        held.at_once,
+        held.each
     );
     assert!(
         busy < Duration::from_secs(1),
-        "{}: the reads kept the runtime busy for {:?} in all",
+        "{}: the reads kept the runtime busy for {:?} in all (each request {:?})",
         what,
-        busy
+        busy,
+        held.each
     );
 }
 
@@ -310,38 +348,40 @@ fn strategy_pages(h: &H, cookie: &str, sid: i64) -> Vec<Request<Body>> {
 /// client's `/api/v1/strategy/orders`, two of each at once over a year of
 /// one strategy. Each read every order the strategy ever placed on the
 /// async worker.
-#[tokio::test]
-async fn strategy_pages_over_a_long_history_do_not_hold_the_runtime() {
-    let h = H::new().await;
-    let sid = seed_strategy(&h);
-    let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
-    let (replies, worst, busy) = all_at_once(&h, &app, strategy_pages(&h, &c, sid)).await;
-    for (i, r) in replies.iter().enumerate() {
+#[test]
+fn strategy_pages_over_a_long_history_do_not_hold_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = started(&runtime).await;
+        let sid = seed_strategy(&h);
+        let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
+        let (replies, held) = held_at_once(&runtime, &h, &app, strategy_pages(&h, &c, sid)).await;
+        for (i, r) in replies.iter().enumerate() {
+            assert_eq!(
+                r.0,
+                StatusCode::OK,
+                "{}: {}",
+                i,
+                String::from_utf8_lossy(&r.1)
+            );
+        }
+        let orders = json_of(&replies[3]);
         assert_eq!(
-            r.0,
-            StatusCode::OK,
-            "{}: {}",
-            i,
-            String::from_utf8_lossy(&r.1)
+            orders["data"].as_array().unwrap().len() as i64,
+            STRATEGY_ORDERS
         );
-    }
-    let orders = json_of(&replies[3]);
-    assert_eq!(
-        orders["data"].as_array().unwrap().len() as i64,
-        STRATEGY_ORDERS
-    );
-    assert_eq!(orders["data"][0]["mode"], "live", "the Detail page's shape");
-    let api_orders = json_of(&replies[4]);
-    assert_eq!(
-        api_orders["data"].as_array().unwrap().len() as i64,
-        STRATEGY_ORDERS
-    );
-    assert!(
-        api_orders["data"][0].get("mode").is_none(),
-        "the web's shape"
-    );
-    assert_runtime_free("strategy pages", worst, busy);
-    h.shutdown().await;
+        assert_eq!(orders["data"][0]["mode"], "live", "the Detail page's shape");
+        let api_orders = json_of(&replies[4]);
+        assert_eq!(
+            api_orders["data"].as_array().unwrap().len() as i64,
+            STRATEGY_ORDERS
+        );
+        assert!(
+            api_orders["data"][0].get("mode").is_none(),
+            "the web's shape"
+        );
+        assert_runtime_free("strategy pages", &held);
+        h.shutdown().await;
+    })
 }
 
 /// The three books the Detail page polls together read the strategy's
@@ -358,7 +398,7 @@ async fn the_books_polled_together_read_the_strategy_history_once() {
         .iter()
         .map(|b| page(&format!("{}/{}", s, b), &c))
         .collect();
-    let (replies, _, _) = all_at_once(&h, &app, books).await;
+    let replies = all_at_once(&h, &app, books).await;
     assert!(replies.iter().all(|r| r.0 == StatusCode::OK));
     assert_eq!(reads.of("a strategy's order history"), 1);
     h.shutdown().await;
@@ -379,26 +419,28 @@ fn deployment_pages(cookie: &str, id: &str) -> Vec<Request<Body>> {
 /// A running deployment's positions (polled every 15 s by the Strategies
 /// panel), its other books and its status, two of each at once over a
 /// year's ledger. Each read the whole ledger on the async worker.
-#[tokio::test]
-async fn deployment_books_over_a_long_ledger_do_not_hold_the_runtime() {
-    let h = H::new().await;
-    let id = seed_deployment(&h);
-    let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
-    let (replies, worst, busy) = all_at_once(&h, &app, deployment_pages(&c, &id)).await;
-    for (i, r) in replies.iter().enumerate() {
-        // The books answer what the sandbox says (502 when its engine is not
-        // running); the ledger was read either way.
-        assert!(
-            r.0 == StatusCode::OK || r.0 == StatusCode::BAD_GATEWAY,
-            "{}: {} {}",
-            i,
-            r.0,
-            String::from_utf8_lossy(&r.1)
-        );
-    }
-    assert_eq!(json_of(&replies[3])["file"], id.as_str());
-    assert_runtime_free("deployment books", worst, busy);
-    h.shutdown().await;
+#[test]
+fn deployment_books_over_a_long_ledger_do_not_hold_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = started(&runtime).await;
+        let id = seed_deployment(&h);
+        let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
+        let (replies, held) = held_at_once(&runtime, &h, &app, deployment_pages(&c, &id)).await;
+        for (i, r) in replies.iter().enumerate() {
+            // The books answer what the sandbox says (502 when its engine is
+            // not running); the ledger was read either way.
+            assert!(
+                r.0 == StatusCode::OK || r.0 == StatusCode::BAD_GATEWAY,
+                "{}: {} {}",
+                i,
+                r.0,
+                String::from_utf8_lossy(&r.1)
+            );
+        }
+        assert_eq!(json_of(&replies[3])["file"], id.as_str());
+        assert_runtime_free("deployment books", &held);
+        h.shutdown().await;
+    })
 }
 
 /// The books asked for together read the deployment's own orders once
@@ -424,34 +466,36 @@ async fn the_books_asked_together_read_the_deployments_orders_once() {
 /// The Action Center reloads on every order event: four reloads and two of
 /// the full list at once over a year of orders. Each read and parsed every
 /// order twice on the async worker.
-#[tokio::test]
-async fn the_action_center_over_many_orders_does_not_hold_the_runtime() {
-    let h = H::new().await;
-    seed_pending(&h);
-    let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
-    let mut reqs: Vec<_> = (0..4)
-        .map(|_| page("/action-center/api/data", &c))
-        .collect();
-    reqs.push(page("/action-center/api/data?status=all", &c));
-    reqs.push(page("/action-center/api/data?status=all", &c));
-    let (replies, worst, busy) = all_at_once(&h, &app, reqs).await;
-    assert!(replies.iter().all(|r| r.0 == StatusCode::OK));
-    let pending = json_of(&replies[0]);
-    assert_eq!(
-        pending["data"]["orders"].as_array().unwrap().len() as i64,
-        PENDING_ORDERS / 10
-    );
-    assert_eq!(
-        pending["data"]["statistics"]["total_approved"],
-        PENDING_ORDERS * 9 / 10
-    );
-    let all = json_of(&replies[4]);
-    assert_eq!(
-        all["data"]["orders"].as_array().unwrap().len() as i64,
-        PENDING_ORDERS
-    );
-    assert_runtime_free("the Action Center", worst, busy);
-    h.shutdown().await;
+#[test]
+fn the_action_center_over_many_orders_does_not_hold_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = started(&runtime).await;
+        seed_pending(&h);
+        let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
+        let mut reqs: Vec<_> = (0..4)
+            .map(|_| page("/action-center/api/data", &c))
+            .collect();
+        reqs.push(page("/action-center/api/data?status=all", &c));
+        reqs.push(page("/action-center/api/data?status=all", &c));
+        let (replies, held) = held_at_once(&runtime, &h, &app, reqs).await;
+        assert!(replies.iter().all(|r| r.0 == StatusCode::OK));
+        let pending = json_of(&replies[0]);
+        assert_eq!(
+            pending["data"]["orders"].as_array().unwrap().len() as i64,
+            PENDING_ORDERS / 10
+        );
+        assert_eq!(
+            pending["data"]["statistics"]["total_approved"],
+            PENDING_ORDERS * 9 / 10
+        );
+        let all = json_of(&replies[4]);
+        assert_eq!(
+            all["data"]["orders"].as_array().unwrap().len() as i64,
+            PENDING_ORDERS
+        );
+        assert_runtime_free("the Action Center", &held);
+        h.shutdown().await;
+    })
 }
 
 /// Reloads that arrive together share a read: the first reads, and the
@@ -467,7 +511,7 @@ async fn action_center_reloads_together_share_a_read() {
     let reqs = (0..4)
         .map(|_| page("/action-center/api/data", &c))
         .collect();
-    let (replies, _, _) = all_at_once(&h, &app, reqs).await;
+    let replies = all_at_once(&h, &app, reqs).await;
     assert!(replies.iter().all(|r| r.0 == StatusCode::OK));
     assert!(replies.iter().all(|r| r.1 == replies[0].1), "one answer");
     assert_eq!(reads.of("the Action Center"), 2);
@@ -480,67 +524,71 @@ async fn action_center_reloads_together_share_a_read() {
 /// analyzer log, kept forever as on the web. While the logs database is
 /// busy (its four connections held for 1.5 s, as long reports do), the
 /// count waits off the runtime; it waited on the async worker before.
-#[tokio::test]
-async fn analyzer_status_waits_for_the_logs_database_off_the_runtime() {
-    let h = H::new().await;
-    let app = openalgo_desktop_lib::server::app(h.ctx.clone());
-    let (held, release) = std::sync::mpsc::channel::<()>();
-    let (holding, ready) = std::sync::mpsc::channel::<()>();
-    let logs = h.ctx.logs.clone();
-    let holder = std::thread::spawn(move || {
-        let conns: Vec<_> = (0..4).map(|_| logs.conn().unwrap()).collect();
-        holding.send(()).unwrap();
-        let _ = release.recv_timeout(Duration::from_millis(1500));
-        drop(conns);
-    });
-    ready.recv().unwrap();
-    let reqs = (0..2)
-        .map(|_| api(&h, "/api/v1/analyzer", json!({})))
-        .collect();
-    let (replies, worst, busy) = all_at_once(&h, &app, reqs).await;
-    drop(held);
-    holder.join().unwrap();
-    for r in &replies {
-        let v = json_of(r);
-        assert_eq!(r.0, StatusCode::OK, "{}", v);
-        assert_eq!(v["data"]["total_logs"], 0);
-    }
-    assert_runtime_free("analyzer status", worst, busy);
-    h.shutdown().await;
+#[test]
+fn analyzer_status_waits_for_the_logs_database_off_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = started(&runtime).await;
+        let app = openalgo_desktop_lib::server::app(h.ctx.clone());
+        let (keep, release) = std::sync::mpsc::channel::<()>();
+        let (holding, ready) = std::sync::mpsc::channel::<()>();
+        let logs = h.ctx.logs.clone();
+        let holder = std::thread::spawn(move || {
+            let conns: Vec<_> = (0..4).map(|_| logs.conn().unwrap()).collect();
+            holding.send(()).unwrap();
+            let _ = release.recv_timeout(Duration::from_millis(1500));
+            drop(conns);
+        });
+        ready.recv().unwrap();
+        let reqs = (0..2)
+            .map(|_| api(&h, "/api/v1/analyzer", json!({})))
+            .collect();
+        let (replies, held) = held_at_once(&runtime, &h, &app, reqs).await;
+        drop(keep);
+        holder.join().unwrap();
+        for r in &replies {
+            let v = json_of(r);
+            assert_eq!(r.0, StatusCode::OK, "{}", v);
+            assert_eq!(v["data"]["total_logs"], 0);
+        }
+        assert_runtime_free("analyzer status", &held);
+        h.shutdown().await;
+    })
 }
 
 /// The Telegram page (its index, users and analytics), an SDK client's
 /// `/api/v1/telegram/stats` and the WhatsApp page's statistics over a year,
 /// over both bots' command logs (kept forever as on the web). Each read
 /// its aggregates on the async worker.
-#[tokio::test]
-async fn bot_statistics_over_a_long_command_log_do_not_hold_the_runtime() {
-    let h = H::new().await;
-    seed_commands(&h);
-    let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
-    let stats_url = format!("/api/v1/telegram/stats?days=30&apikey={}", h.key);
-    let reqs = vec![
-        page("/telegram/api/index", &c),
-        page("/telegram/api/users", &c),
-        page("/telegram/api/analytics", &c),
-        page(&stats_url, &c),
-        page("/whatsapp/stats?days=365", &c),
-        page("/whatsapp/stats?days=7", &c),
-    ];
-    let (replies, worst, busy) = all_at_once(&h, &app, reqs).await;
-    for (i, r) in replies.iter().enumerate() {
-        assert_eq!(
-            r.0,
-            StatusCode::OK,
-            "{}: {}",
-            i,
-            String::from_utf8_lossy(&r.1)
-        );
-    }
-    assert_eq!(json_of(&replies[0])["data"]["total_commands"], BOT_COMMANDS);
-    assert_eq!(json_of(&replies[4])["data"]["total_commands"], BOT_COMMANDS);
-    assert_runtime_free("bot statistics", worst, busy);
-    h.shutdown().await;
+#[test]
+fn bot_statistics_over_a_long_command_log_do_not_hold_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        let h = started(&runtime).await;
+        seed_commands(&h);
+        let (app, c) = (openalgo_desktop_lib::server::app(h.ctx.clone()), cookie(&h));
+        let stats_url = format!("/api/v1/telegram/stats?days=30&apikey={}", h.key);
+        let reqs = vec![
+            page("/telegram/api/index", &c),
+            page("/telegram/api/users", &c),
+            page("/telegram/api/analytics", &c),
+            page(&stats_url, &c),
+            page("/whatsapp/stats?days=365", &c),
+            page("/whatsapp/stats?days=7", &c),
+        ];
+        let (replies, held) = held_at_once(&runtime, &h, &app, reqs).await;
+        for (i, r) in replies.iter().enumerate() {
+            assert_eq!(
+                r.0,
+                StatusCode::OK,
+                "{}: {}",
+                i,
+                String::from_utf8_lossy(&r.1)
+            );
+        }
+        assert_eq!(json_of(&replies[0])["data"]["total_commands"], BOT_COMMANDS);
+        assert_eq!(json_of(&replies[4])["data"]["total_commands"], BOT_COMMANDS);
+        assert_runtime_free("bot statistics", &held);
+        h.shutdown().await;
+    })
 }
 
 /// Migration 095: the WhatsApp statistics read only the window they count,

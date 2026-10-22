@@ -111,6 +111,18 @@ impl IdleLog {
         self.0.lock().push((std::time::Instant::now(), idle));
     }
 
+    /// Wait until the runtime thread goes idle: every task that was ready
+    /// (the background tasks an `AppState` starts, on their first pass) has
+    /// run to its next wait.
+    pub async fn until_idle(&self) {
+        let since = std::time::Instant::now();
+        // A timer, not `yield_now`: the thread parks, and notes it, only
+        // while nothing is ready.
+        while !self.0.lock().iter().any(|&(at, idle)| idle && at >= since) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     /// Run `fut` and return the longest the runtime thread ran meanwhile
     /// without going idle: how long `fut`, or a task it started, held the
     /// runtime at once. Unlike [`runtime_stall`], it leaves out the time an
