@@ -638,7 +638,7 @@ impl StrategyModule {
             .await;
             return false;
         }
-        self.feed.add_run(run_id, &recovered.symbols).await;
+        self.follow_prices(run_id, &recovered.symbols).await;
         self.reconcile_pending_stop(run_id).await;
         true
     }

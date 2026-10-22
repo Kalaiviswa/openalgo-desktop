@@ -1,6 +1,7 @@
-//! The strategy tick path under a burst (benchmarks P1): a deciding price
-//! is never lost while the evaluator is busy, and a tick the reader does
-//! miss is counted for health.
+//! The strategy tick path under a burst (benchmarks P1, PROD-REL-01): every
+//! price is decided while the evaluator is busy, in the order it came, each
+//! decision places one exit, and a tick the reader does miss is counted for
+//! health.
 
 use super::*;
 use openalgo_desktop_lib::brokers::common::streaming::{FeedEvent, MarketEvent, NormalizedTick};
@@ -10,21 +11,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// A market-data channel as small as a burst needs to overrun it.
-struct Burst {
+/// A market-data channel of the size a test needs: small to overrun the
+/// reader, large to hold a whole burst.
+pub(super) struct Burst {
     tx: broadcast::Sender<MarketEvent>,
     subscribed: Mutex<Vec<Key>>,
 }
 
 impl Burst {
-    fn new(capacity: usize) -> Arc<Self> {
+    pub(super) fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             tx: broadcast::channel(capacity).0,
             subscribed: Mutex::new(Vec::new()),
         })
     }
 
-    fn send(&self, symbol: &str, ltp: f64) {
+    pub(super) fn send(&self, symbol: &str, ltp: f64) {
         let tick = NormalizedTick {
             symbol: symbol.into(),
             exchange: "NFO".into(),
@@ -49,17 +51,27 @@ impl PriceSource for Burst {
     }
 }
 
-/// A long weekly NIFTY call at `offset` from the money, with `risk`.
-fn long_call(offset: &str, risk: Value) -> Value {
+/// A NIFTY option leg (`position` B or S, `expiry` weekly or monthly,
+/// `option_type` CE or PE, at `offset` from the money) with `risk`.
+pub(super) fn option_leg(
+    id: i64,
+    (position, expiry, option_type, offset): (&str, &str, &str, &str),
+    risk: Value,
+) -> Value {
     let mut leg = json!({
-        "id": 1, "segment": "options", "expiry": "weekly", "lots": 1,
-        "position": "B", "option_type": "CE", "strike_mode": "atm",
+        "id": id, "segment": "options", "expiry": expiry, "lots": 1,
+        "position": position, "option_type": option_type, "strike_mode": "atm",
         "atm_offset": offset, "trail": {"x": 0, "y": 0},
     });
     for (k, v) in risk.as_object().unwrap() {
         leg[k] = v.clone();
     }
     leg
+}
+
+/// A long weekly NIFTY call at `offset` from the money, with `risk`.
+fn long_call(offset: &str, risk: Value) -> Value {
+    option_leg(1, ("B", "weekly", "CE", offset), risk)
 }
 
 /// A run of one long call bought at 100; answers its run and contract.
@@ -75,6 +87,95 @@ fn sold(t: &T, symbol: &str) -> bool {
         .any(|o| o.symbol == symbol && o.action == "SELL")
 }
 
+/// Wait (bounded) until `f` holds.
+pub(super) async fn eventually(mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..500 {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    f()
+}
+
+/// The kinds of the run's exit orders, in the order they were recorded.
+pub(super) fn exit_kinds(t: &T, run: i64) -> Vec<String> {
+    t.orders(run)
+        .into_iter()
+        .filter(|o| o.kind != "entry")
+        .map(|o| o.kind)
+        .collect()
+}
+
+fn prices_read(t: &T) -> u64 {
+    t.m.feed.health()["ticks_queued"].as_u64().unwrap_or(0)
+}
+
+/// Send `ticks` in order while the evaluator is held placing another run's
+/// exit, wait until the reader has read every one, then let the evaluator
+/// go. Far more than 32 prices of one symbol wait at once.
+pub(super) async fn send_while_held(t: &T, burst: &Burst, ticks: &[(String, f64)]) {
+    let (_, blocker) = held(t, "Blocker", "OTM3", json!({"sl_pts": 10})).await;
+    let gate = Arc::new(Gate::default());
+    *t.gw.place_gate.lock() = Some(gate.clone());
+    let read = prices_read(t);
+    burst.send(&blocker, 85.0);
+    gate.entered().await;
+    for (symbol, ltp) in ticks {
+        burst.send(symbol, *ltp);
+        tokio::task::yield_now().await;
+    }
+    let all = read + 1 + ticks.len() as u64;
+    assert!(
+        eventually(|| prices_read(t) == all).await,
+        "the reader read {} of {} prices",
+        prices_read(t),
+        all
+    );
+    *t.gw.place_gate.lock() = None;
+    gate.release();
+}
+
+/// Wait until nothing decided is still waiting to be acted on.
+pub(super) async fn settled(t: &T) {
+    assert!(
+        eventually(|| t.m.feed.health()["runs_waiting"].as_u64().unwrap_or(0) == 0).await,
+        "{}",
+        t.m.feed.health()
+    );
+}
+
+fn ticks(symbol: &str, prices: &[f64]) -> Vec<(String, f64)> {
+    prices.iter().map(|p| (symbol.to_string(), *p)).collect()
+}
+
+/// `head`, then `price` `n` times.
+fn then_flat(head: &[f64], price: f64, n: usize) -> Vec<f64> {
+    let mut v = head.to_vec();
+    v.extend(std::iter::repeat_n(price, n));
+    v
+}
+
+/// The module with a burst source large enough to hold every price sent.
+async fn burst_module() -> (T, Arc<Burst>) {
+    let burst = Burst::new(8192);
+    let t = t_with(
+        ist(2026, 10, 7, 10, 0),
+        Some(burst.clone() as Arc<dyn PriceSource>),
+    );
+    t.m.start().await;
+    (t, burst)
+}
+
+/// The messages of the strategy's events of `kind`.
+fn messages(t: &T, sid: i64, kind: &str) -> Vec<String> {
+    t.events(sid)
+        .iter()
+        .filter(|e| e["kind"] == kind)
+        .map(|e| e["message"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
 /// While the evaluator is held placing one run's exit, the feed floods
 /// three other held contracts, each with one spike in it: through a stop
 /// (to 85 under 90), through a target (to 115 over 110), and up through a
@@ -82,9 +183,8 @@ fn sold(t: &T, symbol: &str) -> bool {
 /// after it under the trail. Before, one consumer read and evaluated: held
 /// in the placement it stopped reading, the channel overran and the spikes
 /// were skipped (`Lagged`, logged at debug), so three positions got no
-/// exit. Now the reader keeps reading while decisions wait, each contract
-/// keeps its path (folded to its extremes in order when long), and every
-/// spike is decided once the evaluator is free.
+/// exit. Now the reader keeps reading and deciding while the evaluator is
+/// held, and every spike's exit is placed once it is free.
 #[tokio::test]
 async fn a_spike_is_decided_even_while_the_evaluator_is_held() {
     let burst = Burst::new(16);
@@ -142,6 +242,267 @@ async fn a_spike_is_decided_even_while_the_evaluator_is_held() {
     let h = t.m.feed.health();
     assert_eq!(h["ticks_missed"], 0, "{}", h);
     assert!(h["ticks_folded"].as_u64().unwrap() > 0, "{}", h);
+    t.m.shutdown().await;
+}
+
+/// PROD-REL-01, long: bought at 100 with a 90 stop and a 5-point trail.
+/// The 110 raises the stop to 105 and the 104 after it hits it, though a
+/// later 150 and 29 prices of 149 arrive while the evaluator is busy.
+/// Folded to its first, lowest, highest and latest (100, 104, 150, 149),
+/// the path lost the 110: the 104 met a 90 stop and the 145 the 150 earned
+/// was never hit, so the position stayed open.
+#[tokio::test]
+async fn a_trail_raised_by_an_earlier_peak_exits_on_the_dip_after_it() {
+    let (t, burst) = burst_module().await;
+    let risk = json!({"sl_pts": 10, "trail": {"x": 5, "y": 0}});
+    let (run, symbol) = held(&t, "Trail", "ATM", risk).await;
+    let path = then_flat(&[100.0, 110.0, 104.0, 150.0], 149.0, 29);
+    send_while_held(&t, &burst, &ticks(&symbol, &path)).await;
+
+    assert!(
+        eventually(|| !exit_kinds(&t, run).is_empty()).await,
+        "the dip under the trailed stop was never decided"
+    );
+    settled(&t).await;
+    assert_eq!(exit_kinds(&t, run), vec!["exit_sl"], "exactly one exit");
+    let sid = t.run(run).strategy_id;
+    let hits = messages(&t, sid, "leg_sl_hit");
+    assert!(
+        hits.len() == 1 && hits[0].contains("last price 104 ") && hits[0].contains("the stop 105 "),
+        "decided at the 104, against the stop the 110 earned: {:?}",
+        hits
+    );
+    let leg = t.leg(run, 1);
+    assert_eq!(leg.highest_price, Some(150.0), "every price was seen");
+    assert_eq!(leg.effective_sl, Some(145.0));
+    t.m.shutdown().await;
+}
+
+/// The short mirror: sold at 100 with a 110 stop and a 5-point trail. The
+/// 90 lowers the stop to 95 and the 96 after it hits it, though a later 50
+/// and 29 prices of 51 wait with it.
+#[tokio::test]
+async fn a_short_trail_lowered_by_an_earlier_trough_exits_on_the_bounce_after_it() {
+    let (t, burst) = burst_module().await;
+    let leg = option_leg(
+        1,
+        ("S", "weekly", "CE", "ATM"),
+        json!({"sl_pts": 10, "trail": {"x": 5, "y": 0}}),
+    );
+    let sid = t.make(config("Short trail", json!([leg]), json!({})));
+    let run = t.start_filled(sid, 100.0).await;
+    let symbol = t.leg(run, 1).symbol;
+    let path = then_flat(&[100.0, 90.0, 96.0, 50.0], 51.0, 29);
+    send_while_held(&t, &burst, &ticks(&symbol, &path)).await;
+
+    assert!(
+        eventually(|| !exit_kinds(&t, run).is_empty()).await,
+        "the bounce over the trailed stop was never decided"
+    );
+    settled(&t).await;
+    assert_eq!(exit_kinds(&t, run), vec!["exit_sl"], "exactly one exit");
+    let hits = messages(&t, sid, "leg_sl_hit");
+    assert!(
+        hits.len() == 1 && hits[0].contains("last price 96 ") && hits[0].contains("the stop 95 "),
+        "{:?}",
+        hits
+    );
+    let bought_back =
+        t.gw.placed()
+            .into_iter()
+            .filter(|o| o.symbol == symbol && o.action == "BUY")
+            .count();
+    assert_eq!(bought_back, 1);
+    t.m.shutdown().await;
+}
+
+/// A stepped trail (every 10 points of favour moves the 90 stop up 5): the
+/// 120 earns two steps (stop 100) and the 99 after it hits it, though a
+/// later 200 and 29 prices of 199 wait with it. Folded, the 99 met the 90.
+#[tokio::test]
+async fn a_stepped_trail_exits_on_the_dip_after_the_steps_it_earned() {
+    let (t, burst) = burst_module().await;
+    let risk = json!({"sl_pts": 10, "trail": {"x": 10, "y": 5}});
+    let (run, symbol) = held(&t, "Stepped", "ATM", risk).await;
+    let path = then_flat(&[100.0, 120.0, 99.0, 200.0], 199.0, 29);
+    send_while_held(&t, &burst, &ticks(&symbol, &path)).await;
+
+    assert!(
+        eventually(|| !exit_kinds(&t, run).is_empty()).await,
+        "the dip under the stepped stop was never decided"
+    );
+    settled(&t).await;
+    assert_eq!(exit_kinds(&t, run), vec!["exit_sl"], "exactly one exit");
+    let sid = t.run(run).strategy_id;
+    let hits = messages(&t, sid, "leg_sl_hit");
+    assert!(
+        hits.len() == 1 && hits[0].contains("last price 99 ") && hits[0].contains("the stop 100 "),
+        "{:?}",
+        hits
+    );
+    assert_eq!(t.leg(run, 1).effective_sl, Some(140.0), "ten steps at 200");
+    t.m.shutdown().await;
+}
+
+/// The deciding peak and dip arrive between many folds: 40 prices first,
+/// then 110 and 104, then 150 and a hundred prices of 149. Each fold kept
+/// the earlier low and the latest high, so the pair was lost.
+#[tokio::test]
+async fn a_peak_and_dip_between_many_folds_are_still_decided() {
+    let (t, burst) = burst_module().await;
+    let risk = json!({"sl_pts": 10, "trail": {"x": 5, "y": 0}});
+    let (run, symbol) = held(&t, "Long burst", "ATM", risk).await;
+    let mut path = then_flat(&[100.0], 101.0, 40);
+    path.extend(then_flat(&[110.0, 104.0, 150.0], 149.0, 100));
+    send_while_held(&t, &burst, &ticks(&symbol, &path)).await;
+
+    assert!(
+        eventually(|| !exit_kinds(&t, run).is_empty()).await,
+        "the dip was never decided"
+    );
+    settled(&t).await;
+    assert_eq!(exit_kinds(&t, run), vec!["exit_sl"], "exactly one exit");
+    t.m.shutdown().await;
+}
+
+/// Two long legs (a call with a 5-point trail, a put with a 90 stop) and
+/// their prices interleaved. `trail_to_entry`: whether a stop on one moves
+/// the other's stop to its entry.
+async fn two_legs(t: &T, trail_to_entry: bool) -> (i64, String, String) {
+    let call = option_leg(
+        1,
+        ("B", "weekly", "CE", "ATM"),
+        json!({"sl_pts": 10, "trail": {"x": 5, "y": 0}}),
+    );
+    let put = option_leg(2, ("B", "weekly", "PE", "ATM"), json!({"sl_pts": 10}));
+    let sid = t.make(config(
+        "Two legs",
+        json!([call, put]),
+        json!({"trail_sl_to_entry": trail_to_entry}),
+    ));
+    let run = t.start_filled(sid, 100.0).await;
+    (run, t.leg(run, 1).symbol, t.leg(run, 2).symbol)
+}
+
+/// A partial exit: the call's trailed stop is hit on the dip after its
+/// peak and only the call is exited; the put, whose prices interleave and
+/// never reach its stop, stays open and the run keeps running.
+#[tokio::test]
+async fn only_the_leg_whose_trail_was_hit_is_exited() {
+    let (t, burst) = burst_module().await;
+    let (run, call, put) = two_legs(&t, false).await;
+    let call_path = then_flat(&[100.0, 110.0, 104.0, 150.0], 149.0, 29);
+    let mut sent = Vec::new();
+    for (i, p) in call_path.iter().enumerate() {
+        sent.push((call.clone(), *p));
+        sent.push((put.clone(), 100.5 + (i % 3) as f64 * 0.1));
+    }
+    send_while_held(&t, &burst, &sent).await;
+
+    assert!(
+        eventually(|| !exit_kinds(&t, run).is_empty()).await,
+        "the call's dip was never decided"
+    );
+    settled(&t).await;
+    let exits: Vec<(i64, String)> = t
+        .orders(run)
+        .into_iter()
+        .filter(|o| o.kind != "entry")
+        .map(|o| (o.leg_id, o.kind))
+        .collect();
+    assert_eq!(exits, vec![(1, "exit_sl".to_string())]);
+    assert_eq!(t.leg(run, 2).status, "open");
+    assert_eq!(t.run(run).stop_requested_reason, None);
+    t.m.shutdown().await;
+}
+
+/// Trail to entry is decided in order across symbols: the call's stop is
+/// hit at 104, which moves the put's stop to its entry (100), so the put's
+/// 99.5 after it exits the put too. Folded, the call's 110 and 104 were
+/// lost, nothing moved, and the 99.5 met the put's 90.
+#[tokio::test]
+async fn a_trailed_stop_moves_the_other_leg_to_entry_before_its_next_price() {
+    let (t, burst) = burst_module().await;
+    let (run, call, put) = two_legs(&t, true).await;
+    let mut sent = ticks(&call, &[100.0, 110.0, 104.0]);
+    sent.extend(ticks(&put, &[100.5, 100.4, 100.6, 99.5]));
+    sent.extend(ticks(&call, &then_flat(&[150.0], 149.0, 29)));
+    sent.extend(ticks(&put, &[101.0; 30]));
+    send_while_held(&t, &burst, &sent).await;
+
+    assert!(
+        eventually(|| exit_kinds(&t, run).len() == 2).await,
+        "exits: {:?}",
+        exit_kinds(&t, run)
+    );
+    settled(&t).await;
+    let exits: Vec<(i64, String)> = t
+        .orders(run)
+        .into_iter()
+        .filter(|o| o.kind != "entry")
+        .map(|o| (o.leg_id, o.kind))
+        .collect();
+    assert_eq!(
+        exits,
+        vec![(1, "exit_sl".to_string()), (2, "exit_sl".to_string())]
+    );
+    let sid = t.run(run).strategy_id;
+    assert_eq!(messages(&t, sid, "trail_to_entry_activated").len(), 1);
+    t.m.shutdown().await;
+}
+
+/// Aggregate risk over two legs: a trailing profit lock (active at 650,
+/// floor 325, trailing 325 behind the peak). The call's 110 makes 650 and
+/// activates it; the put's 99 and the call's 104 take the run to 195, under
+/// the floor, so the run stops and both legs are exited once each. Folded,
+/// the 110 was lost: the lock activated only at the later 150, with a floor
+/// the 149s never reached.
+#[tokio::test]
+async fn a_profit_lock_across_two_legs_stops_the_run_on_the_reversal() {
+    let (t, burst) = burst_module().await;
+    let call = option_leg(1, ("B", "weekly", "CE", "ATM"), json!({}));
+    let put = option_leg(2, ("B", "weekly", "PE", "ATM"), json!({}));
+    let lock = json!({"lock_profit": {"mode": "lock_and_trail", "if_profit_reaches": 650,
+                                       "lock_profit": 325, "trail_step": 325}});
+    let sid = t.make(config("Locked pair", json!([call, put]), lock));
+    let run = t.start_filled(sid, 100.0).await;
+    let (call, put) = (t.leg(run, 1).symbol, t.leg(run, 2).symbol);
+    let mut sent = ticks(&call, &[100.0, 110.0]);
+    sent.extend(ticks(&put, &[99.0]));
+    sent.extend(ticks(&call, &then_flat(&[104.0, 150.0], 149.0, 29)));
+    sent.extend(ticks(&put, &[99.0; 30]));
+    send_while_held(&t, &burst, &sent).await;
+
+    assert!(
+        eventually(|| exit_kinds(&t, run).len() == 2).await,
+        "exits: {:?}",
+        exit_kinds(&t, run)
+    );
+    settled(&t).await;
+    assert_eq!(
+        t.run(run).stop_requested_reason.as_deref(),
+        Some("lock_profit")
+    );
+    let mut exits: Vec<(i64, String)> = t
+        .orders(run)
+        .into_iter()
+        .filter(|o| o.kind != "entry")
+        .map(|o| (o.leg_id, o.kind))
+        .collect();
+    exits.sort();
+    assert_eq!(
+        exits,
+        vec![
+            (1, "exit_lock_profit".to_string()),
+            (2, "exit_lock_profit".to_string())
+        ]
+    );
+    let hits = messages(&t, sid, "lock_profit_triggered");
+    assert!(
+        hits.len() == 1 && hits[0].contains(" 195 "),
+        "decided at 195: {:?}",
+        hits
+    );
     t.m.shutdown().await;
 }
 

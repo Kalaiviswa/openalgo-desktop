@@ -217,7 +217,7 @@ impl StrategyModule {
             .iter()
             .map(|l| (l.symbol.clone(), l.exchange.clone()))
             .collect();
-        self.feed.add_run(run_id, &symbols).await;
+        self.follow_prices(run_id, &symbols).await;
         self.emit(
             strategy_id,
             user_id,

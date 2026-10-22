@@ -245,6 +245,14 @@ logging. Every input is an argument and every decision is a return value.
 Consumers translate, they do not decide. The web's `test/risk/vectors.json` is
 the contract; the Rust core must pass every vector.
 
+**Risk decides every price, in the order it came** (PROD-REL-01). A trailing
+stop, a stepped trail and a profit lock depend on the path, not on its
+extremes: a peak that raised a stop and the dip that then hit it were lost
+when the strategy tick path folded waiting prices to a later, larger peak.
+Never fold, sample or drop prices before the risk core has judged them; when
+acting is slow, combine the decisions (`strategy::tick_feed::pending`), not
+the prices.
+
 ### An order path decides once, under the lock
 
 Learned by the web from defects that reversed real positions; they apply here

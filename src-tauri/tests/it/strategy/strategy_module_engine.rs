@@ -455,6 +455,9 @@ async fn risk_that_cannot_be_acted_on_reaches_the_audit_trail_once_per_episode()
             run
         ))
         .unwrap();
+    // The run's tick inputs were read when its prices were subscribed;
+    // read them again with the mode written here.
+    t.m.tick_contexts.forget(run);
     t.gw.unauthorised
         .store(true, std::sync::atomic::Ordering::SeqCst);
     t.m.process_tick(ATM_CE, "NFO", 121.0).await;

@@ -16,6 +16,11 @@
 //! other runs this session) cannot change during the run either (one run
 //! per strategy at a time); it is read once per session, also off the
 //! async worker.
+//!
+//! Both are read when the run's prices are subscribed (`follow_prices`),
+//! because the tick reader decides every price itself: a read on a run's
+//! first price would hold the reader, and a burst could overrun the
+//! market-data channel behind it.
 
 use super::dispatch::RunMode;
 use super::store::{RunRow, StrategyRow};
@@ -70,6 +75,15 @@ impl TickContexts {
 }
 
 impl StrategyModule {
+    /// Subscribe the run's instruments and read what its ticks need now,
+    /// so its first price finds them in memory.
+    pub(crate) async fn follow_prices(&self, run_id: i64, symbols: &[(String, String)]) {
+        self.feed.add_run(run_id, symbols).await;
+        if let Some(ctx) = self.tick_context(run_id).await {
+            self.session_loss(&ctx, run_id).await;
+        }
+    }
+
     /// The run's tick context, read on the blocking pool the first time.
     /// `None` when the run has ended or cannot be read (the tick is not
     /// evaluated, as before: a read failure was never a decision).

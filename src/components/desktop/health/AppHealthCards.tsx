@@ -244,7 +244,7 @@ export function StrategyTicksCard({ data }: { data: StrategyTicks }) {
       <Row label="Prices read" value={data.ticks_queued.toLocaleString('en-IN')} />
       <Row label="Combined while busy" value={data.ticks_folded.toLocaleString('en-IN')} />
       <Row label="Missed" value={data.ticks_missed.toLocaleString('en-IN')} />
-      <Row label="Symbols waiting" value={data.symbols_waiting.toLocaleString('en-IN')} />
+      <Row label="Runs waiting" value={data.runs_waiting.toLocaleString('en-IN')} />
     </AppCard>
   )
 }

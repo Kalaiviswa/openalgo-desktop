@@ -157,7 +157,7 @@ export interface StrategyTicks {
   ticks_queued: number
   ticks_folded: number
   ticks_missed: number
-  symbols_waiting: number
+  runs_waiting: number
 }
 
 export interface BrokerFeedLosses {

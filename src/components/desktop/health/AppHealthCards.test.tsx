@@ -94,7 +94,7 @@ describe('App health cards', () => {
             ticks_queued: 50,
             ticks_folded: 0,
             ticks_missed: 0,
-            symbols_waiting: 0,
+            runs_waiting: 0,
           },
         })}
       />
@@ -113,7 +113,7 @@ describe('App health cards', () => {
             ticks_queued: 50,
             ticks_folded: 4,
             ticks_missed: 2,
-            symbols_waiting: 1,
+            runs_waiting: 1,
           },
           order_facts: {
             status: 'fail',
@@ -193,7 +193,7 @@ describe('App health cards', () => {
             ticks_queued: 10,
             ticks_folded: 0,
             ticks_missed: 1,
-            symbols_waiting: 0,
+            runs_waiting: 0,
           },
         })}
       />

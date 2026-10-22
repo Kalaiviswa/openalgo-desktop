@@ -34,7 +34,7 @@
 //! | `scheduler` | IST start and square-off jobs, pending-stop retries |
 //! | `checkpoint` | periodic snapshots |
 //! | `recovery` | rebuild open runs at startup |
-//! | `tick_feed` | refcounted price subscriptions driving `process_tick` |
+//! | `tick_feed` | refcounted price subscriptions; each price decided on arrival, acted on after |
 //! | `resolver` | leg to exact contract |
 //! | `validate` | configuration validation (the session API's rules) |
 //! | `views` | broker-backed books per strategy |
@@ -261,7 +261,7 @@ impl StrategyModule {
             tracing::info!("Strategy module recovered {} run(s)", recovered.len());
         }
         for (run_id, symbols) in &recovered {
-            self.feed.add_run(*run_id, symbols).await;
+            self.follow_prices(*run_id, symbols).await;
         }
         tick_feed::start(self);
         checkpoint::start(self);
