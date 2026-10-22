@@ -174,6 +174,70 @@ async fn a_fractional_gtt_never_reaches_the_broker() {
     h.shutdown().await;
 }
 
+/// The sandbox's GTT book, read without touching the toggle.
+async fn sandbox_gtts(h: &H) -> Value {
+    serde_json::to_value(h.ctx.sandbox.gtt_orderbook(None).await.unwrap()).unwrap()["data"].clone()
+}
+
+/// PROD-TR-05: a GTT is whole units on every venue, so a quantity above
+/// what any broker takes (a 32-bit integer) is refused for CRYPTO too, and
+/// from the GTT page's modify, which has no `/api/v1` schema in front of
+/// it: placed or modified, live and in analyzer mode. Nothing reaches the
+/// broker and the sandbox's GTT keeps its quantity. The schema's cap
+/// skipped CRYPTO, and the page's modify reached the broker or the sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversize_gtt_is_refused_on_every_exchange_and_from_the_page() {
+    use openalgo_desktop_lib::services::ui_order_service;
+    let h = H::new().await;
+    h.analyze(true);
+    let mut sbin_gtt = gtt(json!(2));
+    sbin_gtt["exchange"] = json!("NSE");
+    sbin_gtt["symbol"] = json!("SBIN");
+    sbin_gtt["product"] = json!("CNC");
+    let (s, v) = post(&h, "/api/v1/placegttorder", sbin_gtt.clone()).await;
+    assert_eq!(s, 200, "{}", v);
+    let trigger = v["trigger_id"].clone();
+    let held = sandbox_gtts(&h).await;
+    assert_eq!(held.as_array().map(Vec::len), Some(1), "{}", held);
+
+    for analyze in [false, true] {
+        h.analyze(analyze);
+        let mut modify = gtt(json!(2_147_483_648u64));
+        modify["trigger_id"] = trigger.clone();
+        for (path, body) in [
+            ("/api/v1/placegttorder", gtt(json!(2_147_483_648u64))),
+            ("/api/v1/modifygttorder", modify),
+        ] {
+            let (s, v) = post(&h, path, body).await;
+            assert_eq!(s, 400, "{} analyze {} -> {}", path, analyze, v);
+            assert!(v.to_string().contains(TOO_LARGE), "{} -> {}", path, v);
+        }
+        for (exchange, symbol, product) in [("NSE", "SBIN", "CNC"), ("CRYPTO", "BTCUSDFUT", "NRML")]
+        {
+            let mut page = sbin_gtt.clone();
+            page["trigger_id"] = trigger.clone();
+            page["exchange"] = json!(exchange);
+            page["symbol"] = json!(symbol);
+            page["product"] = json!(product);
+            page["quantity"] = json!(3_000_000_000_000i64);
+            let r = ui_order_service::modify_gtt_order(&h.ctx, page.as_object().unwrap()).await;
+            assert_eq!(
+                r.status, 400,
+                "page {} analyze {} -> {}",
+                exchange, analyze, r.body
+            );
+            assert!(r.message().contains(TOO_LARGE), "{}", r.body);
+        }
+    }
+    assert_eq!(gtt_calls(&h), 0, "no GTT reached the broker");
+    assert_eq!(
+        sandbox_gtts(&h).await,
+        held,
+        "the sandbox's GTT is unchanged"
+    );
+    h.shutdown().await;
+}
+
 // -- options splits ----------------------------------------------------------
 
 /// 195 NIFTY ATM calls in three chunks of 65.

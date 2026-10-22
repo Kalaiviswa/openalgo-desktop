@@ -577,8 +577,11 @@ pub fn gtt_post_process(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
         m.insert("target".into(), Value::Null);
         m.insert("trigger_price".into(), json!(resolved));
     }
-    // placeorder's rule for the quantity: whole outside CRYPTO, and capped.
+    // placeorder's rule for the quantity: whole outside CRYPTO. The cap
+    // holds on CRYPTO too (PROD-TR-05): no GTT takes a fraction, so a GTT is
+    // whole units on every exchange.
     coerce_quantity(m)?;
+    cap_quantities(m)?;
     if let Some(a) = m.get("action").and_then(Value::as_str) {
         let up = a.to_ascii_uppercase();
         m.insert("action".into(), json!(up));
@@ -1069,13 +1072,17 @@ mod tests {
         let gtt = json!({"apikey": "k", "strategy": "s", "trigger_type": "SINGLE",
             "exchange": "NSE", "symbol": "SBIN", "action": "buy", "product": "CNC",
             "quantity": 1, "price": 900, "triggerprice_sl": 905});
+        // CRYPTO too (PROD-TR-05): a GTT is whole units on every exchange.
+        let crypto = with(&gtt, "exchange", &json!("CRYPTO"));
         for schema in [place_gtt(), modify_gtt()] {
-            let mut m = with(&gtt, "quantity", &big);
-            m.insert("trigger_id".into(), json!("GTT-1"));
-            assert_eq!(
-                schema.load(&m).unwrap_err().to_python(),
-                "{'quantity': ['Quantity is larger than any exchange accepts.']}"
-            );
+            for base in [&gtt, &Value::Object(crypto.clone())] {
+                let mut m = with(base, "quantity", &big);
+                m.insert("trigger_id".into(), json!("GTT-1"));
+                assert_eq!(
+                    schema.load(&m).unwrap_err().to_python(),
+                    "{'quantity': ['Quantity is larger than any exchange accepts.']}"
+                );
+            }
         }
         let ok = place_gtt().load(&with(&gtt, "quantity", &largest)).unwrap();
         assert_eq!(ok["quantity"], largest);

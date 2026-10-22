@@ -10,7 +10,8 @@ use super::core::{
     analyze_mode, analyzer_request, broker_handle, f, i, meta, mode_of, publish, s, safe_request,
     Reply,
 };
-use super::order_service::{fractional_refusal, route_to_pending, Route, FRACTIONAL_REFUSED};
+use super::order_service::{fractional_refusal, route_to_pending, Route};
+use super::schemas::{MAX_BROKER_QUANTITY, QUANTITY_TOO_LARGE};
 use crate::brokers::types::{GttOrder, GttRequest, GttTriggerType, QuoteKey};
 use crate::error::AppError;
 use crate::events::{Event, GttKind};
@@ -31,18 +32,31 @@ fn opt_dec(v: &Value, k: &str) -> Option<rust_decimal::Decimal> {
 // quantity is refused, as `placeorder` refuses it where it cannot be
 // carried, never truncated to a GTT for 0.
 
-/// The sandbox request for a loaded GTT body.
-pub fn sandbox_gtt(req: &Value) -> Result<crate::sandbox::GttRequest, Reply> {
+/// The quantity of a GTT, or the refusal of one no broker takes (API-02,
+/// PROD-TR-05): above a 32-bit integer, as `placeorder` refuses it at
+/// dispatch. The `/api/v1` schema refuses it first; the GTT page's modify
+/// reaches here without one.
+fn gtt_quantity(req: &Value) -> Result<i64, Reply> {
     if let Some(refused) = fractional_refusal(req) {
         return Err(refused);
     }
+    let quantity = i(req, "quantity");
+    if quantity > MAX_BROKER_QUANTITY {
+        return Err(Reply::error(400, QUANTITY_TOO_LARGE));
+    }
+    Ok(quantity)
+}
+
+/// The sandbox request for a loaded GTT body.
+pub fn sandbox_gtt(req: &Value) -> Result<crate::sandbox::GttRequest, Reply> {
+    let quantity = gtt_quantity(req)?;
     Ok(crate::sandbox::GttRequest {
         trigger_type: s(req, "trigger_type"),
         symbol: s(req, "symbol"),
         exchange: s(req, "exchange"),
         action: s(req, "action").to_ascii_uppercase(),
         product: s(req, "product"),
-        quantity: i(req, "quantity"),
+        quantity,
         pricetype: s(req, "pricetype"),
         price: opt_dec(req, "price"),
         triggerprice_sl: opt_dec(req, "triggerprice_sl"),
@@ -62,9 +76,7 @@ pub fn sandbox_gtt(req: &Value) -> Result<crate::sandbox::GttRequest, Reply> {
 
 /// The broker request for a loaded GTT body.
 pub fn broker_gtt(req: &Value) -> Result<GttRequest, AppError> {
-    if fractional_refusal(req).is_some() {
-        return Err(AppError::Validation(FRACTIONAL_REFUSED.into()));
-    }
+    let quantity = gtt_quantity(req).map_err(|refused| AppError::Validation(refused.message()))?;
     let parse = |k: &str| AppError::Validation(format!("Invalid {}", k));
     Ok(GttRequest {
         key: QuoteKey::new(s(req, "exchange"), s(req, "symbol")),
@@ -78,7 +90,7 @@ pub fn broker_gtt(req: &Value) -> Result<GttRequest, AppError> {
             .parse()
             .map_err(|_| parse("action"))?,
         product: s(req, "product").parse().map_err(|_| parse("product"))?,
-        quantity: i(req, "quantity"),
+        quantity,
         pricetype: s(req, "pricetype")
             .parse()
             .map_err(|_| parse("pricetype"))?,
@@ -449,6 +461,7 @@ pub async fn gtt_orderbook(ctx: &AppState, status: &str) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::order_service::FRACTIONAL_REFUSED;
 
     #[test]
     fn active_entries_come_first_stably() {
@@ -500,5 +513,30 @@ mod tests {
             "product": "NRML", "pricetype": "LIMIT"});
         assert_eq!(sandbox_gtt(&whole).unwrap().quantity, 2);
         assert_eq!(broker_gtt(&whole).unwrap().quantity, 2);
+    }
+
+    /// A quantity no broker takes is refused by both conversions, on every
+    /// exchange (PROD-TR-05): the GTT page's modify has no schema in front
+    /// of it. The largest one a broker takes passes unchanged.
+    #[test]
+    fn a_quantity_no_broker_takes_makes_no_gtt() {
+        for exchange in ["NSE", "CRYPTO"] {
+            let gtt = |quantity: u64| {
+                json!({"exchange": exchange, "quantity": quantity, "action": "BUY",
+                    "product": "NRML", "pricetype": "LIMIT"})
+            };
+            let refused = sandbox_gtt(&gtt(2_147_483_648)).unwrap_err();
+            assert_eq!(
+                (refused.status, refused.message()),
+                (400, QUANTITY_TOO_LARGE.to_string())
+            );
+            match broker_gtt(&gtt(2_147_483_648)) {
+                Err(AppError::Validation(m)) => assert_eq!(m, QUANTITY_TOO_LARGE),
+                other => panic!("{:?}", other.map(|g| g.quantity)),
+            }
+            let largest = i64::from(i32::MAX);
+            assert_eq!(sandbox_gtt(&gtt(2_147_483_647)).unwrap().quantity, largest);
+            assert_eq!(broker_gtt(&gtt(2_147_483_647)).unwrap().quantity, largest);
+        }
     }
 }

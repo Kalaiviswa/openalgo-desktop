@@ -983,7 +983,10 @@ and add each new one here.
   Only a live CRYPTO smart order carries a fraction, decided and sent in
   exact decimals. The web truncates (`int(position_size)`,
   `int(quantity)`), so a target of 0.5 closed the position and a 0.5 GTT
-  became one for 0 with nothing blocked.
+  became one for 0 with nothing blocked. Nor is a size clamped: a GTT
+  quantity above a 32-bit integer is refused on every exchange, CRYPTO
+  included, from `/api/v1` and from the GTT page's modify alike
+  (`gtt_service::gtt_quantity`, PROD-TR-05).
 
 ### Symbol master and the option tools
 
