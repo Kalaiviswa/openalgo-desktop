@@ -23,6 +23,10 @@ It must have completed with success, and every job the workflow must have
 (EXPECTED_JOBS, NATIVE_ORDER_JOBS) must have succeeded; a skipped or
 missing job does not count.
 
+GitHub's filtered list of runs sometimes leaves out a run it lists a few
+seconds later (seen on 2026-10-22 with every filter combination), so a list
+with no run of the commit is asked again before "none" counts.
+
 It reads the GitHub API through `gh api` (GH_TOKEN, GITHUB_REPOSITORY).
 SMOKE_GATE_FIXTURES=<dir> answers each API path from <dir> instead, for
 the tests: the file name is the path with "/", "?", "&" and "=" replaced by
@@ -36,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 DEFAULT_BRANCH = "master"
@@ -57,6 +62,10 @@ NATIVE_ORDER_JOBS = (
     "native e2e (windows-2025, test build)",
 )
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# An empty list of runs is asked again this many times in all, this many
+# seconds apart.
+LIST_ATTEMPTS = 5
+LIST_PAUSE = 3.0
 
 
 @dataclass(frozen=True)
@@ -120,10 +129,16 @@ def master_run_of(run: dict, r: str, sha: str, gate: Gate) -> bool:
 
 
 def master_runs(gate: Gate, r: str, sha: str) -> list[dict]:
-    """The gate's runs of `sha` on master."""
+    """The gate's runs of `sha` on master, asking again while none is listed."""
     event = f"&event={gate.events[0]}" if len(gate.events) == 1 else ""
     path = f"repos/{r}/actions/workflows/{gate.workflow}/runs?branch={DEFAULT_BRANCH}{event}&head_sha={sha}&per_page=100"
-    return [run for run in api(path).get("workflow_runs", []) if master_run_of(run, r, sha, gate)]
+    for attempt in range(LIST_ATTEMPTS):
+        if attempt:
+            time.sleep(LIST_PAUSE)
+        runs = [run for run in api(path).get("workflow_runs", []) if master_run_of(run, r, sha, gate)]
+        if runs:
+            return runs
+    return []
 
 
 def finished(gate: Gate, run: dict, sha: str) -> None:
