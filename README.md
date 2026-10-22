@@ -2,6 +2,8 @@
 
 <div align="center">
 
+[![OpenAlgo Desktop downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmarketcalls%2Fopenalgo-desktop%2Fstats%2Fbadges%2Fdownloads.json)](https://github.com/marketcalls/openalgo-desktop/tree/stats)
+[![OpenAlgo Desktop downloads per month](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmarketcalls%2Fopenalgo-desktop%2Fstats%2Fbadges%2Fdownloads-month.json)](https://github.com/marketcalls/openalgo-desktop/tree/stats)
 [![GitHub Stars](https://img.shields.io/github/stars/marketcalls/openalgo?style=social)](https://github.com/marketcalls/openalgo)
 [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/openalgoHQ)](https://twitter.com/openalgoHQ)
 [![YouTube Channel Subscribers](https://img.shields.io/youtube/channel/subscribers/UCw7eVneIEyiTApy4RtxrJsQ)](https://www.youtube.com/@openalgo)

@@ -244,6 +244,10 @@ jobs:
       - name: Update manifest tests
         # scripts/ci/updater_manifest.py builds a release's latest.json.
         run: python3 scripts/ci/test_updater_manifest.py
+      - name: Download counter tests
+        # scripts/ci/download_stats.py, run by download-stats.yml, and that
+        # workflow pushing to the stats branch only.
+        run: python3 scripts/ci/test_download_stats.py
       - name: Coverage area floor tests
         # scripts/ci/coverage_areas.py, the rust-coverage job's area gate.
         run: python3 scripts/ci/test_coverage_areas.py
