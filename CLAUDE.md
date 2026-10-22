@@ -1336,6 +1336,9 @@ and add each new one here.
   drop a field from a persisted store, bump its `version` with a `migrate`:
   zustand rewrites storage on load only after a migration, so with
   `partialize` alone the old value stays on disk until the next change.
+  Give it a `merge` that reads back only the persisted fields too: when the
+  stored version matches, zustand's default merge copies every stored
+  field into memory, a stray secret included (PROD-SEC-01).
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
 
