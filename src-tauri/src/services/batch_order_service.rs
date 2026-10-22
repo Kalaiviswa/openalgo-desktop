@@ -33,6 +33,53 @@ pub const SPLIT_PAUSE: Duration = Duration::from_millis(100);
 /// A split chunk not sent because an earlier one has no definite answer.
 pub const SPLIT_HELD: &str = "Not sent: an earlier order of this split has no definite answer from the broker and may have been placed. Check the order book before sending the rest.";
 
+/// The rows of a split sent chunk by chunk, one row per chunk. After a
+/// chunk with no definite answer the rest are held back: it may have been
+/// placed, so nothing more is sent until the order book says (LOG-08 P1-5;
+/// the web keeps sending). Each held chunk still gets its row.
+pub(crate) struct SplitRows {
+    chunks: usize,
+    pub(crate) results: Vec<Value>,
+    /// The chunks with no definite answer, for `uncertain_legs`.
+    pub(crate) uncertain: Vec<String>,
+}
+
+impl SplitRows {
+    pub(crate) fn new(chunks: usize) -> Self {
+        Self {
+            chunks,
+            results: Vec::with_capacity(chunks),
+            uncertain: Vec::new(),
+        }
+    }
+
+    /// Whether chunk `order_num` is held back; if so its row says why.
+    pub(crate) fn hold(&mut self, order_num: usize, qty: i64) -> bool {
+        if self.uncertain.is_empty() {
+            return false;
+        }
+        self.results
+            .push(json!({"order_num": order_num, "quantity": qty,
+            "status": "error", "message": SPLIT_HELD}));
+        true
+    }
+
+    /// The row for a chunk that was sent.
+    pub(crate) fn record(&mut self, order_num: usize, qty: i64, r: &Reply) {
+        if r.is_uncertain() {
+            self.uncertain
+                .push(format!("order {} of {} ({})", order_num, self.chunks, qty));
+        }
+        self.results.push(if r.is_success() {
+            json!({"order_num": order_num, "quantity": qty, "status": "success",
+                "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null)})
+        } else {
+            json!({"order_num": order_num, "quantity": qty, "status": "error",
+                "message": r.message()})
+        });
+    }
+}
+
 /// BUY legs first, then SELL, each group in request order.
 pub fn buy_then_sell(orders: &[Value]) -> Vec<Value> {
     let side = |o: &Value| s(o, "action").to_ascii_uppercase();
@@ -370,43 +417,23 @@ async fn split_to_broker(
         Ok(h) => h,
         Err(r) => return r,
     };
-    let n_orders = chunks.len();
-    let mut results = Vec::with_capacity(n_orders);
-    let mut uncertain: Vec<String> = Vec::new();
+    let mut rows = SplitRows::new(chunks.len());
     for (k, qty) in chunks.iter().enumerate() {
         // The remainder chunk is numbered total_orders, as on the web.
         let order_num = k + 1;
-        if !uncertain.is_empty() {
-            // An earlier chunk may have been placed: nothing more is sent
-            // until the order book says (LOG-08 P1-5; the web keeps
-            // sending). Each unsent chunk is reported, so the result keeps
-            // one row per chunk.
-            results.push(
-                json!({"order_num": order_num, "quantity": qty, "status": "error",
-                "message": SPLIT_HELD}),
-            );
+        if rows.hold(order_num, *qty) {
             continue;
         }
         if k > 0 {
             tokio::time::sleep(SPLIT_PAUSE).await;
         }
         let r = place_live(&h, ctx, &chunk_order(req, *qty)).await;
-        if r.placement.as_ref().is_some_and(|p| p.is_uncertain()) {
-            uncertain.push(format!("order {} of {} ({})", order_num, n_orders, qty));
-        }
-        if r.is_success() {
-            results.push(
-                json!({"order_num": order_num, "quantity": qty, "status": "success",
-                "orderid": r.body.get("orderid").cloned().unwrap_or(Value::Null)}),
-            );
-        } else {
-            results.push(json!({"order_num": order_num, "quantity": qty, "status": "error", "message": r.message()}));
-        }
+        rows.record(order_num, *qty, &r);
     }
     let mut reply = Reply::ok(json!({
-        "status": "success", "total_quantity": total, "split_size": size, "results": results,
+        "status": "success", "total_quantity": total, "split_size": size, "results": rows.results,
     }));
-    reply.placement = uncertain_legs(&uncertain);
+    reply.placement = uncertain_legs(&rows.uncertain);
     publish(ctx, split_event(Mode::Live, safe_request(req), &reply, req));
     reply
 }
