@@ -261,6 +261,13 @@ unchanged:
   queued order through the Action Center's own record
   (`trading/runner/approval.rs`: bound, rejected or unconfirmed), never by a
   number it does not have (LOG-04; the web follows neither).
+- **One request is one decision.** A request that places several orders
+  reads analyzer mode and the Semi-Auto queue once, and every order goes
+  where that said. An options order's legs and chunks go through
+  `order_service::place_admitted`, never `place_order`, so a toggle while
+  a contract resolves or a chunk is in flight cannot split it between Live
+  and Sandbox, or between the broker and the Action Center (PROD-TR-04;
+  the web reads both again for each order).
 - A stop whose exit orders were refused leaves the run open and managed.
 - **An obligation's order goes only through the session it was opened on**
   (LOG-07, `services::live_owner`). A Live strategy run, OpenScript run,

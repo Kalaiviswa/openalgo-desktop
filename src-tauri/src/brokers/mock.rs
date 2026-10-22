@@ -176,6 +176,10 @@ pub struct MockBroker {
     /// Holds a master download while set (it signals `entered`, then waits
     /// for `release`), so a test can act while one is in flight.
     pub master_gate: Mutex<Option<std::sync::Arc<PlaceGate>>>,
+    /// Holds the next `get_quote` once (it signals `entered`, then waits
+    /// for `release`), so a test can act while an option contract is being
+    /// resolved. Taken on first use: later quotes are not held.
+    pub quote_gate: Mutex<Option<std::sync::Arc<PlaceGate>>>,
     /// What `carries_stored` answers.
     pub carry: Mutex<Option<&'static str>>,
     /// The stored rows the last `download_master_carrying` was given.
@@ -251,6 +255,7 @@ impl MockBroker {
             next_id: Mutex::new(0),
             place_gate: Mutex::new(None),
             master_gate: Mutex::new(None),
+            quote_gate: Mutex::new(None),
             strategies: Mutex::new(Vec::new()),
         }
     }
@@ -573,6 +578,11 @@ impl Broker for MockBroker {
     }
 
     async fn get_quote(&self, _: &AuthToken, key: &QuoteKey) -> Result<Quote> {
+        let gate = self.quote_gate.lock().take();
+        if let Some(g) = gate {
+            g.entered.notify_one();
+            g.release.notified().await;
+        }
         self.record(MockCall::Quote(key.clone()));
         self.quotes
             .lock()

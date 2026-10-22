@@ -1,6 +1,12 @@
 //! Options orders (web `place_options_order_service.py`,
 //! `options_multiorder_service.py`): resolve the contract from an offset,
-//! then place through the order service (sandbox or live, decided once).
+//! then place through the order service.
+//!
+//! One request is one decision (PROD-TR-04): analyzer mode and the
+//! Semi-Auto queue are read once, before any contract is resolved, and
+//! every leg and chunk goes where that decision said, whatever either
+//! toggle does while they are resolved and sent. The web reads both again
+//! for each order it places.
 
 use super::batch_order_service::{
     buy_then_sell, split_chunks, too_many_orders, SplitRows, SPLIT_PAUSE,
@@ -10,7 +16,7 @@ use super::core::{
     Reply,
 };
 use super::options_service::{resolve_option, OptionPick, ResolvedOption};
-use super::order_service::{place_order_with, route_to_pending, uncertain_legs, Route};
+use super::order_service::{place_admitted, route_to_pending, uncertain_legs, Route};
 use crate::events::Event;
 use crate::state::AppState;
 use serde_json::{json, Map, Value};
@@ -34,12 +40,13 @@ fn order_body(req: &Value, leg: &Value, opt: &ResolvedOption, quantity: i64) -> 
     })
 }
 
-/// Place one leg's chunks one after another. After a chunk with no
-/// definite answer the rest are held back and answered as `splitorder`
-/// answers them (LOG-08 P1-5; the web keeps sending).
+/// Place one leg's chunks one after another, to the side decided once
+/// (`analyze`). After a chunk with no definite answer the rest are held
+/// back and answered as `splitorder` answers them (LOG-08 P1-5; the web
+/// keeps sending).
 async fn place_split(
     ctx: &AppState,
-    route: Route,
+    analyze: bool,
     req: &Value,
     leg: &Value,
     opt: &ResolvedOption,
@@ -54,7 +61,7 @@ async fn place_split(
         if k > 0 {
             tokio::time::sleep(SPLIT_PAUSE).await;
         }
-        let r = place_order_with(ctx, &order_body(req, leg, opt, *qty), route, false).await;
+        let r = place_admitted(ctx, &order_body(req, leg, opt, *qty), analyze, false).await;
         rows.record(order_num, *qty, &r);
     }
     rows
@@ -94,7 +101,7 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         let Some(chunks) = split_chunks(quantity, splitsize) else {
             return Reply::error(400, too_many_orders());
         };
-        let split = place_split(ctx, route, req, req, &opt, &chunks).await;
+        let split = place_split(ctx, analyze, req, req, &opt, &chunks).await;
         let successful = split
             .results
             .iter()
@@ -132,7 +139,7 @@ pub async fn options_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
         );
         return reply;
     }
-    let r = place_order_with(ctx, &order_body(req, req, &opt, quantity), route, true).await;
+    let r = place_admitted(ctx, &order_body(req, req, &opt, quantity), analyze, true).await;
     if !r.is_success() {
         return r;
     }
@@ -175,7 +182,6 @@ pub async fn options_multi_order(ctx: &AppState, req: &Value, route: Route) -> R
     let order = MultiOrder {
         ctx,
         h: &h,
-        route,
         req,
         analyze,
         shared_ltp,
@@ -233,8 +239,8 @@ async fn shared_underlying_ltp(
 struct MultiOrder<'a> {
     ctx: &'a AppState,
     h: &'a BrokerHandle,
-    route: Route,
     req: &'a Value,
+    /// Where every leg goes, decided once (the sandbox when set).
     analyze: bool,
     /// The underlying's LTP, resolved once.
     shared_ltp: Option<f64>,
@@ -291,7 +297,7 @@ impl MultiOrder<'_> {
                 "message": "Split orders would exceed maximum limit of 100 per leg",
             });
         };
-        let split = place_split(self.ctx, self.route, self.req, leg, opt, &chunks)
+        let split = place_split(self.ctx, self.analyze, self.req, leg, opt, &chunks)
             .await
             .results;
         let any_ok = split.iter().any(|r| r["status"] == "success");
@@ -309,7 +315,7 @@ impl MultiOrder<'_> {
     async fn place_leg(&self, leg: &Value, opt: &ResolvedOption, head: &LegHead) -> Value {
         let (leg_no, offset, ot, action) = (head.leg_no, &head.offset, &head.ot, &head.action);
         let body = order_body(self.req, leg, opt, i(leg, "quantity"));
-        let r = place_order_with(self.ctx, &body, self.route, false).await;
+        let r = place_admitted(self.ctx, &body, self.analyze, false).await;
         if r.is_success() {
             return json!({
                 "leg": leg_no, "symbol": opt.symbol, "exchange": opt.exchange,

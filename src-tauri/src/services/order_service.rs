@@ -410,18 +410,12 @@ pub fn uncertain_legs(labels: &[String]) -> Option<PlaceOutcome> {
 
 /// `placeorder`.
 pub async fn place_order(ctx: &AppState, req: &Value, route: Route) -> Reply {
-    place_order_with(ctx, req, route, true).await
-}
-
-/// `placeorder`, optionally without the `order.placed` / `order.failed`
-/// event (split legs of an options order report one completion event).
-pub async fn place_order_with(ctx: &AppState, req: &Value, route: Route, emit: bool) -> Reply {
     // One read decides both the fractional check and the destination.
     let analyze = match route.analyze(ctx) {
         Ok(a) => a,
         Err(r) => return r,
     };
-    place_order_decided(ctx, req, route, analyze, emit).await
+    place_order_decided(ctx, req, route, analyze, true).await
 }
 
 /// `placeorder` to a destination the caller decided once (`analyze`: the
@@ -434,9 +428,25 @@ pub async fn place_order_decided(
     analyze: bool,
     emit: bool,
 ) -> Reply {
-    if let Some(r) = route_to_pending(ctx, "placeorder", req, route)
-        .or_else(|| fractional_refusal_for(req, analyze))
-    {
+    if let Some(r) = route_to_pending(ctx, "placeorder", req, route) {
+        return r;
+    }
+    place_admitted(ctx, req, analyze, emit).await
+}
+
+/// One order of a request that was admitted as a whole (past the Semi-Auto
+/// queue) and decided once (`analyze`: the sandbox): a leg or chunk of an
+/// options order. Neither toggle is read again, so a request is never
+/// split between Live and Sandbox, or between the broker and the Action
+/// Center (PROD-TR-04). `emit`: publish `order.placed` / `order.failed`
+/// (the chunks of an options split report one completion event instead).
+pub(crate) async fn place_admitted(
+    ctx: &AppState,
+    req: &Value,
+    analyze: bool,
+    emit: bool,
+) -> Reply {
+    if let Some(r) = fractional_refusal_for(req, analyze) {
         return r;
     }
     if analyze {
