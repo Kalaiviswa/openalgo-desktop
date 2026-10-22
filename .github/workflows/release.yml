@@ -289,11 +289,14 @@ jobs:
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
-            bundles: dmg
+            # `app` too: Tauri's bundler (2.12) archives the .app into the
+            # update bundle (.app.tar.gz) only when `app` is asked for;
+            # with `dmg` alone it deletes the .app and makes none.
+            bundles: app,dmg
           - name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
     steps:
       - uses: actions/checkout@v7
       - if: runner.os == 'Linux'

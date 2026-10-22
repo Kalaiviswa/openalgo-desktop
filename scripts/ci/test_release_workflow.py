@@ -64,6 +64,16 @@ class ReleaseBuild(unittest.TestCase):
         self.assertGreaterEqual(python, 0)
         self.assertLess(python, self.action)
 
+    def test_the_macos_rebuild_asks_for_the_app_so_its_update_bundle_is_made(self):
+        # tauri-bundler 2.12 archives the .app into the .app.tar.gz only
+        # when `app` is among the requested bundles.
+        with open(RELEASE, encoding="utf-8") as f:
+            text = f.read()
+        for name in ("macos-aarch64", "macos-x86_64"):
+            entry = text[text.index(f"\n          - name: {name}\n") :]
+            bundles = re.search(r"\n            bundles: (.+)", entry).group(1)
+            self.assertIn("app", bundles.split(","), name)
+
     def test_the_backstop_runs_right_after_the_upload_on_every_target(self):
         backstop = self.steps[self.action + 1]
         self.assertIn("scripts/ci/check_no_e2e_build.py --same-as-checked", backstop)
