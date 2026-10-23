@@ -964,8 +964,10 @@ Every flaky test found so far was a race, not a slow machine:
   page last showed, marked with when it was read, and a list never read
   says it is not known; neither is shown as empty. The Health page once
   read its unconfirmed orders as `[]` on any failure, so a held order
-  vanished after one failed refresh. Each of its reads settles on its own
-  (`components/desktop/health/useHealthReads.ts`), not all or nothing.
+  vanished after one failed refresh. Each of its reads is applied as soon
+  as it settles, with its own time, and fails after a timeout
+  (`components/desktop/health/useHealthReads.ts`): not all or nothing,
+  and never held back by the slowest read or a stalled server.
 - An OpenScript run trades the inputs its start read (PROD-TR-06, as the
   web's `start` hands them to the run): its page is served the snapshot
   kept on the run (`RunEntry::inputs`), never a later read of the saved

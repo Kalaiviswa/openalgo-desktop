@@ -304,9 +304,12 @@ export async function getDetailedHealthCheck(): Promise<HealthCheck> {
 /**
  * Get current metrics snapshot
  * Requires authentication
+ *
+ * Desktop: each health read takes the Health page's abort signal, so a read
+ * that stalls is given up and its request closed (PROD-PAR-01).
  */
-export async function getCurrentMetrics(): Promise<CurrentMetrics> {
-  const response = await webClient.get<CurrentMetrics>('/health/api/current')
+export async function getCurrentMetrics(signal?: AbortSignal): Promise<CurrentMetrics> {
+  const response = await webClient.get<CurrentMetrics>('/health/api/current', { signal })
   return response.data
 }
 
@@ -314,9 +317,13 @@ export async function getCurrentMetrics(): Promise<CurrentMetrics> {
  * Get metrics history
  * Requires authentication
  */
-export async function getMetricsHistory(hours = 24): Promise<HistoricalMetric[]> {
+export async function getMetricsHistory(
+  hours = 24,
+  signal?: AbortSignal
+): Promise<HistoricalMetric[]> {
   const response = await webClient.get<HistoricalMetric[]>('/health/api/history', {
     params: { hours },
+    signal,
   })
   return response.data
 }
@@ -325,9 +332,13 @@ export async function getMetricsHistory(hours = 24): Promise<HistoricalMetric[]>
  * Get aggregated statistics
  * Requires authentication
  */
-export async function getHealthStats(hours = 24): Promise<HealthStats | EmptyHealthStats> {
+export async function getHealthStats(
+  hours = 24,
+  signal?: AbortSignal
+): Promise<HealthStats | EmptyHealthStats> {
   const response = await webClient.get<HealthStats | EmptyHealthStats>('/health/api/stats', {
     params: { hours },
+    signal,
   })
   return response.data
 }
@@ -336,8 +347,8 @@ export async function getHealthStats(hours = 24): Promise<HealthStats | EmptyHea
  * Get active alerts
  * Requires authentication
  */
-export async function getActiveAlerts(): Promise<HealthAlert[]> {
-  const response = await webClient.get<HealthAlert[]>('/health/api/alerts')
+export async function getActiveAlerts(signal?: AbortSignal): Promise<HealthAlert[]> {
+  const response = await webClient.get<HealthAlert[]>('/health/api/alerts', { signal })
   return response.data
 }
 
@@ -373,9 +384,10 @@ export interface HeldOrder {
  * Live orders held for the trader's decision (desktop only)
  * Requires authentication
  */
-export async function getHeldOrders(): Promise<HeldOrder[]> {
+export async function getHeldOrders(signal?: AbortSignal): Promise<HeldOrder[]> {
   const response = await webClient.get<{ status: string; data?: HeldOrder[] }>(
-    '/health/api/held-orders'
+    '/health/api/held-orders',
+    { signal }
   )
   // An answer without the list is a failed read, never "none held" (PROD-PAR-01).
   if (response.data.status !== 'success' || !Array.isArray(response.data.data)) {

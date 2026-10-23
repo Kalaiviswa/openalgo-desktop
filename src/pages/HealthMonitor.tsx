@@ -48,7 +48,7 @@ import { NoHealthSamples } from '@/components/desktop/health/NoHealthSamples'
 import { NotRefreshed, NotRefreshedCard } from '@/components/desktop/health/NotRefreshed'
 import { formatAge, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
 import { UnconfirmedOrders } from '@/components/desktop/health/UnconfirmedOrders'
-import { useHealthReads } from '@/components/desktop/health/useHealthReads'
+import { REFRESH_INTERVAL_MS, useHealthReads } from '@/components/desktop/health/useHealthReads'
 // Alert components removed - using custom styled divs for theme compatibility
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -64,7 +64,7 @@ import {
 import { cn } from '@/lib/utils'
 import { showToast } from '@/utils/toast'
 
-const AUTO_REFRESH_INTERVAL = 10000 // 10 seconds
+const AUTO_REFRESH_INTERVAL = REFRESH_INTERVAL_MS // 10 seconds
 const HISTORY_HOURS = 24
 const CHART_HOURS = 6
 const MAX_CHART_POINTS = 1200

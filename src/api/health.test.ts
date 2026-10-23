@@ -11,7 +11,8 @@ vi.mock('./client', () => ({
   webClient: { get: (...a: unknown[]) => get(...a) },
 }))
 
-const { getHeldOrders } = await import('./health')
+const { getActiveAlerts, getCurrentMetrics, getHealthStats, getHeldOrders, getMetricsHistory } =
+  await import('./health')
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -41,5 +42,25 @@ describe('held orders', () => {
     await expect(getHeldOrders()).rejects.toThrow()
     get.mockResolvedValueOnce({ data: { status: 'success', data: { orders: [held] } } })
     await expect(getHeldOrders()).rejects.toThrow()
+  })
+})
+
+// The Health page gives up a read that stalls (PROD-PAR-01); without the
+// signal on the request it stayed open behind a stalled server.
+describe('health reads', () => {
+  it('hand the Health page abort signal to every request', async () => {
+    get.mockResolvedValue({ data: { status: 'success', data: [] } })
+    const signal = new AbortController().signal
+    await getCurrentMetrics(signal)
+    await getMetricsHistory(6, signal)
+    await getHealthStats(24, signal)
+    await getActiveAlerts(signal)
+    await getHeldOrders(signal)
+    expect(get).toHaveBeenCalledTimes(5)
+    for (const [, config] of get.mock.calls) {
+      expect(config).toMatchObject({ signal })
+    }
+    expect(get.mock.calls[1][1]).toMatchObject({ params: { hours: 6 } })
+    expect(get.mock.calls[2][1]).toMatchObject({ params: { hours: 24 } })
   })
 })

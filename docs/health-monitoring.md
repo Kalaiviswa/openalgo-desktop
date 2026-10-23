@@ -77,8 +77,11 @@ own memory under **Top Memory Processes**, **Unconfirmed Orders**,
 
 The page reads five things on each refresh: the latest figures, the
 history for the charts, the statistics, the alerts and the unconfirmed
-orders. Each is kept on its own, so one that fails does not hide the
-others, and nothing that was on screen disappears because a read failed:
+orders. Each is kept on its own and shown as soon as it is read, so one
+that fails or is slow does not hide or hold back the others, and nothing
+that was on screen disappears because a read failed. A read that has not
+answered within 8 seconds counts as failed (its request is closed), so a
+stalled OpenAlgo is marked before the next refresh tries again:
 
 - What was read before stays on screen, marked "Could not refresh ... at
   10:15:20 am IST; shown as read at 10:14:10 am IST." The banner shows
