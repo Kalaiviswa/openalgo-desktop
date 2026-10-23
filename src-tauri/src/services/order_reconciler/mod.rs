@@ -49,6 +49,7 @@ use crate::strategy::dispatch::{BookOrder, OrderGateway, RunMode};
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -215,8 +216,10 @@ pub type HeldAlert = Arc<dyn Fn(String) + Send + Sync>;
 pub struct BookSnapshot {
     pub rows: Vec<BookOrder>,
     pub read_at: DateTime<Utc>,
-    /// Every owner, asked whether a book order already belongs to it.
-    pub owners: Vec<Arc<dyn OrderOwner>>,
+    /// The book's orders that already belong to an owner: asked of every
+    /// owner once per read (`owned_by`), plus those bound in this pass
+    /// (`claim`).
+    owned: Arc<Mutex<HashSet<String>>>,
     /// The broker reports every order's client tag (its capability).
     pub tags_reported: bool,
     /// Where the corroborating books are read from, on demand.
@@ -234,7 +237,7 @@ impl BookSnapshot {
         Self {
             rows,
             read_at,
-            owners: Vec::new(),
+            owned: Arc::default(),
             tags_reported: false,
             source: None,
             corroboration: Arc::new(tokio::sync::OnceCell::new()),
@@ -321,7 +324,7 @@ impl BookSnapshot {
     /// Whether a book order already belongs to some owner (never a match
     /// for an unconfirmed placement).
     pub fn owned(&self, order_id: &str) -> bool {
-        self.owners.iter().any(|o| o.owns_order(order_id))
+        self.owned.lock().contains(order_id)
     }
 }
 
@@ -330,13 +333,18 @@ impl BookSnapshot {
 pub trait OrderOwner: Send + Sync {
     fn name(&self) -> &'static str;
     /// Whether this owner holds working or unconfirmed orders in `mode`
-    /// (a pass reads a destination's book only when someone does).
+    /// (a pass reads a destination's book only when someone does). Asked
+    /// on the blocking pool; unknown counts as yes.
     fn has_open_orders(&self, mode: RunMode) -> bool;
-    /// Whether this broker order id is already one of this owner's orders.
-    fn owns_order(&self, order_id: &str) -> bool;
+    /// Which of these broker order ids are already this owner's orders.
+    /// Asked on the blocking pool, once per book read; unknown counts as
+    /// all of them, so no other owner binds an order that may be this one's.
+    fn owned_among(&self, order_ids: &[String]) -> HashSet<String>;
     /// Fold one book read. Returns how many unconfirmed placements are
-    /// still unresolved.
-    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize;
+    /// still unresolved, or why this owner's own orders could not be read
+    /// (then nothing of them was settled, and the destination's gap stays
+    /// open).
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> crate::error::Result<usize>;
     /// Live unconfirmed orders held for the trader's decision (P0-3).
     fn held_orders(&self) -> Vec<HeldOrder> {
         Vec::new()
@@ -570,7 +578,6 @@ impl OrderReconciler {
     /// matching trade) or cannot be read.
     async fn recheck_not_placed(&self, held: &HeldOrder) -> Result<(), String> {
         let u = held.unconfirmed();
-        let owners = self.owners();
         let rows = self
             .gateway
             .order_book_rows(RunMode::Live)
@@ -579,7 +586,9 @@ impl OrderReconciler {
                 tracing::warn!("Order book unreadable while checking a held order: {}", e);
                 "OpenAlgo could not read the broker's order book to check this order. Nothing was changed. Try again.".to_string()
             })?;
-        let bound = |oid: &str| owners.iter().any(|o| o.owns_order(oid));
+        let ids = rows.iter().map(|r| r.order_id.clone()).collect();
+        let owned = owners::owned(&self.owners(), ids).await;
+        let bound = |oid: &str| owned.contains(oid);
         // Tags are not relied on here: any row of the same order counts.
         if !matches!(find_placed(&rows, &u, &bound, false), Found::Absent) {
             return Err("The broker's order book now shows an order that matches it, so it was not marked. OpenAlgo picks it up from the book; check the order book.".into());
@@ -718,16 +727,16 @@ impl OrderReconciler {
                     // is not known, so nothing is settled from it.
                     Ok(_) if self.session_changed(mode, &session) => false,
                     Ok(rows) => {
-                        let mut book = BookSnapshot::new(rows, self.clock.now())
+                        let book = BookSnapshot::new(rows, self.clock.now())
                             .with_tags(tags)
                             .with_source(self.gateway.clone(), mode)
                             .with_held_alert(self.held_alert())
-                            .with_session(session);
-                        book.owners = owners.clone();
-                        for o in holders {
-                            unresolved_total += o.reconcile(mode, &book).await;
-                        }
-                        true
+                            .with_session(session)
+                            .owned_by(&owners)
+                            .await;
+                        let (unresolved, folded) = owners::fold(holders, mode, &book).await;
+                        unresolved_total += unresolved;
+                        folded
                     }
                     Err(e) => {
                         self.stats
@@ -1247,12 +1256,12 @@ mod tests {
                 RunMode::Sandbox => self.sandbox.load(Ordering::SeqCst),
             }
         }
-        fn owns_order(&self, _: &str) -> bool {
-            false
+        fn owned_among(&self, _: &[String]) -> HashSet<String> {
+            HashSet::new()
         }
-        async fn reconcile(&self, _: RunMode, _: &BookSnapshot) -> usize {
+        async fn reconcile(&self, _: RunMode, _: &BookSnapshot) -> crate::error::Result<usize> {
             self.folds.fetch_add(1, Ordering::SeqCst);
-            0
+            Ok(0)
         }
     }
 

@@ -81,13 +81,19 @@ async fn the_book_settles_an_uncertain_exit_once_and_the_leg_closes() {
         vec![old, broker_row("BRK-9", "BUY", 65, "complete", 121.0)],
         now,
     );
-    assert_eq!(t.m.reconcile_book(RunMode::Sandbox, &snap).await, 0);
+    assert_eq!(
+        t.m.reconcile_book(RunMode::Sandbox, &snap).await.unwrap(),
+        0
+    );
     let x = exits(&t, run);
     assert_eq!(x[0].broker_order_id.as_deref(), Some("BRK-9"));
     assert_eq!(x[0].status, "complete");
     assert!(t.run(run).stopped_at.is_some(), "flat: the run is finished");
     // A second read of the same fact books nothing more.
-    assert_eq!(t.m.reconcile_book(RunMode::Sandbox, &snap).await, 0);
+    assert_eq!(
+        t.m.reconcile_book(RunMode::Sandbox, &snap).await.unwrap(),
+        0
+    );
     assert_eq!(t.gw.actions(), vec!["SELL", "BUY"]);
     assert!(t
         .event_kinds(sid)
@@ -109,7 +115,8 @@ async fn a_sandbox_uncertain_exit_absent_from_repeated_reads_frees_the_leg_to_ex
     for i in 0..ABSENT_READS {
         let at = start + chrono::Duration::seconds(step * i64::from(i));
         t.m.reconcile_book(RunMode::Sandbox, &book(vec![], at))
-            .await;
+            .await
+            .unwrap();
         assert!(
             t.leg(run, 1).exit_order_id.is_some(),
             "one empty read is not proof"
@@ -118,7 +125,8 @@ async fn a_sandbox_uncertain_exit_absent_from_repeated_reads_frees_the_leg_to_ex
     let at = start + chrono::Duration::seconds(ABSENT_SPAN_SECS + 1);
     assert_eq!(
         t.m.reconcile_book(RunMode::Sandbox, &book(vec![], at))
-            .await,
+            .await
+            .unwrap(),
         0
     );
     let leg = t.leg(run, 1);
@@ -158,7 +166,9 @@ async fn a_live_uncertain_exit_absent_from_the_book_is_held_until_the_trader_mar
     for i in 0..(ABSENT_READS * 4) {
         let at = start + chrono::Duration::seconds(i64::from(i) * ABSENT_SPAN_SECS);
         assert_eq!(
-            t.m.reconcile_book(RunMode::Live, &book(vec![], at)).await,
+            t.m.reconcile_book(RunMode::Live, &book(vec![], at))
+                .await
+                .unwrap(),
             1,
             "still unresolved"
         );
@@ -212,7 +222,8 @@ async fn a_live_absence_is_released_only_with_corroboration() {
         let secs = i64::from(i) * ABSENT_SPAN_SECS;
         assert_eq!(
             t.m.reconcile_book(RunMode::Live, &read(secs, &none, &short))
-                .await,
+                .await
+                .unwrap(),
             1
         );
     }
@@ -220,27 +231,31 @@ async fn a_live_absence_is_released_only_with_corroboration() {
     let early = LIVE_RELEASE_SECS - 60;
     assert_eq!(
         t.m.reconcile_book(RunMode::Live, &read(early, &none, &short))
-            .await,
+            .await
+            .unwrap(),
         1
     );
     // Long enough, but a matching trade (its time unreadable) is there.
     let late = LIVE_RELEASE_SECS + 30;
     assert_eq!(
         t.m.reconcile_book(RunMode::Live, &read(late, &fill, &short))
-            .await,
+            .await
+            .unwrap(),
         1
     );
     // Long enough, no trade, but the position changed.
     assert_eq!(
         t.m.reconcile_book(RunMode::Live, &read(late, &none, &none))
-            .await,
+            .await
+            .unwrap(),
         1
     );
     assert_eq!(exits(&t, run)[0].status, "unconfirmed");
     // Long enough, no trade, position unchanged: released.
     assert_eq!(
         t.m.reconcile_book(RunMode::Live, &read(late + 30, &none, &short))
-            .await,
+            .await
+            .unwrap(),
         0
     );
     assert_eq!(exits(&t, run)[0].status, "rejected");
@@ -318,7 +333,7 @@ async fn an_uncertain_entry_keeps_the_run_open_until_the_book_settles_it() {
         vec![broker_row("BRK-1", "SELL", 65, "complete", 100.0)],
         t.clock.now(),
     );
-    t.m.reconcile_book(RunMode::Sandbox, &snap).await;
+    t.m.reconcile_book(RunMode::Sandbox, &snap).await.unwrap();
     assert_eq!(t.orders(run)[0].broker_order_id.as_deref(), Some("BRK-1"));
     assert_eq!(t.gw.actions(), vec!["SELL", "BUY"]);
 }

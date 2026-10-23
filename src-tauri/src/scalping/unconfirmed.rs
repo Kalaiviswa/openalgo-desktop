@@ -332,55 +332,48 @@ impl OrderOwner for ScalpingOrders {
         read.unwrap_or(true)
     }
 
-    fn owns_order(&self, order_id: &str) -> bool {
+    fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
         let Some(ctx) = self.ctx.upgrade() else {
-            return false;
+            return HashSet::new();
         };
-        ctx.sqlite
-            .conn()
-            .and_then(|c| {
-                let owned = c
-                    .prepare_cached(
-                        "SELECT 1 FROM scalping_unconfirmed WHERE orderid = ?1 LIMIT 1",
-                    )?
-                    .exists(params![order_id])?;
-                Ok(owned)
-            })
-            .unwrap_or(true)
+        let read = ctx.sqlite.conn().and_then(|c| {
+            let mut st =
+                c.prepare_cached("SELECT 1 FROM scalping_unconfirmed WHERE orderid = ?1 LIMIT 1")?;
+            let mut owned = HashSet::new();
+            for id in order_ids {
+                if st.exists(params![id])? {
+                    owned.insert(id.clone());
+                }
+            }
+            Ok(owned)
+        });
+        // Unknown: every one counts as owned, so no other owner binds it.
+        read.unwrap_or_else(|e| {
+            tracing::warn!("Scalping orders could not be read to tell their own: {}", e);
+            order_ids.iter().cloned().collect()
+        })
     }
 
-    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> Result<usize> {
         let Some(ctx) = self.ctx.upgrade() else {
-            return 0;
+            return Ok(0);
         };
         // On the blocking pool: a pass runs on an async worker (PROD-REL-02).
-        let rows = match ctx
+        let rows = ctx
             .blocking(move |c| pending(&c.sqlite, mode_word(mode)))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Scalping orders could not be read to reconcile: {}", e);
-                return 0;
-            }
-        };
+            .await?;
         let scope = format!("{}:", mode.as_str());
         let mut live: HashSet<String> = HashSet::new();
-        let mut claimed: HashSet<String> = HashSet::new();
         let mut unresolved = 0;
         for p in &rows {
             let key = format!("{}{}", scope, p.id);
             live.insert(key.clone());
             let u = unconfirmed_of(p);
-            let found = {
-                let bound = |id: &str| claimed.contains(id) || book.owned(id);
-                book.find(&u, &bound)
-            };
-            match found {
+            match book.find(&u, &|id: &str| book.owned(id)) {
                 Found::Order(b) => {
                     self.absence.forget(&key);
                     self.ambiguous.lock().remove(&key);
-                    claimed.insert(b.order_id.clone());
+                    book.claim(&b.order_id);
                     self.settle_placed(&ctx, p, &b.order_id, book.read_at);
                 }
                 Found::Absent => {
@@ -437,7 +430,7 @@ impl OrderOwner for ScalpingOrders {
         self.ambiguous
             .lock()
             .retain(|k| !k.starts_with(&scope) || live.contains(k));
-        unresolved
+        Ok(unresolved)
     }
 
     fn held_orders(&self) -> Vec<HeldOrder> {

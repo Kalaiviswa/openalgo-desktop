@@ -46,14 +46,22 @@ impl OrderOwner for HoldsTheOrder {
     fn has_open_orders(&self, mode: RunMode) -> bool {
         mode == RunMode::Live
     }
-    fn owns_order(&self, order_id: &str) -> bool {
-        order_id == ORDER
+    fn owned_among(&self, order_ids: &[String]) -> std::collections::HashSet<String> {
+        order_ids
+            .iter()
+            .filter(|id| *id == ORDER)
+            .cloned()
+            .collect()
     }
-    async fn reconcile(&self, _mode: RunMode, book: &BookSnapshot) -> usize {
+    async fn reconcile(
+        &self,
+        _mode: RunMode,
+        book: &BookSnapshot,
+    ) -> openalgo_desktop_lib::error::Result<usize> {
         if let Some(o) = book.by_id(ORDER) {
             self.0.lock().push(o.status.clone());
         }
-        0
+        Ok(0)
     }
 }
 

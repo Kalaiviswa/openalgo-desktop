@@ -871,6 +871,14 @@ Every flaky test found so far was a race, not a slow machine:
   `RiskMonitor::wait_idle`); a read that fails is tried again with a capped
   backoff, and the trader is told when it keeps failing (a stop saved
   meanwhile is not watched yet).
+- The order reconciler asks every owner which of a book's orders are
+  already theirs once per read, on the blocking pool
+  (`BookSnapshot::owned_by`), and matching reads that from memory; an owner
+  that binds an order in the pass claims it on the book
+  (`BookSnapshot::claim`), so a later owner cannot bind it too. An owner's
+  read that fails is never "nothing": unknown holding counts as yes, and an
+  owner that could not read its own orders answers an error, so the gap
+  stays open.
 
 ### Data and migrations
 

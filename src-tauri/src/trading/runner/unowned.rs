@@ -104,9 +104,19 @@ impl Runner {
                 .order_book_rows(RunMode::Live)
                 .await
                 .map_err(&unreadable)?;
+            // Which of the book's orders are the runner's, read on the
+            // blocking pool (PROD-REL-02); unknown, all of them.
+            let ids: Vec<String> = rows.iter().map(|r| r.order_id.clone()).collect();
+            let every = ids.iter().cloned().collect();
+            let owned = self
+                .blocking(move |me| me.owned_among(&ids))
+                .await
+                .unwrap_or(every);
             let book =
                 BookSnapshot::new(rows, self.clock.now()).with_session(Some(session.clone()));
-            if let Found::Order(b) = book.find(&unconfirmed_of(&o), &|oid| self.owns_order(oid)) {
+            if let Found::Order(b) =
+                book.find(&unconfirmed_of(&o), &|oid: &str| owned.contains(oid))
+            {
                 self.bind_unconfirmed(Some(&session), &o, b);
                 return Ok(true);
             }

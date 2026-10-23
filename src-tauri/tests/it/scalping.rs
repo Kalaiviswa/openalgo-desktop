@@ -1603,7 +1603,7 @@ async fn a_live_unconfirmed_exit_absent_from_the_book_is_held_for_the_trader() {
 async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
     use openalgo_desktop_lib::scalping::monitor::ScalpingOrders;
     use openalgo_desktop_lib::services::order_reconciler::{
-        ABSENT_READS, ABSENT_SPAN_SECS, LIVE_RELEASE_SECS,
+        OrderOwner, ABSENT_READS, ABSENT_SPAN_SECS, LIVE_RELEASE_SECS,
     };
     let f = freeze_chunk();
     let m = monitor();
@@ -1639,7 +1639,8 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
     // release check) and waits at the broker, while X2 is partly filled.
     let gate = Arc::new(tokio::sync::Notify::new());
     *m.gw.trades_gate.lock() = Some(gate.clone());
-    let mut partly = book(
+    let owners: Vec<Arc<dyn OrderOwner>> = vec![Arc::new(ScalpingOrders(Arc::downgrade(&m.mon)))];
+    let partly = book(
         vec![json!({
             "orderid": "X2", "symbol": OPT, "exchange": "NFO", "action": "SELL",
             "quantity": f, "product": "MIS", "order_status": "open",
@@ -1647,8 +1648,9 @@ async fn a_reconcile_pass_never_drops_orders_an_exit_sent_meanwhile() {
         })],
         start + chrono::Duration::seconds(LIVE_RELEASE_SECS + 1),
     )
-    .with_source(m.gw.clone(), RunMode::Live);
-    partly.owners = vec![Arc::new(ScalpingOrders(Arc::downgrade(&m.mon)))];
+    .with_source(m.gw.clone(), RunMode::Live)
+    .owned_by(&owners)
+    .await;
     let mon = m.mon.clone();
     let pass = tokio::spawn(async move { mon.reconcile_book(RunMode::Live, &partly).await });
     m.gw.entered.notified().await;
@@ -2887,6 +2889,146 @@ fn a_reconcile_pass_waiting_for_the_database_never_holds_the_runtime() {
         assert_eq!(placed(&h).len(), 2);
         h.shutdown().await;
     })
+}
+
+/// Where `hold_the_pool_at_the_book_read` takes the pool, and its holder.
+static POOL_AT_BOOK_READ: Mutex<Option<Arc<SqliteDb>>> = Mutex::new(None);
+static POOL_HOLDER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// The mock broker's hook: the first order-book read takes every pooled
+/// connection for 800 ms, so whatever the pass does next with the database
+/// waits for it.
+fn hold_the_pool_at_the_book_read(call: &MockCall) {
+    if !matches!(call, MockCall::OrderBook) {
+        return;
+    }
+    if let Some(db) = POOL_AT_BOOK_READ.lock().take() {
+        *POOL_HOLDER.lock() = Some(hold_the_pool(&db, 800));
+    }
+}
+
+/// PROD-REL-02 follow-up: which of the book's orders already belong to an
+/// owner is read once per pass on the blocking pool, and matching reads it
+/// from memory. Matching asked every owner for each candidate on the pass's
+/// async worker (the strategies, the runner and the scalping page answer
+/// from their saved rows), so with every pooled connection taken right
+/// after the book was read the runtime waited with the pool. Afterwards the
+/// unconfirmed exit is found in the book, once, and nothing is sent again.
+#[test]
+fn a_pass_matches_the_book_without_reading_owners_on_the_runtime() {
+    crate::on_watched_runtime(|runtime| async move {
+        use openalgo_desktop_lib::brokers::mock::AfterSend;
+        use openalgo_desktop_lib::scalping::monitor::ChildState;
+        let h = H::new().await;
+        h.ctx.reconciler.stop();
+        *h.mock.positions.lock() = Some(Ok(vec![pos(OPT, "NFO", "MIS", 65)]));
+        let (cookie, csrf) = session(&h);
+        let body = json!({"symbol": OPT, "exchange": "NFO", "product": "MIS", "side": "BUY",
+            "quantity": 65, "entry_price": 100, "initial_sl": 95});
+        let (s, v) = call(
+            &h,
+            req(
+                Method::POST,
+                "/scalping/api/sl",
+                Some(body),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", v);
+        let monitor = h.ctx.scalping.monitor.clone();
+        monitor.sync().await;
+        // The exit reaches the broker and its answer is lost.
+        h.mock
+            .after_send
+            .lock()
+            .push_back((AfterSend::Dropped, "complete"));
+        *h.mock.after_send_time.lock() = "2026-10-03 09:42:05".into();
+        monitor.process_tick(OPT, "NFO", 90.0).await;
+        monitor.wait_idle().await;
+        let a = monitor.exit_attempt("live", OPT, "NFO", "MIS").unwrap();
+        assert_eq!(a.children[0].state, ChildState::Unconfirmed, "{:?}", a);
+        // Every pooled connection opened now, so taking them later is quick.
+        hold_the_pool(&h.ctx.sqlite, 0).join().unwrap();
+        *POOL_AT_BOOK_READ.lock() = Some(h.ctx.sqlite.clone());
+        *h.mock.on_call.lock() = Some(hold_the_pool_at_the_book_read);
+        runtime.until_idle().await;
+        let (_, hold) = runtime.longest_hold(h.ctx.reconciler.pass()).await;
+        *h.mock.on_call.lock() = None;
+        let holder = POOL_HOLDER.lock().take();
+        join(holder.expect("the pass read the order book")).await;
+        assert!(
+            hold < Duration::from_millis(200),
+            "the runtime was held for {:?}",
+            hold
+        );
+        let a = monitor.exit_attempt("live", OPT, "NFO", "MIS").unwrap();
+        assert_eq!(a.children[0].order_id.as_deref(), Some("MOCK-1"), "{:?}", a);
+        assert_eq!(a.children[0].state, ChildState::Filled, "{:?}", a);
+        assert_eq!(
+            placed(&h),
+            vec![("SELL".to_string(), 65)],
+            "never sent again"
+        );
+        h.shutdown().await;
+    })
+}
+
+/// PROD-REL-02 follow-up: an owner whose own orders cannot be read settled
+/// nothing from the book, so a gap in order facts stays open (new entries
+/// keep waiting) until a pass can read them. The scalping page and the
+/// runner answered such a failure as nothing unresolved and the gap closed;
+/// the strategies answered "holds nothing", so a lost fact opened no gap at
+/// all. Each owner's table is made unreadable in turn.
+#[tokio::test]
+async fn a_gap_stays_open_while_an_owners_orders_cannot_be_read() {
+    use openalgo_desktop_lib::services::order_reconciler::{EntryGate, GapCause};
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = H::new().await;
+    let r = h.ctx.reconciler.clone();
+    r.stop();
+    let rename = |from: &str, to: &str| {
+        h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {} RENAME TO {}", from, to))
+            .unwrap()
+    };
+    // Per table: (gap opened, book read, gap kept after it, closed once
+    // readable again).
+    let mut seen = Vec::new();
+    for table in [
+        "scalping_unconfirmed",
+        "openscript_orders",
+        "sm_strategy_run",
+    ] {
+        let hidden = format!("{}_unreadable", table);
+        rename(table, &hidden);
+        r.open_gap(RunMode::Live, GapCause::EventLoss).await;
+        let opened = r.gap_open(RunMode::Live);
+        let (reads, failures) = (
+            r.stats.book_reads.load(SeqCst),
+            r.stats.book_read_failures.load(SeqCst),
+        );
+        r.pass().await;
+        let read = r.stats.book_reads.load(SeqCst) > reads
+            && r.stats.book_read_failures.load(SeqCst) == failures;
+        let kept = r.gap_open(RunMode::Live) && r.entry_refusal(RunMode::Live).is_some();
+        rename(&hidden, table);
+        r.pass().await;
+        seen.push((table, opened, read, kept, !r.gap_open(RunMode::Live)));
+    }
+    assert_eq!(
+        seen,
+        [
+            ("scalping_unconfirmed", true, true, true, true),
+            ("openscript_orders", true, true, true, true),
+            ("sm_strategy_run", true, true, true, true),
+        ]
+    );
+    h.shutdown().await;
 }
 
 /// LOG-07 defence in depth: a Live stop set while Zerodha (AB1234) was

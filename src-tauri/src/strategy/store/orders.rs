@@ -6,6 +6,7 @@ use super::{
 };
 use crate::error::Result;
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashSet;
 
 /// A broker frame's status, lower case; anything unknown reads as working
 /// (`open`).
@@ -121,6 +122,21 @@ impl Store {
                 order_from,
             )
             .optional()?)
+    }
+
+    /// Which of these broker references belong to a strategy order (the
+    /// order reconciler's "is it someone's" test, once per book read).
+    pub fn owned_broker_ids(&self, broker_order_ids: &[String]) -> Result<HashSet<String>> {
+        let conn = self.conn()?;
+        let mut st = conn
+            .prepare_cached("SELECT 1 FROM sm_strategy_order WHERE broker_order_id = ?1 LIMIT 1")?;
+        let mut owned = HashSet::new();
+        for id in broker_order_ids.iter().filter(|i| !i.is_empty()) {
+            if st.exists([id])? {
+                owned.insert(id.clone());
+            }
+        }
+        Ok(owned)
     }
 
     pub fn list_orders(&self, run_id: i64) -> Result<Vec<OrderRow>> {
