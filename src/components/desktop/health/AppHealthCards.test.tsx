@@ -303,7 +303,7 @@ describe('App health cards', () => {
   it('warns when a strategy exit has waited too long to be placed', () => {
     render(
       <AppHealthCards
-        metrics={sample({
+        read={fresh({
           strategy_ticks: {
             status: 'warn',
             ticks_queued: 50,
