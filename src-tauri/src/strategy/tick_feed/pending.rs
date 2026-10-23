@@ -25,11 +25,13 @@
 
 use crate::strategy::store::EventFields;
 use crate::strategy::tick_context::TickContext;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 
 /// One notification a decision raises, and the position it is about.
@@ -69,6 +71,14 @@ impl Event {
 /// Notifications of a level that keeps moving: of a series waiting, only
 /// the latest is recorded.
 const PROGRESS: &[&str] = &["leg_trail_advanced", "lock_profit_floor_advanced"];
+
+/// How long a decided exit or stop may wait to be acted on before health
+/// warns. An order waits at most 10 s for its turn at the broker
+/// (`brokers::common::ratelimit::Pacer`) and is normally answered within a
+/// second or two after that, so an exit decided longer ago than this is
+/// held by something else: a broker call that does not answer, a stalled
+/// database, or the evaluator busy polling prices.
+const SLOW_EXIT_AFTER: Duration = Duration::from_secs(15);
 
 /// An exit risk decided for a leg, and the position it was decided on.
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +148,12 @@ impl Decision {
         }
     }
 
+    /// Whether acting on it places anything: a leg exit or a stop (what
+    /// health counts as waiting; notifications alone are not).
+    fn asks_to_act(&self) -> bool {
+        !self.leg_exits.is_empty() || self.stop_reason.is_some() || !self.after_stop.is_empty()
+    }
+
     /// Keep a leg exit where acting would place it: before the stop while
     /// none waits, after it once one does.
     fn keep_exit(&mut self, x: LegExit) {
@@ -183,6 +199,8 @@ pub(crate) struct RunWork {
     /// When the run's first waiting decision came: runs are acted on in the
     /// order they decided.
     arrived: u64,
+    /// When the first of them that asks for an exit or a stop was decided.
+    exits_since: Option<DateTime<Utc>>,
 }
 
 /// The decisions waiting, and the runs the evaluator has taken and not yet
@@ -191,7 +209,30 @@ pub(crate) struct RunWork {
 struct Waiting {
     runs: HashMap<i64, RunWork>,
     arrivals: u64,
-    acting: u64,
+    /// Each run taken and not yet acted on, with its `exits_since`.
+    acting: Vec<(i64, Option<DateTime<Utc>>)>,
+}
+
+impl Waiting {
+    /// The runs with an exit or stop decided and not yet acted on (a run
+    /// being acted on with a newer decision waiting is one run), and when
+    /// the oldest of those was decided.
+    fn exits(&self) -> (usize, Option<DateTime<Utc>>) {
+        let since = self
+            .runs
+            .iter()
+            .map(|(id, work)| (*id, work.exits_since))
+            .chain(self.acting.iter().copied());
+        let mut runs = HashSet::new();
+        let mut oldest: Option<DateTime<Utc>> = None;
+        for (run_id, at) in since {
+            if let Some(at) = at {
+                runs.insert(run_id);
+                oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            }
+        }
+        (runs.len(), oldest)
+    }
 }
 
 /// The decisions waiting for the evaluator, its wake-up, and what the
@@ -218,13 +259,22 @@ impl Pending {
         self.read.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Leave one price's decision for a run to the evaluator and wake it.
-    pub(crate) fn leave(&self, run_id: i64, ctx: Arc<TickContext>, decision: Decision) {
+    /// Leave one price's decision for a run, decided at `now`, to the
+    /// evaluator and wake it.
+    pub(crate) fn leave(
+        &self,
+        run_id: i64,
+        ctx: Arc<TickContext>,
+        decision: Decision,
+        now: DateTime<Utc>,
+    ) {
         {
             let mut guard = self.waiting.lock();
             let waiting = &mut *guard;
+            let acts = decision.asks_to_act().then_some(now);
             if let Some(work) = waiting.runs.get_mut(&run_id) {
                 work.decided.merge(decision);
+                work.exits_since = work.exits_since.or(acts);
                 self.combined.fetch_add(1, Ordering::Relaxed);
             } else {
                 let mut decided = Decision::default();
@@ -237,6 +287,7 @@ impl Pending {
                         ctx,
                         decided,
                         arrived,
+                        exits_since: acts,
                     },
                 );
             }
@@ -248,23 +299,29 @@ impl Pending {
     /// run taken counts as waiting until `acted`.
     pub(crate) fn take(&self) -> Vec<(i64, RunWork)> {
         let mut runs: Vec<(i64, RunWork)> = {
-            let mut waiting = self.waiting.lock();
-            waiting.acting += waiting.runs.len() as u64;
+            let mut guard = self.waiting.lock();
+            let waiting = &mut *guard;
+            let taken = waiting.runs.iter().map(|(id, w)| (*id, w.exits_since));
+            waiting.acting.extend(taken);
             waiting.runs.drain().collect()
         };
         runs.sort_by_key(|(_, work)| work.arrived);
         runs
     }
 
-    /// One run taken has been acted on.
-    pub(crate) fn acted(&self) {
+    /// The run taken has been acted on.
+    pub(crate) fn acted(&self, run_id: i64) {
         let mut waiting = self.waiting.lock();
-        waiting.acting = waiting.acting.saturating_sub(1);
+        if let Some(i) = waiting.acting.iter().position(|(id, _)| *id == run_id) {
+            waiting.acting.swap_remove(i);
+        }
     }
 
     /// Drop every decision waiting (shutdown).
     pub(super) fn clear(&self) {
-        self.waiting.lock().runs.clear();
+        let mut waiting = self.waiting.lock();
+        waiting.runs.clear();
+        waiting.acting.clear();
     }
 
     pub(super) fn note_lagged(&self, n: u64) {
@@ -282,21 +339,25 @@ impl Pending {
         (self.alerted.fetch_max(missed, Ordering::Relaxed) < missed).then_some(missed)
     }
 
-    /// The counts for health: `warn` once any tick was missed. The read and
-    /// combined counts keep the keys they had when prices waited
-    /// (`ticks_queued`, `ticks_folded`); the Health page names them.
-    pub(super) fn health(&self) -> Value {
+    /// The counts for health at `now`: the strategies with an exit or stop
+    /// decided and not yet acted on and how long the oldest has waited,
+    /// `warn` once any tick was missed or while an exit has waited past
+    /// `SLOW_EXIT_AFTER`. The read and combined counts keep the keys they
+    /// had when prices waited (`ticks_queued`, `ticks_folded`); the Health
+    /// page names them.
+    pub(super) fn health(&self, now: DateTime<Utc>) -> Value {
         let lagged = self.lagged.load(Ordering::Relaxed);
-        let runs_waiting = {
-            let waiting = self.waiting.lock();
-            waiting.runs.len() as u64 + waiting.acting
-        };
+        let (exits_waiting, oldest) = self.waiting.lock().exits();
+        let waited = oldest.map(|at| (now - at).to_std().unwrap_or_default().as_secs());
+        let slow = waited.is_some_and(|s| s >= SLOW_EXIT_AFTER.as_secs());
         json!({
-            "status": if lagged == 0 { "pass" } else { "warn" },
+            "status": if lagged == 0 && !slow { "pass" } else { "warn" },
             "ticks_queued": self.read.load(Ordering::Relaxed),
             "ticks_folded": self.combined.load(Ordering::Relaxed),
             "ticks_missed": lagged,
-            "runs_waiting": runs_waiting,
+            "exits_waiting": exits_waiting,
+            "oldest_exit_wait_s": waited,
+            "exits_slow": slow,
         })
     }
 }
@@ -498,10 +559,11 @@ mod tests {
         p.note_lagged(3);
         assert_eq!(p.missed_since_alert(), Some(3));
         assert_eq!(p.missed_since_alert(), None, "once per growth");
-        let h = p.health();
+        let h = p.health(Utc::now());
         assert_eq!(h["ticks_queued"], 2);
         assert_eq!(h["ticks_missed"], 3);
-        assert_eq!(h["runs_waiting"], 0);
+        assert_eq!(h["exits_waiting"], 0);
+        assert_eq!(h["oldest_exit_wait_s"], Value::Null);
         assert_eq!(h["status"], "warn");
     }
 

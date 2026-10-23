@@ -256,7 +256,9 @@ impl StrategyModule {
             Decision::of_price(leg_exits, stop_reason, events)
         });
         if let Some(decision) = decided {
-            self.feed.pending.leave(run_id, ctx, decision);
+            self.feed
+                .pending
+                .leave(run_id, ctx, decision, self.clock.now());
         }
     }
 
@@ -270,7 +272,7 @@ impl StrategyModule {
             }
             for (run_id, work) in waiting {
                 self.act_on_run(run_id, work).await;
-                self.feed.pending.acted();
+                self.feed.pending.acted(run_id);
             }
         }
     }

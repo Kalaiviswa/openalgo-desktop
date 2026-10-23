@@ -230,21 +230,39 @@ export function RecordsCard({ data }: { data: RecordLosses }) {
   )
 }
 
+function strategyTicksWarning(data: StrategyTicks): string | null {
+  const notes: string[] = []
+  if (data.exits_slow && data.oldest_exit_wait_s !== null) {
+    notes.push(
+      `A strategy exit decided ${data.oldest_exit_wait_s.toLocaleString('en-IN')} seconds ago is not placed yet: the broker or OpenAlgo's database is answering slowly. Check that strategy's positions with your broker.`
+    )
+  }
+  if (data.ticks_missed > 0) {
+    notes.push(
+      'Strategy risk management missed some prices: stops and targets act on the next price. Holding fewer symbols helps.'
+    )
+  }
+  return notes.length > 0 ? notes.join(' ') : null
+}
+
 export function StrategyTicksCard({ data }: { data: StrategyTicks }) {
   return (
-    <AppCard
-      title="Strategy Prices"
-      level={data.status}
-      warning={
-        data.ticks_missed > 0
-          ? 'Strategy risk management missed some prices: stops and targets act on the next price. Holding fewer symbols helps.'
-          : null
-      }
-    >
+    <AppCard title="Strategy Prices" level={data.status} warning={strategyTicksWarning(data)}>
       <Row label="Prices read" value={data.ticks_queued.toLocaleString('en-IN')} />
       <Row label="Combined while busy" value={data.ticks_folded.toLocaleString('en-IN')} />
       <Row label="Missed" value={data.ticks_missed.toLocaleString('en-IN')} />
-      <Row label="Runs waiting" value={data.runs_waiting.toLocaleString('en-IN')} />
+      <Row
+        label="Strategies with exits waiting"
+        value={data.exits_waiting.toLocaleString('en-IN')}
+      />
+      <Row
+        label="Longest exit wait"
+        value={
+          data.oldest_exit_wait_s === null
+            ? 'none'
+            : `${data.oldest_exit_wait_s.toLocaleString('en-IN')} s`
+        }
+      />
     </AppCard>
   )
 }

@@ -5,6 +5,7 @@
 
 use super::*;
 use openalgo_desktop_lib::brokers::common::streaming::{FeedEvent, MarketEvent, NormalizedTick};
+use openalgo_desktop_lib::clock::Clock;
 use openalgo_desktop_lib::strategy::tick_feed::{Key, PriceSource};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -107,8 +108,13 @@ pub(super) fn exit_kinds(t: &T, run: i64) -> Vec<String> {
         .collect()
 }
 
+/// The strategy tick path's health now.
+pub(super) fn health(t: &T) -> Value {
+    t.m.feed.health(t.clock.now())
+}
+
 fn prices_read(t: &T) -> u64 {
-    t.m.feed.health()["ticks_queued"].as_u64().unwrap_or(0)
+    health(t)["ticks_queued"].as_u64().unwrap_or(0)
 }
 
 /// Send `ticks` in order while the evaluator is held placing another run's
@@ -136,12 +142,12 @@ pub(super) async fn send_while_held(t: &T, burst: &Burst, ticks: &[(String, f64)
     gate.release();
 }
 
-/// Wait until nothing decided is still waiting to be acted on.
+/// Wait until no exit or stop decided is still waiting to be acted on.
 pub(super) async fn settled(t: &T) {
     assert!(
-        eventually(|| t.m.feed.health()["runs_waiting"].as_u64().unwrap_or(0) == 0).await,
+        eventually(|| health(t)["exits_waiting"].as_u64().unwrap_or(0) == 0).await,
         "{}",
-        t.m.feed.health()
+        health(t)
     );
 }
 
@@ -239,7 +245,7 @@ async fn a_spike_is_decided_even_while_the_evaluator_is_held() {
     assert_eq!(kind(stop_run).as_deref(), Some("exit_sl"));
     assert_eq!(kind(target_run).as_deref(), Some("exit_target"));
     assert_eq!(kind(trail_run).as_deref(), Some("exit_sl"));
-    let h = t.m.feed.health();
+    let h = health(&t);
     assert_eq!(h["ticks_missed"], 0, "{}", h);
     assert!(h["ticks_folded"].as_u64().unwrap() > 0, "{}", h);
     t.m.shutdown().await;
@@ -579,6 +585,50 @@ async fn a_leg_exit_decided_after_a_stop_that_exited_the_leg_is_not_placed_again
     t.m.shutdown().await;
 }
 
+/// Health counts the strategies whose exit or stop waits to be acted on,
+/// not decisions that only move a level or record nothing, counts a run
+/// being acted on once when a newer decision of it waits, and warns once
+/// the oldest exit has waited past 15 seconds. Before, every price left a
+/// decision (`runs_waiting` was rarely 0), a run taken and decided again
+/// counted twice, and the status stayed pass while an exit sat behind a
+/// broker call that did not answer.
+#[tokio::test]
+async fn health_says_how_long_a_decided_exit_has_waited() {
+    let (t, burst) = burst_module().await;
+    let (_, blocker) = held(&t, "Blocker", "OTM3", json!({"sl_pts": 10})).await;
+    let (_, other) = held(&t, "Other", "ATM", json!({"sl_pts": 10})).await;
+    let gate = Arc::new(Gate::default());
+    *t.gw.place_gate.lock() = Some(gate.clone());
+    burst.send(&blocker, 85.0);
+    gate.entered().await;
+    // Nothing to act on: another strategy's price inside its stop, and a
+    // newer one for the strategy whose exit is being placed.
+    let read = prices_read(&t);
+    burst.send(&other, 100.5);
+    burst.send(&blocker, 95.0);
+    assert!(eventually(|| prices_read(&t) == read + 2).await);
+    let h = health(&t);
+    assert_eq!(h["exits_waiting"], 1, "{}", h);
+    assert_eq!(h["status"], "pass", "{}", h);
+
+    t.clock.advance(chrono::Duration::seconds(20));
+    burst.send(&other, 85.0);
+    assert!(eventually(|| prices_read(&t) == read + 3).await);
+    let h = health(&t);
+    assert_eq!(h["exits_waiting"], 2, "{}", h);
+    assert_eq!(h["oldest_exit_wait_s"], 20, "{}", h);
+    assert_eq!(h["exits_slow"], true, "{}", h);
+    assert_eq!(h["status"], "warn", "{}", h);
+
+    *t.gw.place_gate.lock() = None;
+    gate.release();
+    settled(&t).await;
+    let h = health(&t);
+    assert_eq!(h["oldest_exit_wait_s"], Value::Null, "{}", h);
+    assert_eq!(h["status"], "pass", "{}", h);
+    t.m.shutdown().await;
+}
+
 /// A tick the reader itself misses (the channel overran it) is counted and
 /// turns the strategy tick health to warn; the web logs it at debug only.
 #[tokio::test]
@@ -595,12 +645,12 @@ async fn a_missed_tick_is_counted_for_health() {
         burst.send(&symbol, 100.5);
     }
     for _ in 0..500 {
-        if t.m.feed.health()["ticks_missed"].as_u64().unwrap_or(0) > 0 {
+        if health(&t)["ticks_missed"].as_u64().unwrap_or(0) > 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let h = t.m.feed.health();
+    let h = health(&t);
     assert_eq!(h["ticks_missed"], 16, "{}", h);
     assert_eq!(h["status"], "warn");
     assert_eq!(t.m.feed.ticks_missed_unreported(), Some(16));

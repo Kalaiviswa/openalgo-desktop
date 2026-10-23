@@ -157,7 +157,12 @@ export interface StrategyTicks {
   ticks_queued: number
   ticks_folded: number
   ticks_missed: number
-  runs_waiting: number
+  /** Strategies with an exit or stop decided and not yet placed. */
+  exits_waiting: number
+  /** Seconds the oldest of those has waited; null when none waits. */
+  oldest_exit_wait_s: number | null
+  /** The oldest has waited long enough to warn about (15 s). */
+  exits_slow: boolean
 }
 
 export interface BrokerFeedLosses {

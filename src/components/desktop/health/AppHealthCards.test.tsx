@@ -94,7 +94,9 @@ describe('App health cards', () => {
             ticks_queued: 50,
             ticks_folded: 0,
             ticks_missed: 0,
-            runs_waiting: 0,
+            exits_waiting: 0,
+            oldest_exit_wait_s: null,
+            exits_slow: false,
           },
         })}
       />
@@ -102,6 +104,32 @@ describe('App health cards', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expect(screen.getAllByText('all saved')).toHaveLength(2)
     expect(screen.getByText('Strategy Prices')).toBeInTheDocument()
+    expect(screen.getByText('Strategies with exits waiting')).toBeInTheDocument()
+    expect(screen.getByText('Longest exit wait').nextSibling).toHaveTextContent('none')
+  })
+
+  it('warns when a strategy exit has waited too long to be placed', () => {
+    render(
+      <AppHealthCards
+        metrics={sample({
+          strategy_ticks: {
+            status: 'warn',
+            ticks_queued: 50,
+            ticks_folded: 0,
+            ticks_missed: 0,
+            exits_waiting: 2,
+            oldest_exit_wait_s: 20,
+            exits_slow: true,
+          },
+        })}
+      />
+    )
+    expect(screen.getByText('Strategies with exits waiting').nextSibling).toHaveTextContent('2')
+    expect(screen.getByText('20 s')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /strategy exit decided 20 seconds ago is not placed yet.*Check that strategy's positions with your broker/
+    )
+    expect(screen.getByRole('status')).not.toHaveTextContent(/missed some prices/)
   })
 
   it('warns when strategy prices were missed and when order tracking has a gap', () => {
@@ -113,7 +141,9 @@ describe('App health cards', () => {
             ticks_queued: 50,
             ticks_folded: 4,
             ticks_missed: 2,
-            runs_waiting: 1,
+            exits_waiting: 1,
+            oldest_exit_wait_s: 3,
+            exits_slow: false,
           },
           order_facts: {
             status: 'fail',
@@ -193,7 +223,9 @@ describe('App health cards', () => {
             ticks_queued: 10,
             ticks_folded: 0,
             ticks_missed: 1,
-            runs_waiting: 0,
+            exits_waiting: 1,
+            oldest_exit_wait_s: 20,
+            exits_slow: true,
           },
         })}
       />

@@ -77,9 +77,10 @@ impl TickFeed {
         }
     }
 
-    /// What the strategy tick path read, combined and missed (health).
-    pub fn health(&self) -> serde_json::Value {
-        self.pending.health()
+    /// What the strategy tick path read, combined and missed, and the
+    /// exits waiting to be acted on at `now` (health).
+    pub fn health(&self, now: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+        self.pending.health(now)
     }
 
     /// The count of ticks the reader missed since start, when it grew

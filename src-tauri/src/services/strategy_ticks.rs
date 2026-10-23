@@ -15,9 +15,9 @@ use serde_json::Value;
 pub const ALERT: &str = "strategy_ticks_missed";
 
 /// Prices read, decisions combined and ticks missed since start, and the
-/// runs whose decisions wait to be acted on.
+/// strategies whose exits wait to be acted on.
 pub fn json(ctx: &AppState) -> Value {
-    ctx.strategy.feed.health()
+    ctx.strategy.feed.health(ctx.strategy.clock.now())
 }
 
 /// Raise the alert when more ticks were missed since the last one.

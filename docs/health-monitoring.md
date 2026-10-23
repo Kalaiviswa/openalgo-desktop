@@ -16,6 +16,7 @@ health pages are open only to you, signed in.
 - [Alerts](#alerts)
 - [Run checks (Diagnostics)](#run-checks-diagnostics)
 - [Market data: freshness and skips](#market-data-freshness-and-skips)
+- [Strategy prices and exits](#strategy-prices-and-exits)
 - [Database growth](#database-growth)
 - [Thresholds](#thresholds)
 - [How it works (contributors)](#how-it-works-contributors)
@@ -177,6 +178,29 @@ charts and watchlists, and in your scripts), close apps on port 8765 you do
 not use, and keep other heavy programs off the computer during market hours.
 Skips counted for one connection reset when the broker feed reconnects.
 
+## Strategy prices and exits
+
+The strategy module decides every price of a held symbol as it arrives and
+places what it decided (exits, stops) after that. `GET /health/api/current`
+carries a `strategy_ticks` block, shown as the **Strategy Prices** card:
+
+- `ticks_queued` (**Prices read**), `ticks_folded` (**Combined while
+  busy**: decisions combined while an exit was being placed; every price is
+  still decided) and `ticks_missed` (**Missed**: prices the reader never
+  saw because the feed came faster than it read; each raises
+  `strategy_ticks_missed`), all since OpenAlgo started;
+- `exits_waiting` (**Strategies with exits waiting**): strategies with an
+  exit or stop decided and not yet placed;
+- `oldest_exit_wait_s` (**Longest exit wait**): how long, in seconds, the
+  oldest of those has waited, or `null` when none waits; `exits_slow` is
+  true once it has waited 15 seconds or more.
+
+The block's `status` is `warn` while any price was missed or an exit has
+waited 15 seconds. An order waits at most 10 seconds for its turn at the
+broker and is normally answered within a second or two after that, so an
+exit that late is held by a broker that does not answer or a database that
+is slow. Check that strategy's positions with your broker.
+
 ## Database growth
 
 Added by PR #178. OpenAlgo keeps the order and analyzer logs forever, as
@@ -214,6 +238,7 @@ Fixed in the app (`services/health_service.rs`), not settings:
 | Database connections | 10 | 20 |
 | WebSocket connections | 10 | 20 |
 | Threads | 200 | 400 |
+| A strategy exit decided and not yet placed (`strategy/tick_feed/pending.rs`) | 15 seconds | none |
 
 The thread levels are higher than the web's (50 and 100): the Rust runtime
 keeps a worker thread per processor core and a pool for blocking work.
