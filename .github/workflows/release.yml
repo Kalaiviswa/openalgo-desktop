@@ -438,6 +438,14 @@ jobs:
           EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
         run: python scripts/ci/check_no_e2e_build.py --same-as-checked "src-tauri/target/${TARGET}/release/openalgo-desktop${EXE}"
 
+      - name: The Windows app needs only DLLs that Windows ships
+        # A DLL missing on the trader's PC stops the app before its window
+        # opens (scripts/ci/check_windows_dlls.py).
+        if: runner.os == 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/ci/check_windows_dlls.py "src-tauri/target/${TARGET}/release/openalgo-desktop.exe"
+
       - name: The update bundle is signed
         env:
           TARGET: ${{ matrix.target }}

@@ -738,6 +738,14 @@ worktree onto master. CI builds fresh and is unaffected.
 - Windows: a child process needs `SystemRoot` in its environment; DuckDB holds
   an exclusive lock, so open database files cannot be copied in a test;
   timers are coarse.
+- Windows: the C++ of the bundled DuckDB links MSVCP140.dll, the Visual C++
+  runtime, unless the C runtime is static; Tauri makes only vcruntime
+  static. 1.0.0 did not start on PCs without it, and CI's runners have it
+  installed, so the app starting in CI proves nothing.
+  `.cargo/config.toml` sets `+crt-static` for MSVC; a `RUSTFLAGS` variable
+  replaces it, so a Windows job that sets one repeats the flag; and
+  `scripts/ci/check_windows_dlls.py` refuses a binary that needs a DLL
+  Windows does not ship.
 - Windows: `sync_all` on a file opened read-only (`File::open(p)?.sync_all()`)
   fails with "Access is denied": the flush needs a handle opened for writing.
   The first REL-02 backup passed on macOS and Linux and failed every backup on

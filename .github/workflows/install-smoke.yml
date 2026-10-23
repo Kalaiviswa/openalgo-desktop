@@ -179,6 +179,11 @@ jobs:
         # debugging port and signs in to a scripted broker; a shipped binary
         # carries none of their strings.
         run: python scripts/ci/check_no_e2e_build.py "$APP_EXE"
+      - name: The installed app needs only DLLs that Windows ships
+        # The runner has the Visual C++ runtime a trader's PC may lack, so
+        # the start below cannot show it is not needed; the import tables
+        # can (scripts/ci/check_windows_dlls.py).
+        run: python scripts/ci/check_windows_dlls.py "$APP_EXE"
       - name: Windows version
         shell: pwsh
         run: |

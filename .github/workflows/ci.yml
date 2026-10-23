@@ -92,7 +92,9 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest]
     env:
-      RUSTFLAGS: -D warnings
+      # RUSTFLAGS replaces .cargo/config.toml's rustflags, so Windows repeats
+      # its static C runtime and the tests run the build that ships.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-D warnings -C target-feature=+crt-static' || '-D warnings' }}
     steps:
       - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
@@ -262,6 +264,11 @@ jobs:
         run: |
           python3 scripts/ci/test_check_no_e2e_build.py
           python3 scripts/ci/test_release_workflow.py
+      - name: Windows DLL check tests
+        # scripts/ci/check_windows_dlls.py (the installed, released and E2E
+        # Windows binaries need no DLL that Windows does not ship), and the
+        # static C runtime kept in every Windows build that sets RUSTFLAGS.
+        run: python3 scripts/ci/test_check_windows_dlls.py
       - name: Native E2E order book check tests
         # scripts/ci/native_e2e_sandbox.py, the sandbox order's check in
         # native-e2e-test-build.yml.

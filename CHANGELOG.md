@@ -10,6 +10,14 @@ makes busy pages stop slowing the app's handling of market ticks, and shows
 more of the app's own health. If you run 1.0.0, OpenAlgo offers this update
 in the app; choose Update when no live strategy is running.
 
+### Windows
+
+- OpenAlgo starts on a Windows PC that has never had Microsoft's Visual C++
+  runtime installed. 1.0.0 stopped there with "MSVCP140.dll was not found";
+  the app now carries that runtime inside it. A 1.0.0 that does not start
+  cannot offer the update: download the 1.0.1 setup program and run it over
+  1.0.0, which keeps your data.
+
 ### Order safety
 
 - Delta Exchange: a smart order with a fractional target position is decided

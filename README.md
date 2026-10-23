@@ -155,7 +155,9 @@ created and signed in and the app's own window checked to have opened its
 page: the `.deb` and the AppImage on Ubuntu 22.04 (x64 and 64-bit ARM), the
 setup program on Windows Server 2022 and Windows Server 2025, and the `.dmg`
 on Apple Silicon macOS. Both Mac apps are checked to ask for no newer macOS
-than this table says. On Ubuntu the installed app is also driven through its
+than this table says, and the Windows app to need no DLL that Windows does
+not ship, such as Microsoft's Visual C++ runtime (the build machines have it
+installed; a trader's PC may not). On Ubuntu the installed app is also driven through its
 window: account created, a wrong password refused, signed in and out. A
 release is built only from a change that passed all of them. Windows 10 and
 11, Intel Macs, ARM64 Linux computers and the other systems in the table

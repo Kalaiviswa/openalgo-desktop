@@ -1,0 +1,9 @@
+# Windows: link the C and C++ runtimes into the app, so it starts on a PC
+# without Microsoft's Visual C++ Redistributable. The C++ of the bundled
+# DuckDB otherwise needs MSVCP140.dll, which Windows does not ship (1.0.0 did
+# not start without it); `cc` builds it with /MT when crt-static is on, and
+# Tauri keeps the Universal C runtime, part of Windows 10 and later, as a DLL.
+# A RUSTFLAGS variable replaces this setting, so CI's Windows jobs that set
+# one repeat it. scripts/ci/check_windows_dlls.py checks the built app.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

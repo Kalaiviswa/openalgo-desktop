@@ -240,10 +240,14 @@ jobs:
         working-directory: src-tauri
         env:
           OPENALGO_E2E_BUILD: "1"
-          RUSTFLAGS: -D warnings
+          # With .cargo/config.toml's static C runtime, which RUSTFLAGS
+          # would otherwise replace: the window under test links as shipped.
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
         run: cargo build --profile e2e --locked --features e2e-debug-port,e2e-broker --target x86_64-pc-windows-msvc
       - name: The string check finds the test build
         run: python scripts/ci/check_no_e2e_build.py src-tauri/target/x86_64-pc-windows-msvc/e2e/openalgo-desktop.exe --expect-e2e
+      - name: The test build needs only DLLs that Windows ships
+        run: python scripts/ci/check_windows_dlls.py src-tauri/target/x86_64-pc-windows-msvc/e2e/openalgo-desktop.exe
       - name: The Edge WebDriver of the installed WebView2's version
         # msedgedriver must match the WebView2 runtime the app runs in.
         shell: pwsh

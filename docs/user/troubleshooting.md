@@ -1,5 +1,6 @@
 # Troubleshooting
 
+- [Windows: "MSVCP140.dll was not found"](#windows-msvcp140dll-was-not-found)
 - [The app says a port is already in use](#the-app-says-a-port-is-already-in-use)
 - [Broker sign-in fails](#broker-sign-in-fails)
 - [Master contract errors](#master-contract-errors)
@@ -7,6 +8,23 @@
 - [Another device, a firewall, or a tunnel](#another-device-a-firewall-or-a-tunnel)
 - [Your API client says the API key is invalid](#your-api-client-says-the-api-key-is-invalid)
 - [OpenAlgo could not open your data](#openalgo-could-not-open-your-data)
+
+## Windows: "MSVCP140.dll was not found"
+
+OpenAlgo 1.0.0 needs Microsoft's Visual C++ runtime, which many Windows PCs
+have because another program installed it, but a new or freshly installed
+PC may not. Without it, 1.0.0 stops before its window opens with "The code
+execution cannot proceed because MSVCP140.dll was not found". Version 1.0.1
+and later carry that runtime inside the app.
+
+- Download the setup program of the latest release from the
+  [release page](https://github.com/marketcalls/openalgo-desktop/releases/latest)
+  and run it. It installs over 1.0.0 and keeps your data; a 1.0.0 that does
+  not start cannot offer the update itself.
+- To keep 1.0.0, install Microsoft's
+  [Visual C++ Redistributable for x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+  (from Microsoft; it asks for an administrator's permission), then start
+  OpenAlgo again.
 
 ## The app says a port is already in use
 
