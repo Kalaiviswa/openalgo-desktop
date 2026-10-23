@@ -494,8 +494,6 @@ export default function HealthMonitor() {
             {staleReason && (
               <p className="text-sm text-neutral-600 dark:text-muted-foreground">{staleReason}</p>
             )}
-            <NotRefreshed read={reads.stats} what="the statistics" />
-            <NotRefreshed read={reads.history} what="the charts and recent samples" />
           </div>
         </div>
       )}
@@ -576,6 +574,7 @@ export default function HealthMonitor() {
           <CardHeader>
             <CardTitle className="text-lg">File Descriptors (6h)</CardTitle>
             <CardDescription>Historical FD usage over the last 6 hours</CardDescription>
+            <NotRefreshed read={reads.history} what="this chart" />
           </CardHeader>
           <CardContent>
             <div ref={fdChartContainerRef} className="w-full h-[300px]" />
@@ -588,12 +587,15 @@ export default function HealthMonitor() {
             <CardDescription>
               Historical memory consumption in MB over the last 6 hours
             </CardDescription>
+            <NotRefreshed read={reads.history} what="this chart" />
           </CardHeader>
           <CardContent>
             <div ref={memoryChartContainerRef} className="w-full h-[300px]" />
           </CardContent>
         </Card>
       </div>
+
+      <NotRefreshedCard title="Statistics" read={reads.stats} what="the statistics" />
 
       <NoHealthSamples stats={stats} />
 
@@ -753,6 +755,7 @@ export default function HealthMonitor() {
           <CardDescription>
             Memory used by OpenAlgo's own process, not the rest of the computer
           </CardDescription>
+          <NotRefreshed read={reads.current} what="this list" />
         </CardHeader>
         <CardContent>
           {currentMetrics?.processes && currentMetrics.processes.length > 0 ? (
@@ -780,9 +783,9 @@ export default function HealthMonitor() {
                 ))}
               </TableBody>
             </Table>
-          ) : (
+          ) : currentMetrics ? (
             <div className="text-sm text-muted-foreground">No process data available.</div>
-          )}
+          ) : null}
         </CardContent>
       </Card>
 
@@ -791,6 +794,7 @@ export default function HealthMonitor() {
         <CardHeader>
           <CardTitle className="text-lg">Thread Details</CardTitle>
           <CardDescription>Recent thread snapshot from the application</CardDescription>
+          <NotRefreshed read={reads.current} what="this list" />
         </CardHeader>
         <CardContent>
           {currentMetrics?.threads.details && currentMetrics.threads.details.length > 0 ? (
@@ -816,9 +820,9 @@ export default function HealthMonitor() {
                 ))}
               </TableBody>
             </Table>
-          ) : (
+          ) : currentMetrics ? (
             <div className="text-sm text-muted-foreground">No thread details available.</div>
-          )}
+          ) : null}
         </CardContent>
       </Card>
 
@@ -891,51 +895,56 @@ export default function HealthMonitor() {
         <CardHeader>
           <CardTitle className="text-lg">Recent Metrics</CardTitle>
           <CardDescription>Last 20 samples from the monitoring system</CardDescription>
+          <NotRefreshed read={reads.history} what="these samples" />
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Time</TableHead>
-                <TableHead className="text-right">FDs</TableHead>
-                <TableHead className="text-right">Memory (MB)</TableHead>
-                <TableHead className="text-right">DB Conns</TableHead>
-                <TableHead className="text-right">WS Conns</TableHead>
-                <TableHead className="text-right">Threads</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {historicalMetrics
-                .slice(-20)
-                .reverse()
-                .map((metric, idx) => (
-                  <TableRow key={idx}>
-                    <TableCell className="font-mono text-xs">
-                      {formatIstTime(metric.timestamp)}
-                    </TableCell>
-                    <TableCell className="text-right">{metric.fd_count}</TableCell>
-                    <TableCell className="text-right">{metric.memory_rss_mb.toFixed(1)}</TableCell>
-                    <TableCell className="text-right">{metric.db_connections}</TableCell>
-                    <TableCell className="text-right">{metric.ws_connections}</TableCell>
-                    <TableCell className="text-right">{metric.threads}</TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          metric.overall_status === 'pass'
-                            ? 'default'
-                            : metric.overall_status === 'warn'
-                              ? 'secondary'
-                              : 'destructive'
-                        }
-                      >
-                        {metric.overall_status}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-            </TableBody>
-          </Table>
+          {reads.history.data !== null && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Time</TableHead>
+                  <TableHead className="text-right">FDs</TableHead>
+                  <TableHead className="text-right">Memory (MB)</TableHead>
+                  <TableHead className="text-right">DB Conns</TableHead>
+                  <TableHead className="text-right">WS Conns</TableHead>
+                  <TableHead className="text-right">Threads</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {historicalMetrics
+                  .slice(-20)
+                  .reverse()
+                  .map((metric, idx) => (
+                    <TableRow key={idx}>
+                      <TableCell className="font-mono text-xs">
+                        {formatIstTime(metric.timestamp)}
+                      </TableCell>
+                      <TableCell className="text-right">{metric.fd_count}</TableCell>
+                      <TableCell className="text-right">
+                        {metric.memory_rss_mb.toFixed(1)}
+                      </TableCell>
+                      <TableCell className="text-right">{metric.db_connections}</TableCell>
+                      <TableCell className="text-right">{metric.ws_connections}</TableCell>
+                      <TableCell className="text-right">{metric.threads}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            metric.overall_status === 'pass'
+                              ? 'default'
+                              : metric.overall_status === 'warn'
+                                ? 'secondary'
+                                : 'destructive'
+                          }
+                        >
+                          {metric.overall_status}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
     </div>

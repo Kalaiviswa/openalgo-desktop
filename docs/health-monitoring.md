@@ -83,13 +83,16 @@ that was on screen disappears because a read failed. A read that has not
 answered within 8 seconds counts as failed (its request is closed), so a
 stalled OpenAlgo is marked before the next refresh tries again:
 
-- What was read before stays on screen, marked "Could not refresh ... at
-  10:15:20 am IST; shown as read at 10:14:10 am IST." The banner shows
-  UNKNOWN while the latest figures could not be refreshed, and the cards
-  under it say when they were read.
-- Something never read says so ("Could not read the alerts. Refresh to try
-  again."). The checks a trader acts on (Market Data, Order Tracking,
-  Records Saved, Strategy Prices) show "Not known", never a pass.
+- What was read before stays on screen, marked in its own card "Could not
+  refresh ... at 10:15:20 am IST; shown as read at 10:14:10 am IST.": the
+  checks, both charts, the statistics, **Top Memory Processes**, **Thread
+  Details**, **Recent Metrics**, the alerts and the unconfirmed orders. The
+  banner shows UNKNOWN while the latest figures could not be refreshed.
+- Something never read says so in its card ("Could not read the alerts.
+  Refresh to try again."), and a list never read is not shown as an empty
+  table or "No ... available". The checks a trader acts on (Market Data,
+  Order Tracking, Records Saved, Strategy Prices) show "Not known", never a
+  pass.
 - A failed read changes nothing in OpenAlgo: an unconfirmed order stays
   held until it is found or you mark it not placed.
 

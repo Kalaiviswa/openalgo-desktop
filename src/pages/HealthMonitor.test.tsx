@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CurrentMetrics, EmptyHealthStats } from '@/api/health'
-import { render, screen, userEvent, waitFor } from '@/test/test-utils'
+import type { CurrentMetrics, EmptyHealthStats, HealthStats, HistoricalMetric } from '@/api/health'
+import { render, screen, userEvent, waitFor, within } from '@/test/test-utils'
 import HealthMonitor from './HealthMonitor'
 
 const api = vi.hoisted(() => ({
@@ -18,6 +18,14 @@ vi.mock('@/api/health', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/api/health')>()),
   ...api,
 }))
+
+// The charts draw on a canvas jsdom does not have.
+vi.mock('lightweight-charts', () => {
+  const stub: unknown = new Proxy(() => stub, {
+    get: (_target, key) => (key === 'then' ? undefined : stub),
+  })
+  return { createChart: () => stub, LineSeries: {}, ColorType: { Solid: 'solid' } }
+})
 
 function metrics(overrides: Partial<CurrentMetrics> = {}): CurrentMetrics {
   return {
@@ -72,6 +80,43 @@ async function refresh(times: number) {
   await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
   await waitFor(() => expect(api.getCurrentMetrics).toHaveBeenCalledTimes(times))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+}
+
+/** The card with this title. */
+function card(title: string): HTMLElement {
+  const found = screen.getByText(title).closest<HTMLElement>('[data-slot="card"]')
+  if (!found) throw new Error(`no card titled ${title}`)
+  return found
+}
+
+/** One history sample, as `/health/api/history` answers it. */
+const SAMPLE: HistoricalMetric = {
+  timestamp: '2026-10-20T10:00:00+05:30',
+  fd_count: 4321,
+  memory_rss_mb: 210.5,
+  db_connections: 3,
+  ws_connections: 1,
+  threads: 40,
+  overall_status: 'pass',
+}
+
+/** A statistics window with samples. */
+const STATS: HealthStats = {
+  total_samples: 2,
+  time_period_hours: 24,
+  fd: { current: 120, avg: 118.5, min: 117, max: 120, fail_count: 0, warn_count: 0 },
+  memory: {
+    current_mb: 210,
+    avg_mb: 205.25,
+    min_mb: 200.5,
+    max_mb: 210,
+    fail_count: 0,
+    warn_count: 0,
+  },
+  database: { current: 3, avg: 2.5, min: 2, max: 3 },
+  websocket: { current: 3, avg: 2.5, min: 2, max: 3 },
+  threads: { current: 3, avg: 2.5, min: 2, max: 3 },
+  status: { overall: { pass: 2, warn: 0, fail: 0 } },
 }
 
 /** What the server answers for a window with no samples (`stats_json` on no rows). */
@@ -427,5 +472,111 @@ describe('Health Monitor when a read fails', () => {
       await screen.findByText('Could not read the alerts. Refresh to try again.')
     ).toBeInTheDocument()
     expect(screen.getByText('Active Alerts')).toBeInTheDocument()
+  })
+
+  // The Recent Metrics table showed its header and no rows, and the charts
+  // were blank, with the only mark in the status banner.
+  it('says the recent samples and charts are not known when their read fails', async () => {
+    api.getMetricsHistory.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    await screen.findByText(/System Status: PASS/)
+    const recent = within(card('Recent Metrics'))
+    expect(recent.getByText(/^Could not read these samples\./)).toBeInTheDocument()
+    expect(recent.queryByRole('table')).not.toBeInTheDocument()
+    for (const chart of ['File Descriptors (6h)', 'Memory Usage (6h)']) {
+      expect(within(card(chart)).getByText(/^Could not read this chart\./)).toBeInTheDocument()
+    }
+  })
+
+  it('keeps the recent samples and charts, marked in their cards, when their refresh fails', async () => {
+    api.getMetricsHistory
+      .mockResolvedValueOnce([SAMPLE])
+      .mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('4321')).toBeInTheDocument()
+    expect(within(card('Recent Metrics')).queryByText(/Could not/)).not.toBeInTheDocument()
+    await refresh(2)
+
+    const recent = within(card('Recent Metrics'))
+    expect(recent.getByText('4321')).toBeInTheDocument()
+    expect(
+      recent.getByText(/^Could not refresh these samples at .* IST; shown as read at .* IST\./)
+    ).toBeInTheDocument()
+    for (const chart of ['File Descriptors (6h)', 'Memory Usage (6h)']) {
+      expect(
+        within(card(chart)).getByText(/^Could not refresh this chart at .* IST; shown as read at/)
+      ).toBeInTheDocument()
+    }
+  })
+
+  it('says the statistics are not known when their read fails, in a card of their own', async () => {
+    api.getHealthStats.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    await screen.findByText(/System Status: PASS/)
+    expect(
+      within(card('Statistics')).getByText(/^Could not read the statistics\./)
+    ).toBeInTheDocument()
+    expect(screen.queryByText('File Descriptor Stats')).not.toBeInTheDocument()
+  })
+
+  it('keeps the statistics, marked, when their refresh fails', async () => {
+    api.getHealthStats.mockResolvedValueOnce(STATS).mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('File Descriptor Stats')).toBeInTheDocument()
+    expect(screen.queryByText('Statistics')).not.toBeInTheDocument()
+    await refresh(2)
+
+    expect(screen.getByText('File Descriptor Stats')).toBeInTheDocument()
+    expect(screen.getByText('118.5')).toBeInTheDocument()
+    expect(
+      within(card('Statistics')).getByText(
+        /^Could not refresh the statistics at .* IST; shown as read at .* IST\./
+      )
+    ).toBeInTheDocument()
+  })
+
+  // "No process data available" and "No thread details available" read as
+  // empty lists when health had never been read.
+  it('says the process and thread lists are not known, not empty, when health was never read', async () => {
+    api.getCurrentMetrics.mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    await screen.findByText(/System Status: UNKNOWN/)
+    for (const title of ['Top Memory Processes', 'Thread Details']) {
+      expect(within(card(title)).getByText(/^Could not read this list\./)).toBeInTheDocument()
+    }
+    expect(screen.queryByText(/No process data available/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No thread details available/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the process list, marked, when a refresh of health fails', async () => {
+    const proc = {
+      pid: 4242,
+      name: 'openalgo-desktop',
+      rss_mb: 210,
+      vms_mb: 900,
+      memory_percent: 2.5,
+    }
+    api.getCurrentMetrics
+      .mockResolvedValueOnce(metrics({ sample_age_s: 5, processes: [proc] }))
+      .mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('openalgo-desktop')).toBeInTheDocument()
+    await refresh(2)
+
+    const processes = within(card('Top Memory Processes'))
+    expect(processes.getByText('openalgo-desktop')).toBeInTheDocument()
+    expect(
+      processes.getByText(/^Could not refresh this list at .* IST; shown as read at/)
+    ).toBeInTheDocument()
+    expect(
+      within(card('Thread Details')).getByText(/^Could not refresh this list at/)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/No thread details available/)).toBeInTheDocument()
   })
 })

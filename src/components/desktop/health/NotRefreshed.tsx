@@ -18,9 +18,12 @@ export function NotRefreshed({ read, what }: { read: HealthRead<unknown>; what: 
 }
 
 /**
- * Desktop: a card for a list the page shows only when it has rows (the
- * alerts), when its latest read failed and there are no rows to mark: it
- * was never read, or was empty when last read. Not an empty list.
+ * Desktop: a card saying that a part of the Health page whose own cards
+ * have no header to carry the mark (the statistics) could not be refreshed
+ * or was never read; or, for a list the page shows only when it has rows
+ * (the alerts), that its latest read failed with no rows to mark: it was
+ * never read, or was empty when last read. Never an empty list. A list
+ * with rows on screen carries its own mark instead.
  */
 export function NotRefreshedCard({
   title,
@@ -28,19 +31,20 @@ export function NotRefreshedCard({
   what,
 }: {
   title: string
-  read: HealthRead<unknown[]>
+  read: HealthRead<unknown>
   what: string
 }) {
-  if (read.failedAt === null || (read.data !== null && read.data.length > 0)) return null
+  const rows = Array.isArray(read.data) ? read.data.length : null
+  if (read.failedAt === null || (rows !== null && rows > 0)) return null
   return (
     <Card className="border-yellow-500/50">
       <CardHeader className="pb-3">
         <CardTitle className="text-lg">{title}</CardTitle>
       </CardHeader>
       <CardContent className="text-sm text-muted-foreground">
-        {read.data === null
-          ? notRefreshedText(read, what)
-          : `Could not refresh ${what} at ${readTime(read.failedAt)}. There were none when last read at ${readTime(read.readAt)}.`}
+        {rows === 0
+          ? `Could not refresh ${what} at ${readTime(read.failedAt)}. There were none when last read at ${readTime(read.readAt)}.`
+          : notRefreshedText(read, what)}
       </CardContent>
     </Card>
   )
