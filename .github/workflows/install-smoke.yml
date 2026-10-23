@@ -78,7 +78,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-linux-${{ matrix.name }}
           path: bundles
@@ -161,7 +161,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-windows-x86_64
           path: bundles
@@ -226,7 +226,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-macos-aarch64
           path: bundles
@@ -256,7 +256,7 @@ jobs:
         # src-tauri/src/e2e.rs: no shipped binary carries its strings.
         run: python3 scripts/ci/check_no_e2e_build.py "$APP_BIN"
       - name: Download the Intel bundle
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-macos-x86_64
           path: bundles-x64
