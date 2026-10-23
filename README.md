@@ -6,34 +6,34 @@ How many times the files of each [OpenAlgo Desktop](https://github.com/marketcal
 
 | | Downloads |
 | --- | ---: |
-| All time | 23 |
-| Last 30 days | 23 |
-| Windows | 3 |
-| macOS | 10 |
-| Linux | 10 |
+| All time | 67 |
+| Last 30 days | 67 |
+| Windows | 36 |
+| macOS | 20 |
+| Linux | 11 |
 
-Update checks, which are not downloads and are in no total: 2.
+Update checks, which are not downloads and are in no total: 114.
 
 ## By release
 
 | Release | Published | Windows | macOS installer | macOS update | Linux AppImage | Linux .deb | Total | Update checks |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| v1.0.0 | 2026-10-22 | 3 | 4 | 6 | 6 | 4 | 23 | 2 |
+| v1.0.0 | 2026-10-22 | 36 | 12 | 8 | 6 | 5 | 67 | 114 |
 
 ## By file
 
 | Release | File | Downloaded by | Downloads |
 | --- | --- | --- | ---: |
 | v1.0.0 | `OpenAlgo.Desktop_1.0.0_aarch64.AppImage` | a person or the in-app update | 3 |
-| v1.0.0 | `OpenAlgo.Desktop_1.0.0_aarch64.app.tar.gz` | the in-app update | 3 |
-| v1.0.0 | `OpenAlgo.Desktop_1.0.0_aarch64.dmg` | a person (release page) | 2 |
+| v1.0.0 | `OpenAlgo.Desktop_1.0.0_aarch64.app.tar.gz` | the in-app update | 5 |
+| v1.0.0 | `OpenAlgo.Desktop_1.0.0_aarch64.dmg` | a person (release page) | 5 |
 | v1.0.0 | `OpenAlgo.Desktop_1.0.0_amd64.AppImage` | a person or the in-app update | 3 |
-| v1.0.0 | `OpenAlgo.Desktop_1.0.0_amd64.deb` | a person (release page) | 2 |
+| v1.0.0 | `OpenAlgo.Desktop_1.0.0_amd64.deb` | a person (release page) | 3 |
 | v1.0.0 | `OpenAlgo.Desktop_1.0.0_arm64.deb` | a person (release page) | 2 |
-| v1.0.0 | `OpenAlgo.Desktop_1.0.0_x64-setup.exe` | a person or the in-app update | 3 |
+| v1.0.0 | `OpenAlgo.Desktop_1.0.0_x64-setup.exe` | a person or the in-app update | 36 |
 | v1.0.0 | `OpenAlgo.Desktop_1.0.0_x64.app.tar.gz` | the in-app update | 3 |
-| v1.0.0 | `OpenAlgo.Desktop_1.0.0_x64.dmg` | a person (release page) | 2 |
-| v1.0.0 | `latest.json` | update checks (not a download) | 2 |
+| v1.0.0 | `OpenAlgo.Desktop_1.0.0_x64.dmg` | a person (release page) | 7 |
+| v1.0.0 | `latest.json` | update checks (not a download) | 114 |
 
 ## What the counts mean
 
