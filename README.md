@@ -179,16 +179,19 @@ that was published.
 **Windows.** SmartScreen shows "Windows protected your PC". Choose **More
 info**, then **Run anyway**.
 
-**macOS.** The first time, macOS says the app "cannot be opened because Apple
-cannot check it for malicious software", or that it is from an unidentified
-developer. Either:
+**macOS 15 (Sequoia) and later.** The first time, macOS says "Apple could not
+verify "OpenAlgo Desktop" is free of malware that may harm your Mac or
+compromise your privacy", with the buttons **Done** and **Move to Bin** (Move
+to Trash). Choose **Done**, not Move to Bin. Then go to **System Settings**,
+**Privacy & Security**, scroll down to the message about OpenAlgo Desktop,
+choose **Open Anyway**, and confirm with your password or Touch ID. Open the
+app again and choose **Open Anyway** if macOS asks once more.
 
-- In Finder, open Applications, right-click (or Control-click) OpenAlgo
-  Desktop, choose **Open**, then **Open** again; or
-- Try to open the app once, then go to **System Settings**, **Privacy &
-  Security**, scroll down to the message about OpenAlgo Desktop, choose **Open
-  Anyway**, and confirm. On macOS 15 (Sequoia) and later this is the way that
-  works.
+**macOS 14 (Sonoma) and earlier.** macOS says the app "cannot be opened
+because Apple cannot check it for malicious software", or that it is from an
+unidentified developer. In Finder, open Applications, right-click (or
+Control-click) OpenAlgo Desktop, choose **Open**, then **Open** again. The
+System Settings way above works here too.
 
 You only need to do this once. If macOS says the app "is damaged and can't be
 opened", it is the same check; in Terminal run
