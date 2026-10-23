@@ -44,7 +44,11 @@ jobs:
   linux:
     name: native e2e (linux x86_64)
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    # The install below fetches about 40 MB from the runner's Ubuntu mirror,
+    # which some nights serves the 27 MB WebKit package alone in 4 to 7
+    # minutes (the 1.0.1 and 1.0.2 nights: the 15-minute limit cut the job off
+    # before the journey started). The journey itself takes about 5.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
