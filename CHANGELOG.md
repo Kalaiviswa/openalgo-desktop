@@ -39,6 +39,8 @@ in the app; choose Update when no live strategy is running.
   left there by 1.0.0 is erased the first time 1.0.1 starts.
 - After you generate a new API key, the books and order forms use it at once;
   before, they kept sending the old key until the window was reloaded.
+- WhatsApp alerts use ctutils 0.4.5, the release that fixes advisory
+  RUSTSEC-2026-0385 (encryption code whose timing could reveal secrets).
 
 ### Speed under load
 
