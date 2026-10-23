@@ -203,7 +203,10 @@ raises no alert and was left as it is.
 
 The 19 hashing alerts need nothing: they close as fixed at the first master
 scan after this branch merges. Dismiss only these two, as **false
-positive** (the comment is under GitHub's 280 characters):
+positive** (the comment is under GitHub's 280 characters). Done on
+2026-10-23 with the maintainer's approval; the same day Dependabot alert 2
+(glib, GHSA-wrw7-89jp-8q8g) was re-filed from "tolerable risk" to "not
+used" with the proof in the table below, as CLAUDE.md requires:
 
 - **226, 227**: "Path starts at Angel's auth.user_id() and reaches the XTS
   feed only via CodeQL resolving Box<dyn BrokerFeed> calls to every impl.
