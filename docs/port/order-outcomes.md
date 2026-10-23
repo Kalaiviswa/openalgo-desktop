@@ -72,7 +72,11 @@ shape (P1-5). Every close-all override runs each exit inside
 options split included, stops at the first chunk whose answer was lost and
 reports the rest as not sent (the web keeps sending). The legs of a
 multi-leg options order are independent orders, like a basket's: a lost leg
-holds back nothing, and the reply names it (PROD-TR-02). An Action Center
+holds back nothing, and the reply names it (PROD-TR-02). This is the web's
+behaviour and the maintainer's decision (2026-10-23): the desktop keeps
+sending the remaining legs after a refused or uncertain one, even when that
+leaves a short leg without its hedge, and says so in the reply instead of
+holding them back. An Action Center
 approval whose answer was lost, in full or for one leg or chunk, stays
 `submitting` (unconfirmed): never marked rejected or partial, never sent
 again, across a restart too.
