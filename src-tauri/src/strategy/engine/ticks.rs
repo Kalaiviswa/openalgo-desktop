@@ -16,6 +16,7 @@ use crate::strategy::state::{ExitScope, RunState};
 use crate::strategy::store::{EventFields, StrategyRow};
 use crate::strategy::tick_feed::pending::{Decision, Event, LegExit, RunWork};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 /// Each open leg on this instrument against the price (in the run's
 /// lock): the legs to exit and the events to send. A stop-driven exit
@@ -205,38 +206,43 @@ fn run_breach(
 
 impl StrategyModule {
     /// Decide one price for every run holding the instrument, then act on
-    /// every decision waiting: the REST poll's path, and a test's.
-    pub async fn process_tick(&self, symbol: &str, exchange: &str, ltp: f64) {
-        self.decide_tick(symbol, exchange, ltp).await;
+    /// every decision waiting: the REST poll's path (on the evaluator, so
+    /// a run's tick inputs not yet in memory are read first), and a test's.
+    pub async fn process_tick(self: &Arc<Self>, symbol: &str, exchange: &str, ltp: f64) {
+        for run_id in self.runs_holding(symbol, exchange) {
+            self.read_tick_inputs(run_id).await;
+        }
+        self.decide_tick(symbol, exchange, ltp);
         self.act_on_decided().await;
     }
 
     /// Decide one price for every run holding the instrument and leave
-    /// what it asks for to the evaluator.
-    pub(crate) async fn decide_tick(&self, symbol: &str, exchange: &str, ltp: f64) {
-        for run_id in self.state.active_run_ids() {
-            let holds = self
-                .state
-                .with_run(run_id, |r| {
-                    r.legs
-                        .values()
-                        .any(|l| l.status == "open" && l.symbol == symbol && l.exchange == exchange)
-                })
-                .unwrap_or(false);
-            if holds {
-                self.decide_for_run(run_id, symbol, exchange, ltp).await;
-            }
+    /// what it asks for to the evaluator. The tick reader's path: from
+    /// memory alone, never waiting (`strategy::tick_context`).
+    pub(crate) fn decide_tick(self: &Arc<Self>, symbol: &str, exchange: &str, ltp: f64) {
+        for run_id in self.runs_holding(symbol, exchange) {
+            self.decide_for_run(run_id, symbol, exchange, ltp);
         }
     }
 
-    async fn decide_for_run(&self, run_id: i64, symbol: &str, exchange: &str, ltp: f64) {
-        // In memory since the run's prices were subscribed: no tick waits
-        // on the database (`strategy::tick_context`).
-        let Some(ctx) = self.tick_context(run_id).await else {
+    /// The running runs with an open leg on the instrument.
+    fn runs_holding(&self, symbol: &str, exchange: &str) -> Vec<i64> {
+        let holds = |r: &mut RunState| {
+            r.legs
+                .values()
+                .any(|l| l.status == "open" && l.symbol == symbol && l.exchange == exchange)
+        };
+        self.state
+            .active_run_ids()
+            .into_iter()
+            .filter(|id| self.state.with_run(*id, holds).unwrap_or(false))
+            .collect()
+    }
+
+    fn decide_for_run(self: &Arc<Self>, run_id: i64, symbol: &str, exchange: &str, ltp: f64) {
+        let Some((ctx, (limit, banked))) = self.held_tick_inputs(run_id) else {
             return;
         };
-        // Read before the lock, never inside it.
-        let (limit, banked) = self.session_loss(&ctx, run_id).await;
 
         // In-memory arithmetic only.
         let decided = self.state.with_run(run_id, |run| {

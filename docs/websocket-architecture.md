@@ -152,11 +152,13 @@ a held symbol there and then, through the risk core in the run's lock, so
 each stop, target, trailing stop and profit lock is judged on every price in
 the order it came. Only acting on a decision (placing an exit, stopping the
 run, recording the event) waits for the evaluator task, which combines a
-run's decisions while it is busy; the reader waits for the database only on
-a run's first price, whose fixed inputs it reads once. The reader used to fold each symbol's waiting prices to the
-first, lowest, highest and latest past 32, which lost a trailing stop's
-earlier peak and the dip after it (PROD-REL-01). Prices the reader itself
-missed are counted and raise a `strategy_ticks_missed` health alert.
+run's decisions while it is busy. The reader never waits on the database:
+a run's fixed inputs are read before its prices are subscribed, and what
+the reader finds missing is read in a task of its own. The reader used to
+fold each symbol's waiting prices to the first, lowest, highest and latest
+past 32, which lost a trailing stop's earlier peak and the dip after it
+(PROD-REL-01). Prices the reader itself missed are counted and raise a
+`strategy_ticks_missed` health alert.
 
 **Seeing it.** PR #178 (`origin/pr/health-feed-losses`) counts all of it:
 

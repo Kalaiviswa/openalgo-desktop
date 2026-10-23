@@ -11,10 +11,10 @@
 //!   decides each price of a held symbol at once, in the run's lock
 //!   (`StrategyModule::decide_tick`), so every price is decided, in the
 //!   order it came. It never waits on an action (an exit, a stop, an event
-//!   write), so a slow one cannot make the channel overrun it and skip a
-//!   deciding price. What a run's ticks need is read when its prices are
-//!   subscribed (`follow_prices`); the reader reads it only when that read
-//!   failed, and the day's banked P&L on a session's first price. A tick it
+//!   write) or on the database, so neither can make the channel overrun it
+//!   and skip a deciding price. What a run's ticks need is read when its
+//!   prices are subscribed (`follow_prices`); what the reader still finds
+//!   missing is read in an owned task (`strategy::tick_context`). A tick it
 //!   does miss is counted for health;
 //! * the **evaluator** acts on what was decided (`pending`), run by run in
 //!   the order they decided, and polls stale symbols every 2 s (stale after
@@ -225,7 +225,7 @@ fn spawn_reader(module: &Arc<StrategyModule>, source: Arc<dyn PriceSource>) {
                     if let FeedEvent::Tick(t) = ev.as_ref() {
                         let usable = t.ltp.is_finite() && t.ltp > 0.0;
                         if usable && m.feed.note_tick((t.symbol.clone(), t.exchange.clone())) {
-                            m.decide_tick(&t.symbol, &t.exchange, t.ltp).await;
+                            m.decide_tick(&t.symbol, &t.exchange, t.ltp);
                         }
                     }
                 }

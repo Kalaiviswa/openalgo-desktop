@@ -1,7 +1,7 @@
 //! The strategy tick path under a burst (benchmarks P1, PROD-REL-01): every
 //! price is decided while the evaluator is busy, in the order it came, each
-//! decision places one exit, and a tick the reader does miss is counted for
-//! health.
+//! decision places one exit, the reader never waits on the database, and a
+//! tick the reader does miss is counted for health.
 
 use super::*;
 use openalgo_desktop_lib::brokers::common::streaming::{FeedEvent, MarketEvent, NormalizedTick};
@@ -9,7 +9,7 @@ use openalgo_desktop_lib::clock::Clock;
 use openalgo_desktop_lib::strategy::tick_feed::{Key, PriceSource};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 /// A market-data channel of the size a test needs: small to overrun the
@@ -626,6 +626,69 @@ async fn health_says_how_long_a_decided_exit_has_waited() {
     let h = health(&t);
     assert_eq!(h["oldest_exit_wait_s"], Value::Null, "{}", h);
     assert_eq!(h["status"], "pass", "{}", h);
+    t.m.shutdown().await;
+}
+
+/// The tick reader never waits on the database. With every pooled
+/// connection held, so a read waits its 10 s for one, a run whose banked
+/// P&L must be read for a new session and a run whose tick inputs were
+/// forgotten get prices first; a third run's price after theirs is still
+/// decided at once. Before, the reader read both on the spot and held every
+/// run's prices behind each read, until the market-data channel overran.
+/// The reads it asked for land once the database answers.
+#[tokio::test]
+async fn a_stalled_database_read_never_holds_another_runs_prices() {
+    let burst = Burst::new(4096);
+    let t = t_with(
+        ist(2026, 10, 7, 10, 0),
+        Some(burst.clone() as Arc<dyn PriceSource>),
+    );
+    // The reader and the evaluator only: the checkpoint writer and the
+    // scheduler read the database on the runtime itself.
+    openalgo_desktop_lib::strategy::tick_feed::start(&t.m);
+    let risk = json!({"sl_pts": 10});
+    let limit = json!({"daily_loss_limit_inr": 100000});
+    let sid = t.make(config(
+        "Banked",
+        json!([long_call("ATM", risk.clone())]),
+        limit,
+    ));
+    let banked_run = t.start_filled(sid, 100.0).await;
+    let banked = t.leg(banked_run, 1).symbol;
+    let (forgotten_run, forgotten) = held(&t, "Forgotten", "OTM1", risk.clone()).await;
+    let (free_run, free) = held(&t, "Free", "OTM2", risk).await;
+    t.m.tick_contexts.forget(forgotten_run);
+    t.clock.set(ist(2026, 10, 8, 10, 0));
+    let pool: Vec<_> = (0..8).map(|_| t.db.conn().unwrap()).collect();
+
+    for symbol in [&banked, &forgotten, &free] {
+        burst.send(symbol, 101.0);
+    }
+    let decided = |run: i64, ltp: f64| t.leg(run, 1).ltp == Some(ltp);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !decided(free_run, 101.0) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        decided(free_run, 101.0),
+        "a price waited behind another run's database read"
+    );
+    assert!(
+        decided(banked_run, 101.0),
+        "judged banking nothing meanwhile"
+    );
+    assert!(
+        !decided(forgotten_run, 101.0),
+        "not judged without its inputs"
+    );
+
+    drop(pool);
+    assert!(
+        eventually(|| t.m.tick_contexts.len() == 3).await,
+        "the read the reader asked for never landed"
+    );
+    burst.send(&forgotten, 102.0);
+    assert!(eventually(|| decided(forgotten_run, 102.0)).await);
     t.m.shutdown().await;
 }
 
