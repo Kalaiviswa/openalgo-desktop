@@ -119,7 +119,8 @@ app, and the module is `#[cfg(test)]`, never compiled into the installer.
 The cleartext-logging alert is a failing assertion's message printing the
 test password `pw` to the test runner. This module has raised three rounds
 of the same alerts (99 to 110, 247 to 255, and these), each time its lines
-moved. Commit `670b3492` (`refactor(security)`) moves it verbatim to
+moved. The commit `refactor(security): hashing's tests in their own tests.rs,
+out of CodeQL's scan` moves it verbatim to
 `security/hashing/tests.rs`, declared `#[cfg(test)] mod tests;` as
 `websocket/manager/tests.rs` is; every test is unchanged, the Linux-only
 heap-fallback one included.
@@ -223,7 +224,7 @@ done
 | --- | --- | --- | --- | --- | --- |
 | RUSTSEC-2026-0049, -0098, -0099, -0104; GHSA-82j2-j2ch-gfr8, GHSA-pwjx-qhcg-rvj4, GHSA-965h-392x-2mh5, GHSA-xgp8-3hg3-c2mh | rustls-webpki 0.102.8 | 2026-10-08 | 2026-10-22 | 2027-01-31 | Only `rumqttc 0.25.1` depends on it (`Cargo.lock`; `rustls` and `rustls-platform-verifier` use 0.103.16). rumqttc 0.25.1 names it only as an error type (`tls.rs:42`, `WebPki(#[from] webpki::Error)`), and its `TlsConfiguration::Rustls` branch clones the config it is given (`tls.rs:131`). The IIFL Capital feed, the only rumqttc user, always passes our rustls 0.23 config with the webpki roots (`iiflcapital/mqtt_relay.rs` `tls_config`, `options`), verified by 0.103.16. rumqttc 0.25.1 is still the newest release on crates.io and its main branch still pins `rustls-webpki = "0.102.8"` |
 | RUSTSEC-2026-0382; CVE-2026-111943 | rustls-webpki 0.102.8 | 2026-10-22 | 2026-10-22 | 2027-01-31 | As above. The same CVE also names RUSTSEC-2026-0381 for webpki-roots, fixed by webpki-roots 1.0.10 (in `Cargo.lock`) and not accepted |
-| GHSA-wrw7-89jp-8q8g | glib 0.18.5 (unsound `VariantStrIter`) | 2026-10-07 | 2026-10-22 | 2027-01-31 | Linux only, through Tauri's GTK 0.18 stack (tauri 2.12.2, gtk 0.18.2). No app code names glib (the only matches in `src-tauri/src` are "glibc" in comments), so the app never iterates Variant strings; whether GTK itself does was not exercised |
+| GHSA-wrw7-89jp-8q8g | glib 0.18.5 (unsound `VariantStrIter`) | 2026-10-07 | 2026-10-22 | 2027-01-31 | Linux only, through Tauri's GTK 0.18 stack (tauri 2.12.2, gtk 0.18.2). No app code names glib (the only matches in `src-tauri/src` are "glibc" in comments). The unsound iterator is reached only through `Variant::array_iter_str` (glib `variant.rs:843`), and no crate in the lockfile's Linux stack calls it: on 2026-10-23 a search of the registry sources of every glib 0.18.5 dependent in `Cargo.lock` (atk, cairo-rs, gdk, gdk-pixbuf, gdkx11, gio, gtk, javascriptcore-rs, pango, soup3, webkit2gtk, glib-macros) and of muda, tao, wry, rfd, tray-icon and libappindicator found `VariantStrIter` and `array_iter_str` only in glib itself. GTK's C code cannot call a Rust iterator |
 
 `deny.toml` and `.trivyignore` now carry these dates in each reason; the
 ids `security.yml` reads from `deny.toml` are unchanged (the five above).

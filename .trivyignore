@@ -6,8 +6,11 @@
 
 # glib 0.18.5, GHSA-wrw7-89jp-8q8g (MEDIUM): unsound VariantStrIter iterator.
 # glib arrives only through Tauri's Linux GTK stack (tauri -> muda -> gtk 0.18
-# -> glib 0.18), which Tauri pins; the app never iterates glib Variant
-# strings. Remove when Tauri moves to gtk-rs 0.20 or later.
+# -> glib 0.18), which Tauri pins. The unsound iterator is reached only
+# through Variant::array_iter_str, which neither the app nor any crate in
+# that stack calls (registry search of every glib dependent in Cargo.lock,
+# 2026-10-23; docs/audit/2026-10-22/scanner-triage.md). Remove when Tauri
+# moves to gtk-rs 0.20 or later.
 # Accepted 2026-10-07; re-checked 2026-10-22 (tauri 2.12.2 still pulls gtk
 # 0.18.2 and glib 0.18.5); review by 2027-01-31.
 GHSA-wrw7-89jp-8q8g
