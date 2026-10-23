@@ -11,7 +11,7 @@ use super::core::{
     Reply,
 };
 use super::order_service::{fractional_refusal, route_to_pending, Route};
-use super::schemas::{MAX_BROKER_QUANTITY, QUANTITY_TOO_LARGE};
+use super::schemas::{GTT_QUANTITY_NOT_POSITIVE, MAX_BROKER_QUANTITY, QUANTITY_TOO_LARGE};
 use crate::brokers::types::{GttOrder, GttRequest, GttTriggerType, QuoteKey};
 use crate::error::AppError;
 use crate::events::{Event, GttKind};
@@ -33,14 +33,18 @@ fn opt_dec(v: &Value, k: &str) -> Option<rust_decimal::Decimal> {
 // carried, never truncated to a GTT for 0.
 
 /// The quantity of a GTT, or the refusal of one no broker takes (API-02,
-/// PROD-TR-05): above a 32-bit integer, as `placeorder` refuses it at
-/// dispatch. The `/api/v1` schema refuses it first; the GTT page's modify
-/// reaches here without one.
+/// PROD-TR-05): below 1 (a blank or unreadable one reads as 0), or above a
+/// 32-bit integer, as `placeorder` refuses it at dispatch. The `/api/v1`
+/// schema refuses both first; the GTT page's modify reaches here without
+/// one, and a 0 there would rewrite the GTT's legs and release its margin.
 fn gtt_quantity(req: &Value) -> Result<i64, Reply> {
     if let Some(refused) = fractional_refusal(req) {
         return Err(refused);
     }
     let quantity = i(req, "quantity");
+    if quantity < 1 {
+        return Err(Reply::error(400, GTT_QUANTITY_NOT_POSITIVE));
+    }
     if quantity > MAX_BROKER_QUANTITY {
         return Err(Reply::error(400, QUANTITY_TOO_LARGE));
     }
@@ -538,5 +542,30 @@ mod tests {
             assert_eq!(sandbox_gtt(&gtt(2_147_483_647)).unwrap().quantity, largest);
             assert_eq!(broker_gtt(&gtt(2_147_483_647)).unwrap().quantity, largest);
         }
+    }
+
+    /// A GTT quantity below 1 is refused by both conversions (PROD-TR-05):
+    /// the GTT page's modify turns a blank or unreadable quantity into 0,
+    /// and a negative one would reach the sandbox or the broker unchanged.
+    #[test]
+    fn a_quantity_below_one_makes_no_gtt() {
+        for quantity in [json!(0), json!(-5), json!(null), json!("abc")] {
+            let req = json!({"exchange": "NSE", "quantity": quantity, "action": "BUY",
+                "product": "NRML", "pricetype": "LIMIT"});
+            let refused = sandbox_gtt(&req).unwrap_err();
+            assert_eq!(
+                (refused.status, refused.message()),
+                (400, GTT_QUANTITY_NOT_POSITIVE.to_string()),
+                "{quantity}"
+            );
+            match broker_gtt(&req) {
+                Err(AppError::Validation(m)) => assert_eq!(m, GTT_QUANTITY_NOT_POSITIVE),
+                other => panic!("{quantity}: {:?}", other.map(|g| g.quantity)),
+            }
+        }
+        let one = json!({"exchange": "NSE", "quantity": 1, "action": "BUY",
+            "product": "NRML", "pricetype": "LIMIT"});
+        assert_eq!(sandbox_gtt(&one).unwrap().quantity, 1);
+        assert_eq!(broker_gtt(&one).unwrap().quantity, 1);
     }
 }

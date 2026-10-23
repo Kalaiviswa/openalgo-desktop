@@ -116,6 +116,10 @@ pub(crate) const MAX_BROKER_QUANTITY: i64 = i32::MAX as i64;
 /// The refusal for a quantity above [`MAX_BROKER_QUANTITY`].
 pub(crate) const QUANTITY_TOO_LARGE: &str = "Quantity is larger than any exchange accepts.";
 
+/// The refusal for a GTT quantity below 1, by the schema and by the GTT
+/// page's modify, which reaches the service without one.
+pub(crate) const GTT_QUANTITY_NOT_POSITIVE: &str = "Quantity must be a positive number.";
+
 /// `_coerce_quantity_to_int`: fractional quantities only on crypto.
 ///
 /// Desktop addition (API-02): a quantity or disclosed quantity above
@@ -627,7 +631,7 @@ fn gtt_fields(with_trigger_id: bool, with_expiry: bool) -> Vec<Field> {
                 "GTT supports only CNC (delivery) or NRML (overnight F&O); MIS is intraday-only.",
             ),
         }),
-        positive_quantity("Quantity must be a positive number."),
+        positive_quantity(GTT_QUANTITY_NOT_POSITIVE),
         Field::str("pricetype")
             .default(|| json!("LIMIT"))
             .validate(Validator::one_of(&["LIMIT", "MARKET"])),
