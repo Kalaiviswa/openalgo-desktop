@@ -150,3 +150,13 @@ tests/fixtures/**/*.raw.txt
 *.AppImage
 *.rpm
 *.snap
+
+# QA audit reports and exports (account data: order ids, positions, funds)
+*.xlsx
+*.csv
+# Broker fixtures and the bundled freeze-quantity list are tracked CSVs
+!src-tauri/**/*.csv
+.qa-venv/
+docs/audit/qa_audit/**/qa_shapes.json
+__pycache__/
+~$*
