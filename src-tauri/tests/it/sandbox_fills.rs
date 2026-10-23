@@ -805,6 +805,9 @@ async fn an_exit_that_would_open_a_position_without_funds_is_rejected_at_fill() 
     )
     .await;
     assert_eq!(env.used().await, d("73800"));
+    // The bus delivers the buy's and the target's fills after the calls
+    // return; count from both, or a late one reads as a fill of the stop.
+    env.rec.wait_for("sandbox.order_filled", 2).await;
     let fills_before = env.rec.count("sandbox.order_filled");
 
     // The stop would open a 2000 short needing 38,000 with 36,200 free.
