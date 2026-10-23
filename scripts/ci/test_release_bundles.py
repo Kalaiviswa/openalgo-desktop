@@ -38,6 +38,10 @@ VERSION = "1.2.3"
 PRODUCT = "OpenAlgo Desktop"
 RUNS = f"repos/{REPO}/actions/workflows/ci.yml/runs?branch=master&event=push&head_sha={SHA}&per_page=100"
 NATIVE_RUNS = f"repos/{REPO}/actions/workflows/native-e2e-test-build.yml/runs?branch=master&head_sha={SHA}&per_page=100"
+# When run 100's tauri-build jobs ran, and when their upload made each
+# bundles-<platform> artifact.
+BUILD = ("2026-10-20T01:10:00Z", "2026-10-20T01:40:00Z")
+UPLOADED = "2026-10-20T01:39:30Z"
 
 # What CI's tauri-build puts in each bundles-<platform> artifact, the
 # installers a release does not ship included.
@@ -104,13 +108,15 @@ def ci_run(run_id=100, sha=SHA, attempt=1, **over):
     return run
 
 
-def green_jobs():
+def green_jobs(build=BUILD):
     jobs = [{"name": n, "conclusion": "success"} for n in smoke_gate.EXPECTED_JOBS]
     jobs.append({"name": "ci-ok", "conclusion": "success"})
     for p in rb.PLATFORMS:
         steps = [{"name": "Set up job", "conclusion": "success"}]
         steps += [{"name": s, "conclusion": "success"} for s in rb.TAURI_BUILD_STEPS]
-        jobs.append({"name": p.build_job, "conclusion": "success", "steps": steps})
+        jobs.append(
+            {"name": p.build_job, "conclusion": "success", "started_at": build[0], "completed_at": build[1], "steps": steps}
+        )
     return jobs
 
 
@@ -156,22 +162,27 @@ class Fixtures(unittest.TestCase):
             f.write(data)
 
     def green(self, run=None, jobs=None, artifacts=None, zips=None):
-        """A green CI run 100 of SHA with every bundle, unless overridden."""
+        """A green CI run 100 of SHA with every bundle made by its builds,
+        unless overridden. Given `artifacts`, the caller made them
+        downloadable (`uploaded`)."""
         run = run or ci_run()
+        jobs = jobs or green_jobs()
         self.put(RUNS, {"workflow_runs": [run]})
         self.put(f"repos/{REPO}/actions/runs/{run['id']}", run)
-        self.put(f"repos/{REPO}/actions/runs/{run['id']}/jobs?per_page=100", {"jobs": jobs or green_jobs()})
-        zips = zips or {p.name: zip_of(bundle_files(p.name)) for p in rb.PLATFORMS}
+        # The jobs of the latest attempt (smoke_gate) and of the attempt read
+        # with the run (release_bundles): the same, as GitHub answers them.
+        for jobs_of in ("jobs", f"attempts/{run['run_attempt']}/jobs"):
+            self.put(f"repos/{REPO}/actions/runs/{run['id']}/{jobs_of}?per_page=100", {"jobs": jobs})
         if artifacts is None:
-            artifacts = []
-            for i, p in enumerate(rb.PLATFORMS):
-                data = zips[p.name]
-                artifacts.append(self.artifact(p.name, 500 + i, data, run["id"]))
-        for a in artifacts:
-            if a["name"].removeprefix("bundles-") in zips:
-                self.put_download(f"repos/{REPO}/actions/artifacts/{a['id']}/zip", zips[a["name"].removeprefix("bundles-")])
+            zips = zips or {p.name: zip_of(bundle_files(p.name)) for p in rb.PLATFORMS}
+            artifacts = [self.uploaded(p.name, 500 + i, zips[p.name], run["id"]) for i, p in enumerate(rb.PLATFORMS)]
         self.put(f"repos/{REPO}/actions/runs/{run['id']}/artifacts?per_page=100", {"artifacts": artifacts})
         self.artifacts = artifacts
+
+    def uploaded(self, platform, artifact_id, data, run_id=100, **over):
+        """The artifact of `data`, which a download then answers with."""
+        self.put_download(f"repos/{REPO}/actions/artifacts/{artifact_id}/zip", data)
+        return self.artifact(platform, artifact_id, data, run_id, **over)
 
     def artifact(self, platform, artifact_id, data, run_id=100, **over):
         a = {
@@ -179,6 +190,7 @@ class Fixtures(unittest.TestCase):
             "name": f"bundles-{platform}",
             "size_in_bytes": len(data),
             "expired": False,
+            "created_at": UPLOADED,
             "expires_at": "2026-10-27T01:00:00Z",
             "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
             "workflow_run": {
@@ -290,10 +302,84 @@ class Check(Fixtures):
             self.assertEqual(code, 1, want)
             self.assertIn(want, out)
 
+    def test_refuses_bundles_not_made_by_the_build_whose_steps_were_checked(self):
+        # A later job of the same run can upload under the same name
+        # (upload-artifact's `overwrite`): GitHub records the new artifact
+        # with the same run and commit, so only its time tells it apart.
+        for created in ("2026-10-20T01:52:00Z", "2026-10-20T01:05:00Z", None):
+            arts = [dict(a, id=990, created_at=created) if a["name"] == "bundles-windows-x86_64" else a for a in self.artifacts]
+            self.put(f"repos/{REPO}/actions/runs/100/artifacts?per_page=100", {"artifacts": arts})
+            code, out = self.run_cli("check", SHA)
+            self.assertEqual(code, 1, created)
+            self.assertIn(
+                "no bundles-windows-x86_64 of https://example.invalid/runs/100 was made by tauri-build (windows-x86_64) "
+                "of attempt 1, which ran from 2026-10-20T01:10:00Z to 2026-10-20T01:40:00Z",
+                out,
+            )
+            self.assertIn(f"created at {created}, so replaced after that build", out)
+
+    def test_refuses_a_build_without_its_times(self):
+        jobs = green_jobs()
+        for j in jobs:
+            if j["name"] == "tauri-build (macos-aarch64)":
+                del j["completed_at"]
+        self.green(jobs=jobs)
+        code, out = self.run_cli("check", SHA)
+        self.assertEqual(code, 1)
+        self.assertIn("tauri-build (macos-aarch64) of attempt 1 in https://example.invalid/runs/100 has no start or end time", out)
+
     def test_refuses_a_short_sha(self):
         code, out = self.run_cli("check", SHA[:12])
         self.assertEqual(code, 1)
         self.assertIn("not a full commit sha", out)
+
+
+class ReRuns(Fixtures):
+    """After a re-run GitHub lists the artifacts of every attempt of the run;
+    the attempt the gate decided by ships the ones its own builds made."""
+
+    def attempt(self, n, first_id, made):
+        """Attempt `n`'s bundles, made at `made`; each file names the attempt."""
+        artifacts = []
+        for i, p in enumerate(rb.PLATFORMS):
+            files = {name: f"{p.name}:{name}:attempt {n}".encode() for name in BUNDLES[p.name]}
+            artifacts.append(self.uploaded(p.name, first_id + i, zip_of(files), created_at=made))
+        return artifacts
+
+    def shipped(self, attempt):
+        """Check and download as release.yml does: which attempts made the
+        files downloaded."""
+        output = os.path.join(self.dir, "github_output")
+        os.environ["GITHUB_OUTPUT"] = output
+        code, log = self.run_cli("check", SHA)
+        self.assertEqual(code, 0, log)
+        with open(output) as f:
+            self.assertEqual(f.read(), f"ci_run_id=100\nci_run_attempt={attempt}\n")
+        out = os.path.join(self.dir, "ci-bundles")
+        code, log = self.run_cli("download", SHA, "--run", "100", "--attempt", str(attempt), "--out", out)
+        self.assertEqual(code, 0, log)
+        made_by = set()
+        for p in rb.PLATFORMS:
+            for name in BUNDLES[p.name]:
+                with open(os.path.join(out, p.name, *name.split("/")), "rb") as f:
+                    made_by.add(f.read().decode().rsplit(":", 1)[1])
+        return made_by
+
+    def test_a_re_run_of_all_jobs_ships_the_bundles_its_own_builds_made(self):
+        # Both attempts built and uploaded bundles-<platform>: two artifacts
+        # of each name, told apart by when each attempt's builds ran.
+        second = ("2026-10-20T02:10:00Z", "2026-10-20T02:40:00Z")
+        artifacts = self.attempt(1, 600, UPLOADED) + self.attempt(2, 700, "2026-10-20T02:39:30Z")
+        self.green(run=ci_run(attempt=2), jobs=green_jobs(second), artifacts=artifacts)
+        self.assertEqual(self.shipped(2), {"attempt 2"})
+
+    def test_a_re_run_of_failed_jobs_ships_the_bundles_of_the_builds_it_kept(self):
+        # As CI run 39834069638: its ci-ok failed and was re-run. Attempt 2
+        # lists the builds it kept as its own jobs, created at the re-run
+        # but with the times they ran in attempt 1, when the bundles were made.
+        jobs = [dict(j, created_at="2026-10-20T03:00:00Z") for j in green_jobs()]
+        self.green(run=ci_run(attempt=2), jobs=jobs, artifacts=self.attempt(1, 600, UPLOADED))
+        self.assertEqual(self.shipped(2), {"attempt 1"})
 
 
 class Download(Fixtures):

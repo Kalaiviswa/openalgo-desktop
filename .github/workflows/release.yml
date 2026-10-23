@@ -247,8 +247,9 @@ jobs:
         # step above approved. In that run, ci-ok and every tauri-build job
         # must have succeeded, with the check before bundling, its backstop
         # and the unsigned update bundle, and each bundles-<platform>
-        # artifact must be that run's, unexpired, with a sha256 digest
-        # (scripts/ci/release_bundles.py check, tested by
+        # artifact must be that run's, made while that platform's
+        # tauri-build job of the gated attempt ran, unexpired, with a
+        # sha256 digest (scripts/ci/release_bundles.py check, tested by
         # test_release_bundles.py in CI). Its id and attempt pass to the
         # ci-bundles job. The rebuild does not need them.
         if: steps.mode.outputs.mode != 'rebuild'

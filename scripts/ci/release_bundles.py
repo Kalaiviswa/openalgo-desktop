@@ -13,14 +13,20 @@ already relies on (smoke_gate.verdict): the newest run of ci.yml for a push
 of the commit to master that was not cancelled, completed with success and
 every installed-app job green.
 
-check     refuses unless, in that run, ci-ok succeeded, every tauri-build job
-          succeeded with each step of TAURI_BUILD_STEPS (the build with its
-          check before bundling, the backstop that the bundled binary is the
-          one checked, the unsigned update bundle, the upload), and there is
-          exactly one bundles-<platform> artifact per platform that GitHub
-          records as made by this run, of this commit, on master, in this
-          repository, not expired, with a sha256 digest. It writes the run's
-          id and attempt to GITHUB_OUTPUT (ci_run_id, ci_run_attempt).
+check     refuses unless, in that run's attempt, ci-ok succeeded, every
+          tauri-build job succeeded with each step of TAURI_BUILD_STEPS (the
+          build with its check before bundling, the backstop that the
+          bundled binary is the one checked, the unsigned update bundle, the
+          upload), and for each platform exactly one bundles-<platform>
+          artifact was created while that platform's tauri-build job of the
+          attempt ran, which GitHub records as made by this run, of this
+          commit, on master, in this repository, not expired, with a sha256
+          digest. The run id and commit alone do not tie an artifact to the
+          job whose steps were checked: a later job of the same run can
+          upload one of the same name (upload-artifact's `overwrite`), and
+          after "Re-run all jobs" GitHub lists one per attempt. It writes
+          the run's id and attempt to GITHUB_OUTPUT (ci_run_id,
+          ci_run_attempt).
 download  reads the run the gate approved by its id and checks all of the
           above again, at the same attempt (a re-run since the gate is a run
           nobody gated; a newer push run of the same commit would need
@@ -53,6 +59,7 @@ import subprocess
 import sys
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 
 sys.dont_write_bytecode = True  # leave no __pycache__ in the checkout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -138,6 +145,23 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
+def moment(value: object) -> datetime | None:
+    """A GitHub timestamp (2026-10-22T20:53:15Z), or None."""
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else None
+
+
+def attempt_jobs(r: str, run: dict) -> list[dict]:
+    """The jobs of the run's attempt as read with the run, each with its
+    steps and times. A job a re-run of failed jobs kept is listed under the
+    new attempt with the times it ran."""
+    path = f"repos/{r}/actions/runs/{run['id']}/attempts/{run.get('run_attempt')}/jobs?per_page=100"
+    return smoke_gate.api(path).get("jobs", [])
+
+
 def tested_build(run: dict, jobs: list[dict]) -> None:
     """The run's ci-ok and every platform's build, with its checks, passed."""
     url = run.get("html_url")
@@ -175,28 +199,52 @@ def built_by(artifact: dict, run: dict, sha: str) -> str | None:
     return None
 
 
-def bundles_of(r: str, sha: str, run: dict, jobs: list[dict]) -> dict[str, dict]:
-    """The run's bundle artifact per platform, once its build passed;
-    Refused when any is not as `check` requires."""
+def made_by_build(found: list[dict], job: dict, run: dict) -> dict:
+    """The one of `found` (the run's artifacts of one name) created while
+    `job`, the platform's tauri-build of the run's attempt, ran."""
+    url, attempt = run.get("html_url"), run.get("run_attempt")
+    name, build = found[0].get("name"), job.get("name")
+    start, end = moment(job.get("started_at")), moment(job.get("completed_at"))
+    if start is None or end is None:
+        raise Refused(f"{build} of attempt {attempt} in {url} has no start or end time")
+    during = [a for a in found if (made := moment(a.get("created_at"))) is not None and start <= made <= end]
+    if not during:
+        created = ", ".join(str(a.get("created_at")) for a in found)
+        raise Refused(
+            f"no {name} of {url} was made by {build} of attempt {attempt}, which ran from "
+            f"{job.get('started_at')} to {job.get('completed_at')}: created at {created}, so replaced "
+            "after that build or made by another attempt"
+        )
+    if len(during) != 1:
+        raise Refused(f"{len(during)} artifacts named {name} in {url} were made during {build} of attempt {attempt}")
+    return during[0]
+
+
+def bundles_of(r: str, sha: str, run: dict) -> dict[str, dict]:
+    """The bundle artifact per platform that the run's attempt built, once
+    its build passed; Refused when any is not as `check` requires."""
+    jobs = attempt_jobs(r, run)
     tested_build(run, jobs)
+    by_name = {j.get("name"): j for j in jobs}
     listed = smoke_gate.api(f"repos/{r}/actions/runs/{run['id']}/artifacts?per_page=100").get("artifacts", [])
     artifacts: dict[str, dict] = {}
     for p in PLATFORMS:
         found = [a for a in listed if a.get("name") == p.artifact]
-        if len(found) != 1:
-            raise Refused(f"{len(found)} artifacts named {p.artifact} in {run.get('html_url')}")
-        why = built_by(found[0], run, sha)
+        if not found:
+            raise Refused(f"0 artifacts named {p.artifact} in {run.get('html_url')}")
+        chosen = made_by_build(found, by_name[p.build_job], run)
+        why = built_by(chosen, run, sha)
         if why:
             raise Refused(f"{p.artifact} of {run.get('html_url')} {why}")
-        artifacts[p.name] = found[0]
+        artifacts[p.name] = chosen
     return artifacts
 
 
 def approved(r: str, sha: str) -> tuple[dict, dict[str, dict]]:
     """The CI run whose bundles a release of `sha` ships (the one the
     install smoke gate decides by), and its bundles."""
-    run, jobs = smoke_gate.verdict(CI, r, sha)
-    return run, bundles_of(r, sha, run, jobs)
+    run, _jobs = smoke_gate.verdict(CI, r, sha)
+    return run, bundles_of(r, sha, run)
 
 
 def gated(r: str, sha: str, run_id: int, attempt: int, when: str) -> tuple[dict, dict[str, dict]]:
@@ -212,7 +260,7 @@ def gated(r: str, sha: str, run_id: int, attempt: int, when: str) -> tuple[dict,
     smoke_gate.finished(CI, run, sha)
     jobs = smoke_gate.run_jobs(r, run_id)
     smoke_gate.jobs_passed(CI, run, jobs, sha)
-    return run, bundles_of(r, sha, run, jobs)
+    return run, bundles_of(r, sha, run)
 
 
 def output(**values: object) -> None:

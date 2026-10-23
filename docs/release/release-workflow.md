@@ -98,9 +98,15 @@ update bundle and `.deb`.
   it on `master`. The CI run must be a push of that commit to `master` in
   this repository (`smoke_gate.py`), and every bundle artifact must be
   recorded by GitHub as made by that run, of that commit, on `master`
-  (`release_bundles.py check`). `ci-bundles` reads the run again by its id
-  and requires the same attempt, so a re-run after the gate is refused, and
-  checks out the tagged commit for the product name, scripts and key.
+  (`release_bundles.py check`). That alone does not tie it to the build
+  whose steps were checked: a later job of the same run could upload one of
+  the same name, and after "Re-run all jobs" GitHub lists one per attempt.
+  So each must also have been created while its platform's `tauri-build`
+  job ran, in the attempt the gate decided by; a job that "Re-run failed
+  jobs" kept counts with the times it ran. `ci-bundles` reads the run again
+  by its id and requires the same attempt, so a re-run after the gate is
+  refused, and checks out the tagged commit for the product name, scripts
+  and key.
 - **Tests passed on that commit.** As before: the newest `ci-ok` check run
   on the commit, and the CI run's install smoke and native E2E jobs and the
   native order journey all succeeded. Now also that run's own `ci-ok` job
@@ -157,6 +163,7 @@ already published is never changed: the run stops at `create-release`.
 | `... has no successful step [...] release with build: rebuild` | The CI run predates the update bundles, or a check failed in it: rebuild. |
 | `... expired on ... release with build: rebuild` | The bundles are gone: rebuild. |
 | `run <id> is at attempt <n>, not the gated attempt` | The CI run was re-run after the gate passed: run the release again (`build: ci-bundles`). |
+| `no bundles-<platform> of <run> was made by tauri-build (<platform>) of attempt <n>` | Something other than that build made the artifact: a later job of the run uploading the same name, or another attempt. Stop the job that overwrites it in `ci.yml`, then release from a new green CI run. |
 | `Apple or Windows code signing is configured` | Rebuild. |
 | `Release <id> of <tag> is published` | That version has shipped; the workflow changes only a draft. Release a new version. |
 | An advisory step failed | See "Advisories are scanned every day" above. |
