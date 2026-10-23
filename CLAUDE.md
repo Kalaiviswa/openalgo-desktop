@@ -946,7 +946,10 @@ Every flaky test found so far was a race, not a slow machine:
   kept on the run (`RunEntry::inputs`), never a later read of the saved
   settings, which answered a failure as `{}` and so ran the script's
   default quantity and risk. The page loads nothing from an answer that
-  carries no inputs, and ends the run saying so.
+  carries no inputs, and ends the run saying so. Saved parameters that
+  cannot be read or are not ones a run may carry refuse the start (409,
+  `Deployment::inputs_unusable`); they were read as `{}`, which ran the
+  defaults too.
 - A strategy order is Live or Sandbox by the run that placed it
   (`strategy/store/by_mode.rs`, SM-03, SM-05). A book of one mode is
   attributed only to that mode's orders, and the Detail page lists the

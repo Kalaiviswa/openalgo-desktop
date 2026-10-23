@@ -1470,6 +1470,53 @@ async fn the_page_gets_the_inputs_its_run_started_with() {
     assert_eq!(spec["inputs"], json!({"qty": 1}));
 }
 
+/// PROD-TR-06 follow-up: saved parameters that cannot be read, or that are
+/// no longer ones a run may carry, are not a run without parameters. They
+/// were read as `{}`, and the start ran the script's default quantity and
+/// risk; now the start is refused (409) with the cause and what to do, and
+/// nothing runs. Saved again, it starts with them.
+#[tokio::test]
+async fn a_start_whose_saved_parameters_cannot_be_used_is_refused() {
+    let t = setup().await;
+    let id = t.deploy("SBIN").await;
+    let store = |inputs: &str| {
+        t.h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE openscript_deployments SET inputs = ?1 WHERE deployment = ?2",
+                rusqlite::params![inputs, id],
+            )
+            .unwrap()
+    };
+    let path = format!("/openscript/runner/start/{}", id);
+    let start = || t.call(Method::POST, &path, None);
+    for (saved, cause) in [
+        (r#"{"qty": 7"#, "They are not in a form OpenAlgo can read."),
+        (
+            r#"{"qty": [7]}"#,
+            "qty was given something a parameter cannot be.",
+        ),
+        ("[7]", "must be given as a set of named values"),
+    ] {
+        assert_eq!(store(saved), 1);
+        let (s, v) = start().await;
+        assert_eq!(s, StatusCode::CONFLICT, "{}: {}", saved, v);
+        let why = v["message"].as_str().unwrap();
+        assert!(why.contains(cause), "{}: {}", saved, why);
+        assert!(why.contains("default parameters"), "{}", why);
+        assert!(why.contains("save them again"), "{}", why);
+        assert!(!t.h.ctx.trading.runner.is_running(&id));
+        assert_eq!(t.host.open_count(), 0, "nothing was launched");
+    }
+    assert_eq!(store(r#"{"qty": 7}"#), 1);
+    t.start(&id).await;
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], json!({"qty": 7}));
+}
+
 /// LOG-09: a start decides its side from analyzer mode. Unreadable, it was
 /// taken as off, so a deployment meant for the sandbox started live while a
 /// broker was connected.
