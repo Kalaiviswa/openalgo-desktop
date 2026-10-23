@@ -35,16 +35,18 @@
 //!   web payload.
 //!
 //! Hygiene: one owned consumer task (ticks and sync requests) plus one owned
-//! task per exit in flight (bounded by the managed legs), all in one
+//! task per exit in flight (bounded by the managed legs) and per trailed
+//! stop being saved (one per leg per PERSIST_THROTTLE_MS), all in one
 //! `JoinSet`, aborted by `stop`. `stop` also releases every price
 //! subscription. Every map is keyed by a managed leg and pruned with it.
 //!
-//! Here: the monitor, its lifecycle, sync and ticks. `attempt`: what proves
-//! a leg flat and the exit attempt; `exits`: placing and clearing;
+//! Here: the monitor, its lifecycle, sync and ticks. `consumer`: the owned
+//! task that judges ticks and runs syncs beside them; `writes`: a leg's
+//! writes to its row, outside the monitor's lock; `attempt`: what proves a
+//! leg flat and the exit attempt; `exits`: placing and clearing;
 //! `reconcile`: following exit orders in the broker's book.
 
 use super::store::{SlState, Store, MODE_LIVE};
-use crate::brokers::common::streaming::FeedEvent;
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::clock::Clock;
 use crate::events::subscribers::socketio::UiEmitter;
@@ -58,17 +60,20 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 mod attempt;
+mod consumer;
 mod exits;
 mod reconcile;
+mod writes;
 
 pub use attempt::*;
+pub use consumer::STOPS_UNREAD;
 pub use reconcile::ScalpingOrders;
 
 /// Rate limit on trailing-stop writes (bounds restart staleness).
@@ -243,6 +248,9 @@ struct Inner {
     /// Legs cleared so far (`clear`). A sync installs a read of the stops
     /// only if none was cleared while it ran (see `install`).
     clears: u64,
+    /// Each leg's writer locks (`writes`), kept while anyone holds or
+    /// awaits them.
+    writers: HashMap<String, Arc<writes::LegWriters>>,
 }
 
 impl Inner {
@@ -261,6 +269,8 @@ impl Inner {
         self.last_emit.retain(|k, _| keys.contains(k));
         self.broken.retain(|k| keys.contains(k));
         self.zero_since.retain(|k, _| keys.contains(k));
+        self.writers
+            .retain(|k, w| keys.contains(k) || Arc::strong_count(w) > 1);
         self.alerted
             .retain(|k| keys.contains(k.split('|').next().unwrap_or_default()));
     }
@@ -281,12 +291,24 @@ struct StopsRead {
 }
 
 /// What installing a read of the stops changed: the price subscriptions to
-/// add and drop, and the legs whose stored exit orders could not be read
-/// back.
+/// add and drop, the legs whose stored exit orders could not be read back,
+/// and the legs (key and row) whose restored exit orders were ended and are
+/// to be saved again.
 struct Installed {
     add: Vec<Key>,
     remove: Vec<Key>,
     unreadable: Vec<(String, String)>,
+    ended: Vec<(String, i64)>,
+}
+
+/// What restoring a leg's exit attempt from its row found.
+enum Restored {
+    /// No attempt, or one restored as it was saved.
+    AsSaved,
+    /// Orders from an earlier session were ended: the row is to be saved.
+    Ended,
+    /// The attempt cannot be read back; true when newly so.
+    Unreadable(bool),
 }
 
 pub struct RiskMonitor {
@@ -308,6 +330,8 @@ pub struct RiskMonitor {
     alert: std::sync::OnceLock<MonitorAlert>,
     /// Reads of the saved stops done, counted on the thread that read.
     stop_reads: Arc<AtomicU64>,
+    /// Trailed stops being saved (`writes::TrailSave`).
+    trail_saves: AtomicUsize,
 }
 
 fn elapsed_ms(now: DateTime<Utc>, then: Option<&DateTime<Utc>>) -> i64 {
@@ -350,6 +374,7 @@ impl RiskMonitor {
             absence: AbsenceTracker::new(),
             alert: std::sync::OnceLock::new(),
             stop_reads: Arc::new(AtomicU64::new(0)),
+            trail_saves: AtomicUsize::new(0),
         })
     }
 
@@ -360,14 +385,18 @@ impl RiskMonitor {
 
     /// Raise a trader alert once per leg and reason.
     fn alert_once(&self, key: &str, reason: &str, message: String) {
-        if !self
+        if self
             .inner
             .lock()
             .alerted
             .insert(format!("{}|{}", key, reason))
         {
-            return;
+            self.alert(message);
         }
+    }
+
+    /// Raise a trader alert.
+    fn alert(&self, message: String) {
         tracing::error!("{}", message);
         if let Some(a) = self.alert.get() {
             a(message);
@@ -406,29 +435,6 @@ impl RiskMonitor {
         }
     }
 
-    /// Write a leg's attempt to its row; false when it could not be saved
-    /// (then no further exit order is sent for it).
-    fn persist_attempt(&self, row_id: i64, a: &ExitAttempt) -> bool {
-        let Some(text) = a.to_json() else {
-            tracing::error!("Scalping exit orders for a leg could not be encoded");
-            return false;
-        };
-        match self.store.set_exit_attempt(row_id, Some(&text)) {
-            Ok(true) => true,
-            Ok(false) => {
-                tracing::warn!(
-                    "Scalping stop row {} is gone; its exit orders were not saved",
-                    row_id
-                );
-                false
-            }
-            Err(e) => {
-                tracing::error!("Scalping exit orders for a leg could not be saved: {}", e);
-                false
-            }
-        }
-    }
-
     // ------------------------------------------------------------ lifecycle
 
     /// Start the owned consumer (idempotent) and reconcile with the stored
@@ -443,43 +449,13 @@ impl RiskMonitor {
             }
             let token = CancellationToken::new();
             *running = Some(token.clone());
-            let weak = Arc::downgrade(self);
-            let prices = self.prices.clone();
-            let mut rx = prices.as_ref().map(|p| p.ticks());
-            self.spawn(async move {
-                loop {
-                    let wanted = {
-                        let Some(m) = weak.upgrade() else { break };
-                        // A notified future made before awaiting, so a
-                        // request between iterations is never lost.
-                        let fut = async move { m.sync_wanted.notified().await };
-                        fut
-                    };
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        _ = wanted => {
-                            let Some(m) = weak.upgrade() else { break };
-                            m.sync().await;
-                        }
-                        ev = recv(&mut rx) => match ev {
-                            Ok(ev) => {
-                                let FeedEvent::Tick(t) = ev.as_ref() else { continue };
-                                let Some(m) = weak.upgrade() else { break };
-                                m.process_tick(&t.symbol, &t.exchange, t.ltp).await;
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::debug!("Scalping tick consumer lagged by {}", n);
-                                if let Some(p) = &prices {
-                                    p.note_skipped(n);
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                rx = None;
-                            }
-                        },
-                    }
-                }
-            });
+            let ticks = self.prices.as_ref().map(|p| p.ticks());
+            self.spawn(consumer::consume(
+                Arc::downgrade(self),
+                self.prices.clone(),
+                ticks,
+                token,
+            ));
         }
         self.sync_wanted.notify_one();
     }
@@ -582,6 +558,7 @@ impl RiskMonitor {
             + i.last_exit.len()
             + i.last_persist.len()
             + i.last_emit.len()
+            + i.writers.len()
             + self.absence.len()
     }
 
@@ -591,10 +568,12 @@ impl RiskMonitor {
         self.stop_reads.load(Ordering::SeqCst)
     }
 
-    /// Wait until no exit is in flight (tests).
+    /// Wait until no exit is in flight and no trailed stop is being saved
+    /// (tests).
     pub async fn wait_idle(&self) {
         for _ in 0..2000 {
-            if self.inner.lock().inflight.is_empty() {
+            if self.inner.lock().inflight.is_empty() && self.trail_saves.load(Ordering::SeqCst) == 0
+            {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -604,14 +583,14 @@ impl RiskMonitor {
     // ------------------------------------------------------------ sync
 
     /// A leg's exit attempt restored from its row. A day order from an
-    /// earlier session is ended (review P1-5); an attempt that cannot be
-    /// read back marks the leg broken (fail closed). True when the leg has
-    /// newly become unreadable.
-    fn restore_attempt(&self, inner: &mut Inner, key: &str, sl: &SlState) -> bool {
+    /// earlier session is ended (review P1-5), and the caller saves that
+    /// once the monitor's lock is released; an attempt that cannot be read
+    /// back marks the leg broken (fail closed).
+    fn restore_attempt(&self, inner: &mut Inner, key: &str, sl: &SlState) -> Restored {
         match sl.exit_attempt.as_deref().filter(|t| !t.trim().is_empty()) {
             None => {
                 inner.broken.remove(key);
-                false
+                Restored::AsSaved
             }
             Some(t) => match serde_json::from_str::<ExitAttempt>(t) {
                 Ok(mut a) => {
@@ -634,10 +613,13 @@ impl RiskMonitor {
                         if !a.working() && a.settled_at.is_none() {
                             a.settled_at = Some(self.clock.now());
                         }
-                        self.persist_attempt(sl.id, &a);
                     }
                     inner.attempts.insert(key.to_string(), a);
-                    false
+                    if ended {
+                        Restored::Ended
+                    } else {
+                        Restored::AsSaved
+                    }
                 }
                 Err(e) => {
                     // Exit orders were sent and cannot be read back: never
@@ -647,7 +629,7 @@ impl RiskMonitor {
                         sl.symbol,
                         e
                     );
-                    inner.broken.insert(key.to_string())
+                    Restored::Unreadable(inner.broken.insert(key.to_string()))
                 }
             },
         }
@@ -655,18 +637,22 @@ impl RiskMonitor {
 
     /// Reconcile the managed legs and the price subscriptions with the
     /// stored stops (every mode: a live leg stays protected while analyzer
-    /// mode is on, and the other way round).
+    /// mode is on, and the other way round). Answers whether the stops
+    /// could be read; when not, the legs held stay as they are and the
+    /// consumer tries again (`consumer`).
     ///
     /// The stops are read on the blocking pool and outside the monitor's
     /// lock (PROD-REL-02): a busy pool or a slow disk holds neither the
     /// async worker that judges the ticks nor the legs a tick judges. A
-    /// read that a clear overtook is read again, never installed.
-    pub async fn sync(&self) {
+    /// read that a clear overtook is read again, never installed. Exit
+    /// orders of an earlier session that the install ended are saved after
+    /// it, outside the lock.
+    pub async fn sync(&self) -> bool {
         let _serial = self.sync_lock.lock().await;
         let mut installed = None;
         for _ in 0..SYNC_READS {
             let Some(read) = self.read_stops().await else {
-                return;
+                return false;
             };
             installed = self.install(read);
             if installed.is_some() {
@@ -677,12 +663,16 @@ impl RiskMonitor {
             add,
             remove,
             unreadable,
+            ended,
         }) = installed
         else {
             tracing::warn!("Scalping stops kept being cleared while they were read; reading them again shortly");
             self.request_sync();
-            return;
+            return true;
         };
+        for (key, row_id) in ended {
+            self.update_attempt(&key, row_id, |_| {}).await;
+        }
         // Held exits of a stop that is gone are no longer the trader's to
         // decide here.
         {
@@ -708,6 +698,7 @@ impl RiskMonitor {
                 src.unsubscribe(&remove).await;
             }
         }
+        true
     }
 
     /// The saved stops, read on the blocking pool; `None` when they could
@@ -746,7 +737,7 @@ impl RiskMonitor {
             return None;
         }
         let mut states = HashMap::with_capacity(read.rows.len());
-        let mut unreadable = Vec::new();
+        let (mut unreadable, mut ended) = (Vec::new(), Vec::new());
         for mut sl in read.rows {
             let key = slkey(&sl.mode, &sl.symbol, &sl.exchange, &sl.product);
             let gen = (sl.id, sl.version);
@@ -757,8 +748,12 @@ impl RiskMonitor {
             }
             // An attempt survives a restart on its row; the one in memory
             // is newer while the monitor runs.
-            if !inner.attempts.contains_key(&key) && self.restore_attempt(&mut inner, &key, &sl) {
-                unreadable.push((key.clone(), sl.symbol.clone()));
+            if !inner.attempts.contains_key(&key) {
+                match self.restore_attempt(&mut inner, &key, &sl) {
+                    Restored::AsSaved | Restored::Unreadable(false) => {}
+                    Restored::Ended => ended.push((key.clone(), sl.id)),
+                    Restored::Unreadable(true) => unreadable.push((key.clone(), sl.symbol.clone())),
+                }
             }
             states.insert(key, Leg { gen, sl });
         }
@@ -778,6 +773,7 @@ impl RiskMonitor {
             add,
             remove,
             unreadable,
+            ended,
         })
     }
 
@@ -790,7 +786,7 @@ impl RiskMonitor {
         }
         let now = self.clock.now();
         let mut exits: Vec<(String, Gen, SlState, Option<BreachReason>)> = Vec::new();
-        let mut persists: Vec<(String, SlState, bool)> = Vec::new();
+        let mut persists: Vec<(String, Gen, bool)> = Vec::new();
         {
             let mut guard = self.inner.lock();
             let inner = &mut *guard;
@@ -850,7 +846,7 @@ impl RiskMonitor {
                         if emit {
                             inner.last_emit.insert(key.clone(), now);
                         }
-                        persists.push((key.clone(), leg.sl.clone(), emit));
+                        persists.push((key.clone(), leg.gen, emit));
                     }
                 }
             }
@@ -862,18 +858,12 @@ impl RiskMonitor {
                 me.run_exit(key, gen, sl, reason, ltp).await;
             });
         }
-        for (_key, sl, emit) in persists {
-            // Off the async workers (DB-01): this runs on a tick, and a write
-            // waits for any other writer of the database.
-            let (store, row) = (self.store.clone(), sl.clone());
-            match tokio::task::spawn_blocking(move || store.update_trail(&row)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::debug!("Trailing stop for {} not saved: {}", sl.symbol, e),
-                Err(e) => tracing::debug!("Trailing stop for {} not saved: {}", sl.symbol, e),
-            }
-            if emit {
-                self.ui.emit(SL_UPDATE_EVENT, update_payload(&sl)).await;
-            }
+        // A save is never awaited here (DB-01, PROD-REL-02): a write waits
+        // for any other writer of the database, and the consumer judges the
+        // next tick meanwhile.
+        for (key, gen, emit) in persists {
+            let save = writes::TrailSave::new(self.clone());
+            self.spawn(save.run(key, gen, emit));
         }
     }
 }
@@ -888,13 +878,4 @@ pub fn update_payload(sl: &SlState) -> Value {
         "current_sl": sl.current_sl,
         "target": sl.target,
     })
-}
-
-async fn recv(
-    rx: &mut Option<broadcast::Receiver<crate::brokers::common::streaming::MarketEvent>>,
-) -> Result<crate::brokers::common::streaming::MarketEvent, broadcast::error::RecvError> {
-    match rx {
-        Some(r) => r.recv().await,
-        None => std::future::pending().await,
-    }
 }

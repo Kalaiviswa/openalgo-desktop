@@ -1177,6 +1177,8 @@ async fn trailing_stop_ratchets_persists_pushes_then_exits() {
     let s = m.mon.leg("analyze", OPT, "NFO", "MIS").unwrap();
     assert_eq!(s.current_sl, Some(105.0));
     assert_eq!(s.highest_price, Some(110.0));
+    // Saved and pushed by a task of its own, never awaited by the tick.
+    m.mon.wait_idle().await;
     assert_eq!(
         m.store.active_sl(None).unwrap()[0].current_sl,
         Some(105.0),
@@ -1191,6 +1193,7 @@ async fn trailing_stop_ratchets_persists_pushes_then_exits() {
     );
     // Inside the throttle: moved in memory, not written or pushed again.
     m.mon.process_tick(OPT, "NFO", 112.0).await;
+    m.mon.wait_idle().await;
     assert_eq!(
         m.mon.leg("analyze", OPT, "NFO", "MIS").unwrap().current_sl,
         Some(107.0)
@@ -2364,6 +2367,7 @@ async fn a_trailing_stop_save_never_holds_the_runtime() {
     });
     let ((), stall) = crate::runtime_stall(m.mon.process_tick(OPT, "NFO", 110.0)).await;
     release.join().unwrap();
+    m.mon.wait_idle().await;
     assert!(
         stall < Duration::from_millis(150),
         "the runtime was held {:?}",
@@ -2387,6 +2391,20 @@ fn hold_the_pool(db: &Arc<SqliteDb>, ms: u64) -> std::thread::JoinHandle<()> {
     holder
 }
 
+/// Run `fut` to its end on a runtime of its own, on another thread, never
+/// yielding this test's runtime: its tasks are not polled meanwhile.
+fn elsewhere<T: Send + 'static>(fut: impl std::future::Future<Output = T> + Send + 'static) -> T {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    })
+    .join()
+    .unwrap()
+}
+
 /// Wait on this thread, never yielding to the runtime, until `f` holds.
 fn wait_here(f: impl Fn() -> bool) {
     for _ in 0..5000 {
@@ -2398,54 +2416,341 @@ fn wait_here(f: impl Fn() -> bool) {
     panic!("the condition never held");
 }
 
-/// PROD-REL-02 follow-up: a sync reads the saved stops on the blocking pool
-/// and outside the monitor's lock. It read them on the async worker under
-/// that lock, so while every pooled connection was taken (long reports, a
-/// busy disk) the runtime that judges the ticks waited with it. Now a held
-/// leg's tick is judged while the read waits, and once the database answers
-/// the new stop is installed and its breach sends exactly one exit, to its
-/// own side.
+/// The database's write lock held by another connection for `ms` (a long
+/// import, a report's write); the thread, to join. Reads go on meanwhile.
+fn hold_the_writes(db: &Arc<SqliteDb>, ms: u64) -> std::thread::JoinHandle<()> {
+    let writer = db.conn().unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(ms));
+        writer.execute_batch("COMMIT").unwrap();
+    })
+}
+
+/// Join a holder thread without holding the runtime.
+async fn join(holder: std::thread::JoinHandle<()>) {
+    tokio::task::spawn_blocking(move || holder.join().unwrap())
+        .await
+        .unwrap();
+}
+
+/// Poll `f` until it holds or `limit` has passed; whether it held.
+async fn within(limit: Duration, f: impl Fn() -> bool) -> bool {
+    let end = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    f()
+}
+
+/// A tick for `OPT` on the monitor's price source, as the feed sends it.
+fn send_tick(m: &M, ltp: f64) {
+    let tick = openalgo_desktop_lib::brokers::common::streaming::NormalizedTick {
+        symbol: OPT.into(),
+        exchange: "NFO".into(),
+        ltp,
+        ..Default::default()
+    };
+    m.prices
+        .tx
+        .send(Arc::new(
+            openalgo_desktop_lib::brokers::common::streaming::FeedEvent::Tick(tick),
+        ))
+        .unwrap();
+}
+
+/// PROD-REL-02 follow-up: a sync runs beside the ticks. The consumer ran it
+/// inside its own loop, so while its read of the stops waited for a pooled
+/// connection (here every one is taken, as by long reports) no tick was
+/// judged and the bounded tick channel fell behind. Now a breach on a held
+/// leg, sent through the price source while the sync waits, is judged at
+/// once (its exit reads the position book), and the runtime is never held;
+/// once the database answers, the new stop is installed and exactly one exit
+/// goes out, to the leg's own side.
 #[test]
-fn a_sync_waiting_for_the_database_never_holds_the_runtime() {
+fn a_tick_is_judged_while_a_sync_waits_for_the_database() {
     crate::on_watched_runtime(|runtime| async move {
         let m = monitor();
         m.store.upsert_sl(&leg("live")).unwrap();
-        m.mon.sync().await;
-        // Its high is noted (and saved) now: the same price again moves
-        // nothing, so judging it needs no database.
-        m.mon.process_tick(OPT, "NFO", 96.0).await;
+        m.mon.start();
+        let watched = within(Duration::from_secs(2), || !m.prices.held.lock().is_empty()).await;
+        assert!(watched, "the live stop is watched");
         let mut sandbox = leg("analyze");
-        sandbox.initial_sl = Some(97.0);
+        sandbox.initial_sl = Some(90.0);
         m.store.upsert_sl(&sandbox).unwrap();
-        let holder = hold_the_pool(&m.db, 600);
-        let mon = m.mon.clone();
-        let (waited, hold) = runtime
+        let reads = m.mon.stop_reads();
+        let holder = hold_the_pool(&m.db, 1500);
+        let (judged, hold) = runtime
             .longest_hold(async {
-                let sync = tokio::spawn(async move { mon.sync().await });
-                tokio::task::yield_now().await;
-                m.mon.process_tick(OPT, "NFO", 96.0).await;
-                let waited = !sync.is_finished();
-                sync.await.unwrap();
-                waited
+                m.mon.request_sync();
+                // The consumer starts the sync; its read waits for a connection.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                send_tick(&m, 94.0);
+                let read = within(Duration::from_millis(1000), || {
+                    m.gw.books.lock().contains(&RunMode::Live)
+                })
+                .await;
+                read && m.mon.stop_reads() == reads
             })
             .await;
-        holder.join().unwrap();
+        join(holder).await;
         assert!(
             hold < Duration::from_millis(200),
             "the runtime was held for {:?}",
             hold
         );
-        assert!(waited, "a held leg's tick was judged while the sync waited");
-        assert_eq!(m.mon.leg_count(), 2);
-        m.mon.process_tick(OPT, "NFO", 96.5).await;
+        assert!(judged, "the breach was judged while the sync waited");
+        let installed = within(Duration::from_secs(3), || m.mon.leg_count() == 2).await;
+        assert!(
+            installed,
+            "the new stop is installed once the database answers"
+        );
+        let sent = within(Duration::from_secs(3), || !m.gw.placed.lock().is_empty()).await;
+        assert!(sent);
         m.mon.wait_idle().await;
         let placed = m.gw.placed.lock().clone();
         assert_eq!(placed.len(), 1, "{:?}", placed);
-        assert_eq!(placed[0].0, RunMode::Sandbox);
         assert_eq!(
-            (placed[0].1.action.as_str(), placed[0].1.quantity),
-            ("SELL", 65)
+            (
+                placed[0].0,
+                placed[0].1.action.as_str(),
+                placed[0].1.quantity
+            ),
+            (RunMode::Live, "SELL", 65)
         );
+        m.mon.stop().await;
+    })
+}
+
+/// PROD-REL-02 follow-up: a trailed stop's save never holds the ticks
+/// back. The tick that moved the stop awaited its save, so while another
+/// writer held the database the consumer judged nothing. Now the pull-back
+/// through the moved stop, sent right after, is judged at once (its exit
+/// reads the position book), and the stop is saved once the database is
+/// free.
+#[tokio::test]
+async fn a_tick_is_judged_while_a_trailed_stop_waits_to_be_saved() {
+    let m = monitor();
+    let mut l = leg("analyze");
+    l.trailing_enabled = Some(true);
+    l.trailing_step = Some(5.0);
+    m.store.upsert_sl(&l).unwrap();
+    m.mon.start();
+    let watched = within(Duration::from_secs(2), || !m.prices.held.lock().is_empty()).await;
+    assert!(watched, "the stop is watched");
+    let writer = hold_the_writes(&m.db, 1500);
+    // The stop trails to 105 and its save waits; then the price goes
+    // through it.
+    send_tick(&m, 110.0);
+    send_tick(&m, 104.0);
+    let judged = within(Duration::from_millis(1000), || {
+        m.gw.books.lock().contains(&RunMode::Sandbox)
+    })
+    .await;
+    let unsaved = m.store.active_sl(None).unwrap()[0].current_sl != Some(105.0);
+    join(writer).await;
+    assert_eq!(
+        (judged, unsaved),
+        (true, true),
+        "(the breach judged, while the trail was not yet saved)"
+    );
+    let sent = within(Duration::from_secs(3), || !m.gw.placed.lock().is_empty()).await;
+    assert!(sent);
+    m.mon.wait_idle().await;
+    let placed = m.gw.placed.lock().clone();
+    assert_eq!(placed.len(), 1, "{:?}", placed);
+    assert_eq!(
+        (
+            placed[0].0,
+            placed[0].1.action.as_str(),
+            placed[0].1.quantity
+        ),
+        (RunMode::Sandbox, "SELL", 65)
+    );
+    assert_eq!(m.store.active_sl(None).unwrap()[0].current_sl, Some(105.0));
+    m.mon.stop().await;
+}
+
+/// PROD-REL-02 follow-up: a sync that cannot read the saved stops is tried
+/// again, with a capped backoff, and after three failures in a row the
+/// trader is told that a stop saved meanwhile may not be watched. It gave up
+/// at once and said nothing, so a stop saved while the stops could not be
+/// read was never watched. Readable again, the stop is watched without being
+/// saved again, and its breach exits.
+#[tokio::test]
+async fn a_sync_that_cannot_read_the_stops_tries_again_and_tells_the_trader() {
+    use openalgo_desktop_lib::scalping::monitor::STOPS_UNREAD;
+    let m = monitor();
+    let rename = |from: &str, to: &str| {
+        m.db.conn()
+            .unwrap()
+            .execute_batch(&format!("ALTER TABLE {} RENAME TO {}", from, to))
+            .unwrap()
+    };
+    m.store.upsert_sl(&leg("live")).unwrap();
+    rename("scalping_sl_state", "scalping_sl_state_unreadable");
+    m.mon.start();
+    let told = within(Duration::from_secs(5), || !m.alerts.lock().is_empty()).await;
+    assert!(told, "the trader is told");
+    assert_eq!(m.alerts.lock().clone(), vec![STOPS_UNREAD.to_string()]);
+    assert!(m.mon.stop_reads() >= 3, "{} reads", m.mon.stop_reads());
+    assert_eq!(m.mon.leg_count(), 0);
+
+    rename("scalping_sl_state_unreadable", "scalping_sl_state");
+    let watched = within(Duration::from_secs(10), || {
+        m.mon.leg_count() == 1 && !m.prices.held.lock().is_empty()
+    })
+    .await;
+    assert!(watched, "the stop is watched without being saved again");
+    send_tick(&m, 94.0);
+    let sent = within(Duration::from_secs(3), || !m.gw.placed.lock().is_empty()).await;
+    assert!(sent, "its breach exits");
+    m.mon.wait_idle().await;
+    assert_eq!(m.gw.placed.lock().len(), 1);
+    assert_eq!(m.alerts.lock().len(), 1, "told once");
+    m.mon.stop().await;
+}
+
+/// PROD-REL-02 follow-up: an exit's order is saved before it is sent, and
+/// that save no longer holds the monitor's lock. It did, so while another
+/// writer held the database (here for 800 ms) the save of one leg's exit
+/// held the runtime and every other leg: a breach on another leg was not
+/// judged until it ended. Now the other leg's breach is judged meanwhile
+/// (its exit reads the position book before the first order is sent), and
+/// both exits go out once the database is free, each to its own side.
+#[test]
+fn another_legs_breach_is_judged_while_an_exit_waits_to_be_saved() {
+    crate::on_watched_runtime(|runtime| async move {
+        let m = monitor();
+        m.store.upsert_sl(&leg("live")).unwrap();
+        let mut sandbox = leg("analyze");
+        sandbox.initial_sl = Some(90.0);
+        m.store.upsert_sl(&sandbox).unwrap();
+        m.mon.sync().await;
+        // Both legs' high and low noted and saved now; the clock stands, so
+        // no later move is saved again (PERSIST_THROTTLE_MS): the exits'
+        // saves are the only writes that wait below.
+        m.mon.process_tick(OPT, "NFO", 96.0).await;
+        m.mon.wait_idle().await;
+        let writer = hold_the_writes(&m.db, 800);
+        let (judged, hold) = runtime
+            .longest_hold(async {
+                m.mon.process_tick(OPT, "NFO", 94.0).await;
+                // The live leg's exit reads its position, then waits to
+                // save its order before sending it.
+                within(Duration::from_millis(500), || {
+                    m.gw.books.lock().contains(&RunMode::Live)
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                m.mon.process_tick(OPT, "NFO", 89.0).await;
+                let read = within(Duration::from_millis(500), || {
+                    m.gw.books.lock().contains(&RunMode::Sandbox)
+                })
+                .await;
+                (read, m.gw.placed.lock().len())
+            })
+            .await;
+        join(writer).await;
+        assert!(
+            hold < Duration::from_millis(200),
+            "the runtime was held for {:?}",
+            hold
+        );
+        assert_eq!(
+            judged,
+            (true, 0),
+            "the other leg was judged (its position read) while the exit waited to be saved"
+        );
+        let sent = within(Duration::from_secs(3), || m.gw.placed.lock().len() == 2).await;
+        assert!(sent, "{:?}", m.gw.placed.lock());
+        m.mon.wait_idle().await;
+        let placed: Vec<_> =
+            m.gw.placed
+                .lock()
+                .iter()
+                .map(|(mode, o)| (*mode, o.action.clone(), o.quantity))
+                .collect();
+        assert_eq!(placed.len(), 2, "{:?}", placed);
+        for side in [RunMode::Live, RunMode::Sandbox] {
+            assert!(
+                placed.contains(&(side, "SELL".to_string(), 65)),
+                "{:?}",
+                placed
+            );
+        }
+    })
+}
+
+/// PROD-REL-02 follow-up: exit orders of an earlier session that a sync
+/// ends (review P1-5) are saved after the stops are installed, outside the
+/// monitor's lock. The save ran under it, so a writer holding the database
+/// held the runtime and every leg for as long. Now the stops are installed
+/// at once, a breach is judged meanwhile, and the ended orders are saved
+/// once the database is free.
+#[test]
+fn an_earlier_sessions_exit_is_saved_ended_without_holding_the_monitor() {
+    crate::on_watched_runtime(|runtime| async move {
+        let m = monitor();
+        m.store.upsert_sl(&leg("live")).unwrap();
+        m.mon.sync().await;
+        // Its high and low noted and saved at 100, then its stop is hit.
+        m.mon.process_tick(OPT, "NFO", 100.0).await;
+        m.mon.wait_idle().await;
+        m.mon.process_tick(OPT, "NFO", 94.0).await;
+        m.mon.wait_idle().await;
+        assert_eq!(m.gw.placed.lock().len(), 1);
+        // The app is closed overnight; the order expired with the session.
+        // A short sandbox leg was set meanwhile, its stop at 99.
+        m.mon.stop().await;
+        m.clock.advance(chrono::Duration::days(1));
+        let mut sandbox = leg("analyze");
+        sandbox.side = Some("SELL".into());
+        sandbox.initial_sl = Some(99.0);
+        m.store.upsert_sl(&sandbox).unwrap();
+        let saved = || {
+            m.store.active_sl(Some("live")).unwrap()[0]
+                .exit_attempt
+                .clone()
+                .unwrap_or_default()
+        };
+        assert!(saved().contains("\"working\""), "{}", saved());
+        let writer = hold_the_writes(&m.db, 800);
+        let (seen, hold) = runtime
+            .longest_hold(async {
+                let mon = m.mon.clone();
+                let sync = tokio::spawn(async move { mon.sync().await });
+                let installed = within(Duration::from_millis(500), || m.mon.leg_count() == 2).await;
+                // The sandbox leg's stop; the live leg's is not hit, nor
+                // its high or low moved (nothing of it is saved).
+                m.mon.process_tick(OPT, "NFO", 100.0).await;
+                let judged = within(Duration::from_millis(500), || {
+                    m.gw.books.lock().contains(&RunMode::Sandbox)
+                })
+                .await;
+                let unsaved = saved().contains("\"working\"");
+                assert!(sync.await.unwrap(), "the stops were read");
+                (installed, judged, unsaved)
+            })
+            .await;
+        join(writer).await;
+        assert!(
+            hold < Duration::from_millis(200),
+            "the runtime was held for {:?}",
+            hold
+        );
+        assert_eq!(
+            seen,
+            (true, true, true),
+            "(installed, judged, still unsaved)"
+        );
+        let a = m.mon.exit_attempt("live", OPT, "NFO", "MIS").unwrap();
+        assert!(a.children[0].terminal(), "{:?}", a);
+        assert!(!saved().contains("\"working\""), "saved ended: {}", saved());
+        m.mon.wait_idle().await;
     })
 }
 
@@ -2467,16 +2772,17 @@ async fn a_leg_cleared_while_the_stops_are_read_is_not_brought_back() {
     let mon = m.mon.clone();
     let sync = tokio::spawn(async move { mon.sync().await });
     // The sync begins its read; it cannot install what it read until this
-    // test yields.
+    // test yields, and the exit is folded and the leg cleared on another
+    // thread meanwhile (the fold saves and the clear deletes on the
+    // blocking pool, which would otherwise yield to the sync).
     tokio::task::yield_now().await;
     wait_here(|| m.mon.stop_reads() > reads);
     assert!(!sync.is_finished());
-    m.mon
-        .reconcile_book(
-            RunMode::Live,
-            &book(vec![order_row("X1", "SELL", 65, "complete")], m.clock.now()),
-        )
-        .await;
+    let (mon, filled) = (
+        m.mon.clone(),
+        book(vec![order_row("X1", "SELL", 65, "complete")], m.clock.now()),
+    );
+    elsewhere(async move { mon.reconcile_book(RunMode::Live, &filled).await });
     assert_eq!(m.mon.leg_count(), 0, "cleared");
     assert!(m.store.active_sl(None).unwrap().is_empty());
     sync.await.unwrap();
@@ -2502,7 +2808,9 @@ async fn a_sync_keeps_the_trail_the_monitor_moved() {
     m.store.upsert_sl(&l).unwrap();
     m.mon.sync().await;
     m.mon.process_tick(OPT, "NFO", 110.0).await;
+    m.mon.wait_idle().await;
     m.mon.process_tick(OPT, "NFO", 112.0).await;
+    m.mon.wait_idle().await;
     assert_eq!(m.store.active_sl(None).unwrap()[0].current_sl, Some(105.0));
     m.mon.sync().await;
     let s = m.mon.leg("analyze", OPT, "NFO", "MIS").unwrap();

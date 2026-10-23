@@ -851,15 +851,26 @@ Every flaky test found so far was a race, not a slow machine:
   runtime test that starts its clock right after `H::new()` also times the
   app starting (the first passes of its background tasks): start it after
   `IdleLog::until_idle`.
-- A risk owner reads the database on the blocking pool and never under the
-  lock guarding its state (PROD-REL-02): the scalping stops' sync read
-  them on the runtime under the monitor's lock, and the order reconciler
-  asked its owners about their saved rows on the runtime every pass, so a
-  pool with no free connection held the runtime that judges the ticks for
-  the whole wait. A read made outside the lock can be overtaken: install it
-  only if nothing changed the state meanwhile (`RiskMonitor::install`
-  reads again after a clear), and never over newer state (a held leg keeps
-  the trail it moved).
+- A risk owner reads and writes the database on the blocking pool and
+  never under the lock guarding its state (PROD-REL-02): the scalping
+  stops' sync read them on the runtime under the monitor's lock, the
+  monitor saved exit orders under it, and the order reconciler asked its
+  owners about their saved rows on the runtime every pass, so a pool with
+  no free connection held the runtime that judges the ticks for the whole
+  wait. A leg's exit orders are changed and saved in turn under that leg's
+  writer lock (`RiskMonitor::update_attempt`), never the monitor's. A read
+  made outside the lock can be overtaken: install it only if nothing
+  changed the state meanwhile (`RiskMonitor::install` reads again after a
+  clear), and never over newer state (a held leg keeps the trail it moved).
+- The loop that judges a risk owner's ticks never waits for the database:
+  the scalping consumer ran its sync inside the loop and awaited each
+  trailed stop's save, so a read or write waiting for the database stopped
+  every leg being judged and the tick channel skipped prices. A sync runs
+  beside the ticks (`scalping/monitor/consumer.rs`) and a trail is saved by
+  a task of its own (`scalping/monitor/writes.rs`; tests wait for it with
+  `RiskMonitor::wait_idle`); a read that fails is tried again with a capped
+  backoff, and the trader is told when it keeps failing (a stop saved
+  meanwhile is not watched yet).
 
 ### Data and migrations
 

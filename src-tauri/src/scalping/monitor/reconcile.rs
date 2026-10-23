@@ -183,20 +183,24 @@ impl RiskMonitor {
         }
         // Fold this pass's facts into the attempt as it stands now: an
         // exit may have added orders since the snapshot (they are kept).
-        let (now_attempt, _) = self.update_attempt(p.key, p.sl.id, |slot| {
-            if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
-                // Only the orders this pass learned about: an exit may
-                // have recorded answers on others meanwhile.
-                for &i in touched {
-                    if let (Some(cur), Some(folded)) = (c.children.get_mut(i), a.children.get(i)) {
-                        *cur = folded.clone();
+        let (now_attempt, _) = self
+            .update_attempt(p.key, p.sl.id, |slot| {
+                if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
+                    // Only the orders this pass learned about: an exit may
+                    // have recorded answers on others meanwhile.
+                    for &i in touched {
+                        if let (Some(cur), Some(folded)) =
+                            (c.children.get_mut(i), a.children.get(i))
+                        {
+                            *cur = folded.clone();
+                        }
+                    }
+                    if !c.working() && c.settled_at.is_none() {
+                        c.settled_at = Some(p.book.read_at);
                     }
                 }
-                if !c.working() && c.settled_at.is_none() {
-                    c.settled_at = Some(p.book.read_at);
-                }
-            }
-        });
+            })
+            .await;
         if now_attempt.is_some_and(|c| c.id == a.id && !c.working()) {
             self.settle(p.key, gen, p.sl, p.mode).await;
         }
@@ -304,17 +308,19 @@ impl RiskMonitor {
             return Ok(false);
         };
         let mut hit = false;
-        let (now_attempt, _) = self.update_attempt(key, sl.id, |slot| {
-            if let Some(a) = slot.as_mut().filter(|a| a.id == attempt_id) {
-                if let Some(c) = a.children.get_mut(idx).filter(|c| !c.terminal()) {
-                    c.state = ChildState::Dead;
-                    hit = true;
-                    if !a.working() {
-                        a.settled_at = Some(now);
+        let (now_attempt, _) = self
+            .update_attempt(key, sl.id, |slot| {
+                if let Some(a) = slot.as_mut().filter(|a| a.id == attempt_id) {
+                    if let Some(c) = a.children.get_mut(idx).filter(|c| !c.terminal()) {
+                        c.state = ChildState::Dead;
+                        hit = true;
+                        if !a.working() {
+                            a.settled_at = Some(now);
+                        }
                     }
                 }
-            }
-        });
+            })
+            .await;
         if !hit {
             return Ok(false);
         }
