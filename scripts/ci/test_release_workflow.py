@@ -21,6 +21,8 @@
   key reaches only the steps that sign.
 - A release already published is never changed: create-release refuses its
   tag, so a run by hand of it replaces no file and removes no latest.json.
+- The release header and docs say which shipped files CI never starts, and
+  install-smoke.yml keeps that true.
 
 Read as text, so no YAML library is needed.
 """
@@ -42,6 +44,8 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 RELEASE = os.path.join(ROOT, ".github", "workflows", "release.yml")
 CI = os.path.join(ROOT, ".github", "workflows", "ci.yml")
 SECURITY = os.path.join(ROOT, ".github", "workflows", "security.yml")
+SMOKE = os.path.join(ROOT, ".github", "workflows", "install-smoke.yml")
+RELEASE_DOC = os.path.join(ROOT, "docs", "release", "release-workflow.md")
 PREFLIGHT = os.path.join(ROOT, "scripts", "release", "preflight.sh")
 SCAN = os.path.join(ROOT, "scripts", "ci", "advisory_scan.sh")
 DENY = os.path.join(ROOT, ".github", "deny.toml")
@@ -321,6 +325,35 @@ class CreateRelease(unittest.TestCase):
             self.assertIn("needs: [verify, create-release]", job_text(text, job), job)
             self.assertNotRegex(job_if(text, job), r"always\(\)|failure\(\)|!cancelled\(\)", job)
         self.assertIn("needs.create-release.result == 'success'", job_text(text, "checksums"))
+
+
+class WhatCiStarted(unittest.TestCase):
+    """A release ships every file byte for byte as CI built it, but CI did
+    not start every one. release.yml's header and the release docs say which
+    it never started, and that stays true of install-smoke.yml; a job that
+    starts one of them means rewording both."""
+
+    NEVER_STARTED = (
+        r"macOS `?\.app\.tar\.gz`?[^\n]*never unpacked or started",
+        r"macOS Intel[^\n]*never started",
+        r"AppImage[^\n]*started only",
+    )
+
+    def test_the_release_says_which_files_ci_never_started(self):
+        for name, text in (("release.yml", read(RELEASE).split("\non:\n", 1)[0]), ("release-workflow.md", read(RELEASE_DOC))):
+            for said in self.NEVER_STARTED:
+                self.assertRegex(text, re.compile(said, re.IGNORECASE), name)
+
+    def test_the_install_smoke_still_never_starts_them(self):
+        smoke = read(SMOKE)
+        self.assertNotIn(".app.tar.gz", smoke)
+        intel = [step for step in job_steps(smoke, "macos") if "bundles-x64" in step]
+        self.assertTrue(intel)
+        for step in intel:
+            self.assertNotIn("launch_smoke", step)
+        appimage = script(step_named(job_steps(smoke, "linux"), "Launch the AppImage"))
+        self.assertIn("launch_smoke.py", appimage)
+        self.assertNotIn("--first-sign-in", appimage)
 
 
 class AdvisoryScans(unittest.TestCase):

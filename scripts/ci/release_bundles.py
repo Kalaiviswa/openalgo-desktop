@@ -6,12 +6,12 @@
     python3 scripts/ci/release_bundles.py stage DIR --version 1.2.3 \\
         --config src-tauri/tauri.conf.json --out DIR --sign-list FILE
 
-A tag's release attaches the installers CI built for the tagged commit and
-the install smoke installed, instead of building them again
-(docs/release/release-workflow.md). They come from the run the release gate
-already relies on (smoke_gate.verdict): the newest run of ci.yml for a push
-of the commit to master that was not cancelled, completed with success and
-every installed-app job green.
+A tag's release attaches the installers CI built for the tagged commit,
+instead of building them again; not every one was started in CI, and
+docs/release/release-workflow.md lists what was done with each. They come
+from the run the release gate already relies on (smoke_gate.verdict): the
+newest run of ci.yml for a push of the commit to master that was not
+cancelled, completed with success and every installed-app job green.
 
 check     refuses unless, in that run's attempt, ci-ok succeeded, every
           tauri-build job succeeded with each step of TAURI_BUILD_STEPS (the

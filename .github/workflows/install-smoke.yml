@@ -38,7 +38,8 @@ name: Install smoke
 # under test. Each job names that commit in its summary. release.yml refuses
 # a tag unless the newest CI push run of that commit on master passed every
 # job here (scripts/ci/smoke_gate.py release), and then ships that run's
-# bundles, the files installed here (scripts/ci/release_bundles.py). To try
+# bundles (scripts/ci/release_bundles.py): the files installed here, and the
+# Intel app and the macOS update bundles, which no job here starts. To try
 # an older run's bundles again, re-run its jobs (the bundles are kept 7
 # days), before tagging: a re-run after the gate makes the release refuse.
 #

@@ -16,11 +16,13 @@ visible, and how the signing key is handled.
    (`bundle.createUpdaterArtifacts: true`) and `--no-sign` to every build,
    so besides the installers it produces the platform's **update bundle**,
    unsigned. The release's `ci-bundles` job takes these files from the CI
-   run of the tagged commit, the ones its install smoke tested, and signs
-   each with `tauri signer sign --app-version <version>` and the private
-   key, which writes a **`.sig`** next to it (the `.deb` gets one too). The
-   rebuild by hand (`docs/release/release-workflow.md`) adds the same file
-   without `--no-sign`, and Tauri signs during its build:
+   run of the tagged commit whose install smoke passed (which starts the
+   Windows setup and the AppImages, but never unpacks or starts a macOS
+   `.app.tar.gz`), and signs each with
+   `tauri signer sign --app-version <version>` and the private key, which
+   writes a **`.sig`** next to it (the `.deb` gets one too). The rebuild by
+   hand (`docs/release/release-workflow.md`) adds the same file without
+   `--no-sign`, and Tauri signs during its build:
 
    | Platform | Update bundle on the release | Installs as |
    | --- | --- | --- |

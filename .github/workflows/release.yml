@@ -9,13 +9,24 @@ name: Release
 # GitHub serves from the newest published, non-prerelease release only
 # (docs/release/updates.md).
 #
-# The installers are the files CI built for the tagged commit and the
-# install smoke installed (the `ci-bundles` job): this workflow downloads
-# the bundles of the CI run the gate approved, checks each is the file
-# GitHub recorded for that run, signs the update bundles with the update
-# key and attaches them. Nothing is compiled, so a release takes minutes,
-# and what a trader downloads is byte for byte what passed CI's
-# installed-app checks (docs/release/release-workflow.md).
+# The installers are the files CI built for the tagged commit (the
+# `ci-bundles` job): this workflow downloads the bundles of the CI run the
+# gate approved, checks each is the file GitHub recorded for that run, signs
+# the update bundles with the update key and attaches them. Nothing is
+# compiled, so a release takes minutes, and what a trader downloads is byte
+# for byte the file CI built. Not every file was started in CI; what that
+# run's install smoke and native E2E did with each, on fresh runners:
+#   Windows setup .exe      installed, started, account created and signed
+#                           in (Windows Server 2022 and 2025)
+#   Linux .deb              the same (x64 and arm64); the x64 one also driven
+#                           through its window (native E2E)
+#   Linux AppImage          started only, no sign-in (x64 and arm64)
+#   macOS Apple Silicon     the app in the .dmg started, signed in
+#   macOS Intel             the app in the .dmg never started (no Intel
+#                           runner); only its minimum macOS version read
+#   macOS .app.tar.gz       never unpacked or started, on either chip,
+#                           though every macOS in-app update installs it
+# (docs/release/release-workflow.md).
 #
 # The full rebuild (the `build` job) is the fallback, started by hand:
 # Actions > Release > Run workflow, with the tag and build: rebuild. Use it
@@ -367,8 +378,9 @@ jobs:
           echo "release_id=${id}" >> "$GITHUB_OUTPUT"
 
   ci-bundles:
-    # The default path: the installers are CI's, as the install smoke
-    # tested them; only the update signatures are new.
+    # The default path: the installers are CI's, unchanged (what its install
+    # smoke did with each: the table at the top); only the update
+    # signatures are new.
     name: sign and attach the bundles CI tested
     needs: [verify, create-release]
     if: needs.verify.outputs.mode == 'ci-bundles'

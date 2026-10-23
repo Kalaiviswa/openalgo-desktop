@@ -72,9 +72,11 @@ fixing it the day the scan turns red keeps it off release day.
 
 ## What a tag push does
 
-The release ships the installers CI built for the tagged commit, the very
-files its install smoke installed, started and signed in with. It does not
-build them again. Times are estimates from the runs of 2026-10-22.
+The release ships the installers CI built for the tagged commit, byte for
+byte, from the CI run whose install smoke passed. It does not build them
+again. Not every file it ships was started in CI: the second table below
+says what that run did with each. Times are estimates from the runs of
+2026-10-22.
 
 | Step | Job | About |
 | --- | --- | --- |
@@ -90,7 +92,17 @@ the slowest, plus the same gate and `checksums`.
 The files on the draft, per platform: the NSIS `-setup.exe` (Windows), the
 `.dmg` and the `.app.tar.gz` update bundle (macOS Apple Silicon and Intel),
 the AppImage and the `.deb` (Linux x64 and arm64), and a `.sig` beside each
-update bundle and `.deb`.
+update bundle and `.deb`. What the CI run did with each, on fresh runners
+(`install-smoke.yml`, `native-e2e.yml`):
+
+| File | In CI |
+| --- | --- |
+| Windows `-setup.exe` (installer and update bundle) | Installed per user, started with its window, account created, signed in, on Windows Server 2022 and 2025 |
+| Linux `.deb`, x64 and arm64 | Installed with apt, started with its window, account created, signed in; the x64 one also driven through its window (native E2E) |
+| Linux AppImage, x64 and arm64 (installer and update bundle) | Started only, until its HTTP API answered; no sign-in |
+| macOS Apple Silicon `.dmg` | Its app copied out, started with its window, account created, signed in |
+| macOS Intel `.dmg` | Never started (no Intel runner); only the oldest macOS its app declares is read |
+| macOS `.app.tar.gz`, both chips (update bundle) | Never unpacked or started, though every macOS in-app update installs it |
 
 ### What each guarantee rests on
 
