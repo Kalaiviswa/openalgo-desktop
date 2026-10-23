@@ -329,11 +329,25 @@ jobs:
           prerelease=false
           case "$TAG" in *-*) prerelease=true ;; esac
           # Drafts are not reachable through /releases/tags/<tag>, so list.
-          existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            | jq -r --arg tag "$TAG" '[.[] | select(.tag_name == $tag)][0].id // empty')
+          # "<id> draft" or "<id> published" of this tag's release, a
+          # published one first, so it is refused even beside a draft.
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | python3 -c '
+          import json, os, sys
+          same = [r for r in json.load(sys.stdin) if r.get("tag_name") == os.environ["TAG"]]
+          same.sort(key=lambda r: r.get("draft") is True)
+          if same:
+              print(same[0]["id"], "draft" if same[0].get("draft") is True else "published")
+          ')
           if [ -n "$existing" ]; then
-            echo "Reusing release ${existing} for ${TAG}"
-            id="$existing"
+            read -r id state <<< "$existing"
+            # A run by hand of a tag already released (ci-bundles or
+            # rebuild) would replace the files traders downloaded, and
+            # checksums would remove latest.json while it re-attaches it.
+            if [ "$state" != "draft" ]; then
+              echo "::error title=Release::Release ${id} of ${TAG} is published, and this workflow changes only a draft: installed copies update from a published release. Release a new version instead."
+              exit 1
+            fi
+            echo "Reusing draft release ${id} for ${TAG}"
           else
             id=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
               -f tag_name="$TAG" \

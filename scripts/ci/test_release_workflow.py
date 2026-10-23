@@ -19,6 +19,8 @@
   bundling and its backstop), and release.yml's ci-bundles job signs and
   attaches them without building; the rebuild runs only by hand; the update
   key reaches only the steps that sign.
+- A release already published is never changed: create-release refuses its
+  tag, so a run by hand of it replaces no file and removes no latest.json.
 
 Read as text, so no YAML library is needed.
 """
@@ -31,6 +33,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 sys.dont_write_bytecode = True  # leave no __pycache__ in the checkout
@@ -71,9 +74,9 @@ def job_if(text: str, job: str) -> str:
 
 
 def script(step: str) -> str:
-    """The `run: |` block of a step, unindented."""
-    body = step[step.index("run: |\n") + len("run: |\n") :]
-    return "\n".join(line[4:] for line in body.splitlines())
+    """The `run: |` block of a step, unindented as YAML does (an inline
+    Python program in it keeps its own indentation)."""
+    return textwrap.dedent(step[step.index("run: |\n") + len("run: |\n") :])
 
 
 def index(steps: list[str], pred) -> int:
@@ -255,6 +258,69 @@ class ReleaseShipsWhatCiTested(unittest.TestCase):
                 if "secrets.TAURI_SIGNING" in step:
                     found.add((job, re.match(r"(?:name: |uses: )(.+)", step).group(1)))
         self.assertEqual(found, allowed)
+
+
+class CreateRelease(unittest.TestCase):
+    """create-release fills only a draft. A run by hand (ci-bundles or
+    rebuild) of a tag whose release is published stops there, before any of
+    its files is replaced or its latest.json removed."""
+
+    def create(self, releases):
+        """Run the step with a `gh` that lists `releases` and creates release
+        900: its exit code, log and outputs, and whether it created one."""
+        step = step_named(job_steps(read(RELEASE), "create-release"), "Create or reuse the draft release for this tag")
+        with tempfile.TemporaryDirectory() as tmp:
+            listing, calls, out = (os.path.join(tmp, n) for n in ("releases.json", "calls", "output"))
+            with open(listing, "w", encoding="utf-8") as f:
+                json.dump(releases, f)
+            with open(out, "w", encoding="utf-8"):
+                pass
+            gh = os.path.join(tmp, "gh")
+            with open(gh, "w", encoding="utf-8") as f:
+                f.write('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n')
+                f.write('case " $* " in *" -X POST "*) echo 900 ;; *) cat "$LISTING" ;; esac\n')
+            os.chmod(gh, 0o755)
+            env = dict(
+                os.environ,
+                PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                TAG="v1.0.1",
+                GITHUB_REPOSITORY="marketcalls/openalgo-desktop",
+                GITHUB_OUTPUT=out,
+                CALLS=calls,
+                LISTING=listing,
+            )
+            r = subprocess.run(["bash", "-c", script(step)], env=env, capture_output=True, text=True)
+            outputs = dict(line.split("=", 1) for line in read(out).split())
+            created = os.path.exists(calls) and "-X POST" in read(calls)
+        return r.returncode, r.stdout + r.stderr, outputs, created
+
+    def test_creates_a_draft_for_a_tag_without_a_release(self):
+        code, log, outputs, created = self.create([{"id": 11, "tag_name": "v1.0.0", "draft": False}])
+        self.assertEqual((code, outputs, created), (0, {"release_id": "900"}, True), log)
+
+    def test_reuses_the_draft_of_the_tag(self):
+        releases = [{"id": 11, "tag_name": "v1.0.0", "draft": False}, {"id": 12, "tag_name": "v1.0.1", "draft": True}]
+        code, log, outputs, created = self.create(releases)
+        self.assertEqual((code, outputs, created), (0, {"release_id": "12"}, False), log)
+
+    def test_refuses_a_published_release_of_the_tag(self):
+        for releases in (
+            [{"id": 11, "tag_name": "v1.0.0", "draft": False}, {"id": 12, "tag_name": "v1.0.1", "draft": False}],
+            # A draft of the same tag, listed first, does not hide it.
+            [{"id": 13, "tag_name": "v1.0.1", "draft": True}, {"id": 12, "tag_name": "v1.0.1", "draft": False}],
+        ):
+            code, log, outputs, created = self.create(releases)
+            self.assertEqual(code, 1, log)
+            self.assertIn("Release 12 of v1.0.1 is published", log)
+            self.assertEqual((outputs, created), ({}, False), log)
+
+    def test_nothing_that_attaches_runs_after_a_refusal(self):
+        # An `if:` without a status function waits for every need to succeed.
+        text = read(RELEASE)
+        for job in ("ci-bundles", "build"):
+            self.assertIn("needs: [verify, create-release]", job_text(text, job), job)
+            self.assertNotRegex(job_if(text, job), r"always\(\)|failure\(\)|!cancelled\(\)", job)
+        self.assertIn("needs.create-release.result == 'success'", job_text(text, "checksums"))
 
 
 class AdvisoryScans(unittest.TestCase):

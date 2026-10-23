@@ -123,8 +123,11 @@ update bundle and `.deb`.
   another version.
 - **`latest.json`.** Unchanged: `scripts/ci/updater_manifest.py` builds it
   from the draft's assets as published, one update bundle per platform.
-- **A draft, published by a human.** Unchanged: the workflow only creates
-  or reuses a draft; publishing it is what makes the update visible.
+- **A draft, published by a human.** The workflow only creates or reuses a
+  draft; publishing it is what makes the update visible. `create-release`
+  refuses a tag whose release is already published, even beside a draft of
+  the same tag, so a run by hand for a shipped version (`ci-bundles` or
+  `rebuild`) stops before replacing any of its files or its `latest.json`.
 
 ## The rebuild, by hand
 
@@ -143,7 +146,8 @@ before (the `build` job), then `checksums`. Use it when:
 The rebuilt installers are not the files the install smoke tested, as was
 the case for every release before this path existed. `build: ci-bundles`
 runs the default path by hand, for instance after a failed attempt; a draft
-an earlier run created is reused, and its files are replaced.
+an earlier run created is reused, and its files are replaced. A release
+already published is never changed: the run stops at `create-release`.
 
 ## If the release stops
 
@@ -154,5 +158,6 @@ an earlier run created is reused, and its files are replaced.
 | `... expired on ... release with build: rebuild` | The bundles are gone: rebuild. |
 | `run <id> is at attempt <n>, not the gated attempt` | The CI run was re-run after the gate passed: run the release again (`build: ci-bundles`). |
 | `Apple or Windows code signing is configured` | Rebuild. |
+| `Release <id> of <tag> is published` | That version has shipped; the workflow changes only a draft. Release a new version. |
 | An advisory step failed | See "Advisories are scanned every day" above. |
 
