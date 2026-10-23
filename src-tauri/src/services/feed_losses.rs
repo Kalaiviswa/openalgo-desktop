@@ -7,8 +7,8 @@
 //! 8765), since OpenAlgo started: frames a slow app's queue folded into a
 //! newer one for the same instrument (it gets the latest price, by
 //! design), frames dropped past its queue's cap, and updates the feed
-//! server skipped. The strategy module's own folded and missed prices are
-//! in `strategy_ticks`.
+//! server skipped. The strategy module's own missed prices, and its exits
+//! waiting to be placed, are in `strategy_ticks`.
 
 use crate::feed::MarketDataSource;
 use crate::state::AppState;

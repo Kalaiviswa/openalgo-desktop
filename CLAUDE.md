@@ -251,7 +251,11 @@ extremes: a peak that raised a stop and the dip that then hit it were lost
 when the strategy tick path folded waiting prices to a later, larger peak.
 Never fold, sample or drop prices before the risk core has judged them; when
 acting is slow, combine the decisions (`strategy::tick_feed::pending`), not
-the prices.
+the prices, and never wait on the database where prices are read
+(`strategy::tick_context`). Two exceptions: a price the reader misses when
+the market-data channel overruns it is skipped, counted and alerted
+(`strategy_ticks_missed`), and a run whose settings cannot be read is not
+judged until they are (logged, and read again with a backoff).
 
 ### An order path decides once, under the lock
 

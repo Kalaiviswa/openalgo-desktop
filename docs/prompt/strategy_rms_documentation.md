@@ -550,7 +550,7 @@ stop whose exits were refused leaves the run open and managed.
 feed.add_run(run_id, &keys).await      // refcounted; subscribes newly referenced symbols
 feed.remove_run(run_id).await          // unsubscribes symbols no run holds
 feed.release_all().await               // shutdown
-feed.health()                          // queued, folded and missed ticks
+feed.health(now)                       // prices read, combined and missed; exits waiting
 ```
 
 Subscriptions are refcounted per run, so two strategies holding one contract
@@ -562,22 +562,29 @@ a leg that has fallen back to polling is risk-evaluated on polled prices too.
 
 Two owned tasks:
 
-- **The reader** takes every tick of the market-data broadcast and keeps the
-  prices of held symbols, never waiting on an evaluation. A tick it misses
-  (the broadcast lagged) is counted, and the Health page raises an alert.
-- **The evaluator** takes the waiting prices and evaluates each symbol's in
-  arrival order, and runs the polling fallback.
+- **The reader** takes every tick of the market-data broadcast and decides
+  each price of a held symbol as it arrives, through the risk core in the
+  run's lock, never waiting on an action or on the database. A tick it
+  misses (the broadcast lagged) is counted, and the Health page raises an
+  alert.
+- **The evaluator** acts on what was decided (exits, stops, events), run by
+  run in the order they decided, and runs the polling fallback.
 
-In the desktop, prices waiting for the evaluator are kept per symbol, and a
-path that grows past 32 prices is folded to its first price, its lowest and
-highest in the order they came, and its latest, so a spike through a stop, a
-target or a trailing level is still evaluated. The web queues ticks in one
+In the desktop, no price is folded or shed before risk has judged it
+(PROD-REL-01): a trailing stop depends on the path, so a peak that raised
+the stop and the dip that then hit it must both be seen. While the
+evaluator is busy, a run's decisions are combined instead
+(`strategy/tick_feed/pending.rs`): each position keeps its first exit, the
+first stop is kept, and leg exits decided with or after a stop are placed
+after it (a leg the stop exited refuses them). The web queues ticks in one
 bounded FIFO and sheds when full, which can drop the deciding tick.
 
 What the tick path needs of a running strategy is read once per run into
-`strategy/tick_context.rs`, so no tick waits on the database. This is safe
-because a running strategy's configuration cannot change: edits, the Live
-opt-in and deletion are refused while it runs.
+`strategy/tick_context.rs`, before its prices are subscribed, so no tick
+waits on the database. This is safe because a running strategy's
+configuration cannot change: edits, the Live opt-in and deletion are refused
+while it runs. What the reader still finds missing is read in an owned task,
+retried with a backoff capped at 30 seconds.
 
 In the desktop, the stream-to-polling switch is not reported: the
 `tick_source_switched_to_polling`, `tick_source_switched_to_ws` and
@@ -936,9 +943,9 @@ Each is described in its section above.
   request whose turn is more than 10 seconds away is refused before sending.
 - An unreadable Semi-Auto order mode refuses API-client orders instead of
   executing them (strategy orders never consult it).
-- Waiting prices are folded per symbol instead of shed from one FIFO; the
-  stream-to-polling switch is not reported as events, and there is no
-  `tick_stale` stop. No `STRATEGY_TICK_*` environment variables.
+- Every price is decided on arrival instead of queued in one FIFO that
+  sheds; the stream-to-polling switch is not reported as events, and there
+  is no `tick_stale` stop. No `STRATEGY_TICK_*` environment variables.
 - A start and an edit are refused when the strategy changed in between
   (`revision`).
 - A stop or close that cannot read its own records answers 500, not "not
