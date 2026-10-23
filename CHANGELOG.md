@@ -3,6 +3,89 @@
 All notable changes to OpenAlgo Desktop are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 1.0.2
+
+Safety fixes from an independent production audit of 1.0.1: strategy stops
+that see every price, orders that cannot split or switch between Live and
+Sandbox on the way, scalping stops and order tracking that keep working
+while OpenAlgo's database is busy, and a Health page that never shows a list
+it could not read as empty. If you run 1.0.1, OpenAlgo offers this update in
+the app; choose Update when no live strategy is running.
+
+### Strategy stops and targets
+
+- Every streamed price is checked against a strategy's stops, targets and
+  trailing stops as it arrives. Under heavy market data 1.0.1 combined
+  waiting prices, so a trailing stop could miss the price that should have
+  exited it.
+- An exit closes only the position it was decided for: a leg that re-entered
+  meanwhile (a webhook flip) keeps its new position.
+- Leg exits decided while a strategy stop is waiting are placed after it when
+  the stop could not place its own orders, instead of being dropped.
+- Reading prices never waits on OpenAlgo's database: a slow read for one
+  strategy no longer delays the prices of the others.
+- Health shows "Strategies with exits waiting" and "Longest exit wait", and
+  warns when a decided exit has waited more than 15 seconds to be placed.
+
+### Orders
+
+- A split order is counted before any part of it is built; one that would
+  need more than 100 orders is refused at once, as on OpenAlgo web.
+- An options order, single or multi-leg, goes wholly to Live or wholly to
+  Sandbox, decided once when it starts; switching analyzer mode while it is
+  being sent no longer splits it between the two.
+- A multi-leg options order whose leg got no definite answer from the broker
+  says so in its reply, and an Action Center approval in that state stays
+  unconfirmed, across a restart too. The remaining legs are still sent, as
+  on OpenAlgo web.
+- A GTT quantity that is zero, negative, blank, fractional or larger than
+  any exchange accepts is refused on every exchange, from the GTT page's
+  modify as well.
+
+### Scalping, order tracking and OpenScript
+
+- Scalping stops keep being checked while OpenAlgo's database is busy, and
+  saving one stop's exit no longer holds up another stop.
+- When the scalping stops cannot be read, OpenAlgo tries again and tells you
+  after three failures, instead of silently not watching a stop you just
+  saved.
+- A scalping exit that would need more than 100 orders is refused with an
+  alert and the stop stays managed, instead of sending hundreds of orders
+  from a wrong position size.
+- Order tracking keeps an order unconfirmed when the records it needs cannot
+  be read, instead of treating it as settled.
+- An OpenScript live run trades with the inputs it started with. A start
+  whose saved parameters cannot be read is refused with the reason, instead
+  of running the script's default quantity and risk.
+
+### Health page
+
+- A card that could not be refreshed keeps what it last showed, marked with
+  when it was read; a list that was never read says so instead of looking
+  empty. Unconfirmed orders no longer disappear after one failed refresh.
+- Each figure updates as soon as it is read; a read that stalls is given up
+  after 8 seconds and marked.
+- A WARN or FAIL stays visible after a failed refresh, and times from an
+  earlier day show their date.
+- Market data skipped by a slow reader counts since OpenAlgo started, so a
+  reconnect no longer hides it, and market depth is included. Database
+  growth is shown over the last day.
+
+### Security
+
+- An API key is never read back from the window's browser storage,
+  whichever version of OpenAlgo wrote it there.
+
+### Releases
+
+- Updates reach you sooner: a release now ships the installers CI built and
+  tested for that version, signing only their update files, in about 15
+  minutes instead of 50. A published release can no longer be changed by a
+  later run.
+- Building OpenAlgo Desktop from source needs Node.js 22.23.4, 24.22.1 or
+  26.12.1 or later, following OpenAlgo web (marketcalls/openalgo f3e7de829).
+  The app itself ships no Node.js.
+
 ## 1.0.1
 
 The first update after 1.0.0. It fixes the limitations listed in 1.0.0,
