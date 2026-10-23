@@ -84,8 +84,9 @@ with the full gates (`parallel-work` skill).
 ## The tag is the maintainer's decision
 
 `.github/workflows/release.yml` runs on any pushed `v*` tag: it takes the
-installers CI built and install-tested for that commit (Windows NSIS, macOS
-Apple Silicon and Intel `.dmg`, Linux x64 and arm64 AppImage and `.deb`),
+installers CI built for that commit (Windows NSIS, macOS Apple Silicon and
+Intel `.dmg`, Linux x64 and arm64 AppImage and `.deb`; which of them the
+install smoke starts is listed in `docs/release/release-workflow.md`),
 signs their in-app update bundles, and attaches them with `latest.json` and
 `SHA256SUMS.txt` to a **draft** GitHub release that the maintainer reviews
 and publishes by hand, in about 10 to 15 minutes; it does not build again.

@@ -784,7 +784,8 @@ worktree onto master. CI builds fresh and is unaffected.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
 - A release ships the bundles CI's `tauri-build` made for the tagged commit
-  (the files the install smoke tested), and only signs their update bundles;
+  (the install smoke starts some of them, not all: `docs/release/release-workflow.md`
+  lists which), and only signs their update bundles;
   it does not build again (`docs/release/release-workflow.md`). So
   `tauri-build` builds as the release did: `updater-artifacts.conf.json`
   with `--no-sign` (unsigned update bundles; no CI run ever holds the key,
