@@ -477,6 +477,21 @@ jobs:
           path: signing/
           if-no-files-found: error
           retention-days: 30
+      - name: The release is still a draft
+        # A re-run of failed jobs reuses create-release's earlier answer
+        # without running it again; a release published since then is left
+        # alone, since installed copies update from it.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .draft)
+          if [ "$draft" != "true" ]; then
+            echo "::error title=Release::Release ${RELEASE_ID} is no longer a draft, and this workflow changes only a draft: installed copies update from a published release. Release a new version instead."
+            exit 1
+          fi
       - name: Attach to the draft release
         # A file an earlier attempt attached under the same name is replaced.
         # Each attached file must then have the size and, where GitHub
@@ -668,6 +683,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: The release is still a draft
+        # A re-run of failed jobs reuses create-release's earlier answer
+        # without running it again; a release published since then is left
+        # alone, since installed copies update from it.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .draft)
+          if [ "$draft" != "true" ]; then
+            echo "::error title=Release::Release ${RELEASE_ID} is no longer a draft, and this workflow changes only a draft: installed copies update from a published release. Release a new version instead."
+            exit 1
+          fi
       - name: Build and upload to the draft release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -885,6 +915,21 @@ jobs:
             exit 1
           fi
 
+      - name: The release is still a draft
+        # A re-run of failed jobs reuses create-release's earlier answer
+        # without running it again; a release published since then is left
+        # alone, since installed copies update from it.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          draft=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .draft)
+          if [ "$draft" != "true" ]; then
+            echo "::error title=Release::Release ${RELEASE_ID} is no longer a draft, and this workflow changes only a draft: installed copies update from a published release. Release a new version instead."
+            exit 1
+          fi
       - name: Attach latest.json (the in-app update manifest)
         # Every platform's update bundle, its address on this release and
         # its signature; each signature must verify against the key built

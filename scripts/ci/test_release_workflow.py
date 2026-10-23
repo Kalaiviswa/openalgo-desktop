@@ -327,6 +327,49 @@ class CreateRelease(unittest.TestCase):
         self.assertIn("needs.create-release.result == 'success'", job_text(text, "checksums"))
 
 
+class StillDraft(unittest.TestCase):
+    """A re-run of failed jobs reuses create-release's earlier release id
+    without asking again. Each job that writes to the release checks, before
+    its first write, that the release is still a draft."""
+
+    NAME = "The release is still a draft"
+
+    def run_check(self, draft: str) -> tuple[int, str]:
+        step = step_named(job_steps(read(RELEASE), "checksums"), self.NAME)
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = os.path.join(tmp, "gh")
+            with open(gh, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/bash\necho {draft}\n')
+            os.chmod(gh, 0o755)
+            env = dict(
+                os.environ,
+                PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                GITHUB_REPOSITORY="marketcalls/openalgo-desktop",
+                RELEASE_ID="12",
+            )
+            r = subprocess.run(["bash", "-c", script(step)], env=env, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_every_job_that_writes_checks_first(self):
+        text = read(RELEASE)
+        for job in ("ci-bundles", "build", "checksums"):
+            steps = job_steps(text, job)
+            check = index(steps, lambda s: s.startswith(f"name: {self.NAME}\n"))
+            first_write = index(steps, uploads)
+            self.assertGreaterEqual(first_write, 0, job)
+            self.assertTrue(0 <= check < first_write, job)
+            # The rebuild runs on Windows too, whose default shell is not bash.
+            self.assertIn("shell: bash", steps[check], job)
+        steps = [step_named(job_steps(text, job), self.NAME) for job in ("ci-bundles", "build", "checksums")]
+        self.assertEqual(len(set(steps)), 1)
+
+    def test_a_published_release_stops_the_job(self):
+        self.assertEqual(self.run_check("true")[0], 0)
+        code, log = self.run_check("false")
+        self.assertEqual(code, 1, log)
+        self.assertIn("Release 12 is no longer a draft", log)
+
+
 class WhatCiStarted(unittest.TestCase):
     """A release ships every file byte for byte as CI built it, but CI did
     not start every one. release.yml's header and the release docs say which

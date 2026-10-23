@@ -178,5 +178,6 @@ already published is never changed: the run stops at `create-release`.
 | `no bundles-<platform> of <run> was made by tauri-build (<platform>) of attempt <n>` | Something other than that build made the artifact: a later job of the run uploading the same name, or another attempt. Stop the job that overwrites it in `ci.yml`, then release from a new green CI run. |
 | `Apple or Windows code signing is configured` | Rebuild. |
 | `Release <id> of <tag> is published` | That version has shipped; the workflow changes only a draft. Release a new version. |
+| `Release <id> is no longer a draft` | The release was published while this run, or a re-run of its failed jobs, was still writing to it; nothing more was changed. Release a new version. |
 | An advisory step failed | See "Advisories are scanned every day" above. |
 
