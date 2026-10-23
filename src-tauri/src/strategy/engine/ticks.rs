@@ -44,7 +44,7 @@ fn evaluate_legs(
             }
         };
         if d.trail_armed && d.stop_moved {
-            events.push((
+            events.push(Event::about(
                 "leg_trail_advanced",
                 format!(
                     "Trailing stop on leg {} moved to {}",
@@ -54,6 +54,7 @@ fn evaluate_legs(
                         .unwrap_or_default()
                 ),
                 ev(Some(run_id), Some(id), "info"),
+                leg.position_ref.clone(),
             ));
         }
         if let Some(reason) = d.reason {
@@ -63,7 +64,7 @@ fn evaluate_legs(
                     kind,
                     position_ref: leg.position_ref.clone(),
                 });
-                events.push((
+                events.push(Event::about(
                     if reason == BreachReason::Stop {
                         "leg_sl_hit"
                     } else {
@@ -71,26 +72,24 @@ fn evaluate_legs(
                     },
                     d.detail.clone(),
                     ev(Some(run_id), Some(id), "warn"),
+                    leg.position_ref.clone(),
                 ));
             }
         }
     }
     if trail_sl_to_entry {
-        if let Some(id) = leg_exits
-            .iter()
-            .find(|x| x.kind == "exit_sl")
-            .map(|x| x.leg_id)
-        {
-            let moved = risk_adapter::trail_open_legs_to_entry(run, id);
+        if let Some(stopped) = leg_exits.iter().find(|x| x.kind == "exit_sl") {
+            let moved = risk_adapter::trail_open_legs_to_entry(run, stopped.leg_id);
             if !moved.is_empty() {
-                events.push((
+                events.push(Event::about(
                     "trail_to_entry_activated",
                     format!(
                         "Stop on leg {} moved {} other legs to entry",
-                        id,
+                        stopped.leg_id,
                         moved.len()
                     ),
                     ev(Some(run_id), None, "warn"),
+                    stopped.position_ref.clone(),
                 ));
             }
         }
@@ -118,7 +117,7 @@ fn run_breach(
         }
     };
     if aggregate.lock_armed_now {
-        events.push((
+        events.push(Event::run(
             "lock_profit_armed",
             format!(
                 "Lock profit now active with a floor of {}",
@@ -130,7 +129,7 @@ fn run_breach(
             ev(Some(run_id), None, "info"),
         ));
     } else if aggregate.lock_floor_raised {
-        events.push((
+        events.push(Event::run(
             "lock_profit_floor_advanced",
             format!(
                 "Lock profit floor advanced to {}",
@@ -146,7 +145,7 @@ fn run_breach(
     if let (Some(limit), Some(banked)) = (limit, banked) {
         let day = banked + run.pnl_total;
         if day <= -limit {
-            events.push((
+            events.push(Event::run(
                 "overall_sl_hit",
                 format!(
                     "Daily loss limit reached: the session is down {:.2} against a limit of {:.2}",
@@ -182,7 +181,7 @@ fn run_breach(
                 "overall_target" => "overall_target_hit",
                 _ => "lock_profit_triggered",
             };
-            events.push((
+            events.push(Event::run(
                 kind,
                 aggregate.detail.clone(),
                 EventFields {
@@ -291,8 +290,8 @@ impl StrategyModule {
                 .push_delta(self.state.snapshot(run_id), false)
                 .await;
         }
-        for (kind, message, fields) in decided.events {
-            self.emit(strategy.id, &strategy.user_id, kind, &message, fields)
+        for e in decided.events {
+            self.emit(strategy.id, &strategy.user_id, e.kind, &e.message, e.fields)
                 .await;
         }
         if !decided.leg_exits.is_empty() {

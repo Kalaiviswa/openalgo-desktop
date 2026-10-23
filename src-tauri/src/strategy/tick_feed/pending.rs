@@ -32,11 +32,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-/// One notification a decision raises: its kind, message and fields.
-pub(crate) type Event = (&'static str, String, EventFields);
+/// One notification a decision raises, and the position it is about.
+#[derive(Debug)]
+pub(crate) struct Event {
+    pub(crate) kind: &'static str,
+    pub(crate) message: String,
+    pub(crate) fields: EventFields,
+    /// A leg's position (for a stop that moved the other legs to entry,
+    /// the stopped leg's); `None` for the run. A leg re-entered while its
+    /// notifications wait has its own.
+    position_ref: Option<String>,
+}
 
-/// Notifications of a level that keeps moving: of those waiting, only the
-/// latest is recorded.
+impl Event {
+    /// A notification about the run.
+    pub(crate) fn run(kind: &'static str, message: String, fields: EventFields) -> Self {
+        Self::about(kind, message, fields, None)
+    }
+
+    /// A notification about one position.
+    pub(crate) fn about(
+        kind: &'static str,
+        message: String,
+        fields: EventFields,
+        position_ref: Option<String>,
+    ) -> Self {
+        Event {
+            kind,
+            message,
+            fields,
+            position_ref,
+        }
+    }
+}
+
+/// Notifications of a level that keeps moving: of a series waiting, only
+/// the latest is recorded.
 const PROGRESS: &[&str] = &["leg_trail_advanced", "lock_profit_floor_advanced"];
 
 /// An exit risk decided for a leg, and the position it was decided on.
@@ -92,8 +123,8 @@ impl Decision {
     /// would: its leg exits go before the waiting stop when there is none
     /// yet and after it otherwise, the first stop is kept (a later one
     /// would exit what the first did), and a position keeps its first exit
-    /// (its claim refuses a second). A notification is kept once per kind
-    /// and leg, a moving level's latest replacing the one before.
+    /// (its claim refuses a second). Notifications keep their order (see
+    /// `note`).
     fn merge(&mut self, later: Decision) {
         for e in later.events {
             self.note(e);
@@ -125,19 +156,23 @@ impl Decision {
         }
     }
 
+    /// Keep a notification once per kind and position, in the order they
+    /// came. A moving level's latest replaces the one before only while
+    /// nothing else about that position came in between, so a trail that
+    /// moved, then its stop hit, then the trail moved on reads in that
+    /// order.
     fn note(&mut self, e: Event) {
-        let same = self
-            .events
-            .iter()
-            .position(|w| w.0 == e.0 && w.2.leg_id == e.2.leg_id);
-        match same {
-            None => self.events.push(e),
-            Some(i) if PROGRESS.contains(&e.0) => {
+        let (leg_id, position_ref) = (e.fields.leg_id, e.position_ref.clone());
+        let about = |w: &Event| w.fields.leg_id == leg_id && w.position_ref == position_ref;
+        if PROGRESS.contains(&e.kind) {
+            let last = self.events.iter().rposition(about);
+            if let Some(i) = last.filter(|&i| self.events[i].kind == e.kind) {
                 self.events.remove(i);
-                self.events.push(e);
             }
-            Some(_) => {}
+        } else if self.events.iter().any(|w| w.kind == e.kind && about(w)) {
+            return;
         }
+        self.events.push(e);
     }
 }
 
@@ -279,11 +314,28 @@ mod tests {
     }
 
     fn event(kind: &'static str, leg_id: Option<i64>, message: &str) -> Event {
+        let position = leg_id.map(|l| format!("position-{}", l));
+        event_on(kind, (leg_id, position), message)
+    }
+
+    /// A notification about one position of a leg, or (`None`) the run's.
+    fn event_on(
+        kind: &'static str,
+        (leg_id, position_ref): (Option<i64>, Option<String>),
+        message: &str,
+    ) -> Event {
         let fields = EventFields {
             leg_id,
             ..Default::default()
         };
-        (kind, message.to_string(), fields)
+        Event::about(kind, message.to_string(), fields, position_ref)
+    }
+
+    fn seen(d: &Decision) -> Vec<(&str, Option<i64>, &str)> {
+        d.events
+            .iter()
+            .map(|e| (e.kind, e.fields.leg_id, e.message.as_str()))
+            .collect()
     }
 
     fn exits(d: &Decision) -> Vec<(i64, &'static str)> {
@@ -351,8 +403,11 @@ mod tests {
         assert_eq!(d.leg_exits, vec![exit(1, "exit_sl"), again]);
     }
 
+    /// The trail moved to 105, the 104 hit it, then the trail moved on
+    /// to 145: the log keeps that order, and of each series of moves only
+    /// the latest.
     #[test]
-    fn a_notification_is_kept_once_and_a_moving_level_keeps_its_latest() {
+    fn a_notification_is_kept_once_and_a_moving_level_keeps_its_latest_in_order() {
         let d = combined(vec![
             Decision {
                 events: vec![event("leg_trail_advanced", Some(1), "to 105")],
@@ -368,6 +423,7 @@ mod tests {
                     event("leg_sl_hit", Some(1), "at 103"),
                     event("leg_trail_advanced", Some(1), "to 145"),
                     event("leg_trail_advanced", Some(2), "to 98"),
+                    event("leg_trail_advanced", Some(1), "to 146"),
                 ],
                 ..Default::default()
             },
@@ -381,19 +437,54 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        let seen: Vec<(&str, Option<i64>, &str)> = d
-            .events
-            .iter()
-            .map(|(k, m, f)| (*k, f.leg_id, m.as_str()))
-            .collect();
         assert_eq!(
-            seen,
+            seen(&d),
             vec![
+                ("leg_trail_advanced", Some(1), "to 105"),
                 ("leg_sl_hit", Some(1), "at 104"),
-                ("leg_trail_advanced", Some(1), "to 145"),
                 ("leg_trail_advanced", Some(2), "to 98"),
+                ("leg_trail_advanced", Some(1), "to 146"),
                 ("overall_sl_hit", None, "down"),
                 ("lock_profit_triggered", None, "after the stop"),
+            ]
+        );
+    }
+
+    /// Notifications are kept per position: a leg re-entered while its
+    /// first position's hit waits has its own hit told, and a second leg's
+    /// stop moving the others to entry is told beside the first's.
+    #[test]
+    fn each_position_keeps_its_own_notifications() {
+        let (first, again) = (Some("position-1".into()), Some("position-1b".into()));
+        let d = combined(vec![
+            Decision {
+                events: vec![
+                    event_on("leg_sl_hit", (Some(1), first.clone()), "first"),
+                    event_on("trail_to_entry_activated", (None, first.clone()), "by 1"),
+                ],
+                ..Default::default()
+            },
+            Decision {
+                events: vec![
+                    event_on("leg_sl_hit", (Some(1), first.clone()), "first again"),
+                    event_on("trail_to_entry_activated", (None, first), "by 1 again"),
+                    event_on("leg_sl_hit", (Some(1), again), "re-entered"),
+                    event_on(
+                        "trail_to_entry_activated",
+                        (None, Some("position-2".into())),
+                        "by 2",
+                    ),
+                ],
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            seen(&d),
+            vec![
+                ("leg_sl_hit", Some(1), "first"),
+                ("trail_to_entry_activated", None, "by 1"),
+                ("leg_sl_hit", Some(1), "re-entered"),
+                ("trail_to_entry_activated", None, "by 2"),
             ]
         );
     }
