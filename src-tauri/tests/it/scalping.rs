@@ -2771,6 +2771,11 @@ async fn a_leg_cleared_while_the_stops_are_read_is_not_brought_back() {
     assert_eq!(m.gw.placed.lock().len(), 1);
     *m.gw.net.lock() = 0;
     let reads = m.mon.stop_reads();
+    // Every connection held while the sync begins its read, so the read
+    // waits on the blocking pool and the sync's first poll ends there: a read
+    // that finished before the sync awaited it would let that same poll run
+    // on to install (it did on CI's Linux runner).
+    let holder = hold_the_pool(&m.db, 200);
     let mon = m.mon.clone();
     let sync = tokio::spawn(async move { mon.sync().await });
     // The sync begins its read; it cannot install what it read until this
@@ -2778,6 +2783,7 @@ async fn a_leg_cleared_while_the_stops_are_read_is_not_brought_back() {
     // thread meanwhile (the fold saves and the clear deletes on the
     // blocking pool, which would otherwise yield to the sync).
     tokio::task::yield_now().await;
+    holder.join().unwrap();
     wait_here(|| m.mon.stop_reads() > reads);
     assert!(!sync.is_finished());
     let (mon, filled) = (
