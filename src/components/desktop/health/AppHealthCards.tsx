@@ -52,6 +52,7 @@ const PRICE_READERS = ['strategy', 'scalping', 'sandbox']
 const FEED_NAMES: Record<string, string> = {
   market_data: 'Broker market data',
   order_updates: 'Broker order updates',
+  market_depth: 'Broker market depth',
 }
 
 const GAP_CAUSES: Record<string, string> = {

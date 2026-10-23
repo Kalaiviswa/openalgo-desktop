@@ -23,14 +23,34 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// The broker feeds health reports: the market data feed always; the order
-/// update socket while it runs, or once a reader skipped any of its
-/// updates, so that stays listed after the socket stops (other brokers
-/// relay order updates on the market feed or have the order book read).
+/// update socket (other brokers relay order updates on the market feed or
+/// have the order book read) and the deeper-book socket (Fyers 50, Dhan
+/// 20; the bridge relays it to apps on the feed like the market feed)
+/// while they run, or once a reader skipped any of their updates, so that
+/// stays listed after the socket stops.
 fn feeds(ctx: &AppState) -> Vec<(&'static str, &WebSocketManager)> {
-    let mut out = vec![("market_data", ctx.websocket.as_ref())];
-    let order_ws = ctx.runtime.order_ws.as_ref();
-    if order_ws.is_running() || total(&order_ws.stats().skipped_since_start()) > 0 {
-        out.push(("order_updates", order_ws));
+    listed(
+        ctx.websocket.as_ref(),
+        ctx.runtime.order_ws.as_ref(),
+        ctx.runtime.depth_ws.as_ref(),
+    )
+}
+
+/// The market data feed, then the order update and market depth sockets
+/// that run or skipped, each under the name health reports it by.
+fn listed<'a>(
+    market_data: &'a WebSocketManager,
+    order_updates: &'a WebSocketManager,
+    market_depth: &'a WebSocketManager,
+) -> Vec<(&'static str, &'a WebSocketManager)> {
+    let mut out = vec![("market_data", market_data)];
+    for (name, feed) in [
+        ("order_updates", order_updates),
+        ("market_depth", market_depth),
+    ] {
+        if feed.is_running() || total(&feed.stats().skipped_since_start()) > 0 {
+            out.push((name, feed));
+        }
     }
     out
 }
@@ -242,5 +262,38 @@ mod tests {
             ..folded
         };
         assert_eq!(block(vec![quiet()], dropped)["status"], "warn");
+    }
+
+    /// PROD-REL-05: the bridge relays the deeper-book socket to apps on the
+    /// feed and counts what it skipped against that socket, but health
+    /// listed only the market data and order update feeds, so those skips
+    /// never reached it.
+    #[test]
+    fn a_depth_feed_that_skipped_is_listed() {
+        let (market, orders, depth) = (
+            WebSocketManager::new(),
+            WebSocketManager::new(),
+            WebSocketManager::new(),
+        );
+        let names = |l: &[(&'static str, &WebSocketManager)]| -> Vec<&'static str> {
+            l.iter().map(|(n, _)| *n).collect()
+        };
+        assert_eq!(names(&listed(&market, &orders, &depth)), ["market_data"]);
+
+        depth.stats().note_skipped(Reader::FeedClients, 4);
+        let feeds = listed(&market, &orders, &depth);
+        assert_eq!(names(&feeds), ["market_data", "market_depth"]);
+        let v = block(
+            feeds.iter().map(|(n, f)| feed_json(n, f)).collect(),
+            AppFrames::default(),
+        );
+        assert_eq!(v["status"], "warn", "{}", v);
+        let depth_block = &v["broker_feeds"][1];
+        assert_eq!(depth_block["name"], "market_depth", "{}", depth_block);
+        assert_eq!(
+            depth_block["skipped_since_start"]["feed_clients"], 4,
+            "{}",
+            depth_block
+        );
     }
 }

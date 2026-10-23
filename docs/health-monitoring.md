@@ -194,8 +194,9 @@ not saved since start.
 
 ## Market data: freshness and skips
 
-For each broker feed (the market data feed, and the order-update socket
-while it runs or once anything it carried was skipped):
+For each broker feed (the market data feed; the order-update socket and,
+for brokers that stream a deeper book (Fyers, Dhan), the market depth
+socket, each while it runs or once anything it carried was skipped):
 
 - since its current connection began: whether it is connected and for how
   long, how long ago the last update arrived (freshness), and how many
@@ -227,7 +228,8 @@ Where it shows:
   update."
 - The Health page's **Market Data** card.
 - `GET /health/api/current` carries a `market_data` block: `broker_feeds`
-  (per feed: `connected`, `connected_for_s`, `last_update_age_s`,
+  (per feed, `name` being `market_data`, `order_updates` or `market_depth`:
+  `connected`, `connected_for_s`, `last_update_age_s`,
   `received_since_connect`, `skipped_since_connect` and
   `skipped_since_start` by reader, with their totals) and `feed_clients`
   (`coalesced`, `dropped`, `skipped`). Its `status` is `warn` when anything

@@ -223,6 +223,28 @@ describe('App health cards', () => {
     expect(screen.getByText(/counts are since OpenAlgo started/)).toBeInTheDocument()
   })
 
+  // PROD-REL-05: what the bridge skipped relaying the deeper book to apps
+  // is counted against the depth socket, which health did not list.
+  it('names the market depth feed and counts what apps missed on it', () => {
+    render(
+      <AppHealthCards
+        read={fresh({
+          market_data: {
+            status: 'warn',
+            broker_feeds: [
+              feed('market_data', {}, {}),
+              feed('market_depth', { feed_clients: 4 }, { feed_clients: 4 }),
+            ],
+            feed_clients: { coalesced: 0, dropped: 0, skipped: 0 },
+          },
+        })}
+      />
+    )
+    expect(rowValue('Broker market depth')).toBe('1,200 updates since it connected')
+    expect(rowValue('Missed by apps on the feed')).toBe('4 updates')
+    expect(screen.getByRole('status')).toHaveTextContent(/Apps on the market data feed missed/)
+  })
+
   it('reports a slow app getting newer prices on its own, never as a loss', () => {
     render(
       <AppHealthCards

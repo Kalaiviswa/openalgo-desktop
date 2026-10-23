@@ -740,16 +740,25 @@ async fn health_sampler_endpoints_and_alerts() {
 /// NEW-REL-05: health shows what the broker feed delivered since it
 /// connected and what each reader skipped, and what the apps on the market
 /// data feed were not sent; a skip makes the block a warning. PROD-REL-05:
-/// each reader's skips since OpenAlgo started are there too, so a
-/// reconnect cannot hide them (`feed_losses` tests the reconnect).
+/// each reader's skips since OpenAlgo started are there too, and a
+/// reconnect starts the counts since the connection began again but not
+/// those since start, which it cannot hide.
 #[tokio::test]
 async fn health_shows_market_data_its_readers_skipped() {
+    use crate::broker_session_e2e::until;
+    use openalgo_desktop_lib::brokers::mock::MockFeed;
+    use openalgo_desktop_lib::websocket::Reader;
     let (h, c, _) = signed_in();
+    let (url, srv) = crate::lifecycle::feed_server().await;
+    let feed = &h.ctx.websocket;
+    feed.connect(Box::new(MockFeed::new(url))).await.unwrap();
+    until("the first connection", || feed.is_connected()).await;
     let (s, v) = h.json(with(get("/health/api/current"), &c, None)).await;
     assert_eq!(s, StatusCode::OK, "{}", v);
     let md = &v["market_data"];
     assert_eq!(md["status"], "pass", "{}", md);
     assert_eq!(md["broker_feeds"][0]["name"], "market_data", "{}", md);
+    assert_eq!(md["broker_feeds"][0]["connected"], true, "{}", md);
     assert_eq!(
         md["broker_feeds"][0]["skipped_total_since_connect"], 0,
         "{}",
@@ -758,20 +767,73 @@ async fn health_shows_market_data_its_readers_skipped() {
     for k in ["coalesced", "dropped", "skipped"] {
         assert_eq!(md["feed_clients"][k], 0, "{}: {}", k, md);
     }
-    h.ctx
-        .websocket
-        .stats()
-        .note_skipped(openalgo_desktop_lib::websocket::Reader::Scalping, 7);
+    feed.stats().note_skipped(Reader::Scalping, 7);
     let (_, v) = h.json(with(get("/health/api/current"), &c, None)).await;
     let md = &v["market_data"];
     assert_eq!(md["status"], "warn", "{}", md);
-    let feed = &md["broker_feeds"][0];
-    assert_eq!(feed["skipped_since_connect"]["scalping"], 7, "{}", feed);
-    assert_eq!(feed["skipped_since_connect"]["strategy"], 0, "{}", feed);
-    assert_eq!(feed["skipped_total_since_connect"], 7, "{}", feed);
-    assert_eq!(feed["skipped_since_start"]["scalping"], 7, "{}", feed);
-    assert_eq!(feed["skipped_since_start"]["sandbox"], 0, "{}", feed);
-    assert_eq!(feed["skipped_total_since_start"], 7, "{}", feed);
+    let f = &md["broker_feeds"][0];
+    assert_eq!(f["skipped_since_connect"]["scalping"], 7, "{}", f);
+    assert_eq!(f["skipped_since_connect"]["strategy"], 0, "{}", f);
+    assert_eq!(f["skipped_total_since_connect"], 7, "{}", f);
+    assert_eq!(f["skipped_since_start"]["scalping"], 7, "{}", f);
+    assert_eq!(f["skipped_since_start"]["sandbox"], 0, "{}", f);
+    assert_eq!(f["skipped_total_since_start"], 7, "{}", f);
+
+    // The feed reconnects; then the strategy reader skips 2.
+    let connects = || {
+        feed.stats()
+            .connects
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    feed.reconnect();
+    until("the second connection", || {
+        connects() == 2 && feed.is_connected() && feed.stats().since_connect().skipped_total() == 0
+    })
+    .await;
+    feed.stats().note_skipped(Reader::Strategy, 2);
+    let (_, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    let md = &v["market_data"];
+    assert_eq!(md["status"], "warn", "{}", md);
+    let f = &md["broker_feeds"][0];
+    assert_eq!(f["skipped_since_connect"]["scalping"], 0, "{}", f);
+    assert_eq!(f["skipped_since_connect"]["strategy"], 2, "{}", f);
+    assert_eq!(f["skipped_total_since_connect"], 2, "{}", f);
+    assert_eq!(f["skipped_since_start"]["scalping"], 7, "{}", f);
+    assert_eq!(f["skipped_since_start"]["strategy"], 2, "{}", f);
+    assert_eq!(f["skipped_total_since_start"], 9, "{}", f);
+    feed.disconnect().await.unwrap();
+    srv.abort();
+}
+
+/// PROD-REL-05: what the bridge skipped relaying the broker's deeper-book
+/// socket to apps on the feed is counted against that socket, and health
+/// lists it once anything was skipped, under its own name.
+#[tokio::test]
+async fn health_shows_market_depth_its_readers_skipped() {
+    let (h, c, _) = signed_in();
+    let (_, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v["market_data"]["broker_feeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&v), ["market_data"], "{}", v);
+    h.ctx
+        .runtime
+        .depth_ws
+        .stats()
+        .note_skipped(openalgo_desktop_lib::websocket::Reader::FeedClients, 4);
+    let (_, v) = h.json(with(get("/health/api/current"), &c, None)).await;
+    assert_eq!(names(&v), ["market_data", "market_depth"], "{}", v);
+    let md = &v["market_data"];
+    assert_eq!(md["status"], "warn", "{}", md);
+    let depth = &md["broker_feeds"][1];
+    assert_eq!(depth["connected"], false, "{}", depth);
+    assert_eq!(depth["skipped_since_start"]["feed_clients"], 4, "{}", depth);
+    assert_eq!(depth["skipped_total_since_start"], 4, "{}", depth);
 }
 
 /// NEW-REL-05: health shows each database's size and how much it grew over
