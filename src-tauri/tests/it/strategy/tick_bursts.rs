@@ -506,6 +506,79 @@ async fn a_profit_lock_across_two_legs_stops_the_run_on_the_reversal() {
     t.m.shutdown().await;
 }
 
+/// Two long legs at 100, the call with a 90 stop, and a combined stop of
+/// 325 (5 points): the call's 94 breaches the combined stop, the put's 110
+/// brings the run back inside it, and the call's 89 then hits its own
+/// stop, all while the evaluator is busy. Answers the run and its legs'
+/// exits once acted on.
+async fn stop_then_leg_exit(t: &T, burst: &Burst, refuse_stop: bool) -> (i64, Vec<(i64, String)>) {
+    let call = option_leg(1, ("B", "weekly", "CE", "ATM"), json!({"sl_pts": 10}));
+    let put = option_leg(2, ("B", "weekly", "PE", "ATM"), json!({}));
+    let limit = json!({"overall_sl_mtm": 325});
+    let sid = t.make(config("Stop then leg", json!([call, put]), limit));
+    let run = t.start_filled(sid, 100.0).await;
+    if refuse_stop {
+        t.db.conn()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_stop BEFORE UPDATE OF stop_requested_reason \
+                 ON sm_strategy_run WHEN NEW.id = {} \
+                 BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+                run
+            ))
+            .unwrap();
+    }
+    let (call, put) = (t.leg(run, 1).symbol, t.leg(run, 2).symbol);
+    let mut sent = ticks(&call, &[94.0]);
+    sent.extend(ticks(&put, &[110.0]));
+    sent.extend(ticks(&call, &[89.0]));
+    send_while_held(t, burst, &sent).await;
+    eventually(|| !exit_kinds(t, run).is_empty()).await;
+    settled(t).await;
+    let exits = t
+        .orders(run)
+        .into_iter()
+        .filter(|o| o.kind != "entry")
+        .map(|o| (o.leg_id, o.kind))
+        .collect();
+    (run, exits)
+}
+
+/// A stop that placed nothing (its request could not be saved) does not
+/// take the leg exits decided after it down with it: the call's own stop,
+/// hit after the combined stop while the run was back inside it, is
+/// placed. Before, a leg exit decided behind a waiting stop was dropped,
+/// and the call stayed open until a later price breached again.
+#[tokio::test]
+async fn a_leg_exit_decided_after_a_stop_that_placed_nothing_is_placed() {
+    let (t, burst) = burst_module().await;
+    let (run, exits) = stop_then_leg_exit(&t, &burst, true).await;
+    assert_eq!(exits, vec![(1, "exit_sl".to_string())]);
+    assert_eq!(
+        t.run(run).stop_requested_reason,
+        None,
+        "the stop was not saved"
+    );
+    assert_eq!(t.leg(run, 2).status, "open");
+    t.m.shutdown().await;
+}
+
+/// The same path with a stop that exits every leg: the call's own exit,
+/// decided after the stop, is refused by the leg's claim, so each leg is
+/// exited once, by the stop.
+#[tokio::test]
+async fn a_leg_exit_decided_after_a_stop_that_exited_the_leg_is_not_placed_again() {
+    let (t, burst) = burst_module().await;
+    let (run, exits) = stop_then_leg_exit(&t, &burst, false).await;
+    let stop_kind = "exit_overall_sl".to_string();
+    assert_eq!(exits, vec![(1, stop_kind.clone()), (2, stop_kind)]);
+    assert_eq!(
+        t.run(run).stop_requested_reason.as_deref(),
+        Some("overall_sl")
+    );
+    t.m.shutdown().await;
+}
+
 /// A tick the reader itself misses (the channel overran it) is counted and
 /// turns the strategy tick health to warn; the web logs it at debug only.
 #[tokio::test]

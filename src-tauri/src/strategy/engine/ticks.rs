@@ -254,11 +254,7 @@ impl StrategyModule {
                 (run_id, symbol, exchange, ltp),
                 &mut events,
             );
-            Decision {
-                leg_exits,
-                stop_reason,
-                events,
-            }
+            Decision::of_price(leg_exits, stop_reason, events)
         });
         if let Some(decision) = decided {
             self.feed.pending.leave(run_id, ctx, decision);
@@ -283,7 +279,9 @@ impl StrategyModule {
     /// What was decided for one run, outside its lock (everything here
     /// reaches the database or broker): the page watching it updated, the
     /// events recorded, the leg exits decided before any stop placed, each
-    /// for the position it was decided on, then the stop.
+    /// for the position it was decided on, the stop, then the leg exits
+    /// decided with it or after it. Those are what exits a leg when the
+    /// stop placed nothing; a leg the stop exited refuses them at its claim.
     async fn act_on_run(&self, run_id: i64, work: RunWork) {
         let RunWork { ctx, decided, .. } = work;
         let (strategy, mode) = (&ctx.strategy, ctx.mode);
@@ -303,6 +301,10 @@ impl StrategyModule {
         }
         if decided.stop_reason.is_some() {
             self.act_on_risk(run_id, (strategy, mode), decided.stop_reason, vec![])
+                .await;
+        }
+        if !decided.after_stop.is_empty() {
+            self.act_on_risk(run_id, (strategy, mode), None, decided.after_stop)
                 .await;
         }
     }

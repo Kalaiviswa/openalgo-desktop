@@ -50,41 +50,78 @@ pub(crate) struct LegExit {
 }
 
 /// What one price decided for one run (in the run's lock) and, while it
-/// waits, every later decision combined into it.
+/// waits, every later decision combined into it, in the order acting on
+/// each in turn would place them: the leg exits before any stop, the first
+/// stop, then the leg exits decided with it or after it.
 #[derive(Debug, Default)]
 pub(crate) struct Decision {
+    /// Leg exits decided before any stop.
     pub(crate) leg_exits: Vec<LegExit>,
     /// A strategy-level breach: the run stops.
     pub(crate) stop_reason: Option<&'static str>,
+    /// Leg exits decided with the stop or after it. A stop can place no
+    /// exit at all (its request could not be saved, or a broker
+    /// acknowledgement could not be linked to its order), and these then
+    /// exit the legs; a leg the stop did exit refuses them at its claim.
+    pub(crate) after_stop: Vec<LegExit>,
     pub(crate) events: Vec<Event>,
 }
 
 impl Decision {
+    /// What one price decided: a price that stops the run acts on its own
+    /// leg exits after the stop.
+    pub(crate) fn of_price(
+        leg_exits: Vec<LegExit>,
+        stop_reason: Option<&'static str>,
+        events: Vec<Event>,
+    ) -> Self {
+        let mut d = Decision {
+            stop_reason,
+            events,
+            ..Default::default()
+        };
+        if stop_reason.is_some() {
+            d.after_stop = leg_exits;
+        } else {
+            d.leg_exits = leg_exits;
+        }
+        d
+    }
+
     /// Combine a later decision with this one, as acting on each in turn
-    /// would: a waiting stop closes every leg, so no action after it is
-    /// kept; a price that stops the run exits no leg of its own (the stop
-    /// does); a position keeps its first exit (its claim refuses a second).
-    /// A notification is kept once per kind and leg, a moving level's
-    /// latest replacing the one before.
+    /// would: its leg exits go before the waiting stop when there is none
+    /// yet and after it otherwise, the first stop is kept (a later one
+    /// would exit what the first did), and a position keeps its first exit
+    /// (its claim refuses a second). A notification is kept once per kind
+    /// and leg, a moving level's latest replacing the one before.
     fn merge(&mut self, later: Decision) {
         for e in later.events {
             self.note(e);
         }
-        if self.stop_reason.is_some() {
-            return;
-        }
-        if later.stop_reason.is_some() {
-            self.stop_reason = later.stop_reason;
-            return;
-        }
         for x in later.leg_exits {
-            let waiting = self
-                .leg_exits
-                .iter()
-                .any(|w| w.leg_id == x.leg_id && w.position_ref == x.position_ref);
-            if !waiting {
-                self.leg_exits.push(x);
-            }
+            self.keep_exit(x);
+        }
+        self.stop_reason = self.stop_reason.or(later.stop_reason);
+        for x in later.after_stop {
+            self.keep_exit(x);
+        }
+    }
+
+    /// Keep a leg exit where acting would place it: before the stop while
+    /// none waits, after it once one does.
+    fn keep_exit(&mut self, x: LegExit) {
+        let waiting = self
+            .leg_exits
+            .iter()
+            .chain(&self.after_stop)
+            .any(|w| w.leg_id == x.leg_id && w.position_ref == x.position_ref);
+        if waiting {
+            return;
+        }
+        if self.stop_reason.is_some() {
+            self.after_stop.push(x);
+        } else {
+            self.leg_exits.push(x);
         }
     }
 
@@ -261,42 +298,43 @@ mod tests {
         d
     }
 
+    fn price(leg_exits: Vec<LegExit>, stop_reason: Option<&'static str>) -> Decision {
+        Decision::of_price(leg_exits, stop_reason, vec![])
+    }
+
+    /// A leg keeps its first exit, the first stop is kept, and the leg
+    /// exits after it wait behind it rather than being dropped.
     #[test]
-    fn a_leg_keeps_its_first_exit_and_nothing_acts_after_a_stop() {
+    fn a_leg_keeps_its_first_exit_and_exits_after_a_stop_wait_behind_it() {
         let d = combined(vec![
-            Decision {
-                leg_exits: vec![exit(1, "exit_sl")],
-                ..Default::default()
-            },
-            Decision {
-                leg_exits: vec![exit(1, "exit_target"), exit(2, "exit_target")],
-                ..Default::default()
-            },
-            Decision {
-                stop_reason: Some("overall_sl"),
-                ..Default::default()
-            },
-            Decision {
-                leg_exits: vec![exit(3, "exit_sl")],
-                stop_reason: Some("lock_profit"),
-                ..Default::default()
-            },
+            price(vec![exit(1, "exit_sl")], None),
+            price(vec![exit(1, "exit_target"), exit(2, "exit_target")], None),
+            price(vec![], Some("overall_sl")),
+            price(
+                vec![exit(2, "exit_sl"), exit(3, "exit_sl")],
+                Some("lock_profit"),
+            ),
+            price(vec![exit(3, "exit_target"), exit(4, "exit_target")], None),
         ]);
         assert_eq!(exits(&d), vec![(1, "exit_sl"), (2, "exit_target")]);
         assert_eq!(d.stop_reason, Some("overall_sl"), "the first stop");
+        let after: Vec<(i64, &str)> = d.after_stop.iter().map(|x| (x.leg_id, x.kind)).collect();
+        assert_eq!(after, vec![(3, "exit_sl"), (4, "exit_target")]);
     }
 
-    /// Acting on one price alone, a stop wins and the price's own leg
-    /// exits are not placed (the stop exits every leg).
+    /// A stop can place nothing (its request could not be saved), so the
+    /// stopping price's own leg exits are acted on after it; a leg the
+    /// stop did exit refuses them at its claim.
     #[test]
-    fn a_price_that_stops_the_run_exits_no_leg_of_its_own() {
-        let d = combined(vec![Decision {
-            leg_exits: vec![exit(1, "exit_sl")],
-            stop_reason: Some("lock_profit"),
-            events: vec![event("leg_sl_hit", Some(1), "hit")],
-        }]);
+    fn a_price_that_stops_the_run_acts_on_its_own_leg_exits_after_the_stop() {
+        let d = combined(vec![Decision::of_price(
+            vec![exit(1, "exit_sl")],
+            Some("lock_profit"),
+            vec![event("leg_sl_hit", Some(1), "hit")],
+        )]);
         assert!(d.leg_exits.is_empty());
         assert_eq!(d.stop_reason, Some("lock_profit"));
+        assert_eq!(d.after_stop, vec![exit(1, "exit_sl")]);
         assert_eq!(d.events.len(), 1, "its events are still recorded");
     }
 
@@ -307,14 +345,8 @@ mod tests {
         let mut again = exit(1, "exit_sl");
         again.position_ref = Some("position-1b".into());
         let d = combined(vec![
-            Decision {
-                leg_exits: vec![exit(1, "exit_sl")],
-                ..Default::default()
-            },
-            Decision {
-                leg_exits: vec![again.clone()],
-                ..Default::default()
-            },
+            price(vec![exit(1, "exit_sl")], None),
+            price(vec![again.clone()], None),
         ]);
         assert_eq!(d.leg_exits, vec![exit(1, "exit_sl"), again]);
     }
@@ -389,15 +421,26 @@ mod tests {
         const LEGS: [i64; 3] = [1, 2, 3];
 
         /// What acting places: a position is exited once (its claim), a
-        /// stop exits every leg not yet exited, and the first stop's reason
-        /// is the one kept.
+        /// stop exits the legs it can that are not yet exited, and the
+        /// first stop's reason is the one kept. What a stop can exit is
+        /// fixed for a case: every leg, some (an entry not yet filled), or
+        /// none (its request could not be saved, or a broker
+        /// acknowledgement could not be linked).
         #[derive(Debug, Default, PartialEq)]
         struct Placed {
             exits: Vec<(i64, &'static str)>,
             stop: Option<&'static str>,
+            stop_exits: Vec<i64>,
         }
 
         impl Placed {
+            fn new(stop_exits: &[i64]) -> Self {
+                Placed {
+                    stop_exits: stop_exits.to_vec(),
+                    ..Default::default()
+                }
+            }
+
             fn exit(&mut self, leg_id: i64, kind: &'static str) {
                 if self.exits.iter().all(|(l, _)| *l != leg_id) {
                     self.exits.push((leg_id, kind));
@@ -406,31 +449,37 @@ mod tests {
 
             fn stop(&mut self, reason: &'static str) {
                 self.stop.get_or_insert(reason);
-                for leg in LEGS {
+                for leg in self.stop_exits.clone() {
                     self.exit(leg, "stop");
                 }
             }
 
-            /// The old path: each price acted on alone, a stop winning
-            /// over the price's own exits (`act_on_risk`).
-            fn act_alone(&mut self, d: &Decision) {
-                match d.stop_reason {
-                    Some(reason) => self.stop(reason),
-                    None => d.leg_exits.iter().for_each(|x| self.exit(x.leg_id, x.kind)),
+            /// One price acted on alone: its stop, then its own leg exits
+            /// (a leg the stop exited refuses them).
+            fn act_alone(&mut self, (exits, stop): &Price) {
+                if let Some(reason) = *stop {
+                    self.stop(reason);
                 }
+                exits.iter().for_each(|&(l, k)| self.exit(l, k));
             }
 
             /// The evaluator on combined decisions (`act_on_run`): the leg
-            /// exits waiting, then the stop.
+            /// exits before the stop, the stop, the leg exits after it.
             fn act_combined(&mut self, d: &Decision) {
                 d.leg_exits.iter().for_each(|x| self.exit(x.leg_id, x.kind));
                 if let Some(reason) = d.stop_reason {
                     self.stop(reason);
                 }
+                d.after_stop
+                    .iter()
+                    .for_each(|x| self.exit(x.leg_id, x.kind));
             }
         }
 
-        fn decision() -> impl Strategy<Value = Decision> {
+        /// One price's leg exits and stop, as decided.
+        type Price = (Vec<(i64, &'static str)>, Option<&'static str>);
+
+        fn priced() -> impl Strategy<Value = Price> {
             let leg_exit = (
                 prop::sample::select(LEGS.to_vec()),
                 prop::sample::select(vec!["exit_sl", "exit_target"]),
@@ -442,30 +491,32 @@ mod tests {
                     prop::sample::select(vec!["overall_sl", "lock_profit"]),
                 ),
             )
-                .prop_map(|(exits, stop_reason)| Decision {
-                    leg_exits: exits.into_iter().map(|(l, k)| exit(l, k)).collect(),
-                    stop_reason,
-                    events: vec![],
-                })
+        }
+
+        fn decided((exits, stop): &Price) -> Decision {
+            let exits = exits.iter().map(|&(l, k)| exit(l, k)).collect();
+            Decision::of_price(exits, *stop, vec![])
         }
 
         proptest! {
-            /// However the evaluator's turns cut a run of decisions,
-            /// acting on each turn's combined decisions places exactly
-            /// what acting on every decision in turn places.
+            /// However the evaluator's turns cut a run of decisions, and
+            /// whatever a stop manages to exit, acting on each turn's
+            /// combined decisions places exactly what acting on every
+            /// price in turn places.
             #[test]
             fn combining_decisions_places_what_acting_on_each_does(
-                decisions in prop::collection::vec(decision(), 1..40),
+                prices in prop::collection::vec(priced(), 1..40),
                 cuts in prop::collection::vec(any::<bool>(), 40),
+                stop_exits in prop::sample::subsequence(LEGS.to_vec(), 0..=LEGS.len()),
             ) {
-                let mut alone = Placed::default();
-                for d in &decisions {
-                    alone.act_alone(d);
+                let mut alone = Placed::new(&stop_exits);
+                for p in &prices {
+                    alone.act_alone(p);
                 }
-                let mut turns = Placed::default();
+                let mut turns = Placed::new(&stop_exits);
                 let mut waiting = Decision::default();
-                for (i, d) in decisions.into_iter().enumerate() {
-                    waiting.merge(d);
+                for (i, p) in prices.iter().enumerate() {
+                    waiting.merge(decided(p));
                     if cuts[i] {
                         turns.act_combined(&std::mem::take(&mut waiting));
                     }
