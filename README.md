@@ -831,7 +831,7 @@ Every system needs:
 | Tool | Version | How to get it |
 | --- | --- | --- |
 | Git | any recent | [git-scm.com](https://git-scm.com/downloads) |
-| Node.js | 22 LTS recommended (20.20+, 22.22+ or 24.13+ work) | [nodejs.org](https://nodejs.org/) or a version manager such as `nvm` |
+| Node.js | 22 LTS recommended (22.23.4+, 24.22.1+ or 26.12.1+; npm warns on Node 20 and on older patch levels) | [nodejs.org](https://nodejs.org/) or a version manager such as `nvm` |
 | Rust | 1.92.0, installed through `rustup` | [rustup.rs](https://rustup.rs/). The repository pins the version in `src-tauri/rust-toolchain.toml`, so `rustup` installs the right one automatically the first time you build |
 
 Each system also needs the native libraries the app window is built on:

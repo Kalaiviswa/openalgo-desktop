@@ -139,6 +139,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+          check-latest: true
       - name: JSON report (all severities, never fails)
         run: npm audit --omit=dev --json > npm-audit.json || true
       - name: JSON report of every dependency, dev tooling included (never fails)

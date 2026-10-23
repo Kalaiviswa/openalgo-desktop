@@ -291,6 +291,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
       - name: No high or critical advisory in the shipped JavaScript (npm audit)
         run: scripts/ci/advisory_scan.sh npm-audit
       - name: The update signing key is configured
@@ -431,6 +432,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Install the Tauri CLI the lockfile pins
@@ -590,6 +592,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci

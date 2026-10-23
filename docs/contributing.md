@@ -72,7 +72,8 @@ shape almost every decision in the code:
 
 The tools and the native libraries per system are in README,
 [Running from source](../README.md#running-from-source-developers): Git,
-Node.js 22 LTS (20.20+, 22.22+ or 24.13+ work), and Rust through `rustup`.
+Node.js 22 LTS (22.23.4+, 24.22.1+ or 26.12.1+, the October 2026 security
+releases; Node 20 is end of life), and Rust through `rustup`.
 The Rust version is pinned in `rust-toolchain.toml` at the repository root
 (1.92.0, with rustfmt and clippy), so `rustup` installs the right one the
 first time you build. On Linux the package list is the one CI uses
