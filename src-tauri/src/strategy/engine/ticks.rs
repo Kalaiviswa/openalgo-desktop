@@ -12,7 +12,7 @@ use super::{ev, exit_kind_for, stop_reason_for, StrategyModule};
 use crate::risk::BreachReason;
 use crate::strategy::dispatch::RunMode;
 use crate::strategy::risk_adapter;
-use crate::strategy::state::RunState;
+use crate::strategy::state::{ExitScope, RunState};
 use crate::strategy::store::{EventFields, StrategyRow};
 use crate::strategy::tick_feed::pending::{Decision, Event, LegExit, RunWork};
 use serde_json::{json, Value};
@@ -204,19 +204,6 @@ fn run_breach(
     None
 }
 
-/// The decided exits whose leg still holds the position each was decided
-/// on (in the run's lock): a leg re-entered since is another position.
-fn still_held(run: &RunState, exits: Vec<LegExit>) -> Vec<(i64, &'static str)> {
-    exits
-        .into_iter()
-        .filter(|x| {
-            run.leg(x.leg_id)
-                .is_some_and(|l| l.position_ref == x.position_ref)
-        })
-        .map(|x| (x.leg_id, x.kind))
-        .collect()
-}
-
 impl StrategyModule {
     /// Decide one price for every run holding the instrument, then act on
     /// every decision waiting: the REST poll's path, and a test's.
@@ -311,11 +298,7 @@ impl StrategyModule {
                 .await;
         }
         if !decided.leg_exits.is_empty() {
-            let exits = self
-                .state
-                .with_run(run_id, |run| still_held(run, decided.leg_exits))
-                .unwrap_or_default();
-            self.act_on_risk(run_id, (strategy, mode), None, exits)
+            self.act_on_risk(run_id, (strategy, mode), None, decided.leg_exits)
                 .await;
         }
         if decided.stop_reason.is_some() {
@@ -326,13 +309,16 @@ impl StrategyModule {
 
     /// What risk decided, once the lock is released: a strategy-level
     /// breach stops the run; leg exits are placed, unless there is no
-    /// broker session (recorded once per episode, never pretended).
+    /// broker session (recorded once per episode, never pretended). Each
+    /// leg's claim takes only the position its exit was decided on: the
+    /// exits before it are placed first, and a leg re-entered meanwhile
+    /// holds another position.
     async fn act_on_risk(
         &self,
         run_id: i64,
         (strategy, mode): (&StrategyRow, RunMode),
         stop_reason: Option<&'static str>,
-        leg_exits: Vec<(i64, &'static str)>,
+        leg_exits: Vec<LegExit>,
     ) {
         let strategy_id = strategy.id;
         let user_id = strategy.user_id.clone();
@@ -386,9 +372,17 @@ impl StrategyModule {
         }
         self.note_actionable_again(strategy_id, &user_id, run_id)
             .await;
-        for (leg_id, kind) in leg_exits {
-            self.exit_legs(run_id, strategy, &[leg_id], kind, mode, &user_id)
-                .await;
+        for x in leg_exits {
+            let decided = ExitScope::DecidedOn(x.position_ref.as_deref());
+            self.exit_legs(
+                run_id,
+                strategy,
+                (&[x.leg_id], decided),
+                x.kind,
+                mode,
+                &user_id,
+            )
+            .await;
         }
     }
 }

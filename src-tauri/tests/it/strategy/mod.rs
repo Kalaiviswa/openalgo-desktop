@@ -39,5 +39,6 @@ mod strategy_restx_api;
 mod strategy_views;
 mod tick_bursts;
 mod tick_paths;
+mod tick_positions;
 mod unconfirmed_orders;
 mod webhook_security;

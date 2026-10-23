@@ -407,11 +407,14 @@ impl StateRegistry {
     }
 
     /// Claim every exitable leg and name the unfilled ones, in one hold.
+    /// A risk decision's exit claims only the position it was decided on,
+    /// checked in the same hold (`ExitScope::DecidedOn`).
     pub fn claim_legs_for_exit(
         &self,
         run_id: i64,
         leg_ids: &[i64],
         kind: &str,
+        scope: ExitScope<'_>,
     ) -> (Vec<ExitClaim>, Vec<LegState>) {
         self.with_run(run_id, |run| {
             let mut claimed = Vec::new();
@@ -420,6 +423,11 @@ impl StateRegistry {
                 let Some(leg) = run.leg_mut(*leg_id) else {
                     continue;
                 };
+                if let ExitScope::DecidedOn(decided) = scope {
+                    if leg.position_ref.as_deref() != decided {
+                        continue;
+                    }
+                }
                 if leg.status != "open" || leg.exit_in_flight() {
                     continue;
                 }
@@ -848,6 +856,19 @@ impl StateRegistry {
         })
         .unwrap_or(false)
     }
+}
+
+/// Which of a leg's positions an exit closes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExitScope<'a> {
+    /// Whatever the leg holds when it is claimed: a stop, an operator's
+    /// close.
+    Held,
+    /// Only the position risk decided on (its `position_ref`). Acting can
+    /// come long after deciding (another leg's exit is placed first), and a
+    /// leg re-entered meanwhile holds another position, which that decision
+    /// must not close.
+    DecidedOn(Option<&'a str>),
 }
 
 /// What identifies an exit claim: the token taken before dispatch, or the

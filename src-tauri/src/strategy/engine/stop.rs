@@ -3,6 +3,7 @@
 //! run is flat.
 
 use super::{ev, StopOutcome, StrategyModule, STATE_UNAVAILABLE};
+use crate::strategy::state::ExitScope;
 use crate::strategy::store::{RunRow, StrategyRow, ORDER_KINDS};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -107,7 +108,14 @@ impl StrategyModule {
         let managed = snapshot.managed_leg_ids();
         let kind = stop_exit_kind(&reason);
         let exits = self
-            .exit_legs(run_id, &strategy, &managed, &kind, mode, user_id)
+            .exit_legs(
+                run_id,
+                &strategy,
+                (&managed, ExitScope::Held),
+                &kind,
+                mode,
+                user_id,
+            )
             .await;
 
         self.stop_after_exits(run_id, (strategy_id, user_id), &reason, exits)
@@ -353,7 +361,7 @@ impl StrategyModule {
             .exit_legs(
                 run_id,
                 &strategy,
-                &[leg_id],
+                (&[leg_id], ExitScope::Held),
                 "exit_leg_manual",
                 mode,
                 user_id,
