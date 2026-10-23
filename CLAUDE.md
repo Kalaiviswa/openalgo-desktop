@@ -832,12 +832,16 @@ Every flaky test found so far was a race, not a slow machine:
   a loaded runner stretched one page past 200 ms. Format with the read on
   the blocking pool, and assert the total with `runtime_busy` as well as
   the worst gap.
-- The reverse also happens: running many integration modules together in
-  one `cargo test` process with three or more test threads (strategy::,
-  webui2::, webui_monitoring::, webui_reports:: and the like) hits macOS's
-  limit of 2048 threads per process, and r2d2's scheduled thread pool fails
-  with WouldBlock. CI is not affected (nextest runs one process per test).
-  Locally, run those modules with `--test-threads=2`, or use nextest.
+- The reverse also happens: one `cargo test` process running many tests
+  with three or more test threads hits macOS's limit of 2048 threads per
+  process, and r2d2's scheduled thread pool fails with WouldBlock. It began
+  with integration modules (strategy::, webui2::, webui_monitoring::,
+  webui_reports:: and the like); since 1.0.1 the full `--lib` run reaches
+  it too (55 failures on master, 2026-10-23, every one "Resource
+  temporarily unavailable"). CI is not affected (nextest runs one process
+  per test). Run the full suite locally as CI does: `cargo nextest run
+  --locked --all-targets --config-file ../.github/nextest.toml --profile
+  ci`, then `cargo test --locked --doc`; a filtered `cargo test` stays fine.
 - A `runtime_stall` gap far above the measured work's own polls
   (`runtime_busy`) is not that work: the report pages' test saw the timer
   374 ms late on a macOS runner while all sixteen requests' polls took
