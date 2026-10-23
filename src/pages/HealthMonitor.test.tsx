@@ -430,7 +430,9 @@ describe('Health Monitor when a read fails', () => {
 
     expect(screen.getByText(/System Status: UNKNOWN/)).toBeInTheDocument()
     expect(
-      screen.getByText(/Could not refresh health at .* IST; shown as read at/)
+      screen.getByText(
+        /^Could not refresh the health figures at .* IST; shown as read at .* IST\. OpenAlgo tries again every 10 seconds while Auto is on, or choose Refresh\.$/
+      )
     ).toBeInTheDocument()
     expect(screen.getByText('Records Saved')).toBeInTheDocument()
     expect(screen.getByText('2 not saved')).toBeInTheDocument()
@@ -439,12 +441,31 @@ describe('Health Monitor when a read fails', () => {
     ).toBeGreaterThan(0)
   })
 
+  // One failed refresh turned a red FAIL banner into a grey UNKNOWN.
+  it('keeps a FAIL it last read, with when it was read, when a refresh fails', async () => {
+    api.getCurrentMetrics
+      .mockResolvedValueOnce(metrics({ sample_age_s: 5, overall_status: 'fail' }))
+      .mockRejectedValue(new Error('unreachable'))
+    render(<HealthMonitor />)
+
+    expect(await screen.findByText('System Status: FAIL')).toBeInTheDocument()
+    await refresh(2)
+
+    expect(screen.getByText(/^System Status: FAIL when last read at .* IST$/)).toBeInTheDocument()
+    expect(screen.queryByText(/System Status: UNKNOWN/)).not.toBeInTheDocument()
+    expect(screen.getByText(/^Could not refresh the health figures at/)).toBeInTheDocument()
+  })
+
   it('shows UNKNOWN and the checks as not known when health was never read', async () => {
     api.getCurrentMetrics.mockRejectedValue(new Error('unreachable'))
     render(<HealthMonitor />)
 
     expect(await screen.findByText(/System Status: UNKNOWN/)).toBeInTheDocument()
-    expect(screen.getByText('Could not read health. Refresh to try again.')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Could not read the health figures. OpenAlgo tries again every 10 seconds while Auto is on, or choose Refresh.'
+      )
+    ).toBeInTheDocument()
     expect(screen.getByText('Order Tracking')).toBeInTheDocument()
     expect(screen.getAllByText('Not known')).toHaveLength(4)
     expect(screen.queryByText('None stuck')).not.toBeInTheDocument()
@@ -469,7 +490,9 @@ describe('Health Monitor when a read fails', () => {
     render(<HealthMonitor />)
 
     expect(
-      await screen.findByText('Could not read the alerts. Refresh to try again.')
+      await screen.findByText(
+        'Could not read the alerts. OpenAlgo tries again every 10 seconds while Auto is on, or choose Refresh.'
+      )
     ).toBeInTheDocument()
     expect(screen.getByText('Active Alerts')).toBeInTheDocument()
   })

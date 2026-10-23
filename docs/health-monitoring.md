@@ -86,12 +86,17 @@ stalled OpenAlgo is marked before the next refresh tries again:
 - What was read before stays on screen, marked in its own card "Could not
   refresh ... at 10:15:20 am IST; shown as read at 10:14:10 am IST.": the
   checks, both charts, the statistics, **Top Memory Processes**, **Thread
-  Details**, **Recent Metrics**, the alerts and the unconfirmed orders. The
-  banner shows UNKNOWN while the latest figures could not be refreshed.
+  Details**, **Recent Metrics**, the alerts and the unconfirmed orders.
+  Times are in IST, with the date when it is not today.
+- While the latest figures could not be refreshed, the banner shows
+  UNKNOWN, or the WARN or FAIL it last read, as "FAIL when last read at
+  10:14:10 am IST": a failed refresh never hides bad news, and never
+  carries a PASS forward.
 - Something never read says so in its card ("Could not read the alerts.
-  Refresh to try again."), and a list never read is not shown as an empty
-  table or "No ... available". The checks a trader acts on (Market Data,
-  Order Tracking, Records Saved, Strategy Prices) show "Not known", never a
+  OpenAlgo tries again every 10 seconds while Auto is on, or choose
+  Refresh."), and a list never read is not shown as an empty table or
+  "No ... available". The checks a trader acts on (Market Data, Order
+  Tracking, Records Saved, Strategy Prices) show "Not known", never a
   pass.
 - A failed read changes nothing in OpenAlgo: an unconfirmed order stays
   held until it is found or you mark it not placed.
@@ -278,7 +283,8 @@ stretch one trading session's writes over a whole day.
 
 The **Data Files** card shows each store's size with its daily average over
 the samples kept, says over how many days, and how much all the data grew
-in the last day. With less than a day of samples it shows the growth itself
+in the last day (in the last 12 hours, say, when OpenAlgo ran for only part
+of the day). With less than a day of samples it shows the growth itself
 ("+0.4 MB in 5 h"), and with less than an hour only the sizes. There are no
 warning levels for growth. The sizes are also on the Diagnostics page under
 **Databases** and in the downloaded report.

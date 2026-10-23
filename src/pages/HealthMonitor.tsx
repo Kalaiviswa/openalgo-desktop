@@ -46,7 +46,7 @@ import {
 import { AppHealthCards } from '@/components/desktop/health/AppHealthCards'
 import { NoHealthSamples } from '@/components/desktop/health/NoHealthSamples'
 import { NotRefreshed, NotRefreshedCard } from '@/components/desktop/health/NotRefreshed'
-import { formatAge, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
+import { formatAge, readTime, sampleFreshness } from '@/components/desktop/health/sampleFreshness'
 import { UnconfirmedOrders } from '@/components/desktop/health/UnconfirmedOrders'
 import { REFRESH_INTERVAL_MS, useHealthReads } from '@/components/desktop/health/useHealthReads'
 // Alert components removed - using custom styled divs for theme compatibility
@@ -438,7 +438,10 @@ export default function HealthMonitor() {
   }
 
   // Desktop: a missing or stale sample is UNKNOWN, never the PASS it last showed.
-  const { overallStatus, sampleAge, staleReason, cardStatus } = sampleFreshness(reads.current)
+  // A WARN or FAIL last read stays, with when it was read, after a failed refresh.
+  const { overallStatus, verdictReadAt, sampleAge, staleReason, cardStatus } = sampleFreshness(
+    reads.current
+  )
   const metricsPending = !currentMetrics && reads.current.failedAt === null
 
   return (
@@ -484,7 +487,10 @@ export default function HealthMonitor() {
         >
           <StatusIcon status={overallStatus} />
           <div>
-            <p className="font-semibold">System Status: {overallStatus.toUpperCase()}</p>
+            <p className="font-semibold">
+              System Status: {overallStatus.toUpperCase()}
+              {verdictReadAt !== null && ` when last read at ${readTime(verdictReadAt)}`}
+            </p>
             {currentMetrics && (
               <p className="text-sm text-neutral-600 dark:text-muted-foreground">
                 Last updated (IST): {formatIstDateTime(currentMetrics.timestamp)}

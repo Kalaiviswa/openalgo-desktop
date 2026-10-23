@@ -105,6 +105,59 @@ describe('App health cards', () => {
     ).toBeInTheDocument()
   })
 
+  // "over the last 1 days", and a last day with samples from only part of
+  // it called "the last day".
+  it('names each growth window by its own span, one day or hour as one', () => {
+    const oneDay = {
+      ...growth,
+      window_hours: 25,
+      last_day: {
+        window_hours: 23.8,
+        since: '2026-10-19T11:00:00+05:30',
+        stores: {},
+        total: { size_mb: 163.5, growth_mb: 6, per_day_mb: null },
+      },
+    }
+    const { unmount } = render(
+      <AppHealthCards
+        read={fresh({ database: { total: 1, connections: {}, status: 'pass', growth: oneDay } })}
+      />
+    )
+    expect(screen.getByText('Growth per day: the average over the last day.')).toBeInTheDocument()
+    unmount()
+
+    const partOfDay = {
+      ...oneDay,
+      window_hours: 48,
+      last_day: { ...oneDay.last_day, window_hours: 12 },
+    }
+    render(
+      <AppHealthCards
+        read={fresh({ database: { total: 1, connections: {}, status: 'pass', growth: partOfDay } })}
+      />
+    )
+    expect(
+      screen.getByText(
+        'Growth per day: the average over the last 2 days. In the last 12 hours all data grew +6.0 MB.'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('says growth over the last hour, not 1 hours', () => {
+    const anHour = {
+      window_hours: 1.2,
+      since: '2026-10-20T09:00:00+05:30',
+      stores: {},
+      total: { size_mb: 40, growth_mb: 0.1, per_day_mb: null },
+    }
+    render(
+      <AppHealthCards
+        read={fresh({ database: { total: 1, connections: {}, status: 'pass', growth: anHour } })}
+      />
+    )
+    expect(screen.getByText(/^Growth over the last hour;/)).toBeInTheDocument()
+  })
+
   it('shows the growth itself, not a daily rate, over less than a day of samples', () => {
     const hours = {
       window_hours: 5,
@@ -296,9 +349,33 @@ describe('App health cards', () => {
     )
     expect(notes).toContainEqual(
       expect.stringMatching(
-        /Live since 10:00:00 am IST: the broker's order feed reconnected; Sandbox since 10:01:00 am IST: an order update could not be delivered inside OpenAlgo.*re-checking the broker's order book/
+        /Live since 20 Oct, 10:00:00 am IST: the broker's order feed reconnected; Sandbox since 20 Oct, 10:01:00 am IST: an order update could not be delivered inside OpenAlgo.*re-checking the broker's order book/
       )
     )
+  })
+
+  // A gap open since yesterday read "Live since 3:20:05 pm IST".
+  it('names the date of a gap that opened before today, and only the time of one today', () => {
+    const facts = (since: string) => ({
+      status: 'fail' as const,
+      gaps: [{ mode: 'live', cause: 'event_loss', since }],
+      running: true,
+      passes: 1,
+      book_reads: 1,
+      book_read_failures: 0,
+      book_reads_discarded: 0,
+      gaps_opened: 1,
+      gaps_closed: 0,
+      unconfirmed_orders: 0,
+    })
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString()
+    const { unmount } = render(<AppHealthCards read={fresh({ order_facts: facts(yesterday) })} />)
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Live since \d{1,2} [A-Z][a-z]{2}, \d{2}:\d{2}:\d{2} [ap]m IST:/
+    )
+    unmount()
+    render(<AppHealthCards read={fresh({ order_facts: facts(new Date().toISOString()) })} />)
+    expect(screen.getByRole('status')).toHaveTextContent(/Live since \d{2}:\d{2}:\d{2} [ap]m IST:/)
   })
 
   // PROD-PAR-01: with health unread the checks were left out, so a page

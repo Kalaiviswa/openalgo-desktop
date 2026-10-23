@@ -162,17 +162,42 @@ function sizeAndGrowth(size: number | null, store: StoreGrowth | undefined, hour
   return mb(size)
 }
 
-/** Which windows the growth figures cover. */
+/** "day", "3 days", "hour", "5 hours": a window's span, after "the last". */
+function span(hours: number): string {
+  if (hours >= 24) {
+    const days = Math.round((hours / 24) * 10) / 10
+    return days === 1 ? 'day' : `${days} days`
+  }
+  const whole = Math.round(hours)
+  return whole === 1 ? 'hour' : `${whole} hours`
+}
+
+/**
+ * The last day's window runs from the oldest sample in the last 24 hours:
+ * the whole day once that sample came within a few sampling periods of the
+ * day's start, else only the hours the app was running.
+ */
+const WHOLE_DAY_HOURS = 23.5
+
+/**
+ * Which windows the growth figures cover, each named by its own span; the
+ * last day is left out when it is the same window as the average's.
+ */
 function growthNote(growth: DataGrowth | undefined): string | null {
   if (!growth) return null
   const hours = growth.window_hours
   if (hours < 1) return 'Growth shows once an hour of samples is kept.'
   if (hours < 24) {
-    return `Growth over the last ${Math.round(hours)} hours; a daily average shows once a day of samples is kept.`
+    return `Growth over the last ${span(hours)}; a daily average shows once a day of samples is kept.`
   }
-  const days = Math.round((hours / 24) * 10) / 10
-  const lastDay = growth.last_day?.total.growth_mb
-  return `Growth per day: the average over the last ${days} days.${lastDay != null ? ` In the last day all data grew ${signedMb(lastDay)}.` : ''}`
+  const average = span(hours)
+  const day = growth.last_day
+  const daySpan = day && (day.window_hours >= WHOLE_DAY_HOURS ? 'day' : span(day.window_hours))
+  const lastDay =
+    day && daySpan && day.total.growth_mb != null && day.window_hours >= 1 && daySpan !== average
+      ? ` In the last ${daySpan} all data grew ${signedMb(day.total.growth_mb)}.`
+      : ''
+  return `Growth per day: the average over the last ${average}.${lastDay}`
 }
 
 export function DataFilesCard({
