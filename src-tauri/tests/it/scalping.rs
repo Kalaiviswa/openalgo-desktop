@@ -1831,10 +1831,66 @@ async fn ticks_flow_through_the_owned_task_and_stop_releases_everything() {
 
 #[test]
 fn exit_chunks_are_whole_lots() {
-    assert_eq!(chunks(1950, Some(1755)), vec![1755, 195]);
-    assert_eq!(chunks(65, Some(1755)), vec![65]);
-    assert_eq!(chunks(10, None), vec![10]);
-    assert_eq!(chunks(3510, Some(1755)), vec![1755, 1755]);
+    assert_eq!(chunks(1950, Some(1755)), Ok(vec![1755, 195]));
+    assert_eq!(chunks(65, Some(1755)), Ok(vec![65]));
+    assert_eq!(chunks(10, None), Ok(vec![10]));
+    assert_eq!(chunks(3510, Some(1755)), Ok(vec![1755, 1755]));
+    let full = chunks(130_000, Some(1300)).unwrap();
+    assert_eq!((full.len(), full.iter().sum::<i64>()), (100, 130_000));
+}
+
+/// Count before allocating: an exit's orders are counted before any is
+/// built, and more than 100 is refused. The quantity is the broker's
+/// position book's; one of 2147483647 in orders of 1 asked for 16 GiB
+/// before anything was counted (the cap makes that abort, not swap).
+#[test]
+fn an_exit_counts_its_orders_before_building_them() {
+    let (refused, largest) = crate::alloc_support::capped_sync(64 << 20, || {
+        [
+            chunks(i64::from(i32::MAX), Some(1)),
+            chunks(i64::MAX, Some(1)),
+            chunks(130_065, Some(1300)),
+        ]
+    });
+    assert!(refused.iter().all(Result::is_err), "{:?}", refused);
+    assert!(largest < 4096, "{} bytes in one allocation", largest);
+    assert_eq!(
+        refused[2],
+        Err("Closing 130065 would take more than 100 orders of 1300, so no exit was sent".into())
+    );
+}
+
+/// An exit that would take more than 100 orders (a position book showing
+/// far more than the stop was set for) is refused like any exit that cannot
+/// go out: nothing is sent, the stop stays managed, and the trader is told
+/// why. Before, all 101 orders went out.
+#[tokio::test]
+async fn an_exit_needing_more_than_100_orders_is_refused_and_the_stop_stays() {
+    let m = monitor();
+    // 100 orders of the freeze-sized chunk, and one lot more.
+    let net = freeze_chunk() * 100 + 65;
+    *m.gw.net.lock() = net;
+    m.store.upsert_sl(&leg("live")).unwrap();
+    m.mon.sync().await;
+    m.mon.process_tick(OPT, "NFO", 94.0).await;
+    m.mon.wait_idle().await;
+    assert!(m.gw.placed.lock().is_empty(), "no exit order was sent");
+    assert_eq!(m.mon.leg_count(), 1, "the stop stays managed");
+    assert_eq!(m.store.active_sl(None).unwrap().len(), 1);
+    let alerts = m.alerts.lock().clone();
+    assert_eq!(alerts.len(), 1, "{:?}", alerts);
+    let why = format!(
+        "Closing {} would take more than 100 orders of {}",
+        net,
+        freeze_chunk()
+    );
+    assert!(alerts[0].contains(&why), "{}", alerts[0]);
+    // Its next breach is refused again, and told once.
+    m.clock.advance(chrono::Duration::seconds(4));
+    m.mon.process_tick(OPT, "NFO", 93.0).await;
+    m.mon.wait_idle().await;
+    assert!(m.gw.placed.lock().is_empty());
+    assert_eq!(m.alerts.lock().len(), 1);
 }
 
 // ------------------------------------------------------------------ the real app

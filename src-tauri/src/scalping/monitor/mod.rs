@@ -49,6 +49,7 @@ use crate::brokers::common::symbols::SymbolResolver;
 use crate::clock::Clock;
 use crate::events::subscribers::socketio::UiEmitter;
 use crate::risk::{evaluate_position, BreachReason, PositionRisk, Side, TrailMode};
+use crate::services::batch_order_service::{split_chunks, MAX_SPLIT_ORDERS};
 use crate::services::freeze_qty_service::FreezeLimits;
 use crate::services::order_reconciler::AbsenceTracker;
 use crate::strategy::dispatch::{Book, BookOrder, OrderGateway, RunMode};
@@ -159,17 +160,20 @@ pub fn exit_chunk(
     }))
 }
 
-/// Split `quantity` into orders of at most `chunk` (the last one smaller).
-pub fn chunks(quantity: i64, chunk: Option<i64>) -> Vec<i64> {
+/// Split `quantity` into orders of at most `chunk` (the last one smaller),
+/// counted before any is built. The quantity comes from the broker's
+/// position book, so a wrong one there is refused (`Err`, trader-facing)
+/// rather than sent as more than `MAX_SPLIT_ORDERS` exit orders or
+/// allocated first ("Count before allocating", PROD-TR-03).
+pub fn chunks(quantity: i64, chunk: Option<i64>) -> Result<Vec<i64>, String> {
     match chunk {
-        Some(c) if c > 0 && quantity > c => {
-            let mut out = vec![c; (quantity / c) as usize];
-            if quantity % c != 0 {
-                out.push(quantity % c);
-            }
-            out
-        }
-        _ => vec![quantity],
+        Some(c) if c > 0 && quantity > c => split_chunks(quantity, c).ok_or_else(|| {
+            format!(
+                "Closing {} would take more than {} orders of {}, so no exit was sent",
+                quantity, MAX_SPLIT_ORDERS, c
+            )
+        }),
+        _ => Ok(vec![quantity]),
     }
 }
 

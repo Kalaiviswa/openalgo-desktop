@@ -359,6 +359,28 @@ impl RiskMonitor {
         Some(why)
     }
 
+    /// The orders an exit of `qty` is sent in: whole lots, never above the
+    /// freeze, and counted before they are built. More than
+    /// `MAX_SPLIT_ORDERS` of them is refused like any exit that cannot go
+    /// out (the stop stays managed), and the trader is told: the quantity
+    /// is the broker's position book's, and a wrong one there must not
+    /// become hundreds of orders.
+    fn exit_orders(&self, key: &str, sl: &SlState, qty: i64) -> Result<Vec<i64>, ExitOutcome> {
+        let chunk = exit_chunk(&self.symbols, &self.freeze, &sl.symbol, &sl.exchange, qty)
+            .map_err(ExitOutcome::Refused)?;
+        chunks(qty, chunk).map_err(|why| {
+            self.alert_once(
+                key,
+                "too_many_orders",
+                format!(
+                    "Scalping stop for {} {}: {}. That quantity is what the broker's position book shows. The stop stays; check the position at the broker and close it there.",
+                    sl.symbol, sl.exchange, why
+                ),
+            );
+            ExitOutcome::Refused(why)
+        })
+    }
+
     /// Exit one leg in the mode it was opened in: read its net position,
     /// then send whole-lot, freeze-safe MARKET orders for what is neither
     /// filled nor still working from earlier exits of this leg.
@@ -392,9 +414,9 @@ impl RiskMonitor {
             Err(outcome) => return outcome,
         };
         let action = if net > 0 { "SELL" } else { "BUY" };
-        let chunk = match exit_chunk(&self.symbols, &self.freeze, &sl.symbol, &sl.exchange, qty) {
-            Ok(c) => c,
-            Err(e) => return ExitOutcome::Refused(e),
+        let parts = match self.exit_orders(key, sl, qty) {
+            Ok(p) => p,
+            Err(outcome) => return outcome,
         };
         let mut a = attempt.unwrap_or_else(|| ExitAttempt {
             id: crate::strategy::state::new_position_ref(),
@@ -404,7 +426,6 @@ impl RiskMonitor {
         });
         let mut refused: Option<String> = None;
         let (mut accepted, mut unconfirmed) = (0usize, 0usize);
-        let parts = chunks(qty, chunk);
         let last = parts.len().saturating_sub(1);
         for (i, q) in parts.into_iter().enumerate() {
             let order = OrderPayload {
