@@ -165,9 +165,18 @@ fn lot(s: &str) -> i32 {
     parse_num::<f64>(s).map(|v| v as i32).unwrap_or(1)
 }
 
+/// NSE_CM instrument types that trade as a series of an underlying rather
+/// than as the underlying itself: 2 = NCDs and bonds (`-N0`..`-NM`, `-GB`),
+/// 3 = warrants (`-W1`), 4 = InvITs and similar units (`-IV`, `-SF`, `-D1`),
+/// 5 = state loans (`-SG`), 6 = government loans (`-GS`), 7 = treasury bills
+/// (`-TB`). Type 8 (`-MF`) is left out: Kite does not list those units
+/// either (web issue #2280).
+const NSE_SERIES_TYPES: &[i64] = &[2, 3, 4, 5, 6, 7];
+
 /// `NSE_CM.csv` / `BSE_CM.csv` (`cash` is `NSE` or `BSE`): equities (NSE
-/// types 0, 9 and `-GB` bonds of type 2; BSE types 0, 4, 50) and indices
-/// (type 10, on `NSE_INDEX` / `BSE_INDEX`), all typed `EQ`.
+/// types 0, 9 and [`NSE_SERIES_TYPES`]; BSE types 0, 4, 50) and indices
+/// (type 10, on `NSE_INDEX` / `BSE_INDEX`), all typed `EQ`, as Kite types
+/// them.
 pub fn parse_cash_csv(
     text: &str,
     cash: &str,
@@ -191,9 +200,8 @@ pub fn parse_cash_csv(
             continue;
         };
         let ticker = get(col::TICKER);
-        let exchange = if eq_types.contains(&itype)
-            || (cash == "NSE" && itype == 2 && ticker.ends_with("-GB"))
-        {
+        let series = cash == "NSE" && NSE_SERIES_TYPES.contains(&itype);
+        let exchange = if eq_types.contains(&itype) || series {
             cash
         } else if itype == 10 {
             index_ex
@@ -202,6 +210,15 @@ pub fn parse_cash_csv(
         };
         let underlying = get(col::UNDERLYING);
         let (symbol, name) = match exchange {
+            // The underlying cannot name a series: series share one
+            // (IMC1-N1, -N2 and -N3 are all IMC1), and some share it with
+            // the equity itself (MOTHERSON-D1). The ticker without its
+            // exchange prefix keeps the series and matches Kite's
+            // tradingsymbol (10ISFL26-N3, SGBAPR28I-GB).
+            _ if series => (
+                ticker.strip_prefix("NSE:").unwrap_or(ticker).to_string(),
+                get(col::SYMBOL_DETAILS).to_string(),
+            ),
             "NSE_INDEX" => (
                 nse_index_symbol(underlying),
                 index_feed_name(ticker, index_names),

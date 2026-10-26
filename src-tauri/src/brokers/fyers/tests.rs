@@ -73,13 +73,45 @@ fn master_nse_cash_equities_bonds_and_indices() {
     let tata = r.by_symbol("NSE", "TATASTEEL").unwrap();
     assert_eq!(tata.name, "TATA STEEL, LTD");
     assert_eq!(tata.tick_size, 0.01);
-    // Type 9 (SME) and -GB bonds of type 2 are NSE EQ; other type 2 is not.
+    // Type 9 (SME) is NSE EQ, named by its underlying.
     assert_eq!(r.by_symbol("NSE", "SMECO").unwrap().lot_size, 1600);
+    // Series types 2-7 (bonds, warrants, units, state and government loans,
+    // T-bills) are NSE EQ, named by the ticker as Kite names them, so
+    // series of one underlying stay apart (web issue #2280).
+    let ncd = r.by_symbol("NSE", "10ISFL26-N3").unwrap();
+    assert_eq!(ncd.brsymbol, "NSE:10ISFL26-N3");
+    assert_eq!(ncd.token, "101000000020771");
+    assert_eq!(ncd.instrument_type, "EQ");
+    assert_eq!(ncd.name, "SEC RE NCD 10% SR 4");
+    assert!(r.by_symbol("NSE", "10ISFL26").is_none());
+    assert_eq!(r.by_symbol("NSE", "718GS2033-GB").unwrap().lot_size, 1);
+    assert!(r.by_symbol("NSE", "718GS2033").is_none());
+    assert!(r.by_symbol("NSE", "SOMEDEBT-N1").is_some());
     assert_eq!(
-        r.by_symbol("NSE", "718GS2033").unwrap().instrument_type,
-        "EQ"
+        r.by_symbol("NSE", "IMC1-N1").unwrap().token,
+        "101000000014219"
     );
-    assert!(r.by_symbol("NSE", "SOMEDEBT").is_none());
+    assert_eq!(
+        r.by_symbol("NSE", "IMC1-N2").unwrap().token,
+        "101000000014224"
+    );
+    assert_eq!(r.by_symbol("NSE", "ELECTCAST-W1").unwrap().lot_size, 33340);
+    assert_eq!(r.by_symbol("NSE", "ANZEN-IV").unwrap().lot_size, 25000);
+    assert_eq!(r.by_symbol("NSE", "582RJ27-SG").unwrap().lot_size, 100);
+    assert!(r.by_symbol("NSE", "574GS2026-GS").is_some());
+    assert_eq!(r.by_symbol("NSE", "182D010427-TB").unwrap().lot_size, 100);
+    // A unit sharing the equity's underlying does not take its name.
+    assert_eq!(
+        r.by_symbol("NSE", "MOTHERSON").unwrap().brsymbol,
+        "NSE:MOTHERSON-EQ"
+    );
+    assert_eq!(
+        r.by_symbol("NSE", "MOTHERSON-D1").unwrap().brsymbol,
+        "NSE:MOTHERSON-D1"
+    );
+    // Type 8 (-MF) is not loaded.
+    assert!(r.by_symbol("NSE", "ABSLFTTQDG-MF").is_none());
+    assert!(r.by_symbol("NSE", "ABSLFTTQDG").is_none());
     // Indices: symbol from the underlying, spaces/hyphens removed, renames.
     let nifty = r.by_symbol("NSE_INDEX", "NIFTY").unwrap();
     assert_eq!(nifty.brsymbol, "NSE:NIFTY50-INDEX");
@@ -166,7 +198,7 @@ fn master_cds_and_mcx_lots_come_from_qty_multiplier() {
     let c = r.by_symbol("MCX", "CRUDEOIL15OCT268650CE").unwrap();
     assert_eq!((c.lot_size, c.expiry.as_str()), (100, "15-OCT-26"));
     assert!(parse_json_master("not json", "MCX").is_err());
-    assert_eq!(rows().len(), 28);
+    assert_eq!(rows().len(), 39);
 }
 
 #[test]
