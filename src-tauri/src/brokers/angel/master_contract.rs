@@ -1,7 +1,8 @@
 //! Angel scrip master (web `database/master_contract_db.py`
 //! `process_angel_json`).
 //!
-//! One JSON array; every row is kept (no exchange filter, as on the web).
+//! One JSON array; every exchange is kept (no exchange filter, as on the web).
+//! * CDS `UNDIRC` and NCDEX `AMXIDX` rows are dropped ([`is_listed`]).
 //! * `brsymbol` = Angel `symbol`, `brexchange` = `exch_seg`.
 //! * `AMXIDX` rows on NSE/BSE/MCX move to `NSE_INDEX`/`BSE_INDEX`/`MCX_INDEX`.
 //! * `-EQ`/`-BE`/`-MF`/`-SG` are removed anywhere in the symbol.
@@ -11,7 +12,8 @@
 //!   `name + DDMMMYY + strike + CE|PE`; NFO keeps Angel's symbol.
 //! * Index symbols come from `name` (upper, no spaces or hyphens, BSE also
 //!   without `S&P `), then the web's override table, applied to every row.
-//! * instrumenttype: options -> CE/PE by symbol suffix, futures -> FUT.
+//! * instrumenttype: options -> CE/PE by symbol suffix, futures -> FUT,
+//!   index rows -> EQ.
 
 use super::AngelBroker;
 use crate::brokers::common::de::{f64_lenient, i64_lenient, string_lenient};
@@ -130,6 +132,9 @@ pub fn process_scrip(s: AngelScrip) -> SymToken {
         symbol = o.to_string();
     }
     let instrument_type = match it {
+        // Indices are typed EQ, as Kite types its INDICES segment; the
+        // *_INDEX exchange is what says the row is an index (QA MC-04).
+        _ if ex.ends_with("_INDEX") => "EQ".to_string(),
         "OPTIDX" | "OPTSTK" | "OPTFUT" | "OPTCUR" | "OPTIRC" if symbol.ends_with("CE") => {
             "CE".to_string()
         }
@@ -154,10 +159,33 @@ pub fn process_scrip(s: AngelScrip) -> SymToken {
     }
 }
 
+/// Whether a scrip master row belongs in the symbol master (web QA MC-03).
+/// Two kinds are not tradable contracts and have nowhere to go; Kite's and
+/// Dhan's masters carry neither:
+/// * CDS `UNDIRC`: the government bonds under the interest-rate derivatives.
+///   Angel names some R-series rows without their `R-` prefix, so token 108
+///   (`R636GS2031`) repeats token 107's symbol `GOI6.36%2031`. The bonds
+///   trade on NSE as `-GS` rows, which stay.
+/// * NCDEX `AMXIDX`: indices, but there is no NCDEX index exchange, so they
+///   would sit on NCDEX and `AGRIDEX` would clash with the spot row.
+fn is_listed(s: &AngelScrip) -> bool {
+    !matches!(
+        (s.instrumenttype.as_str(), s.exch_seg.as_str()),
+        ("UNDIRC", "CDS") | ("AMXIDX", "NCDEX")
+    )
+}
+
+fn process_rows(rows: Vec<AngelScrip>) -> Vec<SymToken> {
+    rows.into_iter()
+        .filter(is_listed)
+        .map(process_scrip)
+        .collect()
+}
+
 /// Parse the whole scrip master JSON.
 pub fn parse_master(json: &[u8]) -> Result<Vec<SymToken>> {
     let rows: Vec<AngelScrip> = serde_json::from_slice(json)?;
-    Ok(rows.into_iter().map(process_scrip).collect())
+    Ok(process_rows(rows))
 }
 
 pub async fn download(b: &AngelBroker) -> Result<Vec<SymToken>> {
@@ -168,7 +196,7 @@ pub async fn download(b: &AngelBroker) -> Result<Vec<SymToken>> {
         .send()
         .await?;
     let (_, rows): (_, Vec<AngelScrip>) = http::read_json("angel", resp).await?;
-    let out: Vec<SymToken> = rows.into_iter().map(process_scrip).collect();
+    let out = process_rows(rows);
     tracing::info!("Angel One master contract: {} instruments", out.len());
     Ok(out)
 }

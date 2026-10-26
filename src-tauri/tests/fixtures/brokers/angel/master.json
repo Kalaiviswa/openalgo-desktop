@@ -26,5 +26,9 @@
 {"token":"1170","symbol":"USDINR27OCT26FUT","name":"USDINR","expiry":"27OCT2026","strike":"-1.000000","lotsize":"1","instrumenttype":"FUTCUR","exch_seg":"CDS","tick_size":"0.250000"},
 {"token":"1171","symbol":"USDINR26OCT8325CE","name":"USDINR","expiry":"27OCT2026","strike":"832500000.000000","lotsize":"1","instrumenttype":"OPTCUR","exch_seg":"CDS","tick_size":"0.250000"},
 {"token":"1172","symbol":"GS2032FUT","name":"726GS2032","expiry":"27OCT2026","strike":"-1.000000","lotsize":"2000","instrumenttype":"FUTIRC","exch_seg":"CDS","tick_size":"0.250000"},
-{"token":"777","symbol":"GUARSEED","name":"GUARSEED","expiry":"20NOV2026","strike":"-1.000000","lotsize":"5","instrumenttype":"FUTCOM","exch_seg":"NCDEX","tick_size":"100.000000"}
+{"token":"777","symbol":"GUARSEED","name":"GUARSEED","expiry":"20NOV2026","strike":"-1.000000","lotsize":"5","instrumenttype":"FUTCOM","exch_seg":"NCDEX","tick_size":"100.000000"},
+{"token":"107","symbol":"GOI6.36%2031","name":"636GS2031","expiry":"","strike":"-1.000000","lotsize":"1","instrumenttype":"UNDIRC","exch_seg":"CDS","tick_size":"25000.000000"},
+{"token":"108","symbol":"GOI6.36%2031","name":"R636GS2031","expiry":"","strike":"-1.000000","lotsize":"1","instrumenttype":"UNDIRC","exch_seg":"CDS","tick_size":"25000.000000"},
+{"token":"99918001","symbol":"AGRIDEX","name":"AGRIDEX","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"NCDEX","tick_size":"0.000000"},
+{"token":"AGRIDEX","symbol":"AGRIDEX","name":"AGRIDEX","expiry":"","strike":"-1.000000","lotsize":"1","instrumenttype":"COMDTY","exch_seg":"NCDEX","tick_size":"1.000000"}
 ]

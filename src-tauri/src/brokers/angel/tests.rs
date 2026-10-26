@@ -50,9 +50,9 @@ fn broker() -> AngelBroker {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn master_keeps_every_row_and_strips_series() {
+fn master_keeps_every_exchange_and_strips_series() {
     let rows = parse_master(fixture!("master.json").as_bytes()).unwrap();
-    assert_eq!(rows.len(), 28);
+    assert_eq!(rows.len(), 29);
     let r = master();
     let sbin = r.by_symbol("NSE", "SBIN").unwrap();
     assert_eq!(
@@ -70,6 +70,32 @@ fn master_keeps_every_row_and_strips_series() {
 }
 
 #[test]
+fn master_drops_cds_bond_underlyings_and_ncdex_indices() {
+    // Angel's own master repeats (symbol, exchange) on these rows (QA MC-03).
+    let rows = parse_master(fixture!("master.json").as_bytes()).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        assert!(
+            seen.insert((row.symbol.as_str(), row.exchange.as_str())),
+            "duplicate {}@{}",
+            row.symbol,
+            row.exchange
+        );
+    }
+    assert!(rows.iter().all(|row| row.instrument_type != "UNDIRC"));
+    assert!(!rows.iter().any(|row| row.symbol == "GOI6.36%2031"));
+    // The bond derivatives on CDS stay.
+    assert!(rows.iter().any(|row| row.brsymbol == "GS2032FUT"));
+    // AGRIDEX is left as the NCDEX spot row only.
+    let agridex: Vec<_> = rows.iter().filter(|row| row.symbol == "AGRIDEX").collect();
+    assert_eq!(agridex.len(), 1);
+    assert_eq!(
+        (agridex[0].exchange.as_str(), agridex[0].token.as_str()),
+        ("NCDEX", "AGRIDEX")
+    );
+}
+
+#[test]
 fn master_index_symbols_from_name_with_overrides() {
     let r = master();
     let nifty = r.by_symbol("NSE_INDEX", "NIFTY").unwrap();
@@ -77,7 +103,8 @@ fn master_index_symbols_from_name_with_overrides() {
         (nifty.brsymbol.as_str(), nifty.brexchange.as_str()),
         ("Nifty 50", "NSE")
     );
-    assert_eq!(nifty.instrument_type, "AMXIDX");
+    // Typed EQ as Kite types its indices, not Angel's AMXIDX (QA MC-04).
+    assert_eq!(nifty.instrument_type, "EQ");
     assert!(r.by_symbol("NSE_INDEX", "BANKNIFTY").is_some());
     assert!(r.by_symbol("NSE_INDEX", "FINNIFTY").is_some());
     assert!(r.by_symbol("NSE_INDEX", "MIDCPNIFTY").is_some());
@@ -86,8 +113,13 @@ fn master_index_symbols_from_name_with_overrides() {
     assert!(r.by_symbol("BSE_INDEX", "SENSEX").is_some());
     assert!(r.by_symbol("BSE_INDEX", "BSE500").is_some());
     assert!(r.by_symbol("BSE_INDEX", "SENSEX50").is_some());
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "SENSEX").unwrap().instrument_type,
+        "EQ"
+    );
     let mcx = r.by_symbol("MCX_INDEX", "MCXCOMPDEX").unwrap();
     assert_eq!(mcx.brexchange, "MCX");
+    assert_eq!(mcx.instrument_type, "EQ");
     assert_eq!(index_symbol("S&P BSE SENSEX", "BSE_INDEX"), "BSESENSEX");
     assert_eq!(index_symbol("Nifty Pvt Bank", "NSE_INDEX"), "NIFTYPVTBANK");
 }
