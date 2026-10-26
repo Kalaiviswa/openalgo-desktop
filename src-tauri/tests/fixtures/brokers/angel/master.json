@@ -11,7 +11,7 @@
 {"token":"500112","symbol":"SBIN","name":"SBIN","expiry":"","strike":"-1.000000","lotsize":"1","instrumenttype":"","exch_seg":"BSE","tick_size":"5.000000"},
 {"token":"99919000","symbol":"SENSEX","name":"SENSEX","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"BSE","tick_size":"0.000000"},
 {"token":"99919012","symbol":"S&P BSE 500","name":"S&P BSE 500","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"BSE","tick_size":"0.000000"},
-{"token":"99919016","symbol":"SNSX50","name":"SNSX50","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"BSE","tick_size":"0.000000"},
+{"token":"99919016","symbol":"SNSX50","name":"S&P BSE SENSEX 50","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"BSE","tick_size":"0.000000"},
 {"token":"99920000","symbol":"MCXCOMPDEX","name":"MCXCOMPDEX","expiry":"","strike":"0.000000","lotsize":"1","instrumenttype":"AMXIDX","exch_seg":"MCX","tick_size":"0.000000"},
 {"token":"52175","symbol":"NIFTY27OCT26FUT","name":"NIFTY","expiry":"27OCT2026","strike":"-1.000000","lotsize":"75","instrumenttype":"FUTIDX","exch_seg":"NFO","tick_size":"10.000000"},
 {"token":"43210","symbol":"NIFTY27OCT2625000CE","name":"NIFTY","expiry":"27OCT2026","strike":"2500000.000000","lotsize":"75","instrumenttype":"OPTIDX","exch_seg":"NFO","tick_size":"5.000000"},
