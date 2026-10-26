@@ -112,7 +112,12 @@ fn master_index_symbols_from_name_with_overrides() {
     assert!(r.by_symbol("NSE_INDEX", "INDIAVIX").is_some());
     assert!(r.by_symbol("BSE_INDEX", "SENSEX").is_some());
     assert!(r.by_symbol("BSE_INDEX", "BSE500").is_some());
-    assert!(r.by_symbol("BSE_INDEX", "SENSEX50").is_some());
+    // From Angel's name "S&P BSE SENSEX 50", renamed as Zerodha names SNSX50.
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "SENSEX50").unwrap().brsymbol,
+        "SNSX50"
+    );
+    assert!(r.by_symbol("BSE_INDEX", "BSESENSEX50").is_none());
     assert_eq!(
         r.by_symbol("BSE_INDEX", "SENSEX").unwrap().instrument_type,
         "EQ"

@@ -83,7 +83,8 @@ pub fn symbol_override(s: &str) -> Option<&'static str> {
         "NIFTYFINSERVICE" => "FINNIFTY",
         "NIFTYNEXT50" => "NIFTYNXT50",
         "NIFTYMIDSELECT" | "NIFTYMIDCAPSELECT" => "MIDCPNIFTY",
-        "SNSX50" => "SENSEX50",
+        // BSE_INDEX symbols come from the name: "S&P BSE SENSEX 50".
+        "SNSX50" | "BSESENSEX50" => "SENSEX50",
         _ => return None,
     })
 }
