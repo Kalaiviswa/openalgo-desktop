@@ -1157,7 +1157,7 @@ async fn master_contract_download_and_tbt_address() {
         );
     let b = broker(&fake.serve().await);
     let rows = b.download_master_contract(&auth()).await.unwrap();
-    assert_eq!(rows.len(), 28);
+    assert_eq!(rows.len(), 39);
     let nifty = rows
         .iter()
         .find(|r| r.symbol == "NIFTY" && r.exchange == "NSE_INDEX")
