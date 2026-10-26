@@ -1,7 +1,15 @@
 name: Security Scan
 
-# Weekly, on demand, and on any PR or push that changes a lockfile, a
+# Daily, on demand, and on any PR or push that changes a lockfile, a
 # manifest or this scanning configuration.
+#
+# Daily because the release gate (release.yml) scans the tagged commit with
+# that day's advisory databases: an advisory published since the last scan
+# stopped the 1.0.0 release twice on 2026-10-22, each time after a full CI
+# run. cargo-audit, cargo-deny and npm-audit run the gate's own commands
+# (scripts/ci/advisory_scan.sh), so a red scan here on master is the release
+# gate failing early; scripts/release/preflight.sh runs them before tagging.
+# GitHub mails a failed scheduled run to whoever last changed its schedule.
 #
 # Gating policy (what fails the job):
 #   cargo-audit   any vulnerability advisory for src-tauri/Cargo.lock that is
@@ -11,7 +19,9 @@ name: Security Scan
 #   npm-audit     production dependencies (--omit=dev) with a HIGH or CRITICAL
 #                 advisory. Moderate and low are reported in the JSON artifact
 #                 and must be triaged, but do not fail. Dev-only tooling (vite,
-#                 vitest, playwright, biome) never ships in the installer.
+#                 vitest, playwright, biome) never ships in the installer, so
+#                 the all-dependency report (npm-audit-all.json) never fails
+#                 either; it is read at every periodic review (PROD-SEC-02).
 #   gitleaks      any secret in the full git history not in the allowlist in
 #                 .github/gitleaks.toml.
 #   trivy         report only (SARIF to Code Scanning); gating is done by the
@@ -20,7 +30,7 @@ name: Security Scan
 
 on:
   schedule:
-    - cron: "0 2 * * 1" # Monday 02:00 UTC, same slot as the web repo
+    - cron: "0 2 * * *" # every day 02:00 UTC (07:30 IST), the web repo's weekly slot
   workflow_dispatch:
   pull_request:
     paths:
@@ -31,6 +41,7 @@ on:
       - .github/deny.toml
       - .github/gitleaks.toml
       - .github/workflows/security.yml
+      - scripts/ci/advisory_scan.sh
   push:
     branches: [master]
     paths:
@@ -41,6 +52,7 @@ on:
       - .github/deny.toml
       - .github/gitleaks.toml
       - .github/workflows/security.yml
+      - scripts/ci/advisory_scan.sh
 
 permissions:
   contents: read
@@ -66,20 +78,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-audit
       - name: JSON report (all findings, never fails)
         run: cargo audit --file src-tauri/Cargo.lock --json > cargo-audit.json || true
       - name: Fail on vulnerabilities (ignores come from .github/deny.toml)
-        run: |
-          ignore_args=()
-          while IFS= read -r id; do
-            ignore_args+=(--ignore "$id")
-          done < <(grep -vE '^[[:space:]]*#' .github/deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' | sort -u)
-          echo "Advisories accepted in deny.toml: $(( ${#ignore_args[@]} / 2 ))"
-          cargo audit --file src-tauri/Cargo.lock "${ignore_args[@]}"
-      - uses: actions/upload-artifact@v6
+        run: scripts/ci/advisory_scan.sh cargo-audit
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cargo-audit
@@ -96,10 +102,10 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.92.0
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny
       - name: SARIF report (never fails)
@@ -122,9 +128,7 @@ jobs:
           sarif_file: cargo-deny.sarif
           category: cargo-deny
       - name: Check advisories, bans, licenses, sources
-        run: |
-          cargo deny --manifest-path src-tauri/Cargo.toml --config .github/deny.toml --locked \
-            check advisories bans licenses sources
+        run: scripts/ci/advisory_scan.sh cargo-deny
 
   npm-audit:
     name: npm audit (production deps)
@@ -135,15 +139,20 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+          check-latest: true
       - name: JSON report (all severities, never fails)
         run: npm audit --omit=dev --json > npm-audit.json || true
+      - name: JSON report of every dependency, dev tooling included (never fails)
+        run: npm audit --json > npm-audit-all.json || true
       - name: Fail on high or critical
-        run: npm audit --omit=dev --audit-level=high
-      - uses: actions/upload-artifact@v6
+        run: scripts/ci/advisory_scan.sh npm-audit
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: npm-audit
-          path: npm-audit.json
+          path: |
+            npm-audit.json
+            npm-audit-all.json
           if-no-files-found: ignore
           retention-days: 30
 
@@ -202,7 +211,7 @@ jobs:
         with:
           sarif_file: trivy.sarif
           category: trivy-fs
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy

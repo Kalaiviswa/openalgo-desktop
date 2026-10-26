@@ -110,6 +110,7 @@ const SIGNED_IN_PAGES = [
   '/logs',
   '/profile',
   '/tools',
+  '/health',
 ] as const
 
 /**
@@ -147,6 +148,137 @@ async function signedIn(page: Page, theme: 'light' | 'dark' = 'light') {
   )
 }
 
+/** Health answers with a check in each state, as the stub's failures cannot show. */
+async function stubHealth(page: Page) {
+  const json = (body: unknown) => ({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(body),
+  })
+  const feed = {
+    name: 'market_data',
+    connected: true,
+    connected_for_s: 600,
+    last_update_age_s: 1,
+    received_since_connect: 12000,
+    skipped_since_connect: {
+      strategy: 0,
+      scalping: 0,
+      sandbox: 0,
+      feed_clients: 0,
+      order_relay: 0,
+    },
+    skipped_total_since_connect: 0,
+    skipped_since_start: { strategy: 3, scalping: 7, sandbox: 0, feed_clients: 2, order_relay: 0 },
+    skipped_total_since_start: 12,
+  }
+  await page.route('**/health/api/current', (route) =>
+    route.fulfill(
+      json({
+        timestamp: new Date().toISOString(),
+        sample_age_s: 5,
+        fd: { count: 120, limit: 10240, usage_percent: 1.2, status: 'pass' },
+        memory: {
+          rss_mb: 210,
+          vms_mb: 900,
+          percent: 2.5,
+          available_mb: 4000,
+          swap_mb: 0,
+          status: 'warn',
+        },
+        database: {
+          total: 3,
+          connections: { openalgo: 2, logs: 1 },
+          status: 'pass',
+          sizes_mb: { openalgo: 2.5, logs: 40, sandbox: 1, historify: 120 },
+        },
+        websocket: { total: 1, connections: {}, total_symbols: 12, status: 'pass' },
+        threads: { count: 40, stuck: 0, status: 'pass' },
+        processes: [],
+        overall_status: 'fail',
+        order_facts: {
+          status: 'fail',
+          gaps: [
+            { mode: 'live', cause: 'order_feed_reconnected', since: new Date().toISOString() },
+          ],
+          running: true,
+          passes: 3,
+          book_reads: 3,
+          book_read_failures: 1,
+          book_reads_discarded: 0,
+          gaps_opened: 1,
+          gaps_closed: 0,
+          unconfirmed_orders: 1,
+        },
+        records: {
+          status: 'warn',
+          order_logs_dropped: 2,
+          order_logs_failed: 0,
+          monitoring_dropped: 0,
+          monitoring_lost: 0,
+          monitoring_retried_batches: 1,
+        },
+        strategy_ticks: {
+          status: 'warn',
+          ticks_queued: 50,
+          ticks_folded: 4,
+          ticks_missed: 2,
+          exits_waiting: 1,
+          oldest_exit_wait_s: 3,
+          exits_slow: false,
+        },
+        market_data: {
+          status: 'warn',
+          broker_feeds: [feed],
+          feed_clients: { coalesced: 30, dropped: 1, skipped: 0 },
+        },
+      })
+    )
+  )
+  const alert = (id: number, alert_type: string, severity: string, resolvable: boolean) => ({
+    id,
+    timestamp: new Date().toISOString(),
+    alert_type,
+    severity,
+    metric_name: alert_type,
+    metric_value: 1,
+    threshold_value: 0,
+    message: `${alert_type.replace(/_/g, ' ')}: what happened and what to do`,
+    acknowledged: false,
+    resolved: false,
+    resolvable,
+  })
+  await page.route('**/health/api/alerts', (route) =>
+    route.fulfill(
+      json([
+        alert(7, 'records_not_saved', 'warn', true),
+        alert(8, 'order_facts_gap', 'fail', false),
+      ])
+    )
+  )
+  await page.route('**/health/api/held-orders', (route) =>
+    route.fulfill(
+      json({
+        status: 'success',
+        data: [
+          {
+            owner: 'strategy',
+            id: '42',
+            symbol: 'NIFTY07OCT2624500CE',
+            exchange: 'NFO',
+            action: 'BUY',
+            quantity: 65,
+            since: '2026-10-07 10:00:20',
+            message: 'It may still be at the broker.',
+          },
+        ],
+      })
+    )
+  )
+  await page.route('**/health/api/history**', (route) => route.fulfill(json([])))
+  await page.route('**/health/api/stats**', (route) => route.fulfill({ status: 500, body: '' }))
+}
+
 test.describe('Accessibility - signed in', () => {
   for (const theme of ['light', 'dark'] as const) {
     for (const path of SIGNED_IN_PAGES) {
@@ -176,6 +308,26 @@ test.describe('Accessibility - signed in', () => {
       )
       await page.goto('/dashboard')
       await page.waitForLoadState('networkidle')
+
+      expect(await scan(page, wcag)).toEqual([])
+    })
+  }
+
+  // The Health page with what it shows when something is wrong (PROD-PAR-01):
+  // amber and red checks with their reasons, alerts with Acknowledge and
+  // Resolve, an unconfirmed order, and a list it could not read. The stub
+  // above covers every read failing.
+  for (const theme of ['light', 'dark'] as const) {
+    test(`/health with failing checks, alerts and an unconfirmed order${theme === 'dark' ? ' (dark)' : ''}`, async ({
+      page,
+    }) => {
+      await signedIn(page, theme)
+      await stubHealth(page)
+      await page.goto('/health')
+      await page.waitForLoadState('networkidle')
+      await expect(page.getByText('Unconfirmed Orders (1)')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Resolve' })).toBeVisible()
+      await expect(page.getByText(/Could not read the statistics/)).toBeVisible()
 
       expect(await scan(page, wcag)).toEqual([])
     })

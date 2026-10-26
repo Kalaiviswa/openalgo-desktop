@@ -284,6 +284,39 @@ describe('SocketProvider', () => {
     for (const event of PROVIDER_EVENTS) expect(socket.listenerCount(event)).toBe(1)
   })
 
+  // PROD-SEC-01: a window still open when the session ends elsewhere (a
+  // logout in another window, a password change, a reset) hears it as
+  // force_logout, and drops the key from memory with nothing left in storage.
+  it('drops the API key when the session ends in another window or device', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      renderAt(
+        '/probe',
+        <>
+          <Route element={<Layout />}>
+            <Route path="/probe" element={<p>page</p>} />
+          </Route>
+          <Route path="/login" element={<p>sign in</p>} />
+        </>
+      )
+      act(() => useAuthStore.getState().setApiKey('KEY-1'))
+      const socket = onlySocket()
+
+      act(() => socket.fire('force_logout', { message: 'Logged out from another device' }))
+
+      expect(useAuthStore.getState()).toMatchObject({
+        apiKey: null,
+        isAuthenticated: false,
+        user: null,
+      })
+      expect(localStorage.getItem('openalgo-auth') ?? '').not.toContain('KEY-1')
+      act(() => vi.advanceTimersByTime(2000))
+      expect(screen.getByText('sign in')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('never has two connections open at once when the trader moves between pages', async () => {
     function GoTo({ to }: { to: string }) {
       const navigate = useNavigate()

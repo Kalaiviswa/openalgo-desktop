@@ -438,7 +438,8 @@ pub struct H {
     pub key: String,
     pub recorder: Arc<Recorder>,
     ip: AtomicU32,
-    _dir: tempfile::TempDir,
+    keystore: Arc<MemoryKeyStore>,
+    dir: tempfile::TempDir,
 }
 
 impl H {
@@ -452,13 +453,49 @@ impl H {
     pub async fn new_with(prepare: impl FnOnce(&std::path::Path)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         prepare(dir.path());
+        let keystore = Arc::new(MemoryKeyStore::new());
+        let clock = ManualClock::new(session_time());
+        let (ctx, mock) = Self::open(dir.path(), &keystore, &clock);
+        AuthService::setup(&ctx, "trader", "trader@example.com", "Secret@123").unwrap();
+        let key = ApiKeyService::current(&ctx)
+            .unwrap()
+            .unwrap()
+            .expose()
+            .to_string();
+        Self::connected(ctx, mock, clock, key, keystore, dir)
+    }
+
+    /// An app restart: quit, then open the same data folder again with the
+    /// same keys (the trader signed in again) and the broker session
+    /// connected again. The mock broker is a new one, so it counts only
+    /// what is sent after the restart.
+    pub async fn restart(self) -> Self {
+        let H {
+            ctx,
+            clock,
+            key,
+            keystore,
+            dir,
+            ..
+        } = self;
+        ctx.shutdown().await;
+        drop(ctx);
+        let (ctx, mock) = Self::open(dir.path(), &keystore, &clock);
+        Self::connected(ctx, mock, clock, key, keystore, dir)
+    }
+
+    /// The app on `dir` with the mock broker, the symbol master and quotes.
+    fn open(
+        dir: &std::path::Path,
+        keystore: &Arc<MemoryKeyStore>,
+        clock: &Arc<ManualClock>,
+    ) -> (Arc<AppState>, Arc<MockBroker>) {
         let symbols = SymbolResolver::new();
         let mock = Arc::new(MockBroker::with_symbols("zerodha", symbols.clone()));
-        let clock = ManualClock::new(session_time());
         let ctx = AppState::open(
-            dir.path(),
+            dir,
             OpenOptions {
-                keystore: Arc::new(MemoryKeyStore::new()),
+                keystore: keystore.clone(),
                 clock: clock.clone(),
                 brokers: Arc::new(BrokerRegistry::with_symbols(
                     symbols,
@@ -472,12 +509,18 @@ impl H {
             mock.set_quote(q);
         }
         ctx.load_symbol_cache(rows);
-        AuthService::setup(&ctx, "trader", "trader@example.com", "Secret@123").unwrap();
-        let key = ApiKeyService::current(&ctx)
-            .unwrap()
-            .unwrap()
-            .expose()
-            .to_string();
+        (ctx, mock)
+    }
+
+    /// The broker session connected and an event recorder on the bus.
+    fn connected(
+        ctx: Arc<AppState>,
+        mock: Arc<MockBroker>,
+        clock: Arc<ManualClock>,
+        key: String,
+        keystore: Arc<MemoryKeyStore>,
+        dir: tempfile::TempDir,
+    ) -> Self {
         BrokerAuthService::persist(
             &ctx,
             &BrokerSession {
@@ -499,7 +542,8 @@ impl H {
             key,
             recorder,
             ip: AtomicU32::new(1),
-            _dir: dir,
+            keystore,
+            dir,
         }
     }
 

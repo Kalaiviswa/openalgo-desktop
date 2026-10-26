@@ -12,6 +12,7 @@ import {
 import { describe, expect, it } from 'vitest'
 import {
   Driver,
+  INPUTS_UNREADABLE,
   type InboxMessage,
   intervalMs,
   REPLAY_REFUSAL,
@@ -176,6 +177,49 @@ describe('runner driver', () => {
     const sent = await run(true)
     expect(sent).toHaveLength(1)
     expect(sent[0][0]).toMatchObject({ kind: 'place', side: 'buy' })
+  })
+
+  it('loads the program with exactly the inputs its run was started with', async () => {
+    const h = harness()
+    const saved = { qty: 7, stopPct: 1.5, fast: true, label: 'wide' }
+    const given: Record<string, unknown>[] = []
+    const driver = new Driver(
+      h.transport,
+      (text, options) => {
+        given.push(options.settings)
+        return loadText(text, options)
+      },
+      { ...(await h.transport.spec()), inputs: saved }
+    )
+    expect(driver.load()).toBe(true)
+    expect(given).toEqual([saved])
+  })
+
+  it('an answer without inputs loads nothing and ends the run, so no default is traded', async () => {
+    // PROD-TR-06: unreadable inputs once reached the page as `{}`, and the
+    // engine ran the script's default quantity and risk inputs.
+    for (const inputs of [undefined, null, [], 'qty=7']) {
+      const h = harness()
+      let loads = 0
+      const spec = { ...(await h.transport.spec()), inputs } as unknown as RunSpec
+      const driver = new Driver(
+        h.transport,
+        (text, options) => {
+          loads += 1
+          return loadText(text, options)
+        },
+        spec,
+        () => T0 + 4 * MIN + 10_000
+      )
+      expect(driver.load()).toBe(false)
+      await driver.begin([bar(0, true), bar(1, true), bar(2, true), bar(3, false)])
+      await driver.onBars([bar(4, true), bar(5, false)])
+      await new Promise((r) => setTimeout(r, 0))
+      expect(loads).toBe(0)
+      expect(h.sent).toEqual([])
+      expect(driver.isStopped).toBe(true)
+      expect(h.ended).toEqual([`up.oscript was not started: ${INPUTS_UNREADABLE}`])
+    }
   })
 
   it('a program the engine refuses ends the run with the reason', async () => {

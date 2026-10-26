@@ -125,7 +125,7 @@ impl Fake {
     /// One read of a side's order book, as the order reconciler hands it to
     /// its owners. Each row carries the time of the read as its own (IST),
     /// so the matcher can tell it was placed after the order it looks for.
-    fn snapshot(
+    async fn snapshot(
         &self,
         mode: RunMode,
         read_at: chrono::DateTime<chrono::Utc>,
@@ -158,10 +158,10 @@ impl Fake {
             .collect();
         // Read through the fake's own session (NEW-TR-01: the runner settles
         // only that session's orders from a book).
-        let mut book = BookSnapshot::new(rows, read_at)
-            .with_session((mode == RunMode::Live).then(|| LiveOwner::new("zerodha", "AB1234")));
-        book.owners = owners;
-        book
+        BookSnapshot::new(rows, read_at)
+            .with_session((mode == RunMode::Live).then(|| LiveOwner::new("zerodha", "AB1234")))
+            .owned_by(&owners)
+            .await
     }
 
     fn placed_on(&self, mode: RunMode) -> Vec<Value> {
@@ -1415,6 +1415,108 @@ async fn an_order_with_no_number_blocks_stop_after_a_restart() {
     trading.shutdown().await;
 }
 
+/// PROD-TR-06: the page is served the inputs its run started with. Its
+/// later read of the saved settings once answered a failure as no inputs
+/// (`{}`), so the engine traded the script's default quantity and risk.
+/// Now an unreadable settings table after the start changes nothing the
+/// page gets; readable again, it is the same; and an edit made while the run
+/// goes on waits for the next start, as on the web (its `start` hands the
+/// run the inputs it read).
+#[tokio::test]
+async fn the_page_gets_the_inputs_its_run_started_with() {
+    let t = setup().await;
+    let id = t.deploy("SBIN").await;
+    let save = |inputs: Value| {
+        let body = json!({"symbol": "SBIN", "exchange": "NSE", "interval": "1m",
+            "product": "MIS", "deployment": id, "inputs": inputs});
+        t.call(
+            Method::POST,
+            "/openscript/runner/config/t.oscript",
+            Some(body),
+        )
+    };
+    let readable = |yes: bool| {
+        let (from, to) = (
+            "openscript_deployments",
+            "openscript_deployments_unreadable",
+        );
+        let (from, to) = if yes { (to, from) } else { (from, to) };
+        let sql = format!("ALTER TABLE {} RENAME TO {}", from, to);
+        t.h.ctx.sqlite.conn().unwrap().execute_batch(&sql).unwrap()
+    };
+    let saved = json!({"qty": 7, "stop_pct": 1.5, "trail": true, "label": "wide"});
+    let (s, v) = save(saved.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    t.start(&id).await;
+
+    readable(false);
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], saved, "never the script's defaults");
+
+    readable(true);
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], saved);
+
+    let (s, v) = save(json!({"qty": 1})).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let (_, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(spec["inputs"], saved, "an edit waits for the next start");
+    assert!(t.fake.placed.lock().is_empty());
+    t.h.ctx.trading.runner.pause(&id).unwrap();
+    t.start(&id).await;
+    let (_, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(spec["inputs"], json!({"qty": 1}));
+}
+
+/// PROD-TR-06 follow-up: saved parameters that cannot be read, or that are
+/// no longer ones a run may carry, are not a run without parameters. They
+/// were read as `{}`, and the start ran the script's default quantity and
+/// risk; now the start is refused (409) with the cause and what to do, and
+/// nothing runs. Saved again, it starts with them.
+#[tokio::test]
+async fn a_start_whose_saved_parameters_cannot_be_used_is_refused() {
+    let t = setup().await;
+    let id = t.deploy("SBIN").await;
+    let store = |inputs: &str| {
+        t.h.ctx
+            .sqlite
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE openscript_deployments SET inputs = ?1 WHERE deployment = ?2",
+                rusqlite::params![inputs, id],
+            )
+            .unwrap()
+    };
+    let path = format!("/openscript/runner/start/{}", id);
+    let start = || t.call(Method::POST, &path, None);
+    for (saved, cause) in [
+        (r#"{"qty": 7"#, "They are not in a form OpenAlgo can read."),
+        (
+            r#"{"qty": [7]}"#,
+            "qty was given something a parameter cannot be.",
+        ),
+        ("[7]", "must be given as a set of named values"),
+    ] {
+        assert_eq!(store(saved), 1);
+        let (s, v) = start().await;
+        assert_eq!(s, StatusCode::CONFLICT, "{}: {}", saved, v);
+        let why = v["message"].as_str().unwrap();
+        assert!(why.contains(cause), "{}: {}", saved, why);
+        assert!(why.contains("default parameters"), "{}", why);
+        assert!(why.contains("save them again"), "{}", why);
+        assert!(!t.h.ctx.trading.runner.is_running(&id));
+        assert_eq!(t.host.open_count(), 0, "nothing was launched");
+    }
+    assert_eq!(store(r#"{"qty": 7}"#), 1);
+    t.start(&id).await;
+    let (s, spec) = t.page(Method::GET, &id, "spec", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", spec);
+    assert_eq!(spec["inputs"], json!({"qty": 7}));
+}
+
 /// LOG-09: a start decides its side from analyzer mode. Unreadable, it was
 /// taken as off, so a deployment meant for the sandbox started live while a
 /// broker was connected.
@@ -1826,9 +1928,8 @@ impl T {
         let mut left = 0;
         for n in 0..reads {
             let at = from + chrono::Duration::seconds(10 * n);
-            left = owner
-                .reconcile(mode, &self.fake.snapshot(mode, at, vec![owner.clone()]))
-                .await;
+            let book = self.fake.snapshot(mode, at, vec![owner.clone()]).await;
+            left = owner.reconcile(mode, &book).await.unwrap();
         }
         left
     }
@@ -1886,8 +1987,9 @@ async fn a_lost_exit_reply_sends_one_sell_across_repeated_stops_and_a_restart() 
     let owner = t.owner(&runner);
     let book = t
         .fake
-        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
-    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()])
+        .await;
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await.unwrap(), 0);
     assert_eq!(
         t.row_status(2),
         ("filled".to_string(), Some("OID2".to_string()), 3)
@@ -1930,8 +2032,9 @@ async fn a_lost_entry_reply_keeps_the_intent_pending_and_blocks_new_orders() {
     let owner = t.owner(&runner);
     let book = t
         .fake
-        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
-    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()])
+        .await;
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await.unwrap(), 0);
     let frames = t.frames(&id, 1).await;
     let last = frames.last().unwrap();
     assert_eq!(last["status"], "filled");
@@ -2074,8 +2177,9 @@ async fn an_order_left_without_its_answer_is_settled_from_the_book_after_a_resta
     let owner = t.owner(&runner);
     let book = t
         .fake
-        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()]);
-    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await, 0);
+        .snapshot(RunMode::Sandbox, t.h.ctx.now(), vec![owner.clone()])
+        .await;
+    assert_eq!(owner.reconcile(RunMode::Sandbox, &book).await.unwrap(), 0);
     assert_eq!(
         t.row_status(1),
         ("filled".to_string(), Some("OID1".to_string()), 3)
@@ -2123,11 +2227,15 @@ impl OrderOwner for Holder {
     fn has_open_orders(&self, _mode: RunMode) -> bool {
         true
     }
-    fn owns_order(&self, _order_id: &str) -> bool {
-        false
+    fn owned_among(&self, _order_ids: &[String]) -> std::collections::HashSet<String> {
+        Default::default()
     }
-    async fn reconcile(&self, _mode: RunMode, _book: &BookSnapshot) -> usize {
-        0
+    async fn reconcile(
+        &self,
+        _mode: RunMode,
+        _book: &BookSnapshot,
+    ) -> openalgo_desktop_lib::error::Result<usize> {
+        Ok(0)
     }
 }
 
@@ -2150,7 +2258,7 @@ async fn new_entries_wait_while_order_facts_are_repaired() {
 
     // An order fact is lost while someone holds open orders.
     reconciler.register(Arc::new(Holder));
-    reconciler.report_fact_loss(false);
+    reconciler.report_fact_loss(false).await;
     assert!(reconciler.gap_open(RunMode::Sandbox));
 
     // A new entry waits, and the script is told why.
@@ -2172,7 +2280,7 @@ async fn new_entries_wait_while_order_facts_are_repaired() {
 
     // Stop is never held by a gap.
     t.h.ctx.trading.runner.pump_once(&id).await;
-    reconciler.report_fact_loss(false);
+    reconciler.report_fact_loss(false).await;
     assert!(reconciler.gap_open(RunMode::Sandbox));
     let (s, v) = t.close(&id).await;
     assert_eq!(s, StatusCode::OK, "{}", v);

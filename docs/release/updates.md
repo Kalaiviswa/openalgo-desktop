@@ -12,10 +12,17 @@ visible, and how the signing key is handled.
 1. A `v*` tag on a green commit starts `.github/workflows/release.yml`. Its
    gate (`verify`) also fails when the `TAURI_SIGNING_PRIVATE_KEY` secret is
    not set; only whether it is set is read, never its value.
-2. Each platform build adds `src-tauri/updater-artifacts.conf.json`
-   (`bundle.createUpdaterArtifacts: true`) to the Tauri build. Besides the
-   installers it then produces the platform's **update bundle** and a
-   **`.sig`** next to it, signed with the private key:
+2. CI's `tauri-build` adds `src-tauri/updater-artifacts.conf.json`
+   (`bundle.createUpdaterArtifacts: true`) and `--no-sign` to every build,
+   so besides the installers it produces the platform's **update bundle**,
+   unsigned. The release's `ci-bundles` job takes these files from the CI
+   run of the tagged commit whose install smoke passed (which starts the
+   Windows setup and the AppImages, but never unpacks or starts a macOS
+   `.app.tar.gz`), and signs each with
+   `tauri signer sign --app-version <version>` and the private key, which
+   writes a **`.sig`** next to it (the `.deb` gets one too). The rebuild by
+   hand (`docs/release/release-workflow.md`) adds the same file without
+   `--no-sign`, and Tauri signs during its build:
 
    | Platform | Update bundle on the release | Installs as |
    | --- | --- | --- |
@@ -29,11 +36,13 @@ visible, and how the signing key is handled.
    new version exists and links to the release page.
 
    The committed `tauri.conf.json` does not ask for update bundles, because
-   CI and local builds have no private key and the Tauri build fails without
-   one. Only the release workflow passes the extra config file.
-3. `tauri-action` uploads the installers, the update bundles and their
-   `.sig` files to the **draft** release. It does not write `latest.json`
-   (parallel platform jobs rewriting one file would race).
+   local builds have no private key and the Tauri build fails without one;
+   CI passes the extra config file with `--no-sign`. No CI run holds the
+   key: only the release workflow signs.
+3. The `ci-bundles` job (in the rebuild, `tauri-action`) attaches the
+   installers, the update bundles and their `.sig` files to the **draft**
+   release. Neither writes `latest.json` (the rebuild's parallel platform
+   jobs rewriting one file would race).
 4. The `checksums` job downloads every asset of the draft and runs
    `scripts/ci/updater_manifest.py`, which writes **`latest.json`**:
 

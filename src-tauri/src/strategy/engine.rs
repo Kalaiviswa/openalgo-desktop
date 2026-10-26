@@ -5,7 +5,7 @@
 //! start_run    resolve every leg, claim the strategy, place entries
 //! stop_run     request exits and finalise after confirmed fills
 //! close_leg    exit one leg; the run continues with the rest
-//! process_tick evaluate risk against a price and dispatch what it decides
+//! process_tick decide risk on a price, then act on what was decided
 //! apply_fill   record a fill against the exact position it belongs to
 //! ```
 //!

@@ -1,17 +1,22 @@
-//! The tick decision path (web `engine.py` `process_tick`): evaluate every
-//! run holding an instrument against one price and dispatch what risk
-//! decides.
+//! The tick decision path (web `engine.py` `process_tick`): decide every
+//! run holding an instrument against one price, then act on what risk
+//! decided.
+//!
+//! Deciding and acting are apart (PROD-REL-01). Whoever reads a price (the
+//! tick reader, the REST poll) decides it at once, in the run's lock, so
+//! every price is decided in the order it came; what the decision asks for
+//! (events, exits, a stop, a page update) waits for the evaluator in
+//! `tick_feed::pending`, so a slow exit never holds a decision back.
 
 use super::{ev, exit_kind_for, stop_reason_for, StrategyModule};
 use crate::risk::BreachReason;
 use crate::strategy::dispatch::RunMode;
 use crate::strategy::risk_adapter;
-use crate::strategy::state::RunState;
+use crate::strategy::state::{ExitScope, RunState};
 use crate::strategy::store::{EventFields, StrategyRow};
+use crate::strategy::tick_feed::pending::{Decision, Event, LegExit, RunWork};
 use serde_json::{json, Value};
-
-/// One event to send once the run's lock is released.
-type Event = (&'static str, String, EventFields);
+use std::sync::Arc;
 
 /// Each open leg on this instrument against the price (in the run's
 /// lock): the legs to exit and the events to send. A stop-driven exit
@@ -21,8 +26,8 @@ fn evaluate_legs(
     run_id: i64,
     (symbol, exchange, ltp): (&str, &str, f64),
     trail_sl_to_entry: bool,
-) -> (Vec<(i64, &'static str)>, Vec<Event>) {
-    let mut leg_exits: Vec<(i64, &'static str)> = Vec::new();
+) -> (Vec<LegExit>, Vec<Event>) {
+    let mut leg_exits: Vec<LegExit> = Vec::new();
     let mut events: Vec<Event> = Vec::new();
     let ids: Vec<i64> = run
         .legs
@@ -40,7 +45,7 @@ fn evaluate_legs(
             }
         };
         if d.trail_armed && d.stop_moved {
-            events.push((
+            events.push(Event::about(
                 "leg_trail_advanced",
                 format!(
                     "Trailing stop on leg {} moved to {}",
@@ -50,12 +55,17 @@ fn evaluate_legs(
                         .unwrap_or_default()
                 ),
                 ev(Some(run_id), Some(id), "info"),
+                leg.position_ref.clone(),
             ));
         }
         if let Some(reason) = d.reason {
             if let Some(kind) = exit_kind_for(reason) {
-                leg_exits.push((id, kind));
-                events.push((
+                leg_exits.push(LegExit {
+                    leg_id: id,
+                    kind,
+                    position_ref: leg.position_ref.clone(),
+                });
+                events.push(Event::about(
                     if reason == BreachReason::Stop {
                         "leg_sl_hit"
                     } else {
@@ -63,22 +73,24 @@ fn evaluate_legs(
                     },
                     d.detail.clone(),
                     ev(Some(run_id), Some(id), "warn"),
+                    leg.position_ref.clone(),
                 ));
             }
         }
     }
     if trail_sl_to_entry {
-        if let Some((id, _)) = leg_exits.iter().find(|(_, k)| *k == "exit_sl") {
-            let moved = risk_adapter::trail_open_legs_to_entry(run, *id);
+        if let Some(stopped) = leg_exits.iter().find(|x| x.kind == "exit_sl") {
+            let moved = risk_adapter::trail_open_legs_to_entry(run, stopped.leg_id);
             if !moved.is_empty() {
-                events.push((
+                events.push(Event::about(
                     "trail_to_entry_activated",
                     format!(
                         "Stop on leg {} moved {} other legs to entry",
-                        id,
+                        stopped.leg_id,
                         moved.len()
                     ),
                     ev(Some(run_id), None, "warn"),
+                    stopped.position_ref.clone(),
                 ));
             }
         }
@@ -106,7 +118,7 @@ fn run_breach(
         }
     };
     if aggregate.lock_armed_now {
-        events.push((
+        events.push(Event::run(
             "lock_profit_armed",
             format!(
                 "Lock profit now active with a floor of {}",
@@ -118,7 +130,7 @@ fn run_breach(
             ev(Some(run_id), None, "info"),
         ));
     } else if aggregate.lock_floor_raised {
-        events.push((
+        events.push(Event::run(
             "lock_profit_floor_advanced",
             format!(
                 "Lock profit floor advanced to {}",
@@ -134,7 +146,7 @@ fn run_breach(
     if let (Some(limit), Some(banked)) = (limit, banked) {
         let day = banked + run.pnl_total;
         if day <= -limit {
-            events.push((
+            events.push(Event::run(
                 "overall_sl_hit",
                 format!(
                     "Daily loss limit reached: the session is down {:.2} against a limit of {:.2}",
@@ -170,7 +182,7 @@ fn run_breach(
                 "overall_target" => "overall_target_hit",
                 _ => "lock_profit_triggered",
             };
-            events.push((
+            events.push(Event::run(
                 kind,
                 aggregate.detail.clone(),
                 EventFields {
@@ -193,82 +205,129 @@ fn run_breach(
 }
 
 impl StrategyModule {
-    /// Evaluate every run holding this instrument against one price.
-    pub async fn process_tick(&self, symbol: &str, exchange: &str, ltp: f64) {
-        for run_id in self.state.active_run_ids() {
-            let holds = self
-                .state
-                .with_run(run_id, |r| {
-                    r.legs
-                        .values()
-                        .any(|l| l.status == "open" && l.symbol == symbol && l.exchange == exchange)
-                })
-                .unwrap_or(false);
-            if holds {
-                self.process_tick_for_run(run_id, symbol, exchange, ltp)
-                    .await;
-            }
+    /// Decide one price for every run holding the instrument, then act on
+    /// every decision waiting: the REST poll's path (on the evaluator, so
+    /// a run's tick inputs not yet in memory are read first), and a test's.
+    pub async fn process_tick(self: &Arc<Self>, symbol: &str, exchange: &str, ltp: f64) {
+        for run_id in self.runs_holding(symbol, exchange) {
+            self.read_tick_inputs(run_id).await;
+        }
+        self.decide_tick(symbol, exchange, ltp);
+        self.act_on_decided().await;
+    }
+
+    /// Decide one price for every run holding the instrument and leave
+    /// what it asks for to the evaluator. The tick reader's path: from
+    /// memory alone, never waiting (`strategy::tick_context`).
+    pub(crate) fn decide_tick(self: &Arc<Self>, symbol: &str, exchange: &str, ltp: f64) {
+        for run_id in self.runs_holding(symbol, exchange) {
+            self.decide_for_run(run_id, symbol, exchange, ltp);
         }
     }
 
-    async fn process_tick_for_run(&self, run_id: i64, symbol: &str, exchange: &str, ltp: f64) {
-        // In memory after the run's first tick: no tick waits on the
-        // database (`strategy::tick_context`).
-        let Some(ctx) = self.tick_context(run_id).await else {
+    /// The running runs with an open leg on the instrument.
+    fn runs_holding(&self, symbol: &str, exchange: &str) -> Vec<i64> {
+        let holds = |r: &mut RunState| {
+            r.legs
+                .values()
+                .any(|l| l.status == "open" && l.symbol == symbol && l.exchange == exchange)
+        };
+        self.state
+            .active_run_ids()
+            .into_iter()
+            .filter(|id| self.state.with_run(*id, holds).unwrap_or(false))
+            .collect()
+    }
+
+    fn decide_for_run(self: &Arc<Self>, run_id: i64, symbol: &str, exchange: &str, ltp: f64) {
+        let Some((ctx, (limit, banked))) = self.held_tick_inputs(run_id) else {
             return;
         };
-        let (strategy, strategy_dict, mode) = (&ctx.strategy, &ctx.strategy_dict, ctx.mode);
-        let strategy_id = strategy.id;
-        let user_id = strategy.user_id.clone();
-
-        // Read before the lock, never inside it.
-        let (limit, banked) = self.session_loss(&ctx, run_id).await;
 
         // In-memory arithmetic only.
-        let evaluated = self.state.with_run(run_id, |run| {
+        let decided = self.state.with_run(run_id, |run| {
             let (leg_exits, mut events) = evaluate_legs(
                 run,
                 run_id,
                 (symbol, exchange, ltp),
-                strategy.trail_sl_to_entry,
+                ctx.strategy.trail_sl_to_entry,
             );
             let stop_reason = run_breach(
                 run,
-                (strategy, strategy_dict),
+                (&ctx.strategy, &ctx.strategy_dict),
                 (limit, banked),
                 (run_id, symbol, exchange, ltp),
                 &mut events,
             );
-            (leg_exits, stop_reason, events)
+            Decision::of_price(leg_exits, stop_reason, events)
         });
-        let Some((leg_exits, stop_reason, events)) = evaluated else {
-            return;
-        };
+        if let Some(decision) = decided {
+            self.feed
+                .pending
+                .leave(run_id, ctx, decision, self.clock.now());
+        }
+    }
 
-        // Lock released: everything below reaches the database or broker.
+    /// Act on every decision waiting, run by run in the order they
+    /// decided, until none is left.
+    pub(crate) async fn act_on_decided(&self) {
+        loop {
+            let waiting = self.feed.pending.take();
+            if waiting.is_empty() {
+                return;
+            }
+            for (run_id, work) in waiting {
+                self.act_on_run(run_id, work).await;
+                self.feed.pending.acted(run_id);
+            }
+        }
+    }
+
+    /// What was decided for one run, outside its lock (everything here
+    /// reaches the database or broker): the page watching it updated, the
+    /// events recorded, the leg exits decided before any stop placed, each
+    /// for the position it was decided on, the stop, then the leg exits
+    /// decided with it or after it. Those are what exits a leg when the
+    /// stop placed nothing; a leg the stop exited refuses them at its claim.
+    async fn act_on_run(&self, run_id: i64, work: RunWork) {
+        let RunWork { ctx, decided, .. } = work;
+        let (strategy, mode) = (&ctx.strategy, ctx.mode);
         // The run's state is copied only for a page that watches it.
-        if self.broadcast.has_subscribers(strategy_id) {
+        if self.broadcast.has_subscribers(strategy.id) {
             self.broadcast
                 .push_delta(self.state.snapshot(run_id), false)
                 .await;
         }
-        for (kind, message, fields) in events {
-            self.emit(strategy_id, &user_id, kind, &message, fields)
+        for e in decided.events {
+            self.emit(strategy.id, &strategy.user_id, e.kind, &e.message, e.fields)
                 .await;
         }
-        self.act_on_risk(run_id, (strategy, mode), stop_reason, leg_exits)
-            .await;
+        if !decided.leg_exits.is_empty() {
+            self.act_on_risk(run_id, (strategy, mode), None, decided.leg_exits)
+                .await;
+        }
+        if decided.stop_reason.is_some() {
+            self.act_on_risk(run_id, (strategy, mode), decided.stop_reason, vec![])
+                .await;
+        }
+        if !decided.after_stop.is_empty() {
+            self.act_on_risk(run_id, (strategy, mode), None, decided.after_stop)
+                .await;
+        }
     }
 
     /// What risk decided, once the lock is released: a strategy-level
     /// breach stops the run; leg exits are placed, unless there is no
-    /// broker session (recorded once per episode, never pretended).
+    /// broker session (recorded once per episode, never pretended). Each
+    /// leg's claim takes only the position its exit was decided on: the
+    /// exits before it are placed first, and a leg re-entered meanwhile
+    /// holds another position.
     async fn act_on_risk(
         &self,
         run_id: i64,
         (strategy, mode): (&StrategyRow, RunMode),
         stop_reason: Option<&'static str>,
-        leg_exits: Vec<(i64, &'static str)>,
+        leg_exits: Vec<LegExit>,
     ) {
         let strategy_id = strategy.id;
         let user_id = strategy.user_id.clone();
@@ -322,9 +381,17 @@ impl StrategyModule {
         }
         self.note_actionable_again(strategy_id, &user_id, run_id)
             .await;
-        for (leg_id, kind) in leg_exits {
-            self.exit_legs(run_id, strategy, &[leg_id], kind, mode, &user_id)
-                .await;
+        for x in leg_exits {
+            let decided = ExitScope::DecidedOn(x.position_ref.as_deref());
+            self.exit_legs(
+                run_id,
+                strategy,
+                (&[x.leg_id], decided),
+                x.kind,
+                mode,
+                &user_id,
+            )
+            .await;
         }
     }
 }

@@ -28,12 +28,20 @@ job waits for. On a pushed `v*` tag it refuses to build unless:
   below) succeeded, none skipped;
 - the tagged commit's dependencies pass an advisory scan made at release
   time (`cargo deny`, `cargo audit` and `npm audit --omit=dev`, against
-  that day's advisory databases, gated as `security.yml` gates them; the
-  accepted advisories are the documented ignores in `.github/deny.toml`):
-  a green CI run or last week's scan can predate an advisory;
+  that day's advisory databases, through `scripts/ci/advisory_scan.sh`,
+  the script `security.yml` runs every day and
+  `scripts/release/preflight.sh` runs before tagging; the accepted
+  advisories are the documented ignores in `.github/deny.toml`): a green
+  CI run or yesterday's scan can predate an advisory;
 - the tag equals `v<version>` and every version location agrees
   (`.claude/skills/version-bump/check_versions.py --tag <tag>`), including a
-  `## <version>` section at the top of `CHANGELOG.md`.
+  `## <version>` section at the top of `CHANGELOG.md`;
+- unless the release is rebuilt by hand, that same CI run's `ci-ok` and
+  `tauri-build` jobs succeeded, the latter with the check before bundling
+  and its backstop, and its bundles are there and unexpired: the release
+  ships those very files, checked against the sha256 GitHub recorded for
+  them (`scripts/ci/release_bundles.py`,
+  [Cutting a release](release-workflow.md)).
 
 The gate can be run alone, without building or publishing anything:
 Actions > Release > Run workflow, with the tag to check.

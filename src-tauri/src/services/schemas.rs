@@ -116,6 +116,10 @@ pub(crate) const MAX_BROKER_QUANTITY: i64 = i32::MAX as i64;
 /// The refusal for a quantity above [`MAX_BROKER_QUANTITY`].
 pub(crate) const QUANTITY_TOO_LARGE: &str = "Quantity is larger than any exchange accepts.";
 
+/// The refusal for a GTT quantity below 1, by the schema and by the GTT
+/// page's modify, which reaches the service without one.
+pub(crate) const GTT_QUANTITY_NOT_POSITIVE: &str = "Quantity must be a positive number.";
+
 /// `_coerce_quantity_to_int`: fractional quantities only on crypto.
 ///
 /// Desktop addition (API-02): a quantity or disclosed quantity above
@@ -577,8 +581,11 @@ pub fn gtt_post_process(m: &mut Map<String, Value>) -> Result<(), FieldErrors> {
         m.insert("target".into(), Value::Null);
         m.insert("trigger_price".into(), json!(resolved));
     }
-    // placeorder's rule for the quantity: whole outside CRYPTO, and capped.
+    // placeorder's rule for the quantity: whole outside CRYPTO. The cap
+    // holds on CRYPTO too (PROD-TR-05): no GTT takes a fraction, so a GTT is
+    // whole units on every exchange.
     coerce_quantity(m)?;
+    cap_quantities(m)?;
     if let Some(a) = m.get("action").and_then(Value::as_str) {
         let up = a.to_ascii_uppercase();
         m.insert("action".into(), json!(up));
@@ -624,7 +631,7 @@ fn gtt_fields(with_trigger_id: bool, with_expiry: bool) -> Vec<Field> {
                 "GTT supports only CNC (delivery) or NRML (overnight F&O); MIS is intraday-only.",
             ),
         }),
-        positive_quantity("Quantity must be a positive number."),
+        positive_quantity(GTT_QUANTITY_NOT_POSITIVE),
         Field::str("pricetype")
             .default(|| json!("LIMIT"))
             .validate(Validator::one_of(&["LIMIT", "MARKET"])),
@@ -1069,13 +1076,17 @@ mod tests {
         let gtt = json!({"apikey": "k", "strategy": "s", "trigger_type": "SINGLE",
             "exchange": "NSE", "symbol": "SBIN", "action": "buy", "product": "CNC",
             "quantity": 1, "price": 900, "triggerprice_sl": 905});
+        // CRYPTO too (PROD-TR-05): a GTT is whole units on every exchange.
+        let crypto = with(&gtt, "exchange", &json!("CRYPTO"));
         for schema in [place_gtt(), modify_gtt()] {
-            let mut m = with(&gtt, "quantity", &big);
-            m.insert("trigger_id".into(), json!("GTT-1"));
-            assert_eq!(
-                schema.load(&m).unwrap_err().to_python(),
-                "{'quantity': ['Quantity is larger than any exchange accepts.']}"
-            );
+            for base in [&gtt, &Value::Object(crypto.clone())] {
+                let mut m = with(base, "quantity", &big);
+                m.insert("trigger_id".into(), json!("GTT-1"));
+                assert_eq!(
+                    schema.load(&m).unwrap_err().to_python(),
+                    "{'quantity': ['Quantity is larger than any exchange accepts.']}"
+                );
+            }
         }
         let ok = place_gtt().load(&with(&gtt, "quantity", &largest)).unwrap();
         assert_eq!(ok["quantity"], largest);

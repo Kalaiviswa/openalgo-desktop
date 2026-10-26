@@ -83,12 +83,17 @@ with the full gates (`parallel-work` skill).
 
 ## The tag is the maintainer's decision
 
-`.github/workflows/release.yml` runs on any pushed `v*` tag: it builds every
-platform (Windows NSIS, macOS Apple Silicon and Intel `.dmg`, Linux x64 and
-arm64 AppImage and `.deb`), signs when the secrets are configured, and
-attaches the installers and `SHA256SUMS.txt` to a **draft** GitHub release
-that the maintainer reviews and publishes by hand. It does not re-run the
-tests; its first job, `verify`, refuses to build unless the tag points at a
+`.github/workflows/release.yml` runs on any pushed `v*` tag: it takes the
+installers CI built for that commit (Windows NSIS, macOS Apple Silicon and
+Intel `.dmg`, Linux x64 and arm64 AppImage and `.deb`; which of them the
+install smoke starts is listed in `docs/release/release-workflow.md`),
+signs their in-app update bundles, and attaches them with `latest.json` and
+`SHA256SUMS.txt` to a **draft** GitHub release that the maintainer reviews
+and publishes by hand, in about 10 to 15 minutes; it does not build again.
+CI keeps those bundles 7 days, so tag within a week of the CI run, or
+release with the rebuild by hand (`docs/release/release-workflow.md`). It
+does not re-run the
+tests; its first job, `verify`, refuses to release unless the tag points at a
 commit on master whose `ci-ok` check succeeded, whose newest CI run on
 master that was not cancelled passed the installed-app jobs (install smoke
 and native E2E on that commit's own bundles), whose newest native order
@@ -98,8 +103,12 @@ dependencies pass a
 fresh advisory scan (cargo-deny, cargo-audit, npm audit, run by the gate
 itself), and `check_versions.py --tag` passes (this script, run in CI). A master run cancelled because the same
 commit was already tested on its pull request has no verdict: re-run it
-and wait for it before tagging. Run that gate alone before tagging for
-real: Actions > Release > Run workflow, with the tag name. The release notes
+and wait for it before tagging. Before tagging, run
+`scripts/release/preflight.sh v<new>` in a clean checkout of the commit:
+the gate's version, master, advisory (the same `scripts/ci/advisory_scan.sh`)
+and install-smoke checks, with today's advisory databases
+(`docs/release/release-workflow.md`). The gate alone can also be run on
+GitHub: Actions > Release > Run workflow, with the tag name. The release notes
 say per platform whether the installer was found signed; they are generated
 from a check of each installer, not from the presence of secrets. Branch and
 tag protection the maintainer should enable: `docs/release/branch-protection.md`.

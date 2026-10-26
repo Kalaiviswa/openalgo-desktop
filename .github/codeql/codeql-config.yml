@@ -7,8 +7,11 @@
 # (src-tauri/src/server/tests/ and every tests.rs) are excluded too: each is
 # declared `#[cfg(test)] mod tests;` and never compiled into the app. Check
 # that declaration before adding a path here. Inline #[cfg(test)] modules in
-# other files cannot be excluded by path; alerts on those are dismissed as
-# "used in tests" after a check that they really sit in a test module.
+# other files cannot be excluded by path: move such a module into its own
+# tests.rs beside the file (`foo.rs` declares `#[cfg(test)] mod tests;`, the
+# body goes in `foo/tests.rs`), which closes its alerts at the next scan
+# (security::hashing, 2026-10-22). Dismiss one as "used in tests" only where
+# the module cannot move, after checking it really sits in a test module.
 name: openalgo-desktop CodeQL config
 
 paths-ignore:

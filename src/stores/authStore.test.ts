@@ -66,6 +66,49 @@ describe('auth store persistence', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(false)
   })
 
+  // PROD-SEC-01: zustand's default merge copies every stored field when the
+  // version matches, so an entry that already reads version 1 (or has no
+  // number) must not hand memory a key before the server checks the session.
+  it('never reads a key from storage, whatever version the entry says', async () => {
+    const user = { username: 'trader', broker: 'zerodha', isLoggedIn: true, loginTime: null }
+    for (const version of [1, undefined]) {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ state: { user, apiKey: FAKE_KEY, isAuthenticated: true }, version })
+      )
+
+      const useAuthStore = await loadStore()
+
+      expect(useAuthStore.getState().apiKey, String(version)).toBeNull()
+      expect(useAuthStore.getState().user).toEqual(user)
+      expect(useAuthStore.getState().isAuthenticated).toBe(true)
+      // The first write (AuthSync's session check makes one at every load)
+      // leaves the key out.
+      useAuthStore.getState().setUser(user)
+      expect(localStorage.getItem(STORAGE_KEY), String(version)).not.toContain(FAKE_KEY)
+    }
+  })
+
+  // A second window on the dashboard shares this storage. It must ask the
+  // server for the key rather than find it here, and a window still holding
+  // the key after a logout elsewhere (a stale tab) must not write it back.
+  it('never passes the key between windows through storage', async () => {
+    const firstWindow = await loadStore()
+    firstWindow.getState().login('trader', 'zerodha')
+    firstWindow.getState().setApiKey(FAKE_KEY)
+
+    const secondWindow = await loadStore()
+    expect(secondWindow.getState().isAuthenticated).toBe(true)
+    expect(secondWindow.getState().apiKey).toBeNull()
+
+    secondWindow.getState().logout()
+    firstWindow.getState().setApiKey(`${FAKE_KEY}-regenerated`)
+
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain(FAKE_KEY)
+    const thirdWindow = await loadStore()
+    expect(thirdWindow.getState().apiKey).toBeNull()
+  })
+
   it('forgets the key and the key check at logout', async () => {
     const useAuthStore = await loadStore()
     useAuthStore.getState().login('trader', 'zerodha')

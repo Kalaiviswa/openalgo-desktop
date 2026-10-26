@@ -2,7 +2,7 @@
 //! test_strategy_module_qa_edges.py)
 
 use openalgo_desktop_lib::strategy::state::{
-    new_leg_state, ClaimId, EntryDecision, LegSpec, RunState, StateRegistry,
+    new_leg_state, ClaimId, EntryDecision, ExitScope, LegSpec, RunState, StateRegistry,
 };
 
 fn registry_with_open_leg(entry_status: &str) -> StateRegistry {
@@ -43,9 +43,23 @@ fn the_claim_marker_is_written_before_any_order_id() {
 fn an_accepted_but_unfilled_entry_is_never_claimed_for_exit() {
     let reg = registry_with_open_leg("open");
     assert!(reg.claim_leg_exit(7, 1, "exit_sl").is_none());
-    let (claimed, unfilled) = reg.claim_legs_for_exit(7, &[1], "exit_close_all");
+    let (claimed, unfilled) = reg.claim_legs_for_exit(7, &[1], "exit_close_all", ExitScope::Held);
     assert!(claimed.is_empty());
     assert_eq!(unfilled.len(), 1);
+}
+
+/// A risk exit claims only the position it was decided on, in the same
+/// hold that checks it: the leg re-entered since holds another position.
+#[test]
+fn a_decided_exit_claims_only_the_position_it_was_decided_on() {
+    let reg = registry_with_open_leg("complete");
+    let other = ExitScope::DecidedOn(Some("ref0"));
+    let (claimed, unfilled) = reg.claim_legs_for_exit(7, &[1], "exit_sl", other);
+    assert!(claimed.is_empty() && unfilled.is_empty());
+    assert!(!reg.snapshot(7).unwrap().leg(1).unwrap().exit_in_flight());
+    let this = ExitScope::DecidedOn(Some("ref1"));
+    let (claimed, _) = reg.claim_legs_for_exit(7, &[1], "exit_sl", this);
+    assert_eq!(claimed.len(), 1);
 }
 
 #[test]

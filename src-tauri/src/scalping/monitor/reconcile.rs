@@ -55,13 +55,19 @@ impl RiskMonitor {
         })
     }
 
-    /// Whether a broker order id is one of this monitor's exit orders.
-    pub fn owns_order(&self, order_id: &str) -> bool {
-        self.inner.lock().attempts.values().any(|a| {
-            a.children
-                .iter()
-                .any(|c| c.order_id.as_deref() == Some(order_id))
-        })
+    /// Which of these broker order ids are this monitor's exit orders.
+    pub fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
+        let inner = self.inner.lock();
+        let mine: HashSet<&str> = inner
+            .attempts
+            .values()
+            .flat_map(|a| a.children.iter().filter_map(|c| c.order_id.as_deref()))
+            .collect();
+        order_ids
+            .iter()
+            .filter(|id| mine.contains(id.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// An accepted exit order: folded from the book or, once the book no
@@ -120,16 +126,14 @@ impl RiskMonitor {
         akey: &str,
         child: &mut ExitChild,
         live: &mut HashSet<String>,
-        claimed: &mut HashSet<String>,
     ) -> Followed {
         let mut f = Followed::default();
         live.insert(akey.to_string());
         let u = exit_unconfirmed(p.sl, child);
-        let bound = |id: &str| claimed.contains(id) || p.book.owned(id);
-        match p.book.find(&u, &bound) {
+        match p.book.find(&u, &|id: &str| p.book.owned(id)) {
             Found::Order(b) => {
                 self.absence.forget(akey);
-                claimed.insert(b.order_id.clone());
+                p.book.claim(&b.order_id);
                 child.order_id = Some(b.order_id.clone());
                 fold_child(child, b);
                 f.changed = true;
@@ -183,20 +187,24 @@ impl RiskMonitor {
         }
         // Fold this pass's facts into the attempt as it stands now: an
         // exit may have added orders since the snapshot (they are kept).
-        let (now_attempt, _) = self.update_attempt(p.key, p.sl.id, |slot| {
-            if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
-                // Only the orders this pass learned about: an exit may
-                // have recorded answers on others meanwhile.
-                for &i in touched {
-                    if let (Some(cur), Some(folded)) = (c.children.get_mut(i), a.children.get(i)) {
-                        *cur = folded.clone();
+        let (now_attempt, _) = self
+            .update_attempt(p.key, p.sl.id, |slot| {
+                if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
+                    // Only the orders this pass learned about: an exit may
+                    // have recorded answers on others meanwhile.
+                    for &i in touched {
+                        if let (Some(cur), Some(folded)) =
+                            (c.children.get_mut(i), a.children.get(i))
+                        {
+                            *cur = folded.clone();
+                        }
+                    }
+                    if !c.working() && c.settled_at.is_none() {
+                        c.settled_at = Some(p.book.read_at);
                     }
                 }
-                if !c.working() && c.settled_at.is_none() {
-                    c.settled_at = Some(p.book.read_at);
-                }
-            }
-        });
+            })
+            .await;
         if now_attempt.is_some_and(|c| c.id == a.id && !c.working()) {
             self.settle(p.key, gen, p.sl, p.mode).await;
         }
@@ -223,7 +231,6 @@ impl RiskMonitor {
         };
         let mut unresolved = 0;
         let mut live = HashSet::new();
-        let mut claimed: HashSet<String> = HashSet::new();
         for (key, gen, sl, mut a) in pending {
             if !a.working() {
                 // Every order ended: the position book may only now show
@@ -247,10 +254,7 @@ impl RiskMonitor {
                     (ChildState::Working, Some(id)) => {
                         self.follow_accepted(&p, &akey, &id, child, &mut live).await
                     }
-                    _ => {
-                        self.find_unconfirmed(&p, &akey, child, &mut live, &mut claimed)
-                            .await
-                    }
+                    _ => self.find_unconfirmed(&p, &akey, child, &mut live).await,
                 };
                 unresolved += f.unresolved;
                 if f.changed {
@@ -304,17 +308,19 @@ impl RiskMonitor {
             return Ok(false);
         };
         let mut hit = false;
-        let (now_attempt, _) = self.update_attempt(key, sl.id, |slot| {
-            if let Some(a) = slot.as_mut().filter(|a| a.id == attempt_id) {
-                if let Some(c) = a.children.get_mut(idx).filter(|c| !c.terminal()) {
-                    c.state = ChildState::Dead;
-                    hit = true;
-                    if !a.working() {
-                        a.settled_at = Some(now);
+        let (now_attempt, _) = self
+            .update_attempt(key, sl.id, |slot| {
+                if let Some(a) = slot.as_mut().filter(|a| a.id == attempt_id) {
+                    if let Some(c) = a.children.get_mut(idx).filter(|c| !c.terminal()) {
+                        c.state = ChildState::Dead;
+                        hit = true;
+                        if !a.working() {
+                            a.settled_at = Some(now);
+                        }
                     }
                 }
-            }
-        });
+            })
+            .await;
         if !hit {
             return Ok(false);
         }
@@ -390,15 +396,18 @@ impl OrderOwner for ScalpingOrders {
         self.0.upgrade().is_some_and(|m| m.has_working_exits(mode))
     }
 
-    fn owns_order(&self, order_id: &str) -> bool {
-        self.0.upgrade().is_some_and(|m| m.owns_order(order_id))
+    fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
+        self.0
+            .upgrade()
+            .map(|m| m.owned_among(order_ids))
+            .unwrap_or_default()
     }
 
-    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize {
-        match self.0.upgrade() {
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> crate::error::Result<usize> {
+        Ok(match self.0.upgrade() {
             Some(m) => m.reconcile_book(mode, book).await,
             None => 0,
-        }
+        })
     }
 
     fn held_orders(&self) -> Vec<HeldOrder> {

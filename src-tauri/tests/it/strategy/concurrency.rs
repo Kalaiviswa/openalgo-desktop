@@ -3,7 +3,7 @@
 
 use super::*;
 use openalgo_desktop_lib::strategy::state::{
-    new_leg_state, ClaimId, LegSpec, RunState, StateRegistry,
+    new_leg_state, ClaimId, ExitScope, LegSpec, RunState, StateRegistry,
 };
 use openalgo_desktop_lib::strategy::store::{
     ClaimOutcome, CHANGED_WHILE_STARTING, LIVE_NOT_ENABLED, WEBHOOK_LOCKED,
@@ -36,7 +36,9 @@ fn two_rules_racing_on_one_leg_claim_it_exactly_once() {
                     if i % 2 == 0 {
                         reg.claim_leg_exit(1, 1, "exit_sl").is_some() as usize
                     } else {
-                        reg.claim_legs_for_exit(1, &[1], "exit_close_all").0.len()
+                        reg.claim_legs_for_exit(1, &[1], "exit_close_all", ExitScope::Held)
+                            .0
+                            .len()
                     }
                 })
             })

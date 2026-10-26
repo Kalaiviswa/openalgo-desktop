@@ -28,6 +28,17 @@ interface AuthStore {
   checkSession: () => boolean
 }
 
+/**
+ * Desktop: the only fields kept in browser storage, and the only ones read
+ * back from it. Whatever else an entry holds (the API key 1.0.0 wrote, or an
+ * entry at the current version that should not exist) never reaches memory:
+ * the key comes from the server once it has checked the session (AuthSync).
+ */
+function storedFields(stored: unknown): Pick<AuthStore, 'user' | 'isAuthenticated'> {
+  const { user = null, isAuthenticated = false } = (stored ?? {}) as Partial<AuthStore>
+  return { user, isAuthenticated }
+}
+
 export const useAuthStore = create<AuthStore>()(
   persist(
     (set, get) => ({
@@ -102,14 +113,14 @@ export const useAuthStore = create<AuthStore>()(
       // file in the WebView profile, while every other secret is encrypted at
       // rest with the login password (KEY-01), so the key stays in memory and
       // AuthSync asks the server for it after each start.
-      partialize: (state) => ({ user: state.user, isAuthenticated: state.isAuthenticated }),
+      partialize: (state) => storedFields(state),
       version: 1,
       // Version 0 (1.0.0) stored the key. A migration makes zustand write the
       // store back at once, without it.
-      migrate: (stored) => {
-        const { user = null, isAuthenticated = false } = (stored ?? {}) as Partial<AuthStore>
-        return { user, isAuthenticated }
-      },
+      migrate: storedFields,
+      // zustand's own merge copies every stored field when the version
+      // matches, so it alone would read a stored key into memory.
+      merge: (stored, current) => ({ ...current, ...storedFields(stored) }),
     }
   )
 )

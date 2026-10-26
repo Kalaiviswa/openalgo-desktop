@@ -177,7 +177,7 @@ impl StrategyModule {
             return Err("The position changed before its entry could be placed".into());
         }
         let symbols = vec![(spec.symbol.clone(), spec.exchange.clone())];
-        self.feed.add_run(run_id, &symbols).await;
+        self.follow_prices(run_id, &symbols).await;
         let result = self.place_for_run(run_id, mode, &order).await;
         self.record_acknowledgement(
             row_id,

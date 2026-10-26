@@ -65,13 +65,21 @@ It looks the order up in the broker's order book (`find_placed`, P1-4):
   and no more than 60 seconds before the placement. A row whose time cannot
   be read is never taken. Several candidates are never guessed between.
 
-Multi-order replies (close-all, basket, split) carry "some order has no
-definite answer" beside the web's wire shape (P1-5). Every close-all override
-runs each exit inside `outcome::placing` and records it with
-`CloseAllResult::record`. A split stops at the first chunk whose answer was
-lost and reports the rest as not sent (the web keeps sending). An Action
-Center approval whose answer was lost stays `submitting` (unconfirmed): never
-marked rejected, never sent again.
+Multi-order replies (close-all, basket, split, and an options order's split
+and legs) carry "some order has no definite answer" beside the web's wire
+shape (P1-5). Every close-all override runs each exit inside
+`outcome::placing` and records it with `CloseAllResult::record`. A split, an
+options split included, stops at the first chunk whose answer was lost and
+reports the rest as not sent (the web keeps sending). The legs of a
+multi-leg options order are independent orders, like a basket's: a lost leg
+holds back nothing, and the reply names it (PROD-TR-02). This is the web's
+behaviour and the maintainer's decision (2026-10-23): the desktop keeps
+sending the remaining legs after a refused or uncertain one, even when that
+leaves a short leg without its hedge, and says so in the reply instead of
+holding them back. An Action Center
+approval whose answer was lost, in full or for one leg or chunk, stays
+`submitting` (unconfirmed): never marked rejected or partial, never sent
+again, across a restart too.
 
 A strategy exit whose order row cannot be written is not sent (P2-6): it
 could not be found again if its answer were lost.

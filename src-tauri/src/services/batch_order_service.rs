@@ -93,15 +93,33 @@ pub fn buy_then_sell(orders: &[Value]) -> Vec<Value> {
 }
 
 /// Split `total` into chunks of `size`: full chunks, then the remainder.
-pub fn split_chunks(total: i64, size: i64) -> Vec<i64> {
-    if size <= 0 {
-        return Vec::new();
+/// `None` when that is more than [`MAX_SPLIT_ORDERS`] chunks, when `size`
+/// is not positive or when `total` is negative. The chunks are counted
+/// before any is allocated (PROD-TR-03): a schema-valid 2147483647 in
+/// chunks of 1 used to ask for 16 GiB before the limit was checked, and a
+/// negative total wrapped into a length of 2^64 - 1.
+pub fn split_chunks(total: i64, size: i64) -> Option<Vec<i64>> {
+    if size <= 0 || total < 0 {
+        return None;
     }
-    let mut v = vec![size; (total / size) as usize];
-    if total % size > 0 {
-        v.push(total % size);
+    let (full, rest) = (total / size, total % size);
+    let count = full.checked_add(i64::from(rest > 0))?;
+    if count > MAX_SPLIT_ORDERS {
+        return None;
     }
-    v
+    let mut chunks = vec![size; usize::try_from(full).ok()?];
+    if rest > 0 {
+        chunks.push(rest);
+    }
+    Some(chunks)
+}
+
+/// The web's answer to a split of more than [`MAX_SPLIT_ORDERS`] orders.
+pub(crate) fn too_many_orders() -> String {
+    format!(
+        "Total number of orders would exceed maximum limit of {}",
+        MAX_SPLIT_ORDERS
+    )
 }
 
 /// Quotes for many instruments in one broker call, for pricing sandbox
@@ -343,13 +361,9 @@ pub async fn split_order_decided(
     if size <= 0 {
         return fail("Split size must be greater than 0");
     }
-    let chunks = split_chunks(total, size);
-    if chunks.len() as i64 > MAX_SPLIT_ORDERS {
-        return fail(&format!(
-            "Total number of orders would exceed maximum limit of {}",
-            MAX_SPLIT_ORDERS
-        ));
-    }
+    let Some(chunks) = split_chunks(total, size) else {
+        return fail(&too_many_orders());
+    };
     if analyze {
         split_to_sandbox(ctx, req, &chunks, total, size).await
     } else {
@@ -444,12 +458,14 @@ mod tests {
 
     #[test]
     fn split_aggregation() {
-        assert_eq!(split_chunks(10, 3), vec![3, 3, 3, 1]);
-        assert_eq!(split_chunks(9, 3), vec![3, 3, 3]);
-        assert_eq!(split_chunks(2, 5), vec![2]);
-        assert!(split_chunks(5, 0).is_empty());
-        assert_eq!(split_chunks(1000, 10).len(), 100);
-        assert_eq!(split_chunks(1001, 10).len(), 101);
+        assert_eq!(split_chunks(10, 3), Some(vec![3, 3, 3, 1]));
+        assert_eq!(split_chunks(9, 3), Some(vec![3, 3, 3]));
+        assert_eq!(split_chunks(2, 5), Some(vec![2]));
+        assert_eq!(split_chunks(5, 0), None);
+        assert_eq!(split_chunks(-5, 3), None);
+        assert_eq!(split_chunks(1000, 10).map(|c| c.len()), Some(100));
+        assert_eq!(split_chunks(1001, 10), None);
+        assert_eq!(split_chunks(i64::MAX, 1), None);
     }
 
     #[test]

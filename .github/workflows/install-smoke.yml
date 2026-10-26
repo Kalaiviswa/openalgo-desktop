@@ -36,9 +36,12 @@ name: Install smoke
 # ci-ok needs it), so a pull request is tested installed before it merges,
 # with the bundles, this workflow and these scripts all from the commit
 # under test. Each job names that commit in its summary. release.yml refuses
-# to build a tag unless the newest CI push run of that commit on master
-# passed every job here (scripts/ci/smoke_gate.py release). To try an
-# older run's bundles again, re-run its jobs (the bundles are kept 7 days).
+# a tag unless the newest CI push run of that commit on master passed every
+# job here (scripts/ci/smoke_gate.py release), and then ships that run's
+# bundles (scripts/ci/release_bundles.py): the files installed here, and the
+# Intel app and the macOS update bundles, which no job here starts. To try
+# an older run's bundles again, re-run its jobs (the bundles are kept 7
+# days), before tagging: a re-run after the gate makes the release refuse.
 #
 # The app binds the shipped ports 5000 and 8765 here, which is fine on a CI
 # runner and is why scripts/ci/launch_smoke.py refuses to run outside CI.
@@ -75,7 +78,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-linux-${{ matrix.name }}
           path: bundles
@@ -158,7 +161,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-windows-x86_64
           path: bundles
@@ -223,7 +226,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/tested_commit.sh
       - name: Download the bundles
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-macos-aarch64
           path: bundles
@@ -253,7 +256,7 @@ jobs:
         # src-tauri/src/e2e.rs: no shipped binary carries its strings.
         run: python3 scripts/ci/check_no_e2e_build.py "$APP_BIN"
       - name: Download the Intel bundle
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: bundles-macos-x86_64
           path: bundles-x64

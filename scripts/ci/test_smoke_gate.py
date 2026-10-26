@@ -22,6 +22,8 @@ sys.dont_write_bytecode = True  # leave no __pycache__ in the checkout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import smoke_gate  # noqa: E402
 
+smoke_gate.LIST_PAUSE = 0  # an empty list is asked again, without waiting here
+
 REPO = "marketcalls/openalgo-desktop"
 SHA = "6c804e51853ac878b95d82c622faa5bb49f0cd69"
 OTHER_SHA = "aa73a473aec96ac273a5ed6a649f341a17e4d1f2"
@@ -194,6 +196,32 @@ class Gate(unittest.TestCase):
             {100: GREEN},
         )
         self.assertEqual(self.run_gate("release", SHA)[0], 0)
+
+    def test_a_list_that_misses_the_run_is_asked_again(self):
+        # GitHub's filtered list of runs sometimes answers none for a run it
+        # lists a moment later; the gate asks again before refusing.
+        self.put_runs([ci_run(100, "2026-10-20T01:00:00Z")], {100: GREEN})
+        real, asked = smoke_gate.api, []
+
+        def flaky(path):
+            if "/workflows/ci.yml/runs?" in path:
+                asked.append(path)
+                if len(asked) < smoke_gate.LIST_ATTEMPTS:
+                    return {"workflow_runs": []}
+            return real(path)
+
+        smoke_gate.api = flaky
+        try:
+            self.assertEqual(self.run_gate("release", SHA)[0], 0)
+            self.assertEqual(len(asked), smoke_gate.LIST_ATTEMPTS)
+            # Never answering, it refuses after the last attempt.
+            asked.clear()
+            smoke_gate.api = lambda path: {"workflow_runs": []} if "/runs?" in path else real(path)
+            code, out = self.run_gate("release", SHA)
+            self.assertEqual(code, 1)
+            self.assertIn("has a verdict (none)", out)
+        finally:
+            smoke_gate.api = real
 
     def test_refuses_when_every_run_was_cancelled(self):
         self.put_runs([ci_run(101, "2026-10-20T03:00:00Z", conclusion="cancelled")])

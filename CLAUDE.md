@@ -245,6 +245,18 @@ logging. Every input is an argument and every decision is a return value.
 Consumers translate, they do not decide. The web's `test/risk/vectors.json` is
 the contract; the Rust core must pass every vector.
 
+**Risk decides every price, in the order it came** (PROD-REL-01). A trailing
+stop, a stepped trail and a profit lock depend on the path, not on its
+extremes: a peak that raised a stop and the dip that then hit it were lost
+when the strategy tick path folded waiting prices to a later, larger peak.
+Never fold, sample or drop prices before the risk core has judged them; when
+acting is slow, combine the decisions (`strategy::tick_feed::pending`), not
+the prices, and never wait on the database where prices are read
+(`strategy::tick_context`). Two exceptions: a price the reader misses when
+the market-data channel overruns it is skipped, counted and alerted
+(`strategy_ticks_missed`), and a run whose settings cannot be read is not
+judged until they are (logged, and read again with a backoff).
+
 ### An order path decides once, under the lock
 
 Learned by the web from defects that reversed real positions; they apply here
@@ -261,6 +273,13 @@ unchanged:
   queued order through the Action Center's own record
   (`trading/runner/approval.rs`: bound, rejected or unconfirmed), never by a
   number it does not have (LOG-04; the web follows neither).
+- **One request is one decision.** A request that places several orders
+  reads analyzer mode and the Semi-Auto queue once, and every order goes
+  where that said. An options order's legs and chunks go through
+  `order_service::place_admitted`, never `place_order`, so a toggle while
+  a contract resolves or a chunk is in flight cannot split it between Live
+  and Sandbox, or between the broker and the Action Center (PROD-TR-04;
+  the web reads both again for each order).
 - A stop whose exit orders were refused leaves the run open and managed.
 - **An obligation's order goes only through the session it was opened on**
   (LOG-07, `services::live_owner`). A Live strategy run, OpenScript run,
@@ -764,13 +783,20 @@ worktree onto master. CI builds fresh and is unaffected.
   the time on.
 - Third-party actions are pinned to commit SHAs and Dependabot updates them.
   CodeQL skips test code through `.github/codeql/codeql-config.yml`.
-- In-app update bundles are made only by the release workflow, which adds
-  `src-tauri/updater-artifacts.conf.json` to the build. Never put
-  `createUpdaterArtifacts` in `tauri.conf.json`: CI and local bundle builds
-  have no signing key, and the Tauri build fails without one. The update
-  plugin's own commands are granted to no page (a test pins it): pages reach
-  updates through `/api/update/*` and the `restart_to_update` command.
-  `docs/release/updates.md` has the whole chain.
+- A release ships the bundles CI's `tauri-build` made for the tagged commit
+  (the install smoke starts some of them, not all: `docs/release/release-workflow.md`
+  lists which), and only signs their update bundles;
+  it does not build again (`docs/release/release-workflow.md`). So
+  `tauri-build` builds as the release did: `updater-artifacts.conf.json`
+  with `--no-sign` (unsigned update bundles; no CI run ever holds the key,
+  a test pins it) and `release-checks.conf.json` (the check before
+  bundling), and the steps named in `scripts/ci/release_bundles.py`
+  (`TAURI_BUILD_STEPS`) keep their names. Never put `createUpdaterArtifacts`
+  in `tauri.conf.json`: a local bundle build has no signing key and fails
+  without one. The update plugin's own commands are granted to no page (a
+  test pins it): pages reach updates through `/api/update/*` and the
+  `restart_to_update` command. `docs/release/updates.md` has the whole
+  chain.
 - `tauri` carries its `test` feature as a dev-dependency off Windows (the
   mock runtime the updater tests drive the real plugin with), so
   `clippy --all-targets` and the test builds compile `tauri` a second time.
@@ -806,12 +832,16 @@ Every flaky test found so far was a race, not a slow machine:
   a loaded runner stretched one page past 200 ms. Format with the read on
   the blocking pool, and assert the total with `runtime_busy` as well as
   the worst gap.
-- The reverse also happens: running many integration modules together in
-  one `cargo test` process with three or more test threads (strategy::,
-  webui2::, webui_monitoring::, webui_reports:: and the like) hits macOS's
-  limit of 2048 threads per process, and r2d2's scheduled thread pool fails
-  with WouldBlock. CI is not affected (nextest runs one process per test).
-  Locally, run those modules with `--test-threads=2`, or use nextest.
+- The reverse also happens: one `cargo test` process running many tests
+  with three or more test threads hits macOS's limit of 2048 threads per
+  process, and r2d2's scheduled thread pool fails with WouldBlock. It began
+  with integration modules (strategy::, webui2::, webui_monitoring::,
+  webui_reports:: and the like); since 1.0.1 the full `--lib` run reaches
+  it too (55 failures on master, 2026-10-23, every one "Resource
+  temporarily unavailable"). CI is not affected (nextest runs one process
+  per test). Run the full suite locally as CI does: `cargo nextest run
+  --locked --all-targets --config-file ../.github/nextest.toml --profile
+  ci`, then `cargo test --locked --doc`; a filtered `cargo test` stays fine.
 - A `runtime_stall` gap far above the measured work's own polls
   (`runtime_busy`) is not that work: the report pages' test saw the timer
   374 ms late on a macOS runner while all sixteen requests' polls took
@@ -830,9 +860,36 @@ Every flaky test found so far was a race, not a slow machine:
   the blocking pool (`ApiKeyService::check_off_runtime`); `polled_reads`
   counts Argon2 runs on the runtime thread (`hashing::argon2_runs`). A
   runtime test that starts its clock right after `H::new()` also times the
-  app starting (the scalping stops and the order reconciler read the
-  database on the runtime on their first pass): start it after
+  app starting (the first passes of its background tasks): start it after
   `IdleLog::until_idle`.
+- A risk owner reads and writes the database on the blocking pool and
+  never under the lock guarding its state (PROD-REL-02): the scalping
+  stops' sync read them on the runtime under the monitor's lock, the
+  monitor saved exit orders under it, and the order reconciler asked its
+  owners about their saved rows on the runtime every pass, so a pool with
+  no free connection held the runtime that judges the ticks for the whole
+  wait. A leg's exit orders are changed and saved in turn under that leg's
+  writer lock (`RiskMonitor::update_attempt`), never the monitor's. A read
+  made outside the lock can be overtaken: install it only if nothing
+  changed the state meanwhile (`RiskMonitor::install` reads again after a
+  clear), and never over newer state (a held leg keeps the trail it moved).
+- The loop that judges a risk owner's ticks never waits for the database:
+  the scalping consumer ran its sync inside the loop and awaited each
+  trailed stop's save, so a read or write waiting for the database stopped
+  every leg being judged and the tick channel skipped prices. A sync runs
+  beside the ticks (`scalping/monitor/consumer.rs`) and a trail is saved by
+  a task of its own (`scalping/monitor/writes.rs`; tests wait for it with
+  `RiskMonitor::wait_idle`); a read that fails is tried again with a capped
+  backoff, and the trader is told when it keeps failing (a stop saved
+  meanwhile is not watched yet).
+- The order reconciler asks every owner which of a book's orders are
+  already theirs once per read, on the blocking pool
+  (`BookSnapshot::owned_by`), and matching reads that from memory; an owner
+  that binds an order in the pass claims it on the book
+  (`BookSnapshot::claim`), so a later owner cannot bind it too. An owner's
+  read that fails is never "nothing": unknown holding counts as yes, and an
+  owner that could not read its own orders answers an error, so the gap
+  stays open.
 
 ### Data and migrations
 
@@ -914,6 +971,23 @@ Every flaky test found so far was a race, not a slow machine:
   "not found" (SM-04). The web's store turns it into an empty success; the
   desktop's `/api/v1/strategy` runs, orders and events answer the web's
   500 "An unexpected error occurred" instead.
+- The same holds on a page (PROD-PAR-01): a read that fails keeps what the
+  page last showed, marked with when it was read, and a list never read
+  says it is not known; neither is shown as empty. The Health page once
+  read its unconfirmed orders as `[]` on any failure, so a held order
+  vanished after one failed refresh. Each of its reads is applied as soon
+  as it settles, with its own time, and fails after a timeout
+  (`components/desktop/health/useHealthReads.ts`): not all or nothing,
+  and never held back by the slowest read or a stalled server.
+- An OpenScript run trades the inputs its start read (PROD-TR-06, as the
+  web's `start` hands them to the run): its page is served the snapshot
+  kept on the run (`RunEntry::inputs`), never a later read of the saved
+  settings, which answered a failure as `{}` and so ran the script's
+  default quantity and risk. The page loads nothing from an answer that
+  carries no inputs, and ends the run saying so. Saved parameters that
+  cannot be read or are not ones a run may carry refuse the start (409,
+  `Deployment::inputs_unusable`); they were read as `{}`, which ran the
+  defaults too.
 - A strategy order is Live or Sandbox by the run that placed it
   (`strategy/store/by_mode.rs`, SM-03, SM-05). A book of one mode is
   attributed only to that mode's orders, and the Detail page lists the
@@ -976,7 +1050,10 @@ and add each new one here.
   Only a live CRYPTO smart order carries a fraction, decided and sent in
   exact decimals. The web truncates (`int(position_size)`,
   `int(quantity)`), so a target of 0.5 closed the position and a 0.5 GTT
-  became one for 0 with nothing blocked.
+  became one for 0 with nothing blocked. Nor is a size clamped: a GTT
+  quantity above a 32-bit integer is refused on every exchange, CRYPTO
+  included, from `/api/v1` and from the GTT page's modify alike
+  (`gtt_service::gtt_quantity`, PROD-TR-05).
 
 ### Symbol master and the option tools
 
@@ -1110,6 +1187,16 @@ and add each new one here.
   closed them: parse each input once into a typed value, check limits on that
   value with checked arithmetic, and reserve one shared budget before any
   work starts.
+- **Count before allocating.** A size from a request bounds nothing until
+  it is checked: a split counts its chunks with checked arithmetic and
+  refuses more than 100 before building any (`batch_order_service::
+  split_chunks`, PROD-TR-03: a schema-valid 2147483647 in chunks of 1 asked
+  for 16 GiB first). The same holds for a size read from a broker: a
+  scalping exit splits the position book's quantity through it and refuses
+  more than 100 orders (`scalping::monitor::chunks`) rather than sending
+  hundreds of orders from a wrong book. A test holds such a path to a cap
+  on its largest allocation (`tests/it/alloc_support`), so a regression
+  fails the test instead of swapping the machine.
 - A route is public only if it is in the reviewed list in `server/tests.rs`,
   and a public route that changes state needs its own credential. A CSRF token
   is not one: `GET /auth/csrf-token` hands it to anyone.
@@ -1122,9 +1209,20 @@ and add each new one here.
   `ignore` in `.github/deny.toml` with the reason and a review date, the same
   IDs in `.trivyignore`, and the Dependabot alert dismissed as "not used" with
   the same reason.
-- Dismiss a CodeQL alert as "used in tests" only after checking that it sits
-  in a `#[cfg(test)]` module. A variable named `iv` that means interval trips
-  the hard-coded-crypto rule; rename it.
+- A CodeQL alert in an inline `#[cfg(test)]` module is fixed by moving the
+  module to its own `tests.rs` (`foo.rs` declares `#[cfg(test)] mod tests;`,
+  the body goes in `foo/tests.rs`), which `.github/codeql/codeql-config.yml`
+  excludes by path; dismiss as "used in tests" only where it cannot move,
+  after checking the line really sits in the test module. A variable named
+  `iv` that means interval trips the hard-coded-crypto rule; rename it.
+- Read a CodeQL taint alert's path (the SARIF's code flow, `gh api
+  .../code-scanning/analyses/<id>` with `Accept: application/sarif+json`)
+  before changing the sink. CodeQL resolves a call on `Box<dyn BrokerFeed>`
+  to every implementation and taints every field read of a tainted value,
+  so one feed holding a user id taints another feed's `self` (#226/#227:
+  Angel's client code "reaching" the XTS subscription address). And
+  `rust/cleartext-transmission` checks no scheme: an https-only type does not
+  end it, since `Url::parse` carries the taint.
 - Check a fix by disabling it locally and watching its test fail; never
   commit or push the disabled state, not even to a wip branch.
 - Behind a tunnel or proxy on the same machine (ngrok, cloudflared) every
@@ -1260,6 +1358,9 @@ and add each new one here.
   drop a field from a persisted store, bump its `version` with a `migrate`:
   zustand rewrites storage on load only after a migration, so with
   `partialize` alone the old value stays on disk until the next change.
+  Give it a `merge` that reads back only the persisted fields too: when the
+  stored version matches, zustand's default merge copies every stored
+  field into memory, a stray secret included (PROD-SEC-01).
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
 

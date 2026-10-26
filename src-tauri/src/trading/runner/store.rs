@@ -167,6 +167,11 @@ pub struct Deployment {
     pub product: String,
     pub user_id: Option<String>,
     pub inputs: Map<String, Value>,
+    /// Why the saved parameters cannot be used (they cannot be read, or one
+    /// is not a parameter a run may carry); `inputs` is then empty, and a
+    /// start is refused rather than run on the script's defaults
+    /// (PROD-TR-06).
+    pub inputs_unusable: Option<String>,
     pub mode: Option<String>,
     pub updated_at: String,
 }
@@ -187,8 +192,18 @@ impl Deployment {
     }
 }
 
+/// The saved parameters as a run may carry them, or why they cannot be.
+fn saved_inputs(text: &str) -> std::result::Result<Map<String, Value>, String> {
+    let value = serde_json::from_str::<Value>(text)
+        .map_err(|_| "They are not in a form OpenAlgo can read.".to_string())?;
+    checked_inputs(&value)
+}
+
 fn deployment_from_row(r: &rusqlite::Row) -> rusqlite::Result<Deployment> {
-    let inputs: String = r.get(7)?;
+    let (inputs, inputs_unusable) = match saved_inputs(&r.get::<_, String>(7)?) {
+        Ok(inputs) => (inputs, None),
+        Err(why) => (Map::new(), Some(why)),
+    };
     Ok(Deployment {
         deployment: r.get(0)?,
         script: r.get(1)?,
@@ -197,11 +212,8 @@ fn deployment_from_row(r: &rusqlite::Row) -> rusqlite::Result<Deployment> {
         interval: r.get(4)?,
         product: r.get(5)?,
         user_id: r.get(6)?,
-        inputs: serde_json::from_str::<Value>(&inputs)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .map(|m| checked_inputs(&Value::Object(m)).unwrap_or_default())
-            .unwrap_or_default(),
+        inputs,
+        inputs_unusable,
         mode: r
             .get::<_, Option<String>>(8)?
             .filter(|m| m == "live" || m == "sandbox"),
@@ -316,15 +328,22 @@ pub fn require(conn: &Connection, name: &str) -> Result<std::result::Result<Depl
             absent.push(words);
         }
     }
+    let script = if found.script.is_empty() {
+        name
+    } else {
+        &found.script
+    };
     if !absent.is_empty() {
         return Ok(Err(format!(
             "{} is missing {} from its run settings. Save them, then start it again.",
-            if found.script.is_empty() {
-                name
-            } else {
-                &found.script
-            },
+            script,
             listed(&absent)
+        )));
+    }
+    if let Some(why) = &found.inputs_unusable {
+        return Ok(Err(format!(
+            "The saved strategy parameters of {} cannot be used: {} It was not started, because it would have run on the script's default parameters instead of yours. Open its run settings, check the parameters and save them again, then start it.",
+            script, why
         )));
     }
     Ok(Ok(found))

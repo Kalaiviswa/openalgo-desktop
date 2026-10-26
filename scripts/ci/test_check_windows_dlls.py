@@ -144,6 +144,13 @@ class Workflows(unittest.TestCase):
         self.assertIn("RUSTFLAGS: -D warnings -C target-feature=+crt-static", windows)
         for name in ("release.yml", "install-smoke.yml"):
             self.assertNotIn("RUSTFLAGS", text(f".github/workflows/{name}"), name)
+        # CI's tauri-build makes the installers a release ships, so it takes
+        # the static C runtime from .cargo/config.toml, never a RUSTFLAGS:
+        # neither its own nor one from ci.yml's top-level env, which every
+        # job inherits.
+        build = ci[ci.index("\n  tauri-build:\n") : ci.index("\n  install-smoke:\n")]
+        self.assertNotIn("RUSTFLAGS", build)
+        self.assertNotIn("RUSTFLAGS", ci[: ci.index("\njobs:\n")])
 
     def test_the_shipped_and_the_installed_binary_are_checked(self):
         release = text(".github/workflows/release.yml")

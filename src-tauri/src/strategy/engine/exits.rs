@@ -6,7 +6,7 @@ use super::{ev, StrategyModule, UNFILLED_EXIT};
 use crate::strategy::dispatch::{
     build_order, exit_action, DispatchResult, OrderPayload, RunMode, EXIT_PRICETYPE,
 };
-use crate::strategy::state::{ClaimId, ExitClaim, SupersededClaim};
+use crate::strategy::state::{ClaimId, ExitClaim, ExitScope, SupersededClaim};
 use crate::strategy::store::{NewOrder, StrategyRow};
 use serde_json::{json, Value};
 
@@ -52,18 +52,20 @@ impl ExitTarget {
 }
 
 impl StrategyModule {
-    /// Exit the named legs at market, from the symbol each leg HOLDS.
+    /// Exit the named legs at market, from the symbol each leg HOLDS: the
+    /// position `scope` names, and a flip's outgoing position (one the
+    /// strategy already chose to close).
     pub(crate) async fn exit_legs(
         &self,
         run_id: i64,
         strategy: &StrategyRow,
-        leg_ids: &[i64],
+        (leg_ids, scope): (&[i64], ExitScope<'_>),
         kind: &str,
         mode: RunMode,
         user_id: &str,
     ) -> Vec<Value> {
         // Claimed and classified in ONE hold of the run lock.
-        let (live, unfilled) = self.state.claim_legs_for_exit(run_id, leg_ids, kind);
+        let (live, unfilled) = self.state.claim_legs_for_exit(run_id, leg_ids, kind, scope);
         let targets = self.exit_targets(run_id, leg_ids, live);
         let mut outcomes = Vec::new();
         for t in &targets {

@@ -19,22 +19,21 @@ that did not run is reported as not run.
 ## 1. Dependency and secret scanners
 
 Run each, record the command, the tool version and the result. CI runs the
-same set in `.github/workflows/security.yml` (weekly and on lockfile
+same set in `.github/workflows/security.yml` (daily and on lockfile
 changes), `ci.yml` (gitleaks on every push) and `codeql.yml`.
 
 ```bash
-# Rust advisories, licenses, bans, sources (the single place advisories are accepted)
-cargo deny --manifest-path src-tauri/Cargo.toml --config .github/deny.toml --locked \
-  check advisories bans licenses sources
-
-# RustSec, with the ignores taken from deny.toml (exactly what security.yml does)
-ignore_args=(); while IFS= read -r id; do ignore_args+=(--ignore "$id"); done \
-  < <(grep -vE '^[[:space:]]*#' .github/deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' | sort -u)
-cargo audit --file src-tauri/Cargo.lock "${ignore_args[@]}"
-
-# JavaScript: production dependencies, fail on high or critical
-npm audit --omit=dev --audit-level=high
+# The release gate's three scans, exactly as release.yml and security.yml
+# run them (scripts/ci/advisory_scan.sh): cargo-deny (advisories, licenses,
+# bans, sources; deny.toml is the single place advisories are accepted),
+# cargo-audit with the ignores taken from deny.toml, npm audit of the
+# production dependencies failing on high or critical
+scripts/ci/advisory_scan.sh all
 npm audit --omit=dev --json > /tmp/npm-audit.json   # triage moderate and low too
+# Every dependency, dev tooling included: never a gate, always in the report.
+# Name the chain (`npm ls <pkg> --all`) and whether untrusted input reaches it;
+# fixAvailable is not proof of a patched release (PROD-SEC-02).
+npm audit --json > /tmp/npm-audit-all.json
 
 # Secrets in the full history, and in a branch's own commits
 gitleaks git --no-banner -c .github/gitleaks.toml --redact .
@@ -54,9 +53,13 @@ gh api "repos/marketcalls/openalgo-desktop/code-scanning/alerts?state=open&per_p
 the latest CI run's artifact (`gh run list --workflow security.yml`, then
 `gh run download <id>`), and say which you did. An unrun scanner is a gap in
 the report, not a pass. CodeQL config: `.github/codeql/codeql-config.yml`
-excludes `src-tauri/tests/**`, `*.test.ts(x)` and `e2e/**`; an alert inside a
-`#[cfg(test)]` module in `src-tauri/src` is dismissed as "used in tests" only
-after checking it really sits in a test module.
+excludes `src-tauri/tests/**`, `src-tauri/src/**/tests.rs`, `*.test.ts(x)` and
+`e2e/**`; an alert inside an inline `#[cfg(test)]` module in `src-tauri/src` is
+fixed by moving that module to its own `tests.rs`, and dismissed as "used in
+tests" only where it cannot move, after checking it really sits in a test
+module. For a taint alert, read its code flow in the analysis SARIF before
+touching the sink: the source may be another broker's feed (CLAUDE.md,
+"Security work").
 
 ## 2. The attack surface, control by control
 
@@ -170,18 +173,29 @@ unreachable, is accepted in writing, never by silence:
   `docs/security/known-residuals.md` naming the entry point, the protection,
   the code that carries it, the test that proves it, and what remains.
 - **Rust advisory**: an `ignore` entry in `.github/deny.toml` `[advisories]`
-  with `{ id = "RUSTSEC-...", reason = "<why unreachable>; review by YYYY-MM-DD" }`.
+  with `{ id = "RUSTSEC-...", reason = "<why unreachable>. Accepted YYYY-MM-DD; re-checked YYYY-MM-DD (<what was checked>); review by YYYY-MM-DD" }`.
   `security.yml` takes the cargo-audit ignores from that file, so it is the
-  single place.
+  single place; never name another RUSTSEC id in a reason (the job greps
+  every id outside comments and would ignore it too).
 - **Trivy finding**: the id in `.trivyignore` with a comment above it saying
-  why it is accepted and what would let it be removed, plus a review date.
+  why it is accepted, what would let it be removed, the date it was accepted
+  and last re-checked, and a review date.
   An advisory accepted in `deny.toml` carries the same GHSA ids in
   `.trivyignore`, and its Dependabot alert is dismissed as "not used" with the
   same reason. Accept only when the vulnerable code provably never runs.
-- **CodeQL alert**: dismissed in GitHub with the reason, only after the check
-  in section 1.
+- **CodeQL alert**: its disposition (fixed, false positive, used in tests,
+  accepted) and reason in the audit's dated triage record
+  (`docs/audit/2026-10-22/scanner-triage.md` is the model), then dismissed in
+  GitHub by the maintainer with the same reason, only after the check in
+  section 1. A test-only alert in an inline `#[cfg(test)]` module is better
+  ended by moving that module to its own `tests.rs`, which the CodeQL config
+  excludes by path.
 - **npm advisory** in a production dependency at high or critical: not
   accepted; upgrade or replace. Moderate and low: list them in the report.
+  A dev-only one is removed by moving the enclosing tool to a release that
+  drops it (a lockfile update, or a scoped `overrides` entry); when none
+  exists, a dated acceptance in the audit report names the chain, shows no
+  untrusted input reaches it and sets a review date.
 
 Every review date that has passed is a finding in the next audit.
 

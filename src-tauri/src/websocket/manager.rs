@@ -164,6 +164,12 @@ impl FeedStats {
             .since_connect(self.events.load(Ordering::Relaxed), self.now_ms())
     }
 
+    /// What each reader skipped since OpenAlgo started, every reader in
+    /// `Reader::ALL` order; a reconnect does not reset it.
+    pub(crate) fn skipped_since_start(&self) -> Vec<(Reader, u64)> {
+        self.losses.since_start()
+    }
+
     /// How long ago the last tick, depth or order update arrived; None
     /// before the first.
     pub fn last_event_age(&self) -> Option<Duration> {

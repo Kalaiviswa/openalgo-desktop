@@ -28,7 +28,8 @@ impl Runner {
         self.entry_for(run_id, token).is_some()
     }
 
-    /// What the page needs to load the program.
+    /// What the page needs to load the program, with the inputs its run
+    /// started with (never read again here: see `RunEntry::inputs`).
     pub fn page_spec(&self, run_id: &str, token: &str) -> Option<Result<Value, Refusal>> {
         let entry = self.entry_for(run_id, token)?;
         let info = &entry.info;
@@ -39,13 +40,7 @@ impl Runner {
             )));
         };
         let program = String::from_utf8_lossy(&program).into_owned();
-        let inputs = self
-            .db
-            .conn()
-            .ok()
-            .and_then(|c| store::read(&c, run_id).ok().flatten())
-            .map(|d| Value::Object(d.inputs))
-            .unwrap_or_else(|| json!({}));
+        let inputs = Value::Object(entry.inputs.clone());
         let today = self.clock.now().with_timezone(&Kolkata).date_naive();
         let facts = self
             .services()

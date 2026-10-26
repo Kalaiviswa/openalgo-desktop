@@ -982,7 +982,10 @@ async fn an_unsaved_answer_then_a_crash_and_reopen_place_exactly_once() {
 
     *t.zerodha.order_book.lock() = Some(Ok(vec![order("MOCK-1", "BUY", 3, 3, "complete")]));
     let book = book_of(&t.zerodha, t.h.ctx.now() + chrono::Duration::seconds(10));
-    assert_eq!(runner.reconcile_book(RunMode::Live, &book).await, 0);
+    assert_eq!(
+        runner.reconcile_book(RunMode::Live, &book).await.unwrap(),
+        0
+    );
     assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-1".into()), 3));
     let stale = runner
         .page_intents(&id, &token, Some(old), intents)
@@ -1372,11 +1375,15 @@ async fn a_book_settles_only_the_orders_of_the_session_that_read_it() {
     let read_at = t.h.ctx.now() + chrono::Duration::seconds(10);
     let through_angel =
         book_of(&t.zerodha, read_at).with_session(Some(LiveOwner::new("angel", "XY9876")));
-    runner.reconcile_book(RunMode::Live, &through_angel).await;
+    runner
+        .reconcile_book(RunMode::Live, &through_angel)
+        .await
+        .unwrap();
     assert_eq!(t.rows()[0], ("unconfirmed".into(), None, 0));
     runner
         .reconcile_book(RunMode::Live, &book_of(&t.zerodha, read_at))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(t.rows()[0], ("filled".into(), Some("MOCK-1".into()), 3));
 }
 
@@ -1430,7 +1437,8 @@ async fn an_unconfirmed_row_from_before_accounts_is_never_judged_absent() {
         t.h.ctx.reconciler.pass().await;
         runner
             .reconcile_book(RunMode::Live, &book_of(&t.zerodha, t.h.ctx.now()))
-            .await;
+            .await
+            .unwrap();
         t.h.clock
             .set(t.h.ctx.now() + chrono::Duration::seconds(120));
     }

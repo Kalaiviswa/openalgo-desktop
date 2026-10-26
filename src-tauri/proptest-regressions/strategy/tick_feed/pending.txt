@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc de6da2755fe9baf5b7ba92656407bcea498f9e1487c7e85b8a29aeb753d67643 # shrinks to prices = [([], None), ([], None), ([(1, "exit_target")], Some("overall_sl")), ([], None), ([], None)], cuts = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false], stop_exits = []

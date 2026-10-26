@@ -206,6 +206,47 @@ describe('AuthSync', () => {
     expect(keysSeen.every((key) => key === 'KEY-1')).toBe(true)
   })
 
+  // PROD-SEC-01: a reload starts from what storage kept (signed in, no key).
+  // The page waits for the server's answer, and the key it gets is the one
+  // that answer carries.
+  it('after a reload, holds the page until the server has checked the session', async () => {
+    useAuthStore.setState({
+      user: { username: 'trader', broker: 'fyers', isLoggedIn: true, loginTime: null },
+      isAuthenticated: true,
+    })
+    const status = held()
+    statusAnswers.push(status.answer)
+    renderAt('/positions')
+    expect(screen.queryByText('page')).toBeNull()
+    expect(keysSeen).toEqual([])
+
+    await act(async () => status.release(SIGNED_IN_WITH_BROKER))
+    await screen.findByText('page')
+    expect(statusCalls).toBe(1)
+    expect(keysSeen.length).toBeGreaterThan(0)
+    expect(keysSeen.every((key) => key === 'KEY-1')).toBe(true)
+  })
+
+  // The session ended while the window was closed or in another window (a
+  // logout there, a password change, the app restarting): the reload's check
+  // says so, and the window is signed out with no key in memory.
+  it('after a reload, signs the window out when the session ended elsewhere', async () => {
+    useAuthStore.setState({
+      user: { username: 'trader', broker: 'fyers', isLoggedIn: true, loginTime: null },
+      isAuthenticated: true,
+    })
+    statusAnswers.push(NOT_SIGNED_IN)
+    renderAt('/positions')
+
+    await screen.findByText('page')
+    expect(useAuthStore.getState()).toMatchObject({
+      apiKey: null,
+      isAuthenticated: false,
+      user: null,
+    })
+    expect(keysSeen.every((key) => key === null)).toBe(true)
+  })
+
   it('stops checking once the key is there', async () => {
     statusAnswers.push(SIGNED_IN_WITH_BROKER)
     renderAt('/dashboard')

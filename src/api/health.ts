@@ -109,14 +109,21 @@ export interface CurrentMetrics extends SampleFreshness {
 export interface StoreGrowth {
   size_mb: number | null
   growth_mb: number | null
+  /** Null over less than a day of samples. */
   per_day_mb: number | null
 }
 
-export interface DataGrowth {
+/** Growth from the oldest sample in a window to the newest. */
+export interface GrowthWindow {
   window_hours: number
   since: string | null
   stores: Record<string, StoreGrowth>
   total: StoreGrowth
+}
+
+/** Over every sample kept (up to 7 days), and over the last day. */
+export interface DataGrowth extends GrowthWindow {
+  last_day?: GrowthWindow
 }
 
 export interface OrderFacts {
@@ -157,7 +164,12 @@ export interface StrategyTicks {
   ticks_queued: number
   ticks_folded: number
   ticks_missed: number
-  symbols_waiting: number
+  /** Strategies with an exit or stop decided and not yet placed. */
+  exits_waiting: number
+  /** Seconds the oldest of those has waited; null when none waits. */
+  oldest_exit_wait_s: number | null
+  /** The oldest has waited long enough to warn about (15 s). */
+  exits_slow: boolean
 }
 
 export interface BrokerFeedLosses {
@@ -169,6 +181,9 @@ export interface BrokerFeedLosses {
   /** Per reader: strategy, scalping, sandbox, feed_clients, order_relay. */
   skipped_since_connect: Record<string, number>
   skipped_total_since_connect: number
+  /** Per reader, since OpenAlgo started: a reconnect does not reset it. */
+  skipped_since_start?: Record<string, number>
+  skipped_total_since_start?: number
 }
 
 export interface MarketDataLosses {
@@ -289,9 +304,12 @@ export async function getDetailedHealthCheck(): Promise<HealthCheck> {
 /**
  * Get current metrics snapshot
  * Requires authentication
+ *
+ * Desktop: each health read takes the Health page's abort signal, so a read
+ * that stalls is given up and its request closed (PROD-PAR-01).
  */
-export async function getCurrentMetrics(): Promise<CurrentMetrics> {
-  const response = await webClient.get<CurrentMetrics>('/health/api/current')
+export async function getCurrentMetrics(signal?: AbortSignal): Promise<CurrentMetrics> {
+  const response = await webClient.get<CurrentMetrics>('/health/api/current', { signal })
   return response.data
 }
 
@@ -299,9 +317,13 @@ export async function getCurrentMetrics(): Promise<CurrentMetrics> {
  * Get metrics history
  * Requires authentication
  */
-export async function getMetricsHistory(hours = 24): Promise<HistoricalMetric[]> {
+export async function getMetricsHistory(
+  hours = 24,
+  signal?: AbortSignal
+): Promise<HistoricalMetric[]> {
   const response = await webClient.get<HistoricalMetric[]>('/health/api/history', {
     params: { hours },
+    signal,
   })
   return response.data
 }
@@ -310,9 +332,13 @@ export async function getMetricsHistory(hours = 24): Promise<HistoricalMetric[]>
  * Get aggregated statistics
  * Requires authentication
  */
-export async function getHealthStats(hours = 24): Promise<HealthStats | EmptyHealthStats> {
+export async function getHealthStats(
+  hours = 24,
+  signal?: AbortSignal
+): Promise<HealthStats | EmptyHealthStats> {
   const response = await webClient.get<HealthStats | EmptyHealthStats>('/health/api/stats', {
     params: { hours },
+    signal,
   })
   return response.data
 }
@@ -321,8 +347,8 @@ export async function getHealthStats(hours = 24): Promise<HealthStats | EmptyHea
  * Get active alerts
  * Requires authentication
  */
-export async function getActiveAlerts(): Promise<HealthAlert[]> {
-  const response = await webClient.get<HealthAlert[]>('/health/api/alerts')
+export async function getActiveAlerts(signal?: AbortSignal): Promise<HealthAlert[]> {
+  const response = await webClient.get<HealthAlert[]>('/health/api/alerts', { signal })
   return response.data
 }
 
@@ -358,11 +384,16 @@ export interface HeldOrder {
  * Live orders held for the trader's decision (desktop only)
  * Requires authentication
  */
-export async function getHeldOrders(): Promise<HeldOrder[]> {
+export async function getHeldOrders(signal?: AbortSignal): Promise<HeldOrder[]> {
   const response = await webClient.get<{ status: string; data?: HeldOrder[] }>(
-    '/health/api/held-orders'
+    '/health/api/held-orders',
+    { signal }
   )
-  return response.data.data ?? []
+  // An answer without the list is a failed read, never "none held" (PROD-PAR-01).
+  if (response.data.status !== 'success' || !Array.isArray(response.data.data)) {
+    throw new Error('The unconfirmed orders could not be read')
+  }
+  return response.data.data
 }
 
 /**

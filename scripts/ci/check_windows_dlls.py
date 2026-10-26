@@ -18,8 +18,9 @@ own static VC runtime covers only vcruntime140.dll. GitHub's Windows
 runners have the Visual C++ runtime installed, so the app starting there
 proves nothing; this check does.
 
-The install smoke runs it on the installed app of every CI run, the release
-build on the binary it bundles, and the Windows native E2E on its test build.
+The install smoke runs it on the installed app of every CI run (CI's
+installers are the ones a release ships), a release rebuild on the binary it
+bundles, and the Windows native E2E on its test build.
 A new import that is part of Windows belongs in SYSTEM_DLLS; anything else
 is linked statically or not at all.
 """

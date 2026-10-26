@@ -134,13 +134,26 @@ impl Runner {
         }
     }
 
-    /// Whether a destination order id already belongs to one of the
-    /// runner's rows. Unknown counts as owned, so no other owner binds it.
-    pub fn owns_order(&self, orderid: &str) -> bool {
-        self.db
-            .conn()
-            .and_then(|c| store::owns_orderid(&c, orderid))
-            .unwrap_or(true)
+    /// Which of these destination order ids already belong to the
+    /// runner's rows. Unknown counts as all of them, so no other owner
+    /// binds one.
+    pub fn owned_among(&self, orderids: &[String]) -> HashSet<String> {
+        let read = self.db.conn().and_then(|c| {
+            let mut owned = HashSet::new();
+            for id in orderids {
+                if store::owns_orderid(&c, id)? {
+                    owned.insert(id.clone());
+                }
+            }
+            Ok(owned)
+        });
+        read.unwrap_or_else(|e| {
+            tracing::warn!(
+                "OpenScript orders could not be read to tell their own: {}",
+                e
+            );
+            orderids.iter().cloned().collect()
+        })
     }
 
     fn running_entry(&self, deployment: &str, mode: &str) -> Option<Arc<RunEntry>> {
@@ -161,37 +174,31 @@ impl Runner {
     }
 
     /// Fold one book read for every unconfirmed row of `mode`. Returns how
-    /// many stay unresolved.
-    pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+    /// many stay unresolved, or why the rows could not be read.
+    pub async fn reconcile_book(
+        &self,
+        mode: RunMode,
+        book: &BookSnapshot,
+    ) -> crate::error::Result<usize> {
         // Judged against the session the book was read through, not the one
-        // connected by the time it is folded.
-        let rows = match self.unconfirmed_here(mode, book.session.as_ref()) {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!(
-                    "Unconfirmed OpenScript orders could not be read to reconcile: {}",
-                    e
-                );
-                return 0;
-            }
-        };
+        // connected by the time it is folded. Read on the blocking pool: a
+        // pass runs on an async worker (PROD-REL-02).
+        let session = book.session.clone();
+        let rows = self
+            .blocking(move |me| me.unconfirmed_here(mode, session.as_ref()))
+            .await??;
         let scope = format!("{}:", mode.as_str());
         let mut live: HashSet<String> = HashSet::new();
-        let mut claimed: HashSet<String> = HashSet::new();
         let mut unresolved = 0;
         for o in &rows {
             let key = format!("{}{}", scope, o.id);
             live.insert(key.clone());
             let u = unconfirmed_of(o);
-            let found = {
-                let bound = |id: &str| claimed.contains(id) || book.owned(id);
-                book.find(&u, &bound)
-            };
-            match found {
+            match book.find(&u, &|id: &str| book.owned(id)) {
                 Found::Order(b) => {
                     self.absence.forget(&key);
                     self.ambiguous.lock().remove(&key);
-                    claimed.insert(b.order_id.clone());
+                    book.claim(&b.order_id);
                     self.bind_unconfirmed(book.session.as_ref(), o, b);
                 }
                 // A row from before accounts were recorded may belong to
@@ -248,7 +255,7 @@ impl Runner {
         self.ambiguous
             .lock()
             .retain(|k| !k.starts_with(&scope) || live.contains(k));
-        unresolved
+        Ok(unresolved)
     }
 
     pub(super) fn bind_unconfirmed(
@@ -450,14 +457,17 @@ impl OrderOwner for RunnerOrders {
         self.0.upgrade().is_some_and(|r| r.has_unconfirmed(mode))
     }
 
-    fn owns_order(&self, order_id: &str) -> bool {
-        self.0.upgrade().is_some_and(|r| r.owns_order(order_id))
+    fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
+        self.0
+            .upgrade()
+            .map(|r| r.owned_among(order_ids))
+            .unwrap_or_default()
     }
 
-    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> crate::error::Result<usize> {
         match self.0.upgrade() {
             Some(r) => r.reconcile_book(mode, book).await,
-            None => 0,
+            None => Ok(0),
         }
     }
 

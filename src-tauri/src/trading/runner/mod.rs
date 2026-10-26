@@ -222,6 +222,11 @@ impl RunInfo {
 
 struct RunEntry {
     info: RunInfo,
+    /// The script's parameters as saved when the run started, which its
+    /// page is served (web `start`: read once and handed to the run). Never
+    /// read again: an edit applies at the next start, and a later read that
+    /// fails cannot turn them into the script's defaults (PROD-TR-06).
+    inputs: serde_json::Map<String, Value>,
     token: String,
     inbox: Inbox,
     halted: AtomicBool,
@@ -641,17 +646,32 @@ impl Runner {
         let key = (name.clone(), format!("{:?}", destination));
         let at = destination.clone();
         let read = self.ledgers.share(key, || async move {
-            tokio::task::spawn_blocking(move || {
+            me.blocking(move |me| {
                 let own = me.own_orders(&me.as_run_id(&name), &at)?;
                 Ok(Arc::new(books::OwnBook::of(&own)))
             })
             .await
-            .map_err(|e| crate::error::AppError::Internal(format!("Blocking task failed: {}", e)))
         });
         read.await.unwrap_or_else(|e| {
             tracing::error!("Could not read the orders of {}: {}", given, e);
             Err(ORDERS_UNREADABLE.to_string())
         })
+    }
+
+    /// Run `read` with this runner on the blocking pool: its rows grow with
+    /// every order, and the async workers carry the feed and the risk
+    /// owners (PROD-REL-02).
+    async fn blocking<T: Send + 'static>(
+        &self,
+        read: impl FnOnce(&Runner) -> T + Send + 'static,
+    ) -> crate::error::Result<T> {
+        let me = self
+            .me
+            .upgrade()
+            .ok_or_else(|| crate::error::AppError::Internal("OpenAlgo is shutting down".into()))?;
+        tokio::task::spawn_blocking(move || read(&me))
+            .await
+            .map_err(|e| crate::error::AppError::Internal(format!("Blocking task failed: {}", e)))
     }
 
     /// Place one order for a run and record it. Answers the row id and the

@@ -201,7 +201,7 @@ impl RiskMonitor {
     /// leaves it unconfirmed and looked up in the book, never forgotten and
     /// sent again (review P2-5). Answers its index, or the refusal when it
     /// could not be saved (it is then not sent).
-    fn remember_child(
+    async fn remember_child(
         &self,
         key: &str,
         sl: &SlState,
@@ -222,13 +222,15 @@ impl RiskMonitor {
         a.children.push(pending.clone());
         a.settled_at = None;
         let idx = a.children.len() - 1;
-        let (_, saved) = self.update_attempt(key, sl.id, |slot| match slot {
-            Some(c) if c.id == a.id => {
-                c.children.push(pending);
-                c.settled_at = None;
-            }
-            _ => *slot = Some(a.clone()),
-        });
+        let (_, saved) = self
+            .update_attempt(key, sl.id, |slot| match slot {
+                Some(c) if c.id == a.id => {
+                    c.children.push(pending);
+                    c.settled_at = None;
+                }
+                _ => *slot = Some(a.clone()),
+            })
+            .await;
         if !saved {
             // Not sent: it could not be remembered.
             a.children.pop();
@@ -238,7 +240,8 @@ impl RiskMonitor {
                         c.children.pop();
                     }
                 }
-            });
+            })
+            .await;
             self.alert_once(
                 key,
                 "persist",
@@ -256,7 +259,7 @@ impl RiskMonitor {
     /// Records the broker's answer on the order, in the row and in memory;
     /// a definite refusal never reached the broker, so that order is
     /// removed. Answers whether the row was written.
-    fn record_answer(
+    async fn record_answer(
         &self,
         key: &str,
         row_id: i64,
@@ -282,23 +285,25 @@ impl RiskMonitor {
                 ch.state = st;
             }
         };
-        let (_, saved) = self.update_attempt(key, row_id, |slot| {
-            if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
-                match state {
-                    // A definite refusal never reached the broker.
-                    None => {
-                        if c.children.len() == idx + 1 && c.children[idx].order_id.is_none() {
-                            c.children.pop();
+        let (_, saved) = self
+            .update_attempt(key, row_id, |slot| {
+                if let Some(c) = slot.as_mut().filter(|c| c.id == a.id) {
+                    match state {
+                        // A definite refusal never reached the broker.
+                        None => {
+                            if c.children.len() == idx + 1 && c.children[idx].order_id.is_none() {
+                                c.children.pop();
+                            }
                         }
-                    }
-                    Some(_) => {
-                        if let Some(ch) = c.children.get_mut(idx) {
-                            apply(ch);
+                        Some(_) => {
+                            if let Some(ch) = c.children.get_mut(idx) {
+                                apply(ch);
+                            }
                         }
                     }
                 }
-            }
-        });
+            })
+            .await;
         match state {
             None => {
                 a.children.pop();
@@ -359,6 +364,28 @@ impl RiskMonitor {
         Some(why)
     }
 
+    /// The orders an exit of `qty` is sent in: whole lots, never above the
+    /// freeze, and counted before they are built. More than
+    /// `MAX_SPLIT_ORDERS` of them is refused like any exit that cannot go
+    /// out (the stop stays managed), and the trader is told: the quantity
+    /// is the broker's position book's, and a wrong one there must not
+    /// become hundreds of orders.
+    fn exit_orders(&self, key: &str, sl: &SlState, qty: i64) -> Result<Vec<i64>, ExitOutcome> {
+        let chunk = exit_chunk(&self.symbols, &self.freeze, &sl.symbol, &sl.exchange, qty)
+            .map_err(ExitOutcome::Refused)?;
+        chunks(qty, chunk).map_err(|why| {
+            self.alert_once(
+                key,
+                "too_many_orders",
+                format!(
+                    "Scalping stop for {} {}: {}. That quantity is what the broker's position book shows. The stop stays; check the position at the broker and close it there.",
+                    sl.symbol, sl.exchange, why
+                ),
+            );
+            ExitOutcome::Refused(why)
+        })
+    }
+
     /// Exit one leg in the mode it was opened in: read its net position,
     /// then send whole-lot, freeze-safe MARKET orders for what is neither
     /// filled nor still working from earlier exits of this leg.
@@ -392,9 +419,9 @@ impl RiskMonitor {
             Err(outcome) => return outcome,
         };
         let action = if net > 0 { "SELL" } else { "BUY" };
-        let chunk = match exit_chunk(&self.symbols, &self.freeze, &sl.symbol, &sl.exchange, qty) {
-            Ok(c) => c,
-            Err(e) => return ExitOutcome::Refused(e),
+        let parts = match self.exit_orders(key, sl, qty) {
+            Ok(p) => p,
+            Err(outcome) => return outcome,
         };
         let mut a = attempt.unwrap_or_else(|| ExitAttempt {
             id: crate::strategy::state::new_position_ref(),
@@ -404,7 +431,6 @@ impl RiskMonitor {
         });
         let mut refused: Option<String> = None;
         let (mut accepted, mut unconfirmed) = (0usize, 0usize);
-        let parts = chunks(qty, chunk);
         let last = parts.len().saturating_sub(1);
         for (i, q) in parts.into_iter().enumerate() {
             let order = OrderPayload {
@@ -416,7 +442,10 @@ impl RiskMonitor {
                 pricetype: "MARKET".into(),
                 strategy: SCALPING_STRATEGY.into(),
             };
-            let idx = match self.remember_child(key, sl, &mut a, (action, q, net), i == 0) {
+            let idx = match self
+                .remember_child(key, sl, &mut a, (action, q, net), i == 0)
+                .await
+            {
                 Ok(idx) => idx,
                 Err(msg) => {
                     refused = Some(msg);
@@ -430,7 +459,9 @@ impl RiskMonitor {
                 Some(_) => unconfirmed += 1,
                 None => {}
             }
-            let saved = self.record_answer(key, sl.id, &mut a, idx, (state, &r));
+            let saved = self
+                .record_answer(key, sl.id, &mut a, idx, (state, &r))
+                .await;
             if state.is_none() {
                 refused = Some(
                     r.error
@@ -457,30 +488,6 @@ impl RiskMonitor {
         }
     }
 
-    /// Change a leg's attempt in memory and write it to the stop's row in
-    /// the same hold, so two writers (a reconcile pass folding fills, an
-    /// exit adding an order, the trader's "not placed") never overwrite
-    /// each other's orders. Answers the attempt as it now stands and
-    /// whether the row was written (memory has the change either way).
-    pub(super) fn update_attempt(
-        &self,
-        key: &str,
-        row_id: i64,
-        change: impl FnOnce(&mut Option<ExitAttempt>),
-    ) -> (Option<ExitAttempt>, bool) {
-        let mut inner = self.inner.lock();
-        let mut slot = inner.attempts.remove(key);
-        change(&mut slot);
-        let saved = match &slot {
-            Some(a) => {
-                inner.attempts.insert(key.to_string(), a.clone());
-                self.persist_attempt(row_id, a)
-            }
-            None => true,
-        };
-        (slot, saved)
-    }
-
     /// Forget a closed leg: its row, its state, its subscription when no
     /// other leg needs the instrument, then tell the terminal. Only for the
     /// stop the exit was decided on: a replacement is never touched.
@@ -491,7 +498,12 @@ impl RiskMonitor {
                 return false;
             }
         }
-        match self.store.delete_sl_exact(gen.0, gen.1) {
+        // On the blocking pool: a busy database holds no async worker.
+        let store = self.store.clone();
+        let deleted = tokio::task::spawn_blocking(move || store.delete_sl_exact(gen.0, gen.1))
+            .await
+            .unwrap_or_else(|e| Err(crate::error::AppError::Internal(e.to_string())));
+        match deleted {
             Ok(true) => {}
             Ok(false) => {
                 // Edited since: the new stop stays, and decides next tick.
@@ -510,6 +522,9 @@ impl RiskMonitor {
             let mut inner = self.inner.lock();
             if inner.states.get(key).map(|l| l.gen) == Some(gen) {
                 inner.states.remove(key);
+                // A sync reading the stops now may have read this row
+                // before its delete: it reads again (`install`).
+                inner.clears += 1;
             }
             inner.prune();
             let needed = inner.wanted().contains(&symkey);

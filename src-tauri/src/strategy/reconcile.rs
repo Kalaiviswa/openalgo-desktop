@@ -25,8 +25,9 @@
 
 use super::dispatch::RunMode;
 use super::engine::{ORDER_UNCONFIRMED, UNCONFIRMED};
-use super::store::{EventFields, OrderRow, RunRow, StrategyRow};
+use super::store::{EventFields, OrderRow, RunRow, Store, StrategyRow};
 use super::StrategyModule;
+use crate::error::Result;
 use crate::services::order_reconciler::{
     held_message, Absence, BookSnapshot, Found, HeldOrder, OrderOwner, Unconfirmed,
 };
@@ -74,24 +75,93 @@ fn placed_at(o: &OrderRow) -> Option<chrono::DateTime<chrono::Utc>> {
     None
 }
 
+/// The open runs of `mode`.
+fn open_runs_of(store: &Store, mode: RunMode) -> Result<Vec<RunRow>> {
+    Ok(store
+        .list_open_runs()?
+        .into_iter()
+        .filter(|r| RunMode::parse(&r.mode) == Some(mode))
+        .collect())
+}
+
+/// One open run as a reconcile pass reads it: its orders and, when one of
+/// them is unconfirmed, its strategy (none when it is gone) and the client
+/// tag each unconfirmed order was sent with (its witness).
+struct RunRead {
+    orders: Vec<OrderRow>,
+    strategy: Option<StrategyRow>,
+    tags: HashMap<i64, String>,
+}
+
+/// Read one open run for a reconcile pass.
+fn read_run(s: &Store, run: &RunRow) -> Result<RunRead> {
+    let orders = s.list_orders(run.id)?;
+    if !orders.iter().any(unconfirmed) {
+        return Ok(RunRead {
+            orders,
+            strategy: None,
+            tags: HashMap::new(),
+        });
+    }
+    let events = s.list_events(
+        run.strategy_id,
+        Some(run.id),
+        Some(ORDER_UNCONFIRMED),
+        None,
+        500,
+    )?;
+    let tags = events
+        .iter()
+        .filter_map(|e| {
+            let p = e.get("payload")?;
+            let id = p.get("order_id")?.as_i64()?;
+            let tag = p.get("client_tag")?.as_str()?.to_string();
+            Some((id, tag))
+        })
+        .collect();
+    Ok(RunRead {
+        orders,
+        strategy: s.get_strategy_unscoped(run.strategy_id)?,
+        tags,
+    })
+}
+
 impl StrategyModule {
-    fn open_runs_of(&self, mode: RunMode) -> Vec<RunRow> {
+    /// The open runs of `mode`, each as a pass reads it (or why it could
+    /// not be), all read at once on the blocking pool: the order reconciler
+    /// asks every few seconds while a strategy order works, from an async
+    /// worker, and matches in memory (PROD-REL-02).
+    async fn open_runs_read(&self, mode: RunMode) -> Result<Vec<Result<RunRead>>> {
         self.store
-            .list_open_runs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| RunMode::parse(&r.mode) == Some(mode))
-            .collect()
+            .blocking(move |s| {
+                Ok(open_runs_of(s, mode)?
+                    .iter()
+                    .map(|run| read_run(s, run))
+                    .collect())
+            })
+            .await
     }
 
     /// Whether any open run of `mode` has a working or unconfirmed order.
+    /// Unknown counts as yes: a book is read rather than an order left
+    /// unsettled.
     pub fn has_open_orders(&self, mode: RunMode) -> bool {
-        self.open_runs_of(mode).iter().any(|run| {
-            self.store
-                .list_orders(run.id)
-                .unwrap_or_default()
-                .iter()
-                .any(|o| unconfirmed(o) || (has_broker_id(o) && working(&o.status)))
+        let holds = || -> Result<bool> {
+            for run in open_runs_of(&self.store, mode)? {
+                if self
+                    .store
+                    .list_orders(run.id)?
+                    .iter()
+                    .any(|o| unconfirmed(o) || (has_broker_id(o) && working(&o.status)))
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        holds().unwrap_or_else(|e| {
+            tracing::warn!("Could not check for open strategy orders: {}", e);
+            true
         })
     }
 
@@ -112,9 +182,13 @@ impl StrategyModule {
             .sum()
     }
 
-    /// Whether a broker order id already belongs to a strategy order.
-    pub fn owns_order(&self, order_id: &str) -> bool {
-        matches!(self.store.get_order_by_broker_id(order_id), Ok(Some(_)))
+    /// Which of these broker order ids already belong to a strategy order.
+    /// Unknown counts as all of them, so no other owner binds one.
+    pub fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
+        self.store.owned_broker_ids(order_ids).unwrap_or_else(|e| {
+            tracing::warn!("Strategy orders could not be read to tell their own: {}", e);
+            order_ids.iter().cloned().collect()
+        })
     }
 
     /// An unconfirmed order the book does not show: settled as never placed
@@ -190,25 +264,23 @@ impl StrategyModule {
     }
 
     /// Fold one book read for every open run of `mode`. Returns how many
-    /// unconfirmed placements remain unresolved.
-    pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+    /// unconfirmed placements remain unresolved, or why a run's orders could
+    /// not be read (the other runs are folded all the same).
+    pub async fn reconcile_book(&self, mode: RunMode, book: &BookSnapshot) -> Result<usize> {
         let mut unresolved = 0;
         let mut live_keys = HashSet::new();
-        let mut claimed: HashSet<String> = HashSet::new();
-        for run in self.open_runs_of(mode) {
-            let rows = match self.store.list_orders(run.id) {
+        let mut unread = None;
+        for run in self.open_runs_read(mode).await? {
+            let run = match run {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::error!(
-                        "Strategy orders of run {} could not be read to reconcile: {}",
-                        run.id,
-                        e
-                    );
+                    unread.get_or_insert(e);
                     continue;
                 }
             };
             // Working orders: fold the book's fact (idempotent).
-            for o in rows
+            for o in run
+                .orders
                 .iter()
                 .filter(|o| has_broker_id(o) && working(&o.status))
             {
@@ -217,16 +289,12 @@ impl StrategyModule {
                     self.apply_order_snapshot(&bid, &b.row).await;
                 }
             }
-            let pending: Vec<&OrderRow> = rows.iter().filter(|o| unconfirmed(o)).collect();
-            if pending.is_empty() {
+            // Its unconfirmed orders; a run whose strategy is gone has no
+            // one to settle them for.
+            let Some(strategy) = &run.strategy else {
                 continue;
-            }
-            let strategy = match self.store.get_strategy_unscoped(run.strategy_id) {
-                Ok(Some(s)) => s,
-                _ => continue,
             };
-            let tags = self.unconfirmed_tags(run.strategy_id, run.id);
-            for o in pending {
+            for o in run.orders.iter().filter(|o| unconfirmed(o)) {
                 let key = format!("{}:{}", mode.as_str(), o.id);
                 live_keys.insert(key.clone());
                 let u = Unconfirmed {
@@ -235,34 +303,36 @@ impl StrategyModule {
                     action: &o.action,
                     quantity: o.qty,
                     product: o.product.as_deref(),
-                    client_tag: tags.get(&o.id).map(String::as_str),
+                    client_tag: run.tags.get(&o.id).map(String::as_str),
                     placed_at: placed_at(o),
                     net_before: Some(net_before(o)),
                     pricetype: Some(&o.pricetype),
                     price: Some(o.price),
                     trigger_price: Some(o.trigger_price),
                 };
-                let bound = |id: &str| claimed.contains(id) || book.owned(id);
-                match book.find(&u, &bound) {
+                match book.find(&u, &|id: &str| book.owned(id)) {
                     Found::Order(b) => {
                         self.reconcile_absence.forget(&key);
-                        claimed.insert(b.order_id.clone());
+                        book.claim(&b.order_id);
                         let row = b.row.clone();
                         let id = b.order_id.clone();
                         self.bind_unconfirmed(o, &id, &row, strategy.id, &strategy.user_id)
                             .await;
                     }
                     Found::Absent => {
-                        unresolved += self
-                            .judge_absent(&key, o, &strategy, (mode, book), &u)
-                            .await;
+                        unresolved += self.judge_absent(&key, o, strategy, (mode, book), &u).await;
                     }
                     Found::Ambiguous(n) => {
                         unresolved += 1;
-                        self.report_ambiguous(&key, o, &strategy, n).await;
+                        self.report_ambiguous(&key, o, strategy, n).await;
                     }
                 }
             }
+        }
+        // A run not read keeps what is known of its orders (its absences
+        // and held orders) until a pass reads it.
+        if let Some(e) = unread {
+            return Err(e);
         }
         // Bounded by the rows still unconfirmed (this destination's only:
         // the other's pass keeps its own).
@@ -271,28 +341,7 @@ impl StrategyModule {
         self.reconcile_ambiguous
             .lock()
             .retain(|k| !k.starts_with(&scope) || live_keys.contains(k));
-        unresolved
-    }
-
-    /// The client tag each unconfirmed row was sent with (its witness).
-    fn unconfirmed_tags(&self, strategy_id: i64, run_id: i64) -> HashMap<i64, String> {
-        self.store
-            .list_events(
-                strategy_id,
-                Some(run_id),
-                Some(ORDER_UNCONFIRMED),
-                None,
-                500,
-            )
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|e| {
-                let p = e.get("payload")?;
-                let id = p.get("order_id")?.as_i64()?;
-                let tag = p.get("client_tag")?.as_str()?.to_string();
-                Some((id, tag))
-            })
-            .collect()
+        Ok(unresolved)
     }
 
     async fn bind_unconfirmed(
@@ -353,7 +402,7 @@ impl StrategyModule {
     /// strategy order row) was not placed. Releases it as the reconciler
     /// would. Run under the reconciler's pass lock, so no pass binds it
     /// meanwhile.
-    pub async fn confirm_not_placed(&self, id: &str) -> Result<bool, String> {
+    pub async fn confirm_not_placed(&self, id: &str) -> std::result::Result<bool, String> {
         let Some(key) = self.reconcile_absence.held_key(id) else {
             return Ok(false);
         };
@@ -456,14 +505,17 @@ impl OrderOwner for StrategyOrders {
         self.0.upgrade().is_some_and(|m| m.has_open_orders(mode))
     }
 
-    fn owns_order(&self, order_id: &str) -> bool {
-        self.0.upgrade().is_some_and(|m| m.owns_order(order_id))
+    fn owned_among(&self, order_ids: &[String]) -> HashSet<String> {
+        self.0
+            .upgrade()
+            .map(|m| m.owned_among(order_ids))
+            .unwrap_or_default()
     }
 
-    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> usize {
+    async fn reconcile(&self, mode: RunMode, book: &BookSnapshot) -> Result<usize> {
         match self.0.upgrade() {
             Some(m) => m.reconcile_book(mode, book).await,
-            None => 0,
+            None => Ok(0),
         }
     }
 
@@ -474,7 +526,7 @@ impl OrderOwner for StrategyOrders {
             .unwrap_or_default()
     }
 
-    async fn confirm_not_placed(&self, id: &str) -> Result<bool, String> {
+    async fn confirm_not_placed(&self, id: &str) -> std::result::Result<bool, String> {
         match self.0.upgrade() {
             Some(m) => m.confirm_not_placed(id).await,
             None => Ok(false),

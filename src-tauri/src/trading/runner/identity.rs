@@ -81,7 +81,7 @@ impl Runner {
     /// book cannot be read.
     /// While it runs on another session than the one connected now, the
     /// sentence saying so: its book is not read through that one.
-    pub fn book_destination(&self, given: &str) -> Result<Destination, String> {
+    pub(super) fn book_destination(&self, given: &str) -> Result<Destination, String> {
         if let Some(info) = self.status_of(given) {
             return match self.session_refusal(&info) {
                 Some(why) => Err(why),
@@ -99,5 +99,21 @@ impl Runner {
                 .filter(Destination::is_known)
                 .ok_or_else(|| BOOK_UNAVAILABLE.to_string()),
         }
+    }
+
+    /// The run id a deployment's books are tagged with, and their
+    /// destination ([`Runner::book_destination`]), worked out on the
+    /// blocking pool: a deployment that is not running is read from its
+    /// saved settings, and the Strategies panel polls its books every 15 s
+    /// (PROD-REL-02).
+    pub async fn book_target(&self, given: &str) -> Result<(String, Destination), String> {
+        let name = given.to_string();
+        let read = self
+            .blocking(move |r| r.book_destination(&name).map(|at| (r.as_run_id(&name), at)))
+            .await;
+        read.unwrap_or_else(|e| {
+            tracing::error!("Could not tell where the books of {} are: {}", given, e);
+            Err(super::ORDERS_UNREADABLE.to_string())
+        })
     }
 }

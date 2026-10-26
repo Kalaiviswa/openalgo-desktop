@@ -78,10 +78,10 @@ async fn send(h: &H, app: &App, mut req: Request<Body>) -> Reply {
 
 /// The app, once the runtime has gone idle after opening it. The
 /// background tasks it starts (the scalping stops, the order reconciler)
-/// read the database on the runtime on their first pass. That is the app
-/// starting, not the reads timed here: run at the same time as the
-/// requests, it waited on the runtime for a connection while the pool was
-/// still opening them (30-63 ms on an M1).
+/// make their first pass then. That is the app starting, not the reads
+/// timed here: run at the same time as the requests, it waited on the
+/// runtime for a connection while the pool was still opening them (30-63
+/// ms on an M1, before those passes read off the runtime).
 async fn started(runtime: &crate::IdleLog) -> H {
     let h = H::new().await;
     runtime.until_idle().await;

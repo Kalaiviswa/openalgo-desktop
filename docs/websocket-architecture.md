@@ -146,13 +146,19 @@ then acts on the next update: a stop checks the next price, a sandbox order
 fills on the next tick. A skip is a price that reader did not see, not a lost
 order.
 
-The strategy module adds its own fold since #159 (`strategy/tick_feed/`): a
-reader task takes ticks off the broadcast at once, and for each symbol keeps
-a short price path for the evaluator (the first, lowest, highest and latest
-prices once more than 32 arrive before it runs), so a stop or target that a
-price crossed is never missed because the evaluator was busy, and nothing on
-that path waits for the database. Prices the reader itself missed are counted
-and raise a `strategy_ticks_missed` health alert.
+The strategy module splits reading from acting (`strategy/tick_feed/`): a
+reader task takes ticks off the broadcast at once and decides every price of
+a held symbol there and then, through the risk core in the run's lock, so
+each stop, target, trailing stop and profit lock is judged on every price in
+the order it came. Only acting on a decision (placing an exit, stopping the
+run, recording the event) waits for the evaluator task, which combines a
+run's decisions while it is busy. The reader never waits on the database:
+a run's fixed inputs are read before its prices are subscribed, and what
+the reader finds missing is read in a task of its own. The reader used to
+fold each symbol's waiting prices to the first, lowest, highest and latest
+past 32, which lost a trailing stop's earlier peak and the dip after it
+(PROD-REL-01). Prices the reader itself missed are counted and raise a
+`strategy_ticks_missed` health alert.
 
 **Seeing it.** PR #178 (`origin/pr/health-feed-losses`) counts all of it:
 
@@ -269,7 +275,7 @@ wrong API key counts against that caller's failure budget.
 | Pieces | Broker adapters, a ZeroMQ bus on port 5555, the WebSocket proxy on 8765, a `MarketDataService` for the backend | One process: the broker manager, bounded channels, the feed server on 8765; backend readers subscribe to the manager directly |
 | Broker connections | A pool of up to 3 connections of 1,000 symbols each | One connection per feed (market, depth, order updates), up to 3,000 instruments |
 | Slow clients | Every tick forwarded; no server-side throttle in current code (the web's own architecture page still says 50 ms) | Every tick forwarded; a slow client's queue folds to the latest price per instrument |
-| Strategy readers | A 10,000-tick FIFO that sheds | A per-symbol price path that folds, with missed prices counted |
+| Strategy readers | A 10,000-tick FIFO that sheds | Every price decided on arrival; only the actions wait, with missed prices counted |
 | Losses | Logged | Counted and shown in health (PR #178) |
 | Client limits | None | Message size, message budget, connection pools, handshake checks |
 | After a sign-out or new key | Clients stay connected | Clients are closed with 4401 |

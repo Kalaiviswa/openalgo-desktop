@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 /// A feed server that accepts every connection and reads until it closes.
-async fn feed_server() -> (String, tokio::task::JoinHandle<()>) {
+pub(crate) async fn feed_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {

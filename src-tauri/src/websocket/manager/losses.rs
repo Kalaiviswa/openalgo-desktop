@@ -1,9 +1,13 @@
 //! What a broker feed's readers missed (NEW-REL-05). Each reader of the
 //! feed's event channel (`TICK_CHANNEL_CAP` events) that falls behind skips
 //! ahead (`RecvError::Lagged`) and says how many it skipped; the feed keeps
-//! the count per reader, and the counts since its current connection began,
-//! for health and Run diagnostics. Before this the skips were log lines
-//! only, most of them at debug level.
+//! the count per reader since OpenAlgo started, and the counts since its
+//! current connection began, for health and Run diagnostics. Before this
+//! the skips were log lines only, most of them at debug level.
+//!
+//! Health reports the skips since start (PROD-REL-05): a reconnect does not
+//! undo a price a stop never saw, so it must not hide that it was missed.
+//! The counts since the connection began say how the current one is doing.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -90,6 +94,15 @@ impl Losses {
             .store(now_ms.saturating_add(1), Ordering::Relaxed);
     }
 
+    /// What each reader skipped since the feed was created (OpenAlgo
+    /// started), in `Reader::ALL` order; connections do not reset it.
+    pub(super) fn since_start(&self) -> Vec<(Reader, u64)> {
+        Reader::ALL
+            .iter()
+            .map(|r| (*r, self.skipped[slot(*r)].load(Ordering::Relaxed)))
+            .collect()
+    }
+
     pub(super) fn since_connect(&self, received: u64, now_ms: u64) -> SinceConnect {
         let connected_for = self
             .connected_at
@@ -137,5 +150,22 @@ mod tests {
         assert_eq!((s.received, s.skipped_total()), (10, 0));
         assert_eq!(s.connected_for, Some(Duration::from_millis(500)));
         assert_eq!(Losses::default().since_connect(0, 9).connected_for, None);
+    }
+
+    /// PROD-REL-05: the skips health reports were only those since the
+    /// current connection, so a reconnect hid every price a stop had missed.
+    #[test]
+    fn what_each_reader_skipped_since_start_survives_a_reconnect() {
+        let l = Losses::default();
+        l.note(Reader::Scalping, 5);
+        l.connected(100, 1_000);
+        l.note(Reader::Strategy, 2);
+        l.connected(200, 2_000);
+        assert_eq!(l.since_connect(200, 2_500).skipped_total(), 0);
+        let start = l.since_start();
+        assert_eq!(start.len(), Reader::ALL.len());
+        assert!(start.contains(&(Reader::Scalping, 5)), "{:?}", start);
+        assert!(start.contains(&(Reader::Strategy, 2)), "{:?}", start);
+        assert!(start.contains(&(Reader::Sandbox, 0)), "{:?}", start);
     }
 }
