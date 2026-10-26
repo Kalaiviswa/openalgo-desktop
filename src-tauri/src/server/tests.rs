@@ -233,6 +233,8 @@ mod key_vault;
 mod origin;
 // docs-35: Server Status shows the desktop's parts with their real state.
 mod server_status;
+// docs-1, docs-19: each /api/v1 endpoint in its own window, at the web's limit.
+mod api_limits;
 
 // ------------------------------------------------------------------ fixtures
 
