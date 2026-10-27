@@ -1,15 +1,17 @@
 //! The web's `blueprints/agent.py`, split by area: the chat routes
 //! ([`chat`]), the conversation routes ([`conversations`]), the
-//! configuration routes ([`config`]: status, catalogue, models, settings)
-//! and the voice routes ([`voice`]).
-//! Every route needs the signed-in user and carries the session's CSRF
-//! token on writes, like every page route; none is public.
+//! configuration routes ([`config`]: status, catalogue, models, settings),
+//! the ChatGPT plan ([`chatgpt`]), web search ([`websearch`]), the voice
+//! routes ([`voice`]) and the audit trail's read route ([`audit`], D-006, a
+//! desktop addition). Every route needs the signed-in user and carries the
+//! session's CSRF token on writes, like every page route; none is public.
 //!
 //! The handlers read the request, call one service in `crate::agent` and
 //! shape the reply. Limits as the web: 240 requests a minute across the
 //! ordinary routes, 30 a minute on the streaming ones (per caller), and a
 //! 12 MB body.
 
+pub mod audit;
 pub mod chat;
 pub mod chatgpt;
 pub mod config;
@@ -84,6 +86,7 @@ fn chat_table() -> Vec<RouteSpec> {
         spec("/agent/api/chat/{run_id}/cancel", Method::POST, || {
             post(chat::cancel)
         }),
+        spec("/agent/api/audit", Method::GET, || get(audit::list)),
     ]
 }
 
