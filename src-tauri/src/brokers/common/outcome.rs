@@ -33,10 +33,14 @@
 //! body says the session ended, or a sign-in refused after a 5xx, says
 //! nothing about the order. It keeps its session-error wire answer.
 //!
-//! The uncertainty never reaches the `/api/v1` wire: the order service
-//! answers exactly as before (a broker's text with 400, a transport failure
-//! with 500 and its internal-error text) and carries the outcome beside the
-//! reply for in-process callers (strategies, scalping, OpenScript, MCP).
+//! On the `/api/v1` wire the order service answers as the web does: a
+//! broker's text with 400, and a request that was sent but whose answer
+//! was lost ([`unanswered`]) with 502 and [`UNANSWERED_ORDER_MESSAGE`]
+//! ("it may have been placed, check the order book"; web openalgo#2305).
+//! Other uncertain answers keep their wire answer (a broker's text with
+//! 400, an unreadable answer with 500 and its internal-error text). The
+//! outcome travels beside the reply for in-process callers (strategies,
+//! scalping, OpenScript, MCP).
 //!
 //! Adapters that tag orders attach the tag to an uncertain answer with
 //! [`with_client_tag`], so the reconciler can find the order by it.
@@ -124,6 +128,7 @@ fn settle(e: AppError) -> AppError {
                 message: m,
                 client_tag: None,
                 internal: false,
+                unanswered: false,
                 session: true,
             }))
         }
@@ -270,10 +275,11 @@ pub fn after_send(e: &reqwest::Error) -> bool {
 ///
 /// h2 gives the server's GOAWAY error only to streams above that id and to
 /// requests not yet sent; a stream at or below it that loses its answer
-/// gets an I/O error, which stays uncertain. reqwest sends a refused
-/// request again (on a new stream, or a new connection after a graceful
-/// GOAWAY), twice, so what reaches here is a refusal that outlasted those
-/// retries, or a GOAWAY that carried an error code.
+/// gets an I/O error, which stays uncertain. The shared client sends a
+/// refused request once more (on a new stream, or a new connection after a
+/// graceful GOAWAY; `http::retry_policy`), so what reaches here is a
+/// refusal that outlasted that retry, or a GOAWAY that carried an error
+/// code.
 fn not_processed(e: &reqwest::Error) -> bool {
     let mut cause = std::error::Error::source(e);
     while let Some(c) = cause {
@@ -319,6 +325,25 @@ pub fn uncertain_cause(e: &AppError) -> Option<Option<String>> {
         | AppError::Database(_)
         | AppError::Pool(_)
         | AppError::DuckDb(_) => None,
+    }
+}
+
+/// What a placement answers when its request was sent and the broker's
+/// reply was lost (web `UNANSWERED_ORDER_MESSAGE`, openalgo#2305), with
+/// HTTP 502.
+pub const UNANSWERED_ORDER_MESSAGE: &str = "The connection to the broker dropped after the order \
+was sent, so it may have been placed. Check the order book before placing it again.";
+
+/// Whether this error is a request that was sent and whose answer was lost
+/// on the way back (web `watch_for_unanswered_writes`, openalgo#2305): a
+/// transport failure after sending, however the adapter passed it on. A
+/// connection that never opened, an answer that came back (a server error,
+/// an unreadable body) and a refusal are not.
+pub fn unanswered(e: &AppError) -> bool {
+    match e {
+        AppError::Http(re) => after_send(re),
+        AppError::Uncertain(u) => u.unanswered,
+        _ => false,
     }
 }
 
@@ -382,6 +407,7 @@ pub fn with_client_tag(result: Result<OrderResponse>, client_tag: &str) -> Resul
                     message: uncertain_reason(&e),
                     client_tag: Some(client_tag.into()),
                     internal,
+                    unanswered: unanswered(&e),
                     session,
                 })))
             }

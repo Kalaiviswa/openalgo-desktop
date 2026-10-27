@@ -12,6 +12,7 @@ use crate::error::{AppError, Result};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct OrderId {
@@ -81,6 +82,13 @@ pub fn modify_order_form(m: &ResolvedModify) -> Result<Vec<(&'static str, String
     Ok(form)
 }
 
+/// How long an order whose answer was lost on the way back is looked for in
+/// Kite's order book by its tag, without sending it again (web
+/// `_recover_order_by_tag`, openalgo#2305).
+pub const RECOVERY_WINDOW: Duration = Duration::from_secs(2);
+/// Pause between two reads of the order book while looking.
+const RECOVERY_POLL: Duration = Duration::from_millis(250);
+
 pub async fn place_order(
     b: &ZerodhaBroker,
     auth: &AuthToken,
@@ -102,7 +110,60 @@ pub async fn place_order(
             order_id: r.order_id,
             message: None,
         });
+    let placed = match placed {
+        // Sent, and the answer lost on the way back: Kite may hold it.
+        Err(e) if outcome::unanswered(&e) => {
+            match recover_by_tag(b, auth, &tag, b.recovery_window).await {
+                Some(order_id) => Ok(OrderResponse {
+                    order_id,
+                    message: None,
+                }),
+                None => Err(e),
+            }
+        }
+        other => other,
+    };
     outcome::with_client_tag(placed, &tag)
+}
+
+/// The id of the order sent with `tag`, if Kite's order book shows it
+/// within `window`; the order is never sent again. `None` leaves the
+/// placement uncertain, for the trader and the reconciler.
+async fn recover_by_tag(
+    b: &ZerodhaBroker,
+    auth: &AuthToken,
+    tag: &str,
+    window: Duration,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left, get_order_book_tagged(b, auth)).await {
+            Ok(Ok(book)) => {
+                let found = book
+                    .into_iter()
+                    .find(|t| t.client_tag.as_deref() == Some(tag) && !t.order.order_id.is_empty());
+                if let Some(t) = found {
+                    tracing::warn!(
+                        "Recovered Kite order {} from the order book after its answer was lost",
+                        t.order.order_id
+                    );
+                    return Some(t.order.order_id);
+                }
+            }
+            Ok(Err(e)) => tracing::warn!(
+                "Could not read Kite's order book while looking for tag {}: {}",
+                tag,
+                e.code()
+            ),
+            Err(_) => return None,
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(left.min(RECOVERY_POLL)).await;
+    }
 }
 
 /// The order book with each order's tag (the reconciler's lookup).

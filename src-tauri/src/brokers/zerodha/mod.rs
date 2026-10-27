@@ -74,6 +74,9 @@ pub struct ZerodhaBroker {
     quote_pacer: Pacer,
     history_pacer: Pacer,
     other_pacer: Pacer,
+    /// How long an order whose answer was lost is looked for in the order
+    /// book by its tag ([`orders::RECOVERY_WINDOW`]).
+    recovery_window: std::time::Duration,
 }
 
 impl ZerodhaBroker {
@@ -91,7 +94,15 @@ impl ZerodhaBroker {
             quote_pacer: Pacer::per_second(1.0),
             history_pacer: Pacer::per_second(3.0),
             other_pacer: Pacer::per_second(10.0),
+            recovery_window: orders::RECOVERY_WINDOW,
         }
+    }
+
+    /// Look for an order whose answer was lost for `window` instead of
+    /// [`orders::RECOVERY_WINDOW`] (tests).
+    pub fn with_recovery_window(mut self, window: std::time::Duration) -> Self {
+        self.recovery_window = window;
+        self
     }
 
     pub(crate) fn resolver(&self) -> &SymbolResolver {

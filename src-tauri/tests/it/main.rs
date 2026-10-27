@@ -196,6 +196,7 @@ mod broker_unread_routes;
 mod broker_upstox_feed;
 mod broker_upstox_feed_hygiene;
 mod broker_upstox_rest;
+mod broker_zerodha_recovery;
 mod brokers_direct_batch_a;
 mod brokers_direct_batch_b;
 mod brokers_noren;
@@ -228,6 +229,7 @@ mod options_uncertainty;
 mod order_identity;
 mod order_quantity_safety;
 mod order_split_bounds;
+mod order_unanswered;
 mod perf;
 mod polled_reads;
 // Counts the process's threads, which only macOS and Linux report.
