@@ -1,6 +1,7 @@
 //! The web's `blueprints/agent.py`, split by area: the chat routes
-//! ([`chat`]), the conversation routes ([`conversations`]) and the
-//! configuration routes ([`config`]: status, catalogue, models, settings).
+//! ([`chat`]), the conversation routes ([`conversations`]), the
+//! configuration routes ([`config`]: status, catalogue, models, settings)
+//! and the voice routes ([`voice`]).
 //! Every route needs the signed-in user and carries the session's CSRF
 //! token on writes, like every page route; none is public.
 //!
@@ -13,6 +14,7 @@ pub mod chat;
 pub mod chatgpt;
 pub mod config;
 pub mod conversations;
+pub mod voice;
 pub mod websearch;
 
 use super::{Access, RouteSpec};
@@ -42,6 +44,7 @@ pub fn table() -> Vec<RouteSpec> {
     routes.extend(config::table());
     routes.extend(chatgpt::table());
     routes.extend(websearch::table());
+    routes.extend(voice::table());
     routes
 }
 

@@ -26,6 +26,8 @@
 //! - `chat/`: the chat service the routes call; `run/`: one turn, its loop
 //!   and its stored state; `stream/`: its frames as SSE; `reply`: a refusal
 //!   before anything streams.
+//! - `voice/`: the spoken surface (the session mint, its settings and key,
+//!   spoken approval, the spoken-line record).
 //! - `settings/`, `providers/`, `catalog/`, `models/`, `resolver`, `plan`,
 //!   `setup_gate`: the configuration (migration `098_agent_config`): the
 //!   Agent's settings and run policy, the provider kinds and their genai
@@ -63,6 +65,7 @@ pub mod stream;
 pub(crate) mod testing;
 pub mod tool_guard;
 pub mod tools;
+pub mod voice;
 pub mod websearch;
 
 use contract::approval::{ApprovalHook, NoApprovalRecord};
@@ -93,6 +96,8 @@ pub struct AgentModule {
     client: Mutex<Option<Arc<ModelClient>>>,
     turn_limit: RwLock<Duration>,
     plan: RwLock<Arc<dyn PlanSignIn>>,
+    /// The voice surface: spoken approval windows, the mint's client.
+    voice: voice::VoiceModule,
 }
 
 impl Default for AgentModule {
@@ -114,6 +119,7 @@ impl AgentModule {
             client: Mutex::new(None),
             turn_limit: RwLock::new(run::MAX_TURN),
             plan: RwLock::new(Arc::new(NoPlanSignIn)),
+            voice: voice::VoiceModule::default(),
         }
     }
 
@@ -222,6 +228,11 @@ impl AgentModule {
     pub fn set_plan(&self, plan: Arc<dyn PlanSignIn>) {
         *self.plan.write() = plan;
     }
+
+    /// The voice surface.
+    pub fn voice(&self) -> &voice::VoiceModule {
+        &self.voice
+    }
 }
 
 /// Once a minute, how often expired approvals are swept.
@@ -269,6 +280,7 @@ async fn sweep(app: &Arc<crate::state::AppState>) {
         Ok(ids) => {
             let hook = app.agent.approvals();
             for id in ids {
+                app.agent.voice.windows.forget(&id);
                 hook.abandoned(app, &id).await;
             }
         }
