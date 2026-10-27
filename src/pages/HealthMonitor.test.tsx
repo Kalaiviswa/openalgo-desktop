@@ -19,12 +19,16 @@ vi.mock('@/api/health', async (importOriginal) => ({
   ...api,
 }))
 
-// The charts draw on a canvas jsdom does not have.
-vi.mock('lightweight-charts', () => {
+// The charts draw on a canvas jsdom does not have; the themes stay the
+// engine's own.
+vi.mock('openalgo-charts', async (importOriginal) => {
   const stub: unknown = new Proxy(() => stub, {
     get: (_target, key) => (key === 'then' ? undefined : stub),
   })
-  return { createChart: () => stub, LineSeries: {}, ColorType: { Solid: 'solid' } }
+  return {
+    ...(await importOriginal<typeof import('openalgo-charts')>()),
+    createChart: () => stub,
+  }
 })
 
 function metrics(overrides: Partial<CurrentMetrics> = {}): CurrentMetrics {
