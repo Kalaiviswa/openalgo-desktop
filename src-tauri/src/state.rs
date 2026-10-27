@@ -509,6 +509,7 @@ impl AppState {
         crate::services::broker_config_service::BrokerConfigService::apply_rate_plans(ctx);
         crate::services::request_budget_service::restore(ctx);
         crate::services::request_budget_service::start(ctx);
+        crate::agent::start(ctx);
         // Analyzer mode survives restarts: resume the sandbox engine.
         if ctx.sqlite.get_analyze_mode().unwrap_or(false) {
             crate::services::analyzer_service::AnalyzerService::spawn_resume(ctx);
@@ -568,6 +569,7 @@ impl AppState {
     /// tasks.
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
+        self.agent.stop_all();
         self.tunnel
             .stop(crate::services::tunnel::Off::SignedOut)
             .await;
