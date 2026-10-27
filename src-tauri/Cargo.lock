@@ -4208,6 +4208,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "rustls",
+ "scheduled-thread-pool",
  "semver",
  "serde",
  "serde_json",
