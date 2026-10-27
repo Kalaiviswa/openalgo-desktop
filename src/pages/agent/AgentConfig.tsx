@@ -36,9 +36,8 @@
  * render error so one broken panel cannot take the other two down with it.
  *
  * Desktop: a Trading safety section follows Trading (decision 1 of the 1.0.4
- * plan: every setting reachable in the app), and the Voice and External data
- * sections are added by the parts that own them, each at its web position
- * marked below.
+ * plan: every setting reachable in the app), and the External data section
+ * is added by the part that owns it, at its web position marked below.
  */
 
 import { ArrowLeft, Plus } from 'lucide-react'
@@ -51,6 +50,7 @@ import { ProviderCatalogPanel } from '@/components/agent/config/ProviderCatalogP
 import { RegisteredModelsTable } from '@/components/agent/config/RegisteredModelsTable'
 import { TradingPanel } from '@/components/agent/config/TradingPanel'
 import { TradingSafetyPanel } from '@/components/agent/config/TradingSafetyPanel'
+import { VoicePanel } from '@/components/agent/config/VoicePanel'
 import { WebSearchPanel } from '@/components/agent/config/WebSearchPanel'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Navbar } from '@/components/layout/Navbar'
@@ -158,7 +158,9 @@ export default function AgentConfig() {
                 comment above gives: anything under that grid is a screen and a
                 half down, and this section is one an operator arrives looking
                 for. */}
-            {/* The Voice section goes here (the voice part). */}
+            <Section name="Voice">
+              <VoicePanel />
+            </Section>
             <Section name="The provider catalog">
               <ProviderCatalogPanel />
             </Section>
