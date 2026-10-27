@@ -4326,6 +4326,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "webkit2gtk",
  "webpki-roots 1.0.10",
  "whatsapp-rust",
  "zeroize",
