@@ -34,6 +34,7 @@
 //!   targets, the model catalogue, the trader's models and keys, which model
 //!   a run uses, the ChatGPT plan's sign-in seen from the registry, and the
 //!   setup gate.
+//! - `safety`: the order guard, the kill switch and the session counters.
 //!
 //! Nothing a turn needs starts at boot: a run is built when the trader sends
 //! a message, so a platform whose Agent cannot work still starts. [`start`]
@@ -58,6 +59,7 @@ pub mod redact;
 pub mod reply;
 pub mod resolver;
 pub mod run;
+pub mod safety;
 pub mod settings;
 pub mod setup_gate;
 pub mod stream;
