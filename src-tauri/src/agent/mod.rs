@@ -43,10 +43,12 @@ pub mod attachments;
 pub mod catalog;
 pub mod chart_catalogue;
 pub mod chat;
+pub mod chatgpt;
 pub mod contract;
 pub mod conversations;
 pub mod indicators;
 pub mod models;
+pub mod outbound;
 pub mod plan;
 pub mod prompts;
 pub mod providers;
@@ -160,6 +162,8 @@ impl AgentModule {
     /// End every turn now (sign-out, lock, account reset, fresh start,
     /// quit): each ends with `done` (cancelled) and is stored as cancelled.
     pub fn stop_all(&self) -> usize {
+        // A ChatGPT sign-in waiting for approval stops too.
+        self.plan().stop();
         let n = self.runs.cancel_all();
         if n > 0 {
             tracing::info!("Stopped {} Agent turn(s)", n);
