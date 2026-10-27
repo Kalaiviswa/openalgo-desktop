@@ -54,19 +54,6 @@ vi.mock('@/api/straddle-chart', () => ({ straddleChartApi: mocks.straddle }))
 vi.mock('@/api/custom-straddle', () => ({ customStraddleApi: mocks.custom }))
 vi.mock('@/lib/Plot2D', () => ({ default: () => null }))
 vi.mock('@/lib/Plot3D', () => ({ default: () => null }))
-vi.mock('lightweight-charts', () => {
-  // Every chart call answers with the same inert stub.
-  const stub: unknown = new Proxy(() => stub, {
-    get: (_target, key) => (key === 'then' ? undefined : stub),
-  })
-  return {
-    createChart: () => stub,
-    LineSeries: {},
-    BaselineSeries: {},
-    ColorType: { Solid: 'solid' },
-    CrosshairMode: { Normal: 0 },
-  }
-})
 vi.mock('openalgo-charts', async (importOriginal) => {
   // Every chart call answers with the same inert stub (jsdom has no
   // canvas); the themes stay the engine's own.
