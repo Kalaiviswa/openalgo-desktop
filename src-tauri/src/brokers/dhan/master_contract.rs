@@ -27,67 +27,6 @@ const EQUITY_FNO: &[&str] = &["FUTIDX", "FUTSTK", "OPTIDX", "OPTSTK", "OPTFUT"];
 const CURRENCY: &[&str] = &["FUTCUR", "OPTCUR"];
 const COMMODITY: &[&str] = &["FUTCOM", "FUTIDX", "OPTFUT", "OPTIDX"];
 
-/// NSE index symbols OpenAlgo documents; others keep Dhan's name.
-const VALID_NSE_INDEX: &[&str] = &[
-    "NIFTY",
-    "NIFTYNXT50",
-    "FINNIFTY",
-    "BANKNIFTY",
-    "MIDCPNIFTY",
-    "INDIAVIX",
-    "HANGSENGBEESNAV",
-    "NIFTY100",
-    "NIFTY200",
-    "NIFTY500",
-    "NIFTYALPHA50",
-    "NIFTYAUTO",
-    "NIFTYCOMMODITIES",
-    "NIFTYCONSUMPTION",
-    "NIFTYCPSE",
-    "NIFTYDIVOPPS50",
-    "NIFTYENERGY",
-    "NIFTYFMCG",
-    "NIFTYGROWSECT15",
-    "NIFTYGS10YR",
-    "NIFTYGS10YRCLN",
-    "NIFTYGS1115YR",
-    "NIFTYGS15YRPLUS",
-    "NIFTYGS48YR",
-    "NIFTYGS813YR",
-    "NIFTYGSCOMPSITE",
-    "NIFTYINFRA",
-    "NIFTYIT",
-    "NIFTYMEDIA",
-    "NIFTYMETAL",
-    "NIFTYMIDLIQ15",
-    "NIFTYMIDCAP100",
-    "NIFTYMIDCAP150",
-    "NIFTYMIDCAP50",
-    "NIFTYMIDSML400",
-    "NIFTYMNC",
-    "NIFTYPHARMA",
-    "NIFTYPSE",
-    "NIFTYPSUBANK",
-    "NIFTYPVTBANK",
-    "NIFTYREALTY",
-    "NIFTYSERVSECTOR",
-    "NIFTYSMLCAP100",
-    "NIFTYSMLCAP250",
-    "NIFTYSMLCAP50",
-    "NIFTY100EQLWGT",
-    "NIFTY100LIQ15",
-    "NIFTY100LOWVOL30",
-    "NIFTY100QUALTY30",
-    "NIFTY200QUALTY30",
-    "NIFTY50DIVPOINT",
-    "NIFTY50EQLWGT",
-    "NIFTY50PR1XINV",
-    "NIFTY50PR2XLEV",
-    "NIFTY50TR1XINV",
-    "NIFTY50TR2XLEV",
-    "NIFTY50VALUE20",
-];
-
 /// Dhan's compact NSE index names -> OpenAlgo (after upper/space removal).
 const NSE_INDEX_FIXUPS: &[(&str, &str)] = &[
     ("NIFTYNEXT50", "NIFTYNXT50"),
@@ -99,6 +38,30 @@ const NSE_INDEX_FIXUPS: &[(&str, &str)] = &[
     ("NIFTY100EQUALWEIGHT", "NIFTY100EQLWGT"),
     ("NIFTY100LOWVOLATILITY30", "NIFTY100LOWVOL30"),
     ("NIFTYMID100FREE", "NIFTYMIDCAP100"),
+];
+
+/// Indices in `docs/prompt/symbol-format.md` that Dhan lists under its own
+/// BSE codes, which the shared [`BSE_INDEX_RENAMES`] does not carry. Matched
+/// by `SEM_CUSTOM_SYMBOL` ("BSE Momentum Index") or, where Dhan gives only
+/// the code, by BSE's index code (DSI, LVI, QUI). Web 8053a6eb8, QA MC-08.
+const DHAN_BSE_INDEX_CODES: &[(&str, &str)] = &[
+    ("ALLCAP", "BSEALLCAP"),
+    ("BHRT22", "BSEBHARAT22INDEX"),
+    ("BSEDSI", "BSEDIVIDENDSTABILITY"),
+    ("BSEEVI", "BSEENHANCEDVALUE"),
+    ("BSELVI", "BSELOWVOLATILITY"),
+    ("BSEMOI", "BSEMOMENTUM"),
+    ("BSEPBI", "BSEPRIVATEBANKS"),
+    ("BSEQUI", "BSEQUALITY"),
+    ("COMDTY", "BSEBASICMATERIALS"),
+    ("CONDIS", "BSECONSUMERDISCRETIONARYGOODS&SERVICES"),
+    ("DFRGRI", "BSEDIVERSIFIEDFINANCIALSREVENUEGROWTHINDEX"),
+    ("ESG100", "BSE100ESG"),
+    ("FOCIT", "BSEFOCUSEDIT"),
+    ("LCTMCI", "BSE100LARGECAPTMCINDEX"),
+    ("MFG", "BSEINDIAMANUFACTURING"),
+    ("SML250", "BSE250SMALLCAPINDEX"),
+    ("UTILS", "BSEUTILITIES"),
 ];
 
 /// (exchange, brexchange, instrumenttype) for a row, `None` to drop it
@@ -117,8 +80,11 @@ pub fn assign_values(
     Some(match (segment, exch_id) {
         ("E", "NSE") if instrument == "EQUITY" => ("NSE", "NSE_EQ", "EQ".into()),
         ("E", "BSE") if instrument == "EQUITY" => ("BSE", "BSE_EQ", "EQ".into()),
-        ("I", "NSE") if instrument == "INDEX" => ("NSE_INDEX", "IDX_I", "INDEX".into()),
-        ("I", "BSE") if instrument == "INDEX" => ("BSE_INDEX", "IDX_I", "INDEX".into()),
+        // Indices are typed EQ, as Kite types its INDICES segment; the
+        // *_INDEX exchange is what says the row is an index (web b0b51f800,
+        // QA MC-04). History still asks Dhan for INDEX, from the exchange.
+        ("I", "NSE") if instrument == "INDEX" => ("NSE_INDEX", "IDX_I", "EQ".into()),
+        ("I", "BSE") if instrument == "INDEX" => ("BSE_INDEX", "IDX_I", "EQ".into()),
         ("D", "NSE") if EQUITY_FNO.contains(&instrument) => ("NFO", "NSE_FNO", deriv),
         ("D", "BSE") if EQUITY_FNO.contains(&instrument) => ("BFO", "BSE_FNO", deriv),
         ("C", "NSE") if CURRENCY.contains(&instrument) => ("CDS", "NSE_CURRENCY", deriv),
@@ -246,20 +212,20 @@ impl Cols {
     }
 }
 
+/// Every NSE index is normalised: upper case, no spaces or hyphens. It once
+/// fell back to Dhan's raw name outside a fixed allow-list, so each index
+/// added to the documented set stayed as "Nifty100 Alpha 30" instead of
+/// NIFTY100ALPHA30 (web 8053a6eb8, QA MC-08).
 fn nse_index_symbol(raw: &str) -> String {
     let compact = raw.to_ascii_uppercase().replace([' ', '-'], "");
-    let fixed = rename(NSE_INDEX_FIXUPS, &compact)
+    rename(NSE_INDEX_FIXUPS, &compact)
         .map(str::to_string)
-        .unwrap_or(compact);
-    if VALID_NSE_INDEX.contains(&fixed.as_str()) {
-        fixed
-    } else {
-        raw.to_string()
-    }
+        .unwrap_or(compact)
 }
 
 fn bse_index_symbol(raw: &str) -> String {
-    rename(BSE_INDEX_RENAMES, raw)
+    rename(DHAN_BSE_INDEX_CODES, raw)
+        .or_else(|| rename(BSE_INDEX_RENAMES, raw))
         .map(str::to_string)
         .unwrap_or_else(|| raw.to_string())
 }

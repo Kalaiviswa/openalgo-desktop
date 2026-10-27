@@ -52,7 +52,7 @@ fn d(y: i32, m: u32, day: u32) -> NaiveDate {
 fn master_contract_maps_segments_and_symbols() {
     let rows = parse_scrip_master(fixture!("api-scrip-master.csv"), Variant::Live).unwrap();
     // 25 data rows; the bond (segment X) is dropped.
-    assert_eq!(rows.len(), 24);
+    assert_eq!(rows.len(), 28);
     let r = master();
     let sbin = r.by_symbol("NSE", "SBIN").unwrap();
     assert_eq!(
@@ -112,9 +112,14 @@ fn master_contract_keeps_nse_commodity_apart_from_nfo() {
 fn master_contract_indices() {
     let r = master();
     let nifty = r.by_symbol("NSE_INDEX", "NIFTY").unwrap();
+    // Typed EQ as Kite types its indices, not Dhan's INDEX (QA MC-04).
     assert_eq!(
         (nifty.brexchange.as_str(), nifty.instrument_type.as_str()),
-        ("IDX_I", "INDEX")
+        ("IDX_I", "EQ")
+    );
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "SENSEX").unwrap().instrument_type,
+        "EQ"
     );
     // INDEX tick sizes are already rupees.
     assert_eq!(nifty.tick_size, 0.05);
@@ -124,8 +129,24 @@ fn master_contract_indices() {
         r.by_symbol("NSE_INDEX", "NIFTYNXT50").unwrap().brsymbol,
         "NIFTY NEXT 50"
     );
-    // Not in the documented set: Dhan's name is kept.
-    assert!(r.by_symbol("NSE_INDEX", "NIFTY SOMETHING NEW").is_some());
+    // Every NSE index is normalised, documented or not (QA MC-08).
+    assert!(r.by_symbol("NSE_INDEX", "NIFTYSOMETHINGNEW").is_some());
+    assert!(r.by_symbol("NSE_INDEX", "NIFTY SOMETHING NEW").is_none());
+    assert_eq!(
+        r.by_symbol("NSE_INDEX", "NIFTY100ALPHA30")
+            .unwrap()
+            .brsymbol,
+        "Nifty100 Alpha 30"
+    );
+    // Dhan's own BSE codes map to the documented names, ahead of the
+    // shared table.
+    assert_eq!(r.by_symbol("BSE_INDEX", "BSEMOMENTUM").unwrap().token, "36");
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "BSEALLCAP").unwrap().brsymbol,
+        "ALLCAP"
+    );
+    assert!(r.by_symbol("BSE_INDEX", "BSEDIVIDENDSTABILITY").is_some());
+    assert!(r.by_symbol("BSE_INDEX", "BSEMOI").is_none());
     assert_eq!(r.by_symbol("BSE_INDEX", "SENSEX").unwrap().tick_size, 0.01);
     assert_eq!(r.by_symbol("BSE_INDEX", "BSEAUTO").unwrap().token, "52");
 }
