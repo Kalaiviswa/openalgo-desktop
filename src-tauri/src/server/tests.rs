@@ -245,6 +245,8 @@ mod tunnel;
 mod agent_config;
 // The ChatGPT plan and web search routes (blueprints/agent.py).
 mod agent_chatgpt_search;
+// D-006: the Agent's audit trail, read.
+mod agent_audit;
 
 // ------------------------------------------------------------------ fixtures
 
