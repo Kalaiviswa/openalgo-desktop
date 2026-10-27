@@ -33,6 +33,12 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # duckdb 1.20000.0 is DuckDB 2.0 (a new engine and storage format)
+      # behind a minor-looking version. It does not link on Linux ARM64
+      # (undefined duckdb_register_static_extensions, 2026-10-24), and moving
+      # Historify to it is a planned upgrade, not a weekly PR.
+      - dependency-name: "duckdb"
+        versions: [">=1.20000.0"]
     groups:
       tauri:
         patterns: ["tauri", "tauri-*"]
