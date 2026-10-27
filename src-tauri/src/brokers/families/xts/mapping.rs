@@ -357,6 +357,36 @@ fn value_text(v: Option<&Value>) -> String {
     }
 }
 
+/// The net quantity of one instrument in the position list (web rmoney
+/// `get_open_position`, openalgo#2292). XTS names a position its own way
+/// ("NIFTY 27OCT2026 CE 22400") while the master's broker symbol for the
+/// same option is "NIFTY26OCT22400CE", so a position is matched by its
+/// instrument id, and by its name only when it carries none. 0 when flat.
+pub fn open_position(
+    rows: &[Value],
+    symbols: &SymbolResolver,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> i64 {
+    let token = symbols.token(symbol, exchange).filter(|t| !t.is_empty());
+    let brsymbol = symbols.br_symbol(symbol, exchange);
+    rows.iter()
+        .filter(|p| p.is_object())
+        .find(|p| {
+            let held = value_text(position_instrument(p));
+            let same_instrument = match &token {
+                Some(t) if !held.is_empty() => held == *t,
+                _ => brsymbol.as_deref() == Some(s(p, "TradingSymbol").as_str()),
+            };
+            same_instrument
+                && oa_exchange(&s(p, "ExchangeSegment")) == exchange
+                && s(p, "ProductType") == product
+        })
+        .map(|p| f(p, "Quantity") as i64)
+        .unwrap_or(0)
+}
+
 /// `transform_positions_data` (`order_data.py:280-325`) over a list
 /// [`position_list`] read.
 pub fn positions(rows: &[Value], symbols: &SymbolResolver) -> Vec<Position> {

@@ -192,6 +192,34 @@ pub(crate) async fn get_positions(b: &XtsBroker, auth: &AuthToken) -> Result<Vec
     Ok(mapping::positions(rows, b.resolver()))
 }
 
+/// web rmoney `get_open_position` (openalgo#2292): the position matched by
+/// its instrument, not its name. A book that cannot be read refuses the
+/// smart order instead of reading as flat (web #2116).
+pub(crate) async fn get_open_position(
+    b: &XtsBroker,
+    auth: &AuthToken,
+    symbol: &str,
+    exchange: &str,
+    product: &str,
+) -> Result<i64> {
+    let v = b
+        .interactive(
+            Method::GET,
+            "/portfolio/positions?dayOrNet=NetWise",
+            auth,
+            None,
+        )
+        .await?;
+    let rows = mapping::position_list(result(&v)).ok_or_else(|| unread(b.cfg.name))?;
+    Ok(mapping::open_position(
+        rows,
+        b.resolver(),
+        symbol,
+        exchange,
+        product,
+    ))
+}
+
 pub(crate) async fn get_holdings(b: &XtsBroker, auth: &AuthToken) -> Result<Vec<Holding>> {
     let v = b
         .interactive(Method::GET, "/portfolio/holdings", auth, None)

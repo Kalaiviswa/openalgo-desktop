@@ -79,6 +79,8 @@ struct Fake {
     seen: Mutex<Vec<String>>,
     /// Market-data calls with this token answer "Invalid Token".
     expired_feed: Mutex<Option<String>>,
+    /// The position book's answer, when not the fixture's.
+    positions: Mutex<Option<Value>>,
 }
 
 type S = State<Arc<Fake>>;
@@ -260,7 +262,8 @@ fn app(state: Arc<Fake>) -> Router {
             "/interactive/portfolio/positions",
             get(|State(s): S, OriginalUri(u): OriginalUri| async move {
                 s.log(format!("positions|{}", u.query().unwrap_or("")));
-                Json(books()["positions"].clone())
+                let answer = s.positions.lock().clone();
+                Json(answer.unwrap_or_else(|| books()["positions"].clone()))
             }),
         )
         .route(
@@ -510,6 +513,82 @@ async fn cancel_all_and_close_all() {
         .await
         .unwrap();
     assert_eq!(q, -50);
+}
+
+/// Web test/test_rmoney_open_position.py (openalgo#2292): XTS names a
+/// position its own way ("NIFTY 25APR 22500 CE") while the master's broker
+/// symbol is "NIFTY24APR22500CE", so the open position is found by its
+/// instrument, and by its name only when it carries no instrument id.
+#[tokio::test]
+async fn rmoney_finds_the_open_position_by_its_instrument() {
+    use openalgo_desktop_lib::services::order_service::{smart_decision, SmartDecision};
+    let (b, fake, _) = broker(&rmoney::CONFIG).await;
+    let t = token();
+    let option = "NIFTY25APR2422500CE";
+    let position = |fields: Value| {
+        let mut p = json!({
+            "TradingSymbol": "NIFTY 25APR2024 CE 22500",
+            "ExchangeSegment": "NSEFO",
+            "ExchangeInstrumentID": 43210,
+            "ProductType": "NRML",
+            "Quantity": "65",
+        });
+        for (k, v) in fields.as_object().unwrap() {
+            if v.is_null() {
+                p.as_object_mut().unwrap().remove(k);
+            } else {
+                p[k] = v.clone();
+            }
+        }
+        p
+    };
+    let held = |p: Value| {
+        *fake.positions.lock() = Some(json!({"type": "success", "result": {"positionList": [p]}}));
+        let b = &b;
+        let t = &t;
+        async move {
+            b.get_open_position(t, option, "NFO".parse().unwrap(), Product::Nrml)
+                .await
+                .unwrap()
+        }
+    };
+    // test_an_option_position_is_found_by_its_instrument_whatever_xts_calls_it
+    assert_eq!(held(position(json!({}))).await, 65);
+    // test_the_instrument_id_matches_however_xts_types_it
+    assert_eq!(
+        held(position(json!({"ExchangeInstrumentID": "43210"}))).await,
+        65
+    );
+    // test_another_product_of_the_same_option_is_not_this_position
+    assert_eq!(held(position(json!({"ProductType": "MIS"}))).await, 0);
+    // test_another_instrument_is_not_this_position
+    assert_eq!(
+        held(position(json!({
+            "ExchangeInstrumentID": 43211,
+            "TradingSymbol": "NIFTY 25APR2024 CE 22550"
+        })))
+        .await,
+        0
+    );
+    // test_a_position_with_no_instrument_id_is_matched_by_name: the name is
+    // the master's broker symbol.
+    assert_eq!(
+        held(position(json!({
+            "ExchangeInstrumentID": null,
+            "TradingSymbol": "NIFTY24APR22500CE"
+        })))
+        .await,
+        65
+    );
+    // test_a_smart_exit_sells_the_whole_position: quantity 0, position
+    // size 0 against the 65 found sells 65.
+    let current = held(position(json!({}))).await;
+    match smart_decision(current, 0, 0, "SELL") {
+        SmartDecision::Place { action, quantity } => {
+            assert_eq!((action.as_str(), quantity), ("SELL", 65));
+        }
+        SmartDecision::NoAction(m) => panic!("{}", m),
+    }
 }
 
 #[tokio::test]
