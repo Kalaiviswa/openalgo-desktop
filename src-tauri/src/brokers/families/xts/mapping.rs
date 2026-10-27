@@ -361,7 +361,9 @@ fn value_text(v: Option<&Value>) -> String {
 /// `get_open_position`, openalgo#2292). XTS names a position its own way
 /// ("NIFTY 27OCT2026 CE 22400") while the master's broker symbol for the
 /// same option is "NIFTY26OCT22400CE", so a position is matched by its
-/// instrument id, and by its name only when it carries none. 0 when flat.
+/// instrument id, and by its name only when it carries none: the broker
+/// symbol, as the web matches it, or the OpenAlgo symbol, as the position
+/// book reads such a row. 0 when flat.
 pub fn open_position(
     rows: &[Value],
     symbols: &SymbolResolver,
@@ -377,7 +379,10 @@ pub fn open_position(
             let held = value_text(position_instrument(p));
             let same_instrument = match &token {
                 Some(t) if !held.is_empty() => held == *t,
-                _ => brsymbol.as_deref() == Some(s(p, "TradingSymbol").as_str()),
+                _ => {
+                    let name = s(p, "TradingSymbol");
+                    brsymbol.as_deref() == Some(name.as_str()) || name == symbol
+                }
             };
             same_instrument
                 && oa_exchange(&s(p, "ExchangeSegment")) == exchange

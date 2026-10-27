@@ -580,6 +580,16 @@ async fn rmoney_finds_the_open_position_by_its_instrument() {
         .await,
         65
     );
+    // The desktop also reads such a row by its OpenAlgo symbol, as its
+    // position book does.
+    assert_eq!(
+        held(position(json!({
+            "ExchangeInstrumentID": null,
+            "TradingSymbol": option
+        })))
+        .await,
+        65
+    );
     // test_a_smart_exit_sells_the_whole_position: quantity 0, position
     // size 0 against the 65 found sells 65.
     let current = held(position(json!({}))).await;

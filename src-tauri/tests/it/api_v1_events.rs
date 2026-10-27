@@ -705,7 +705,7 @@ async fn a_lost_answer_has_the_order_book_read_at_once() {
         .lock()
         .push_back((AfterSend::Dropped, "open"));
     let (s, _) = call(&h, "/api/v1/placeorder", order_body()).await;
-    assert_eq!(s, 500);
+    assert_eq!(s, 502, "may have been placed (web openalgo#2305)");
     assert_eq!(requested(), before + 1, "a pass is asked for at once");
     h.shutdown().await;
 }
