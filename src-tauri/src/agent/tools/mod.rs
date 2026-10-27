@@ -55,10 +55,11 @@ pub const TOOLKITS: &[ToolGroup] = &[
     option_viz::GROUP,
     viz::GROUP,
     openui::GROUP,
-    // Toolkit lanes add their line here. Later: flow_gen::GROUP (order 70,
-    // chat only), not in this version.
-    orders::GROUP,    // order 50, every surface, requires Trading
-    websearch::GROUP, // order 80, every surface, requires WebSearch
+    // Order 50, every surface, requires Trading.
+    orders::GROUP,
+    // Later: flow_gen::GROUP (order 70, chat only), not in this version.
+    // Order 80, every surface, requires WebSearch.
+    websearch::GROUP,
 ];
 
 /// The groups a run is offered, ordered by `order` then `key`.
