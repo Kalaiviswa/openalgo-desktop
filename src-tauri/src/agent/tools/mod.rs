@@ -26,6 +26,8 @@ pub mod openui;
 pub mod option_viz;
 pub mod options;
 pub mod options_common;
+pub mod order_vocab;
+pub mod orders;
 pub mod service;
 #[cfg(test)]
 pub(crate) mod spec_contract;
@@ -53,11 +55,10 @@ pub const TOOLKITS: &[ToolGroup] = &[
     option_viz::GROUP,
     viz::GROUP,
     openui::GROUP,
-    // Toolkit lanes add their line here, for example:
-    // orders::GROUP,     // order 50, every surface, requires Trading
+    // Toolkit lanes add their line here. Later: flow_gen::GROUP (order 70,
+    // chat only), not in this version.
+    orders::GROUP,    // order 50, every surface, requires Trading
     websearch::GROUP, // order 80, every surface, requires WebSearch
-                      //
-                      // Later: flow_gen::GROUP (order 70, chat only), not in this version.
 ];
 
 /// The groups a run is offered, ordered by `order` then `key`.
