@@ -60,6 +60,17 @@ vi.mock('lightweight-charts', () => {
     CrosshairMode: { Normal: 0 },
   }
 })
+vi.mock('openalgo-charts', async (importOriginal) => {
+  // Every chart call answers with the same inert stub (jsdom has no
+  // canvas); the themes stay the engine's own.
+  const stub: unknown = new Proxy(() => stub, {
+    get: (_target, key) => (key === 'then' ? undefined : stub),
+  })
+  return {
+    ...(await importOriginal<typeof import('openalgo-charts')>()),
+    createChart: () => stub,
+  }
+})
 vi.mock('@/utils/toast', () => ({
   showToast: {
     error: vi.fn(),
