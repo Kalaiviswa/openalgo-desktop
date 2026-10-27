@@ -34,7 +34,8 @@
 //!   targets, the model catalogue, the trader's models and keys, which model
 //!   a run uses, the ChatGPT plan's sign-in seen from the registry, and the
 //!   setup gate.
-//! - `safety`: the order guard, the kill switch and the session counters.
+//! - `safety`: the order guard, the kill switch, the session counters,
+//!   the audit trail and the approval hook.
 //!
 //! Nothing a turn needs starts at boot: a run is built when the trader sends
 //! a message, so a platform whose Agent cannot work still starts. [`start`]
@@ -70,7 +71,7 @@ pub mod tools;
 pub mod voice;
 pub mod websearch;
 
-use contract::approval::{ApprovalHook, NoApprovalRecord};
+use contract::approval::ApprovalHook;
 use contract::model::{ModelResolver, NoModelConfigured};
 use contract::policy::{DefaultPolicy, RunPolicy, SectionSource};
 use contract::tool::ToolGroup;
@@ -112,7 +113,7 @@ impl AgentModule {
     pub fn new() -> Self {
         Self {
             resolver: RwLock::new(Arc::new(NoModelConfigured)),
-            approvals: RwLock::new(Arc::new(NoApprovalRecord)),
+            approvals: RwLock::new(Arc::new(safety::approval::AuditTrail)),
             policy: RwLock::new(Arc::new(DefaultPolicy)),
             sections: RwLock::new(Vec::new()),
             toolkits: RwLock::new(tools::TOOLKITS),
