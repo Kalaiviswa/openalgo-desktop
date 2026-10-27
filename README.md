@@ -74,6 +74,10 @@ on, every order from the app, the API, webhooks and MCP clients goes to the
 sandbox instead of your broker. Alerts, P&L tracking, latency and traffic
 monitoring and the MCP server use the same services as the screens.
 
+## Video Tutorial
+
+[![OpenAlgo Explainer](https://img.youtube.com/vi/DgFwpvuxQr8/0.jpg)](https://www.youtube.com/watch?v=DgFwpvuxQr8)
+
 ## Quick Links
 
 - **Download**: [GitHub Releases](https://github.com/marketcalls/openalgo-desktop/releases)
