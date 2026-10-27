@@ -4,6 +4,7 @@
 
 use super::core::{broker_handle, float, num, BrokerHandle, Reply};
 use super::schemas::SUPPORTED_INTERVALS;
+use crate::brokers::common::history;
 use crate::brokers::common::mapping::{Action, PriceType, Product};
 use crate::brokers::types::{Candle, DepthLevel, HistoryRequest, MarginLeg, Quote, QuoteKey};
 use crate::error::AppError;
@@ -179,7 +180,49 @@ pub fn candle_json(c: &Candle) -> Value {
     })
 }
 
+/// The broker's candles for `req`, without the bars a broker appends after
+/// the session close (web dhan `_drop_bars_after_close`, openalgo#2308):
+/// the close comes from the market calendar, which only a service reads.
+/// Every history read (`/api/v1/history`, the ticker, the charts,
+/// Historify) comes through here.
+pub async fn broker_candles(
+    ctx: &AppState,
+    h: &BrokerHandle,
+    req: &HistoryRequest,
+) -> crate::error::Result<Vec<Candle>> {
+    let candles = h.broker.get_history(&h.auth, req).await?;
+    if !h.broker.history_trims_after_close(req) {
+        return Ok(candles);
+    }
+    let exchange = history::session_exchange(&req.key.exchange);
+    Ok(history::drop_bars_after_close(candles, |day| {
+        session_close_ms(ctx, day, exchange)
+    }))
+}
+
+/// The latest close of `exchange`'s sessions on `day`, epoch ms; `None`
+/// when the calendar has no session for it that day (or cannot be read,
+/// which leaves the bars as the broker sent them).
+fn session_close_ms(ctx: &AppState, day: NaiveDate, exchange: &str) -> Option<i64> {
+    match super::market_calendar_service::timings_for(ctx, day) {
+        Ok(windows) => windows
+            .iter()
+            .filter(|w| w.exchange == exchange)
+            .map(|w| w.end_time)
+            .max(),
+        Err(e) => {
+            tracing::warn!(
+                "Market calendar for {} could not be read; history bars after the close are kept: {}",
+                day,
+                e.code()
+            );
+            None
+        }
+    }
+}
+
 async fn broker_history(
+    ctx: &AppState,
     h: &BrokerHandle,
     symbol: &str,
     exchange: &str,
@@ -198,8 +241,7 @@ async fn broker_history(
         start,
         end,
     };
-    h.broker
-        .get_history(&h.auth, &req)
+    broker_candles(ctx, h, &req)
         .await
         .map_err(|e| Reply::broker_failure(&e, 500))
 }
@@ -227,7 +269,7 @@ pub async fn history(
     if let Err(m) = validate_symbol(ctx, symbol, exchange) {
         return Reply::error(400, m);
     }
-    match broker_history(&h, symbol, exchange, interval, start, end).await {
+    match broker_history(ctx, &h, symbol, exchange, interval, start, end).await {
         Ok(c) => Reply::ok(json!({"status": "success",
             "data": c.iter().map(candle_json).collect::<Vec<_>>()})),
         Err(r) => r,
@@ -363,7 +405,7 @@ pub async fn ticker_candles(
 ) -> Result<Vec<Candle>, Reply> {
     let h = broker_handle(ctx)?;
     let start = clamp_range(interval, start, end);
-    broker_history(&h, symbol, exchange, interval, start, end).await
+    broker_history(ctx, &h, symbol, exchange, interval, start, end).await
 }
 
 // ------------------------------------------------------------------ margin
@@ -558,6 +600,68 @@ mod tests {
             validate_margin(p("0").as_array().unwrap()).unwrap_err(),
             "Position 1: Quantity must be a positive number"
         );
+    }
+
+    #[tokio::test]
+    async fn history_drops_the_bar_a_broker_appends_after_the_close() {
+        use crate::brokers::common::symbols::tests::row;
+        use crate::brokers::mock::MockBroker;
+        use crate::brokers::types::Candle;
+        use crate::brokers::{Broker, BrokerRegistry};
+        use std::sync::Arc;
+        // Web openalgo#2308: after the close Dhan appends one flat bar,
+        // stamped at the request time, to index series (SENSEX 15m: 15:15,
+        // then 16:00). The bar at 16:00 goes on every history read; the
+        // session's bars stay, and a broker that does not append one keeps
+        // every bar. Tuesday 2026-10-27, a BSE trading day closing 15:30.
+        let mock = Arc::new(MockBroker::new("dhan"));
+        let t = crate::state::testing::build(
+            BrokerRegistry::with(vec![mock.clone() as Arc<dyn Broker>]),
+            chrono::Utc::now(),
+        );
+        let ctx = &t.ctx;
+        let mut sensex = row("SENSEX", "SENSEX", "BSE_INDEX", "51");
+        sensex.brexchange = "IDX_I".into();
+        ctx.load_symbol_cache(vec![sensex]);
+        ctx.set_broker_session(Some(crate::state::BrokerSession {
+            broker_id: "dhan".into(),
+            auth_token: crate::security::Secret::new("t"),
+            feed_token: None,
+            user_id: "AB1".into(),
+            user_name: None,
+            authenticated_at: ctx.now(),
+        }));
+        let day = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let ist = |h: u32, m: u32| day.and_hms_opt(h, m, 0).unwrap().and_utc().timestamp() - 19_800;
+        let bar = |ts: i64| Candle {
+            timestamp: ts,
+            open: 82_000.0,
+            high: 82_000.0,
+            low: 82_000.0,
+            close: 82_000.0,
+            ..Default::default()
+        };
+        *mock.history.lock() = Some(Ok(vec![bar(ist(9, 15)), bar(ist(15, 15)), bar(ist(16, 0))]));
+        let stamps = |r: &Reply| -> Vec<i64> {
+            r.body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["timestamp"].as_i64().unwrap())
+                .collect()
+        };
+        *mock.trims_after_close.lock() = true;
+        let r = history(ctx, "SENSEX", "BSE_INDEX", "15m", day, day, "api").await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(stamps(&r), vec![ist(9, 15), ist(15, 15)]);
+        let ticker = ticker_candles(ctx, "SENSEX", "BSE_INDEX", "15m", day, day)
+            .await
+            .unwrap();
+        assert_eq!(ticker.len(), 2);
+
+        *mock.trims_after_close.lock() = false;
+        let r = history(ctx, "SENSEX", "BSE_INDEX", "15m", day, day, "api").await;
+        assert_eq!(stamps(&r), vec![ist(9, 15), ist(15, 15), ist(16, 0)]);
     }
 
     /// BR-01: a basket with a leg missing from the master is refused by

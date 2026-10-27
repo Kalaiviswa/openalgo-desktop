@@ -153,6 +153,9 @@ pub struct MockBroker {
     pub quotes: Mutex<HashMap<String, Quote>>,
     pub depth: Mutex<Option<Scripted<MarketDepth>>>,
     pub history: Mutex<Option<Scripted<Vec<Candle>>>>,
+    /// `history_trims_after_close` answers this (Dhan's index bar after the
+    /// close).
+    pub trims_after_close: Mutex<bool>,
     pub gtt: Mutex<Option<Scripted<GttResponse>>>,
     pub gtt_book: Mutex<Option<Scripted<Vec<GttOrder>>>>,
     pub master: Mutex<Option<Scripted<Vec<SymbolData>>>>,
@@ -239,6 +242,7 @@ impl MockBroker {
             quotes: Mutex::new(HashMap::new()),
             depth: Mutex::new(None),
             history: Mutex::new(None),
+            trims_after_close: Mutex::new(false),
             gtt: Mutex::new(None),
             gtt_book: Mutex::new(None),
             master: Mutex::new(None),
@@ -644,6 +648,10 @@ impl Broker for MockBroker {
         self.pace().await?;
         self.record(MockCall::History(req.clone()));
         out(&self.history, Vec::new)
+    }
+
+    fn history_trims_after_close(&self, _: &HistoryRequest) -> bool {
+        *self.trims_after_close.lock()
     }
 
     async fn place_gtt(&self, _: &AuthToken, _: &GttRequest) -> Result<GttResponse> {

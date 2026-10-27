@@ -44,6 +44,26 @@ fn d(y: i32, m: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, day).unwrap()
 }
 
+/// Web openalgo#2308: every intraday series is trimmed at its exchange's
+/// close, never a daily one, and never GIFT NIFTY, which trades about 06:30
+/// to 02:45 under NSE_INDEX.
+#[test]
+fn intraday_history_is_trimmed_at_the_close_except_gift_nifty() {
+    let req = |exchange: &str, symbol: &str, interval: &str| HistoryRequest {
+        key: QuoteKey::new(exchange, symbol),
+        interval: interval.into(),
+        start: d(2026, 10, 27),
+        end: d(2026, 10, 27),
+    };
+    let b = DhanBroker::new(SymbolResolver::new());
+    assert!(b.history_trims_after_close(&req("BSE_INDEX", "SENSEX", "15m")));
+    assert!(b.history_trims_after_close(&req("NSE", "SBIN", "1m")));
+    assert!(!b.history_trims_after_close(&req("BSE_INDEX", "SENSEX", "D")));
+    assert!(!b.history_trims_after_close(&req("NSE_INDEX", "GIFTNIFTY", "5m")));
+    let sandbox = crate::brokers::dhan_sandbox::broker(SymbolResolver::new());
+    assert!(sandbox.history_trims_after_close(&req("NSE_INDEX", "NIFTY", "15m")));
+}
+
 // ---------------------------------------------------------------------------
 // Master contract
 // ---------------------------------------------------------------------------
