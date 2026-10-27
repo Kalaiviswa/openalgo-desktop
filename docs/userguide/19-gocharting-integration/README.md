@@ -27,7 +27,8 @@ the message for you.
 ## Making the desktop reachable
 
 Turn on the built-in ngrok tunnel in **Profile**, **Broker** tab, **Server
-Configuration** (your ngrok authtoken, then **Enable Ngrok Tunnel**; see
+Configuration** (your ngrok authtoken and your free ngrok domain, then **Enable Ngrok
+Tunnel**; see
 [chapter 16](../16-tradingview-integration/README.md#step-1-turn-on-the-built-in-tunnel)).
 Or run a tunnel yourself on the same computer (for example
 `cloudflared tunnel --url http://localhost:5000`, using your app port if you
