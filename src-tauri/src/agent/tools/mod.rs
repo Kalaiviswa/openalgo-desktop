@@ -35,6 +35,7 @@ pub mod symbols;
 pub(crate) mod testkit;
 pub mod values;
 pub mod viz;
+pub mod websearch;
 
 use crate::agent::contract::tool::{AgentTool, ToolCtx, ToolGroup};
 use std::collections::HashSet;
@@ -54,8 +55,9 @@ pub const TOOLKITS: &[ToolGroup] = &[
     openui::GROUP,
     // Toolkit lanes add their line here, for example:
     // orders::GROUP,     // order 50, every surface, requires Trading
-    //
-    // Later: flow_gen::GROUP (order 70, chat only), not in this version.
+    websearch::GROUP, // order 80, every surface, requires WebSearch
+                      //
+                      // Later: flow_gen::GROUP (order 70, chat only), not in this version.
 ];
 
 /// The groups a run is offered, ordered by `order` then `key`.
