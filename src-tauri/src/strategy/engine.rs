@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 
 mod exits;
 mod fills;
+pub(crate) use fills::FillOutcome;
 mod start;
 mod stop;
 mod ticks;
