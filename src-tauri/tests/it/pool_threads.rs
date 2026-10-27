@@ -41,7 +41,6 @@ fn open_and_drop() {
     });
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_dropped_app_context_leaves_no_threads_behind() {
     crate::isolated!(a_dropped_app_context_leaves_no_threads_behind);
