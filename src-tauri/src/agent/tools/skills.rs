@@ -14,7 +14,7 @@
 //! from `next_offset` until it is null. The slices are contiguous, so the
 //! pages join back to the page exactly.
 
-use super::lane_specs::web_or_log;
+use super::specs::web_or_log;
 use crate::agent::contract::json::dumps_capped_ordered;
 use crate::agent::contract::tool::{
     AgentTool, Surfaces, ToolCtx, ToolGroup, ToolOutcome, ToolSpec,

@@ -22,7 +22,7 @@ mod call;
 mod catalogue;
 mod paging;
 
-use super::lane_specs::web_or_log;
+use super::specs::web_or_log;
 use crate::agent::contract::json::dumps_capped_ordered;
 use crate::agent::contract::tool::{
     AgentTool, Capability, Surfaces, ToolCtx, ToolGroup, ToolOutcome, ToolSpec, MAX_RESULT_CHARS,

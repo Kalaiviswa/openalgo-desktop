@@ -18,6 +18,7 @@ use crate::agent::contract::tool::{
     AgentTool, Capability, Surfaces, ToolCtx, ToolGroup, ToolOutcome, ToolSpec, MAX_RESULT_CHARS,
 };
 use crate::agent::prompts::untrusted::wrap_web_result;
+use crate::agent::tools::specs::web_or_log;
 use crate::agent::websearch::payloads::{Answer, Links, NotOk};
 use crate::agent::websearch::providers::{self, Net, Outcome};
 use crate::agent::websearch::settings::{self, Config};
@@ -28,8 +29,7 @@ use crate::state::AppState;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
-use std::borrow::Cow;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 pub const GROUP: ToolGroup = ToolGroup {
     key: "websearch",
@@ -49,22 +49,6 @@ const NO_PERPLEXITY_KEY: &str = "No Perplexity key is stored in the agent settin
 const PERPLEXITY_TAVILY: &str = "The configured provider is Perplexity, which answers questions rather than returning links, so Tavily answered this search. Use web_research for a Perplexity answer.";
 const PERPLEXITY_DUCKDUCKGO: &str = "The configured provider is Perplexity, which answers questions rather than returning links, so DuckDuckGo answered this search. Use web_research for a Perplexity answer.";
 const TAVILY_WITHOUT_KEY: &str = "Tavily is the configured provider but no Tavily key is stored in the agent settings, so DuckDuckGo answered instead.";
-
-/// The two tools' specs as the web sends them (copied from the web
-/// capture; see `websearch/specs.json`).
-static SPECS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../websearch/specs.json")).unwrap_or(Value::Null)
-});
-
-fn spec(name: &'static str) -> Option<ToolSpec> {
-    let entry = SPECS.get("tools")?.get(name)?;
-    Some(ToolSpec {
-        name,
-        description: Cow::Owned(entry.get("description")?.as_str()?.to_string()),
-        parameters: entry.get("parameters")?.clone(),
-        needs_approval: entry.get("needs_approval")?.as_bool()?,
-    })
-}
 
 /// The caps on one run's searches, shared by its two tools.
 struct Budget {
@@ -91,16 +75,12 @@ fn build(ctx: &ToolCtx) -> Vec<Arc<dyn AgentTool>> {
     });
     let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
     for (name, research) in [("web_search", false), ("web_research", true)] {
-        match spec(name) {
-            Some(spec) => tools.push(Arc::new(WebTool {
+        if let Some(spec) = web_or_log(GROUP.key, name) {
+            tools.push(Arc::new(WebTool {
                 spec,
                 research,
                 shared: shared.clone(),
-            })),
-            None => tracing::error!(
-                "Agent toolkit websearch has no spec for {}; not offered",
-                name
-            ),
+            }));
         }
     }
     tools

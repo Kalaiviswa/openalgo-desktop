@@ -67,7 +67,6 @@ fn ddg(fake: &FakeServer) {
 
 #[tokio::test]
 async fn the_tools_are_the_webs_and_are_offered_only_with_the_switch_on() {
-    let specs: Value = serde_json::from_str(include_str!("../specs.json")).unwrap();
     assert_eq!((GROUP.key, GROUP.order), ("websearch", 80));
     assert_eq!(
         GROUP.description,
@@ -82,7 +81,7 @@ async fn the_tools_are_the_webs_and_are_offered_only_with_the_switch_on() {
         let names: Vec<&str> = on.iter().map(|x| x.spec().name).collect();
         assert_eq!(names, ["web_search", "web_research"], "{:?}", surface);
         for tool in &on {
-            let web = &specs["tools"][tool.spec().name];
+            let web = crate::agent::tools::spec_contract::tool(tool.spec().name);
             assert_eq!(
                 tool.spec().description,
                 web["description"].as_str().unwrap()

@@ -20,7 +20,7 @@
 //!
 //! [`ScriptStore::save`]: crate::trading::scripts::ScriptStore::save
 
-use super::lane_specs::web_or_log;
+use super::specs::web_or_log;
 use crate::agent::contract::json::{dumps_capped_ordered, strip_code_fence};
 use crate::agent::contract::tool::{
     AgentTool, Surfaces, ToolCtx, ToolGroup, ToolOutcome, ToolSpec, MAX_RESULT_CHARS,
