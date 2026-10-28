@@ -298,6 +298,7 @@ impl crate::agent::AgentModule {
         module.set_policy(Arc::new(crate::agent::settings::policy::SettingsPolicy));
         module.set_plan(Arc::new(crate::agent::chatgpt::ChatGptPlan::default()));
         module.add_section_source(Arc::new(crate::agent::skills::prompt::SkillsSection));
+        module.add_section_source(Arc::new(crate::agent::mcp::prompt::ExternalDataSection));
         module
     }
 }

@@ -247,6 +247,8 @@ mod agent_config;
 mod agent_chatgpt_search;
 // D-006: the Agent's audit trail, read.
 mod agent_audit;
+// The Agent's external data routes (the MCP part of blueprints/agent.py).
+mod agent_external;
 
 // ------------------------------------------------------------------ fixtures
 

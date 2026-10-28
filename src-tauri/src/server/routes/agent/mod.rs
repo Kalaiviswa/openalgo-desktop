@@ -2,11 +2,11 @@
 //! ([`chat`]), the conversation routes ([`conversations`]), the
 //! configuration routes ([`config`]: status, catalogue, models, settings),
 //! the ChatGPT plan ([`chatgpt`]), web search ([`websearch`]), the voice
-//! routes ([`voice`]), and two desktop additions: the audit trail's read
-//! route ([`audit`], D-006) and what a paused smart order will send
-//! ([`orders`], for the approval card). Every route needs the signed-in user
-//! and carries the session's CSRF token on writes, like every page route;
-//! none is public.
+//! routes ([`voice`]), the external data routes ([`external`]), and two
+//! desktop additions: the audit trail's read route ([`audit`], D-006) and
+//! what a paused smart order will send ([`orders`], for the approval card).
+//! Every route needs the signed-in user and carries the session's CSRF token
+//! on writes, like every page route; none is public.
 //!
 //! The handlers read the request, call one service in `crate::agent` and
 //! shape the reply. Limits as the web: 240 requests a minute across the
@@ -18,6 +18,7 @@ pub mod chat;
 pub mod chatgpt;
 pub mod config;
 pub mod conversations;
+pub mod external;
 pub mod orders;
 pub mod voice;
 pub mod websearch;
@@ -50,6 +51,7 @@ pub fn table() -> Vec<RouteSpec> {
     routes.extend(chatgpt::table());
     routes.extend(websearch::table());
     routes.extend(voice::table());
+    routes.extend(external::table());
     routes
 }
 

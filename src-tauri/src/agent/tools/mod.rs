@@ -22,6 +22,7 @@ pub mod instrument;
 mod lane_specs;
 pub mod live;
 pub mod market;
+pub mod mcp;
 pub mod numbers;
 pub mod openscript_gen;
 pub mod openui;
@@ -67,6 +68,8 @@ pub const TOOLKITS: &[ToolGroup] = &[
     // Later: flow_gen::GROUP (order 70, chat only), not in this version.
     // Order 80, every surface, requires WebSearch.
     websearch::GROUP,
+    // Order 85, every surface, requires Mcp.
+    mcp::GROUP,
 ];
 
 /// The groups a run is offered, ordered by `order` then `key`.
