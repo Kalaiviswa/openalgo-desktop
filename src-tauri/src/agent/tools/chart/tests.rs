@@ -11,7 +11,7 @@ use crate::agent::contract::tool::{AgentTool, Capabilities, Surface, ToolCtx, To
 use crate::agent::contract::viz::VizSink;
 use crate::agent::tools::spec_contract;
 use crate::agent::tools::testkit::{body, call_checked, Kit};
-use crate::agent::tools::{build_tools, TOOLKITS};
+use crate::agent::tools::{build_tools, select, TOOLKITS};
 use crate::brokers::types::Candle;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -155,6 +155,28 @@ async fn the_chart_toolkit_stays_chart_only() {
                 "the chart tools are offered first"
             );
         }
+    }
+}
+
+/// Q-114 (the web's `test_the_chart_panel_is_unchanged_by_the_new_surface`):
+/// orders reach the chart panel through the trading capability alone, the
+/// same gate as chat and voice; the chat-only authoring tools never do.
+#[tokio::test]
+async fn the_chart_panel_has_orders_only_with_trading_and_no_chat_only_tools() {
+    let kit = Kit::new();
+    let keys = |trading_enabled: bool| -> Vec<&'static str> {
+        let mut ctx = kit.ctx(Surface::Chart);
+        ctx.caps = Capabilities {
+            trading_enabled,
+            ..Default::default()
+        };
+        select(TOOLKITS, &ctx).iter().map(|g| g.key).collect()
+    };
+    let chart = keys(true);
+    assert!(chart.contains(&"orders"), "{:?}", chart);
+    assert!(!keys(false).contains(&"orders"));
+    for chat_only in ["openui", "strategy_gen", "flow_gen"] {
+        assert!(!chart.contains(&chat_only), "{} on the chart", chat_only);
     }
 }
 
