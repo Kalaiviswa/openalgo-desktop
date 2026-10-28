@@ -19,9 +19,11 @@ pub mod account;
 pub mod answer;
 pub mod indicators;
 pub mod instrument;
+mod lane_specs;
 pub mod live;
 pub mod market;
 pub mod numbers;
+pub mod openscript_gen;
 pub mod openui;
 pub mod option_viz;
 pub mod options;
@@ -29,6 +31,7 @@ pub mod options_common;
 pub mod order_vocab;
 pub mod orders;
 pub mod service;
+pub mod skills;
 #[cfg(test)]
 pub(crate) mod spec_contract;
 pub mod specs;
@@ -57,6 +60,10 @@ pub const TOOLKITS: &[ToolGroup] = &[
     openui::GROUP,
     // Order 50, every surface, requires Trading.
     orders::GROUP,
+    // Order 58, chat and chart.
+    skills::GROUP,
+    // Order 65, chat and chart.
+    openscript_gen::GROUP,
     // Later: flow_gen::GROUP (order 70, chat only), not in this version.
     // Order 80, every surface, requires WebSearch.
     websearch::GROUP,

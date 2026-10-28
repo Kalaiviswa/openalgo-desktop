@@ -28,6 +28,8 @@
 //!   before anything streams.
 //! - `voice/`: the spoken surface (the session mint, its settings and key,
 //!   spoken approval, the spoken-line record).
+//! - `skills/`: the authoring guidance the Agent reads on demand and the
+//!   SKILLS prompt section.
 //! - `settings/`, `providers/`, `catalog/`, `models/`, `resolver`, `plan`,
 //!   `setup_gate`: the configuration (migration `098_agent_config`): the
 //!   Agent's settings and run policy, the provider kinds and their genai
@@ -63,6 +65,7 @@ pub mod run;
 pub mod safety;
 pub mod settings;
 pub mod setup_gate;
+pub mod skills;
 pub mod stream;
 #[cfg(test)]
 pub(crate) mod testing;
