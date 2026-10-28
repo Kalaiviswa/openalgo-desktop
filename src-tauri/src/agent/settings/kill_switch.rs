@@ -18,9 +18,6 @@ use crate::state::AppState;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-/// What the file says to whoever finds it.
-const FILE_NOTE: &str = "While this file exists, the OpenAlgo Agent places, modifies and cancels no orders.\nDelete it, or release the kill switch in Agent settings, to allow them again.\n";
-
 /// The switch as the panel shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KillSwitchState {
@@ -71,22 +68,13 @@ pub fn set(app: &AppState, engaged: bool) -> crate::error::Result<KillSwitchStat
     let text = if engaged { "true" } else { "false" };
     store::write_all(&*app.sqlite.conn()?, &[(KILL_SWITCH, text.to_string())])?;
     let path = resolve(Snapshot::read(app).text(KILL_SWITCH_FILE), &app.data_dir);
-    if engaged {
-        if let Err(e) = std::fs::write(&path, FILE_NOTE) {
-            tracing::warn!(
-                "The Agent kill switch file could not be created at {}: {}",
-                path.display(),
-                e
-            );
-        }
-    } else if path.exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!(
-                "The Agent kill switch file could not be removed at {}: {}",
-                path.display(),
-                e
-            );
-        }
+    if let Err(e) = crate::agent::safety::kill_switch::set(&path, engaged) {
+        tracing::warn!(
+            "The Agent kill switch file could not be {} at {}: {}",
+            if engaged { "created" } else { "removed" },
+            path.display(),
+            e
+        );
     }
     tracing::info!(
         "Agent kill switch {}",

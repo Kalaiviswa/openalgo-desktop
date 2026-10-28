@@ -5,7 +5,7 @@ use super::*;
 use crate::agent::contract::tool::{Capabilities, Surface};
 use crate::agent::tool_guard::{missing_arguments, validate};
 use crate::agent::tools::testing::ctx;
-use crate::agent::tools::{build_tools, TOOLKITS};
+use crate::agent::tools::{build_tools, spec_contract, TOOLKITS};
 use serde_json::json;
 
 fn spec(name: &str) -> &'static ToolSpec {
@@ -26,10 +26,16 @@ fn seven_tools_in_the_webs_order_all_needing_approval() {
     let names: Vec<&str> = specs().iter().map(|s| s.name).collect();
     assert_eq!(names, MUTATING_TOOLS);
     assert!(specs().iter().all(|s| s.needs_approval));
-    let recorded: Vec<Value> = serde_json::from_str(SPECS_JSON).unwrap();
-    assert_eq!(recorded.len(), 7);
-    for r in &recorded {
-        assert_eq!(r["requires_confirmation"], true, "{}", r["name"]);
+    let web = spec_contract::toolkit("orders");
+    assert_eq!(web["tools"], json!(MUTATING_TOOLS));
+    for name in MUTATING_TOOLS {
+        assert_eq!(
+            spec_contract::tool(name)["needs_approval"],
+            true,
+            "{}",
+            name
+        );
+        spec_contract::assert_tool(spec(name));
     }
 }
 

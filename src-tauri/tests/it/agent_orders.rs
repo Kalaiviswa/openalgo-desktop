@@ -300,8 +300,9 @@ async fn the_kill_switch_stops_every_order_tool_until_released() {
     trading(&h);
     h.analyze(true);
     let ctx = run(&h, "kill");
-    let path = kill_switch::set_for(&h.ctx, true).unwrap();
-    assert_eq!(path, h.ctx.data_dir.join("agent_kill_switch"));
+    // The file half alone, at the default path in the data folder.
+    let path = h.ctx.data_dir.join(kill_switch::FILE_NAME);
+    kill_switch::set(&path, true).unwrap();
     let out = call(&ctx, "place_order", buy("SBIN")).await;
     assert_eq!(out["code"], "kill_switch", "{}", out);
     assert_eq!(out["risk"]["details"]["source"], "file");
@@ -309,7 +310,7 @@ async fn the_kill_switch_stops_every_order_tool_until_released() {
         call(&ctx, "cancel_order", json!({"order_id": "A1"})).await["code"],
         "kill_switch"
     );
-    kill_switch::set_for(&h.ctx, false).unwrap();
+    kill_switch::set(&path, false).unwrap();
     assert_eq!(call(&ctx, "place_order", buy("SBIN")).await["ok"], true);
     settings(&h, &[("kill_switch", "true")]);
     let out = call(&ctx, "place_order", buy("RELIANCE")).await;

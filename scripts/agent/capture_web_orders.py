@@ -1,12 +1,9 @@
 """Record the web agent's order tools and risk guard as the desktop's contract.
 
 Reads the web's `services/agent/tools/orders.py`, `order_vocab.py` and
-`services/agent/safety/risk.py`, runs them, and writes three files:
+`services/agent/safety/risk.py`, runs them, and writes two files (the seven
+order tools' specs come from `capture_web_tools.py`, with every toolkit's):
 
-- `src-tauri/src/agent/tools/orders/specs.json`: the seven order tools exactly
-  as agno hands them to the model (name, description, JSON schema) and their
-  approval flag, in the order the model sees them. The desktop embeds this
-  file, so the tools' words are the web's and never retyped.
 - `src-tauri/tests/fixtures/agent/risk_vectors.json`: the guard's verdicts for
   every rule and refusal code, step by step through a session (claims,
   releases, commits, the duplicate window on an injected clock). The
@@ -34,33 +31,12 @@ from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SPECS = ROOT / "src-tauri/src/agent/tools/orders/specs.json"
 FIXTURES = ROOT / "src-tauri/tests/fixtures/agent"
 
 #: The fixed start of every vector session; steps say how far past it they run.
 T0 = datetime(2026, 10, 27, 4, 0, 0, tzinfo=UTC)
 KILL_FILE = "<kill_switch_file>"
 TOKEN = "<claim_token>"
-
-
-def capture_specs(orders_mod, tools_pkg) -> list[dict]:
-    """The order tools as the model sees them, from the real toolkit."""
-    context = tools_pkg.ToolContext(api_key="k", surface="chat", trading_enabled=True)
-    toolkit = orders_mod.OrdersToolkit(context)
-    specs = []
-    for name in orders_mod.MUTATING_TOOLS:
-        function = toolkit.functions[name]
-        function.process_entrypoint(strict=False)
-        d = function.to_dict()
-        specs.append(
-            {
-                "name": d["name"],
-                "description": d["description"],
-                "parameters": d["parameters"],
-                "requires_confirmation": bool(d.get("requires_confirmation")),
-            }
-        )
-    return specs
 
 
 # ---------------------------------------------------------------- risk vectors
@@ -399,7 +375,6 @@ def main(web_root: str) -> None:
 
     import database.settings_db as settings_db  # noqa: PLC0415
     from services.agent import settings  # noqa: PLC0415
-    from services.agent import tools as tools_pkg  # noqa: PLC0415
     from services.agent.safety import risk  # noqa: PLC0415
     from services.agent.tools import order_vocab, orders  # noqa: PLC0415
 
@@ -409,9 +384,6 @@ def main(web_root: str) -> None:
     # A guard handed no analyzer mode reads the toggle itself; the capture
     # makes that read fail, which is what None means on the desktop.
     settings_db.get_analyze_mode = unreadable
-
-    SPECS.parent.mkdir(parents=True, exist_ok=True)
-    SPECS.write_text(json.dumps(capture_specs(orders, tools_pkg), indent=2, ensure_ascii=False) + "\n")
 
     base = settings.default_risk_limits()
     vectors = {

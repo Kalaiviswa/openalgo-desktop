@@ -11,7 +11,6 @@
 //! decision 2, 2026-10-27), and the trading safety panel's switch creates
 //! and removes it through [`set`].
 
-use crate::state::AppState;
 use std::path::{Path, PathBuf};
 
 /// The file's name in the data folder.
@@ -68,37 +67,33 @@ pub fn present(path: &Path) -> bool {
     }
 }
 
-/// Engage (create an empty file) or release (remove it). Releasing a
-/// switch that is not engaged is not an error.
+/// What a file the panel creates says to whoever finds it.
+const FILE_NOTE: &str = "While this file exists, the OpenAlgo Agent places, modifies and cancels no orders.\nDelete it, or release the kill switch in Agent settings, to allow them again.\n";
+
+/// Engage (create the file, saying what it is) or release (remove it). A
+/// file already there is left as it is; releasing a switch that is not
+/// engaged is not an error. The one writer of the file: the panel's switch
+/// (`settings::kill_switch::set`) calls it.
 pub fn set(path: &Path, engaged: bool) -> std::io::Result<()> {
     if engaged {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
             .open(path)
-            .map(|_| ())
+        {
+            Ok(mut file) => std::io::Write::write_all(&mut file, FILE_NOTE.as_bytes()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
     } else {
         match std::fs::remove_file(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
     }
-}
-
-/// Engage or release the file at the trader's configured path (the panel
-/// switch; the config part stores the `kill_switch` setting beside it).
-pub fn set_for(app: &AppState, engaged: bool) -> std::io::Result<PathBuf> {
-    let path = super::limits::read(app).kill_switch_path;
-    set(&path, engaged)?;
-    tracing::info!(
-        "Agent kill switch file {} at {}",
-        if engaged { "created" } else { "removed" },
-        path.display()
-    );
-    Ok(path)
 }
 
 #[cfg(test)]
@@ -124,7 +119,10 @@ mod tests {
         assert!(!present(&path));
         set(&path, true).unwrap();
         assert!(present(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FILE_NOTE);
+        std::fs::write(&path, "mine").unwrap();
         set(&path, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
         set(&path, false).unwrap();
         assert!(!present(&path));
         set(&path, false).unwrap();
