@@ -33,7 +33,7 @@ export const tools: Tool[] = [
     description:
       'Which NSE sectors, stocks and indices are leading, weakening, lagging or improving against a benchmark, with daily or weekly trails',
     href: '/sector-rotation',
-    color: 'bg-cyan-500',
+    color: 'bg-cyan-700',
   },
   {
     title: 'Option Chain',
