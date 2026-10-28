@@ -23,8 +23,11 @@ import { Link } from 'react-router'
 import { type BrokerList, brokerConfigApi } from '@/api/broker-config'
 import { webClient } from '@/api/client'
 import TwoFactorEnforcement from '@/components/auth/TwoFactorEnforcement'
+// Desktop: the built-in ngrok tunnel (authtoken, domain, status).
+import { NgrokTunnelSettings } from '@/components/desktop/NgrokTunnelSettings'
 // Desktop: where the web's SMTP and System tabs are answered instead.
 import { ProfileDesktopNote } from '@/components/desktop/ProfileDesktopNote'
+import { ServerStatusCard } from '@/components/desktop/ServerStatusCard'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -129,11 +132,6 @@ interface BrokerCredentials {
   // Desktop: true while the address is the automatic one (nothing saved).
   host_server_is_default?: boolean
   websocket_url_is_default?: boolean
-  server_status?: {
-    flask: { host: string; port: string }
-    websocket: { host: string; port: string }
-    zmq: { host: string; port: string }
-  }
 }
 
 // Toast position options
@@ -718,57 +716,17 @@ export default function ProfilePage() {
             </CardContent>
           </Card>
 
-          {/* Server Status Card */}
-          {brokerCredentials?.server_status && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Server Status</CardTitle>
-                <CardDescription>Running services and their configured ports</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="flex flex-col items-center p-3 bg-muted rounded-lg">
-                    <Badge variant="default" className="mb-2 bg-green-600">
-                      Running
-                    </Badge>
-                    <span className="text-sm font-medium">Flask App</span>
-                    <span className="text-xs text-muted-foreground">
-                      {brokerCredentials.server_status.flask.host}:
-                      {brokerCredentials.server_status.flask.port}
-                    </span>
-                  </div>
-                  <div className="flex flex-col items-center p-3 bg-muted rounded-lg">
-                    <Badge variant="default" className="mb-2 bg-green-600">
-                      Running
-                    </Badge>
-                    <span className="text-sm font-medium">WebSocket</span>
-                    <span className="text-xs text-muted-foreground">
-                      {brokerCredentials.server_status.websocket.host}:
-                      {brokerCredentials.server_status.websocket.port}
-                    </span>
-                  </div>
-                  <div className="flex flex-col items-center p-3 bg-muted rounded-lg">
-                    <Badge variant="default" className="mb-2 bg-green-600">
-                      Running
-                    </Badge>
-                    <span className="text-sm font-medium">ZeroMQ</span>
-                    <span className="text-xs text-muted-foreground">
-                      {brokerCredentials.server_status.zmq.host}:
-                      {brokerCredentials.server_status.zmq.port}
-                    </span>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* Desktop: the parts the desktop runs, with their real state (docs-35). */}
+          <ServerStatusCard />
 
           {/* Ngrok Configuration - Separate Card */}
           <Card>
             <CardHeader>
               <CardTitle>Server Configuration</CardTitle>
               <CardDescription>
-                Configure ngrok for receiving webhook alerts from external services like
-                TradingView, Chartink, GoCharting, etc.
+                Receive webhook alerts from external services like TradingView, Chartink and
+                GoCharting through the built-in ngrok tunnel, or through a tunnel you run yourself
+                (enter its address as the Host Server URL).
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -786,6 +744,8 @@ export default function ProfilePage() {
                 )}
               </div>
 
+              <NgrokTunnelSettings />
+
               <div className="space-y-2">
                 <Label htmlFor="profile-host-server">Host Server URL</Label>
                 <Input
@@ -795,7 +755,8 @@ export default function ProfilePage() {
                   placeholder="https://your-domain.ngrok-free.app"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Your ngrok domain or custom domain for receiving webhooks.
+                  The public address of this app for receiving webhooks. With Enable Ngrok Tunnel on
+                  and an ngrok domain saved, it is https://&lt;that domain&gt;.
                 </p>
                 {hostServerEdited && hostServer.trim() && (
                   <Badge variant="outline" className="text-yellow-600">
@@ -1437,9 +1398,10 @@ export default function ProfilePage() {
                 <Shield className="h-4 w-4" />
                 <AlertTitle>About TOTP Authentication</AlertTitle>
                 <AlertDescription>
+                  {/* Desktop: TOTP guards sign-in; it does not recover a password (docs-34). */}
                   TOTP (Time-based One-Time Password) provides an additional layer of security.
                   You&apos;ll need an authenticator app like Google Authenticator or Authy to
-                  generate codes for password recovery.
+                  generate the codes OpenAlgo asks for when two-factor sign-in is on.
                 </AlertDescription>
               </Alert>
 
@@ -1485,9 +1447,14 @@ export default function ProfilePage() {
                     <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
                       <li>Install an authenticator app (Google Authenticator, Authy, etc.)</li>
                       <li>Scan the QR code above or enter the secret key manually</li>
-                      <li>Save your backup codes in a safe place</li>
+                      {/* Desktop: there are no backup codes, and a forgotten password is
+                          replaced from the sign-in page, not with a code (docs-41). */}
                       <li>
-                        You&apos;ll need the TOTP code to reset your password if you forget it
+                        There are no backup codes: keep the secret key somewhere safe, such as a
+                        password manager, to add it to a new phone
+                      </li>
+                      <li>
+                        Turn on Dashboard sign-in above to be asked for a code at every sign-in
                       </li>
                     </ol>
                   </div>

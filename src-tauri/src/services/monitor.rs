@@ -17,6 +17,7 @@
 
 use crate::db::sqlite::monitor::{self as store, LatencyRow, TrafficRow};
 use crate::db::sqlite::webui::{self, SecuritySettings};
+use crate::server::envelope::EarlyReply;
 use crate::server::middleware::client_ip;
 use crate::services::latency_probe::{self, BrokerTime};
 use crate::state::AppState;
@@ -408,7 +409,10 @@ fn write_batch(ctx: &AppState, batch: &[Record]) -> crate::error::Result<WriteOu
     Ok(out)
 }
 
-/// Web convention: 0 hours means permanent.
+/// An automatic ban's duration setting: 0 gives none, so the ban lasts
+/// `AUTO_BAN_DEFAULT_HOURS` (`store::auto_ban`). On the web 0 makes it
+/// permanent; here an automatic ban always expires (G3), and the Security
+/// page offers 0 as "Default (24 hours)".
 fn hours(h: i64) -> Option<i64> {
     (h > 0).then_some(h)
 }
@@ -547,13 +551,14 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
             };
             match timed(&ctx, req, next, call).await {
                 Ok(r) => r,
-                Err(r) => return r,
+                Err(r) => return *r,
             }
         }
         None => next.run(req).await,
     };
     let status = resp.status();
     let elapsed_ms = ms_since(started);
+    let (resp, error) = refusal_reason(resp).await;
 
     if status == StatusCode::FORBIDDEN && path.starts_with("/api/v1/") {
         ctx.monitor.send(Record::InvalidKey { ip: ip.clone() });
@@ -572,9 +577,29 @@ pub async fn layer(State(ctx): State<Arc<AppState>>, req: Request, next: Next) -
         status_code: status.as_u16() as i64,
         duration_ms: elapsed_ms,
         host,
-        error: None,
+        error,
     }));
     resp
+}
+
+/// Why a reply of 400 or above refused the request, for the traffic log's
+/// Error column: the message of a small JSON reply (`message`, or `error`
+/// on the pages' replies; field errors as their JSON text). The web fills
+/// the column only when its handler raised an exception, so a refusal there
+/// carries no reason and the column is nearly always empty; here it says
+/// why, as the latency log does for `/api/v1`.
+async fn refusal_reason(resp: Response) -> (Response, Option<String>) {
+    if !(resp.status().is_client_error() || resp.status().is_server_error()) {
+        return (resp, None);
+    }
+    let (resp, body) = scan_body(resp).await;
+    let said = |k: &str| match body.as_ref()?.get(k)? {
+        Value::String(s) => Some(s.clone()),
+        fields @ (Value::Object(_) | Value::Array(_)) => Some(fields.to_string()),
+        _ => None,
+    };
+    let reason = said("message").or_else(|| said("error"));
+    (resp, reason)
 }
 
 fn ms_since(t: Instant) -> f64 {
@@ -597,11 +622,11 @@ fn banned_reply() -> Response {
 
 /// Read an API POST's body (refused past the body limit) for the symbol it
 /// names, and rebuild the request.
-async fn with_symbol(req: Request) -> Result<(Request, Option<String>), Response> {
+async fn with_symbol(req: Request) -> Result<(Request, Option<String>), EarlyReply> {
     let (parts, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, crate::config::BODY_LIMIT_BYTES).await {
         Ok(b) => b,
-        Err(_) => return Err(too_large()),
+        Err(_) => return Err(Box::new(too_large())),
     };
     let symbol = serde_json::from_slice::<Value>(&bytes)
         .ok()
@@ -665,7 +690,7 @@ async fn timed(
     req: Request,
     next: Next,
     call: Timed<'_>,
-) -> Result<Response, Response> {
+) -> Result<Response, EarlyReply> {
     let t = Instant::now();
     let (req, symbol) = if req.method() == Method::POST {
         with_symbol(req).await?

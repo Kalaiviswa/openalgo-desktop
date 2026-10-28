@@ -18,6 +18,7 @@ use openalgo_desktop_lib::brokers::hdfcsecurities::proto::{
 use openalgo_desktop_lib::brokers::hdfcsecurities::HdfcSecuritiesBroker;
 use openalgo_desktop_lib::brokers::types::*;
 use openalgo_desktop_lib::brokers::{Broker, BrokerCredentials};
+use openalgo_desktop_lib::websocket::handshake;
 use parking_lot::Mutex;
 use prost::Message as _;
 use serde_json::{json, Value};
@@ -178,10 +179,9 @@ fn packet_for(scrip: &str) -> Option<GenericDto> {
         (packet_type::NSE_FO_ALL, t)
     } else if let Some(t) = scrip.strip_prefix("NCD_") {
         (packet_type::NSE_CD_ALL, t)
-    } else if let Some(t) = scrip.strip_prefix("NSE_") {
-        (packet_type::NSE_CM_ALL, t)
     } else {
-        return None;
+        let t = scrip.strip_prefix("NSE_")?;
+        (packet_type::NSE_CM_ALL, t)
     };
     let level = |price: f64, buy: bool| MarketDepthDto {
         quantity: 40,
@@ -223,7 +223,7 @@ async fn serve_ws(fake: Arc<Fake>) -> String {
             let fake = fake.clone();
             tokio::spawn(async move {
                 let rec = fake.clone();
-                let cb = move |req: &Request, resp: WsResponse| {
+                let cb = handshake::check(move |req: &Request, resp: WsResponse| {
                     let auth = req
                         .headers()
                         .get("authorization")
@@ -232,7 +232,7 @@ async fn serve_ws(fake: Arc<Fake>) -> String {
                         .to_string();
                     rec.ws_handshakes.lock().push((req.uri().to_string(), auth));
                     Ok(resp)
-                };
+                });
                 let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, cb).await else {
                     return;
                 };

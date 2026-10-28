@@ -330,6 +330,7 @@ One JSON object per line: `{ts, iso, direction: send|recv|note, message|raw, ...
 
 ### Rate limiting
 - `API_RATE_LIMIT` on this instance is `100 per second` (env; code default 10/s for ping, 50/s elsewhere), flask-limiter moving-window, in-memory, keyed by remote address. Order endpoints use `ORDER_RATE_LIMIT=10 per second`. A burst of 103 pings completed in 2.6 s with zero 429s (server throughput < limit), so the 429 body was not observable; per flask-limiter defaults it would be `429 {"message": "..."}`.
+- Each route's `@limiter.limit` counts in a window of its own per address: Flask-Limiter 4.1.1 (the web's pin) scopes a route limit by its endpoint (`RuntimeLimit.scope_for`). Read from source, not recorded (2026-10-26, docs-19). The other limits the decorators read: `SMART_ORDER_RATE_LIMIT` 10/s, `GREEKS_RATE_LIMIT` 30/min (optiongreeks, not in `.sample.env`), `TELEGRAM_RATE_LIMIT` 30/min, telegram/broadcast 5/min, `WHATSAPP_RATE_LIMIT` 30/min; the Telegram webhook has none (the desktop keeps the general limit on it as a resource guard).
 
 ### Date / time formats (four different ones)
 - Request dates: `start_date`/`end_date`/`from`/`to`/`market/timings.date` = `YYYY-MM-DD`. `expiry_date` for optionsymbol/optionchain/syntheticfuture = `DDMMMYY` (`06OCT26`).
@@ -377,6 +378,13 @@ The web shares each of these defects; the desktop answers differently on purpose
 - **`/api/v1/margin` refuses a basket with a leg missing from the master (BR-01)**: `400 "Position N: Symbol X not found on EX. ..."`; the web's adapters drop the leg and total the rest.
 - **HDFC Sky `user_order_id` (BR-05)**: distinct per order (`max(clock, last + 1)` below 1e9); the web's clock-only id repeats for legs placed in the same millisecond.
 - **XTS subscription batches (BF-03)**: a batch that failed with a server error or rate limit is sent again (1 s doubling to 30 s, five times) for every XTS member, not only RMoney; a refused token reconnects the feed.
+
+### Web API defects deliberately not copied (1.0.3, read from web source)
+No fixture records these; each is asserted by its own test.
+- **`/analyzer/toggle` in Semi-Auto (docs-32)**: the web means to refuse it with 403 `Operation analyzer/toggle is not allowed in Semi-Auto mode. ...` (`services/analyzer_service.py`), but passes the API key to `get_order_mode`, which looks the mode up by user id, so it always reads `auto` and never refuses. The desktop refuses with that 403 (`server::tests::api_parity`).
+- **`/history` with `source: "db"` (docs-30)**: the web reads Historify without checking the key at all; the desktop checks the key and, as the web, needs no broker session for it (`server::tests::api_parity`).
+- **`/strategy/start` refused by the engine because Live was switched off after the check (docs-4)**: the web answers 400 (only "already running" is 409); the desktop answers 409, as the check before the start does.
+- **WebSocket `depth` that is not a whole number (docs-8)**: the web's proxy checks no level; Zerodha's adapter echoes the value and the others fail with a `SERVER_ERROR` frame. The desktop refuses it with `INVALID_PARAMETERS` `Depth must be a whole number, such as 5, 20, 30 or 50`; any whole number is taken, as on the web (`feed_behaviour`).
 
 ### Web broker changes deliberately not copied
 - **Angel daily candles (web 4c8ee632c, #2176, 2026-10-06)**: the web dropped the +05:30 shift on Angel `D` candles, so they are now stamped at IST midnight (18:30 UTC of the previous day). Every other web broker, and `history/nifty_index_D.json` above (`1788220800` = 2026-09-01 00:00 UTC), stamps a daily candle at 00:00 UTC of its date. The desktop keeps 00:00 UTC for Angel (`brokers/angel/data.rs` `parse_candles`). The IST request window from the same commit is ported.

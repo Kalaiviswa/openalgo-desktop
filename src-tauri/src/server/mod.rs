@@ -17,6 +17,7 @@ pub mod routes;
 pub mod socketio;
 pub mod source;
 pub mod spa;
+pub(crate) mod tunnel;
 
 #[cfg(test)]
 mod tests;
@@ -117,7 +118,7 @@ fn cors(ctx: Arc<AppState>) -> CorsLayer {
 
 /// The router with every layer, without trailing-slash normalisation.
 pub fn router(ctx: Arc<AppState>) -> (Router, socketioxide::SocketIo) {
-    let (sio_layer, io) = socketio::layer(ctx.clone());
+    let (sio_layer, io) = socketio::layer(&ctx);
     let api = api_v1::router().route_layer(mw::from_fn_with_state(
         ctx.clone(),
         middleware::api_rate_limit,

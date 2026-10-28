@@ -29,7 +29,7 @@ fn broker_fail(e: &crate::error::AppError) -> Reply {
         crate::error::AppError::Unsupported(_) => Reply::error(501, e.client_message()),
         _ => {
             tracing::warn!("Broker book request failed: {}", e.code());
-            Reply::error(500, e.client_message())
+            Reply::broker_failure(e, 500)
         }
     }
 }
@@ -138,14 +138,19 @@ pub fn statistics_json(stats: &crate::brokers::types::PortfolioStats) -> Value {
     })
 }
 
-/// Live funds: the web's broker modules format every value to two decimals
-/// as strings.
-pub fn live_funds(f: &Funds) -> Value {
-    let used = if f.utilised_debits != 0.0 {
+/// The margin in use: the broker's utilised debits, else its used margin.
+pub(crate) fn utilised(f: &Funds) -> f64 {
+    if f.utilised_debits != 0.0 {
         f.utilised_debits
     } else {
         f.used_margin
-    };
+    }
+}
+
+/// Live funds: the web's broker modules format every value to two decimals
+/// as strings.
+pub fn live_funds(f: &Funds) -> Value {
+    let used = utilised(f);
     json!({
         "availablecash": format!("{:.2}", f.available_cash),
         "collateral": format!("{:.2}", f.collateral),
@@ -353,7 +358,7 @@ pub async fn funds(ctx: &AppState) -> Reply {
         Ok(f) => Reply::ok(json!({"status": "success", "data": live_funds(&f)})),
         Err(e) => {
             tracing::warn!("Funds request failed: {}", e.code());
-            Reply::error(500, e.client_message())
+            Reply::broker_failure(&e, 500)
         }
     }
 }
@@ -432,7 +437,7 @@ pub async fn open_position(ctx: &AppState, req: &Value) -> Reply {
                     .unwrap_or(json!(0));
                 Reply::ok(json!({"quantity": q, "status": "success"}))
             }
-            Err(e) => Reply::error(500, e.client_message()),
+            Err(e) => Reply::broker_failure(&e, 500),
         };
     }
     match h.broker.get_positions(&h.auth).await {
@@ -444,7 +449,7 @@ pub async fn open_position(ctx: &AppState, req: &Value) -> Reply {
                 .unwrap_or(0);
             Reply::ok(json!({"quantity": q, "status": "success"}))
         }
-        Err(e) => Reply::error(500, e.client_message()),
+        Err(e) => Reply::broker_failure(&e, 500),
     }
 }
 

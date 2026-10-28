@@ -230,11 +230,15 @@ mod order_quantity_safety;
 mod order_split_bounds;
 mod perf;
 mod polled_reads;
+// Counts the process's threads, which only macOS and Linux report.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod pool_threads;
 mod sandbox_concurrency;
 mod sandbox_contract;
 mod sandbox_engine;
 mod sandbox_fills;
 mod sandbox_gtt;
+mod sandbox_place_atomic;
 mod sandbox_props;
 mod sandbox_restart;
 mod sandbox_schedule;

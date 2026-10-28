@@ -122,7 +122,12 @@ Observed quirks that are part of the contract and must be reproduced, not
 - `/expiry` returns `DD-MMM-YY`; `/optiongreeks` returns `DD-Mon-YYYY`; history
   and ticker candles are epoch seconds; holidays, timings and WebSocket
   timestamps are epoch milliseconds.
-- Rate limit is 100 per second per IP, moving window, no rate-limit headers.
+- Rate limits are per endpoint and per IP (Flask-Limiter scopes a route's
+  limit by its endpoint), moving window, no rate-limit headers, at the web's
+  `.sample.env` values: 100 per second, 10 per second for place, modify and
+  cancel (options orders and GTT writes included) and smart orders, 30 per
+  minute for `optiongreeks`, Telegram and WhatsApp, 5 per minute for the
+  Telegram broadcast (`server::ratelimit::api_limits`).
 
 ## Ports
 
@@ -447,6 +452,14 @@ below, and treat a wave as unfinished until it has been done.
   silently growing or dying.
 - Do not retain large payloads (master contract, history, option chains)
   beyond the request that built them.
+- On Linux the resident set includes memory glibc keeps after the app
+  freed it. Before calling growth a leak, read the endurance run's parts
+  (`perf::endurance`: code pages, glibc in use and held free, SQLite's
+  cache): over 180 minutes the in-use heap stayed flat while held-free
+  memory climbed. `services::heap` gives whole free pages back once a
+  minute (about 1 ms each); the resident set still climbs about 2.6 MiB
+  an hour after it (3.8 before) with the in-use heap flat, so a longer
+  run has to say whether that settles.
 
 **Measure, do not just read.** For a suspected leak, drive the path 100+ times
 and sample descriptors (`lsof -p <pid> | wc -l`) and RSS (`ps -o rss= -p <pid>`)
@@ -832,16 +845,22 @@ Every flaky test found so far was a race, not a slow machine:
   a loaded runner stretched one page past 200 ms. Format with the read on
   the blocking pool, and assert the total with `runtime_busy` as well as
   the worst gap.
-- The reverse also happens: one `cargo test` process running many tests
-  with three or more test threads hits macOS's limit of 2048 threads per
-  process, and r2d2's scheduled thread pool fails with WouldBlock. It began
-  with integration modules (strategy::, webui2::, webui_monitoring::,
-  webui_reports:: and the like); since 1.0.1 the full `--lib` run reaches
-  it too (55 failures on master, 2026-10-23, every one "Resource
-  temporarily unavailable"). CI is not affected (nextest runs one process
-  per test). Run the full suite locally as CI does: `cargo nextest run
-  --locked --all-targets --config-file ../.github/nextest.toml --profile
-  ci`, then `cargo test --locked --doc`; a filtered `cargo test` stays fine.
+- One `cargo test` process running many tests reached macOS's limit of
+  2048 threads per process, and r2d2's thread pool failed with WouldBlock
+  (55 failures in the full `--lib` run on 2026-10-23; 21 in `server::`
+  alone, which climbed steadily to 2,048 even one test at a time). Every
+  app context a test built the HTTP app on stayed alive after the test:
+  the Socket.IO layer held the context strongly while the context held the
+  layer's handle, a cycle that kept its databases and their 13 threads.
+  The layer now holds it weakly (`server::socketio::layer`), and a pool's
+  worker threads end with the pool (`db::sqlite::workers`; r2d2's own
+  stayed until the pool's next 30 s reaper run). `server::` then passes
+  with the process peaking at 514 threads and falling back (CI flake e,
+  `tests/it/pool_threads.rs`). Never hold the app strongly in something
+  the app holds. CI is not affected (nextest runs one process per test);
+  run the full suite locally as CI does: `cargo nextest run --locked
+  --all-targets --config-file ../.github/nextest.toml --profile ci`, then
+  `cargo test --locked --doc`.
 - A `runtime_stall` gap far above the measured work's own polls
   (`runtime_busy`) is not that work: the report pages' test saw the timer
   374 ms late on a macOS runner while all sixteen requests' polls took
@@ -851,6 +870,26 @@ Every flaky test found so far was a race, not a slow machine:
   remainder, bound the test with `on_watched_runtime` and
   `IdleLog::longest_hold`, the longest the runtime thread ran without going
   idle, instead of raising the bound.
+- A synchronous database call on the runtime waits for a free pooled
+  connection for as long as other requests' blocking reads hold the pool.
+  The strategy pages and `/api/v1/strategy` looked their strategy up that
+  way (one request alone 114 and 173 ms on macOS runners, 201 ms under
+  llvm-cov); they read it off the runtime now
+  (`StrategyModule::owned_strategy`). A runtime test counts the pooled
+  connections taken on its runtime thread (`db::sqlite::checkouts`, as
+  `polled_reads` does) as well as bounding the hold: the count fails on
+  every run, the bound only when the wait happened to be long.
+- Opening a store waits for its first connection while it is being
+  opened, up to two minutes, and fails at once with SQLite's reason when
+  it cannot open (`db::sqlite::build_pool`). A macOS runner once slowed
+  every running test 5-8 times for 10-16 s at the same instants, and the
+  10 s checkout deadline failed `AppState::open` with `Pool(Error(None))`:
+  the connection was still opening, nothing had failed.
+- macOS examines a freshly linked binary the first time it runs, before
+  `main`: `openalgo-desktop mcp --help` took 9.0 s on a loaded Mac right
+  after linking and 0.5-1 s after that. A test that runs the binary
+  bounds that first run on its own (`mcp_subcommand::FIRST_RUN`), and
+  keeps its short waits for what the binary itself does.
 - An `/api/v1` call with a key no cache knows yet (the first after a start,
   a sign-out, a new key or a broker session change) verifies it: an index
   query, one Argon2 run and a `last_used_at` write. Inline in
@@ -890,6 +929,15 @@ Every flaky test found so far was a race, not a slow machine:
   read that fails is never "nothing": unknown holding counts as yes, and an
   owner that could not read its own orders answers an error, so the gap
   stays open.
+- The strategies' share of a pass reads nothing per working order: it
+  folds the book's fact into the row the pass already read, and only when
+  the fact would change it (`StrategyModule::fold_book_fact`,
+  `store::frame_changes`). The fold, the order lookups of the
+  order-update path, the writes that settle an unconfirmed order and the
+  strategy's audit events run on the blocking pool (PROD-REL-02). A fold
+  and the fill it applies to the run hold `fold_gate` together, so fills
+  reach the run in the order their folds committed; the follow-ups (a
+  pending stop, a finished run) run after it is released.
 
 ### Data and migrations
 
@@ -1234,6 +1282,14 @@ and add each new one here.
   the app's own `Host`. No forwarding header is read as an address: tunnel
   callers are one identity, and bans and IP allowlists apply to network
   peers only.
+- The built-in ngrok tunnel (`services::tunnel`) serves its connections in
+  process with the app's router and marks each request
+  (`source::ThroughBuiltInTunnel`), so it is a tunnel caller whatever its
+  headers say. Only the paths in `server::tunnel::reach` are served through
+  it (`/api/v1`, the two webhooks, `/mcp`; broker callbacks are sent on to
+  `127.0.0.1`); the app and its sign-in stay local. A new public route is
+  not reachable through it until it is added there, deliberately
+  (`docs/security/known-residuals.md`).
 - Refuse cross-site browser requests (`Sec-Fetch-Site`, a foreign `Origin`
   or `Referer`) before they reach any failure counter or rate limit: a web
   page can fire them blind and use up the trader's budget.

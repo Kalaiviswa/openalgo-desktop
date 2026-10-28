@@ -5,6 +5,7 @@
 //! with `subscribe_ticks()` and maps them to the web's `market_data` frames.
 //! Broker specifics live in each adapter's `BrokerFeed`.
 
+pub mod handshake;
 mod manager;
 
 pub use crate::brokers::common::streaming::{
@@ -12,5 +13,6 @@ pub use crate::brokers::common::streaming::{
     NormalizedTick, OrderUpdate,
 };
 pub use manager::{
-    FeedConfig, FeedStats, FeedStatus, Reader, SinceConnect, WebSocketManager, TICK_CHANNEL_CAP,
+    Connection, DropCause, FeedConfig, FeedStats, FeedStatus, LastDrop, Reader, SinceConnect,
+    WebSocketManager, TICK_CHANNEL_CAP,
 };

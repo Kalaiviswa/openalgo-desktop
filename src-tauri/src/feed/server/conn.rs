@@ -118,7 +118,7 @@ async fn handshake(
         crate::server::source::Source::Tunnel,
     ));
     let seen = source.clone();
-    let check_origin =
+    let check_origin = crate::websocket::handshake::check(
         move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
               resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
             let get = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok());
@@ -134,9 +134,10 @@ async fn handshake(
                         "Request blocked.".into(),
                     ));
                 *refused.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
-                Err(refused)
+                Err(Box::new(refused))
             }
-        };
+        },
+    );
     let deadline = if pending {
         shared
             .cfg
@@ -180,7 +181,7 @@ async fn take_pool_place(
         (&shared.network, shared.cfg.max_connections, Pool::Network)
     };
     let placed = counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < cap).then_some(n + 1)
         })
         .is_ok();

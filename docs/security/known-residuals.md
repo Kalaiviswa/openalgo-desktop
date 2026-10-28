@@ -44,6 +44,75 @@ the account binding (and the trader's own app secret, without which a
 `tokenId` cannot be consumed) does the verification. OpenAlgo web has the
 same exposure for these brokers: its callbacks do not check `state`.
 
+## The built-in ngrok tunnel: what is reachable
+
+The tunnel (`services::tunnel`, ngrok's SDK in process) runs only while the
+trader is signed in: it opens at the sign-in when **Enable Ngrok Tunnel** is
+on and closes at the sign-out, a fresh start, an account reset and quitting.
+Its connections are served by the app's own router with every layer
+(`server::tunnel`), and each request is marked as coming through it before
+any layer runs, so it is a tunnel caller (`Source::Tunnel`) whatever its
+headers say: one shared identity, never this computer, matching no IP
+allowlist, never banned, with the tunnel's own sign-in and failure budgets.
+Only these paths are served through it, by exact shape
+(`server::tunnel::reach`); everything else answers a 404 notice before the
+router runs:
+
+| Path | Credential | Notes |
+| --- | --- | --- |
+| `/api/v1/*` | API key in the body | The web's limits; behind the tunnel a valid key gets its own window |
+| `POST /strategy/webhook/{token}` | The secret address | An IP allowlist with entries refuses tunnel callers |
+| `POST /chartink/webhook/{webhook_id}` | The secret address | |
+| `/mcp`, `/mcp/healthz` | MCP bearer token | Not there at all unless Remote MCP is on |
+| `/{broker}/callback` (catalogue brokers) | none here | Answered with a 307 to the same path and query on `http://127.0.0.1:<port>`, where the browser session that started the sign-in is; nothing is processed through the tunnel |
+
+Not reachable through it: the app's pages and static files, `/auth/*`
+(sign-in, sign-out, CSRF token), `/setup`, Socket.IO, every session route,
+the OpenScript runner host and anything with an empty, `.` or `..` path
+segment. So nobody can sign in through the built-in tunnel. A tunnel the
+trader runs (cloudflared, an ngrok agent) is unchanged: callers through it
+are tunnel callers by their headers and `Host`, and the sign-in page is
+reachable there as before.
+
+The authtoken is sealed with the data key in `settings.ngrok_authtoken`
+(bound to its row and column), opened only while signed in, never returned
+by `/api/tunnel`, and listed in `key_vault::drop_encrypted_values` and
+`key_vault::witness`. ngrok's answer to a malformed token repeats it; that
+answer is never logged (only its error code), and other answers are logged
+with the token removed (`ngrok_sdk::redacted`). The SDK verifies ngrok's own
+CA bundled in the crate, over rustls with ring.
+
+Every connection through it is bounded (`server::tunnel::Limits`, security
+review of the tunnel): 10 s to send the request's headers (an idle
+connection is closed then), 10 s for its body, one request per connection
+(no keep-alive), and 90 s for the connection's whole life. The app's answer
+is waited for 60 s, the slowest legitimate call (an order: up to 10 s for
+the broker pacer and the broker request's 30 s timeout); past it the caller
+is told the request is still being worked on, and the work runs on in a
+task the app owns, so an order is never cut off half-way. That detached
+work is bounded too: each request's work holds one of 128 permits
+(`services::tunnel::MAX_WORK`, for the app's whole life) until it has
+actually ended, and a request that finds none free is answered 503 at once,
+before anything of it runs. At most 128 connections are served at once;
+the next caller is turned away at once (its connection closed), never
+queued.
+
+Residual: a stranger who finds the tunnel address and keeps opening slow
+connections can fill those 128 places; each is held at most 90 s, alerts
+arriving meanwhile are turned away at once rather than left waiting, and
+nothing else in the app is affected. ngrok's own limits on the free plan
+apply in front of it.
+
+The tunnel opens only on the saved domain (the free one ngrok gives every
+account) and never on another address: an answer on any other address is
+closed at once. With the switch on, the stored Host Server URL is
+`https://<domain>` (`db::sqlite::tunnel::pin_host_server`), so the webhook
+addresses, the Host check, the trusted origins and the automatic broker
+redirect (`https://<domain>/<broker>/callback`, as a web user registers
+it) are that one address whether the tunnel is online or not; nothing
+follows the tunnel's live state. A sign-in that comes back through the
+tunnel is sent on to this computer, as above.
+
 ## Credentials and limits behind a tunnel
 
 Behind a tunnel or proxy on this computer every caller arrives from

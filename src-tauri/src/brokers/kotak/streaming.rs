@@ -12,6 +12,7 @@
 //! * `{"event": "subscribeScrips"|"subscribeDepth"|"subscribeIndices",
 //!   "inputtoken": "nse_cm|11536,nse_cm|1594", "ack_symbol": true}` and the
 //!   `unsubscribe*` twins; acks (1109) map `seg|token` to trading symbols.
+//! * keepalive: a WebSocket ping every 30 s, answered within 10 s.
 //!
 //! Binary frames are little-endian, several packets per frame, each
 //! starting with its `u16` length. Header (9 bytes): `u16 length @0, u16 code
@@ -40,14 +41,15 @@
 use super::data::{index_candidates, kotak_segment};
 use super::feed_config::{lookup_feed_url, FeedLookup};
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, PrepareError, WsRequest,
+    now_ms, ping, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
+    NormalizedTick, PrepareError, WsRequest, WEB_PING_INTERVAL, WEB_PING_TIMEOUT,
 };
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::DepthLevel;
 use crate::error::{AppError, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub const HEADER_SIZE: usize = 9;
@@ -391,6 +393,8 @@ struct State {
     ltt: i64,
     buy: Vec<DepthLevel>,
     sell: Vec<DepthLevel>,
+    /// A depth packet (level 8 or 16) has filled the book.
+    book: bool,
 }
 
 fn keep(old: f64, new: f64) -> f64 {
@@ -702,32 +706,43 @@ impl KotakFeed {
         st.total_sell = keep_i(st.total_sell, total_sell);
         st.oi = keep_i(st.oi, oi);
         st.ltt = keep_i(st.ltt, last_trade_time);
-        let depth = matches!(level, 8 | 16);
-        if depth || level == 4 {
+        if matches!(level, 4 | 8 | 16) {
             st.buy = merge_levels(&st.buy, &buy);
             st.sell = merge_levels(&st.sell, &sell);
+            st.book |= level != 4;
         }
         let st = st.clone();
         let mode = self.subs.get(&key).map(|s| s.mode);
         if mode == Some(FeedMode::Ltp) && st.ltp <= 0.0 {
             return;
         }
-        if let Some(t) = self.tick_for(&key, &st, now) {
+        self.publish(&key, &st, now, out);
+    }
+
+    /// A packet's tick, and for a Depth subscription whose book has
+    /// arrived, that book with the packet's price. Kotak sends the price
+    /// and the book in separate packets; the web republishes the depth with
+    /// its cached book on every packet (`kotak_adapter._on_data_received`,
+    /// mode 3), so the option chain, the order dialog and every Depth
+    /// holder see the price move between book updates.
+    fn publish(&self, key: &str, st: &State, now: i64, out: &mut Vec<FeedEvent>) {
+        let Some(sub) = self.subs.get(key) else {
+            return;
+        };
+        if let Some(t) = self.tick_for(key, st, now) {
             out.push(FeedEvent::Tick(t));
         }
-        if depth && mode == Some(FeedMode::Depth) {
-            if let Some(sub) = self.subs.get(&key) {
-                out.push(FeedEvent::Depth(NormalizedDepth {
-                    symbol: sub.symbol.clone(),
-                    exchange: sub.exchange.clone(),
-                    ltp: st.ltp,
-                    buy: st.buy.clone(),
-                    sell: st.sell.clone(),
-                    total_buy_quantity: st.total_buy,
-                    total_sell_quantity: st.total_sell,
-                    timestamp_ms: now,
-                }));
-            }
+        if sub.mode == FeedMode::Depth && st.book {
+            out.push(FeedEvent::Depth(NormalizedDepth {
+                symbol: sub.symbol.clone(),
+                exchange: sub.exchange.clone(),
+                ltp: st.ltp,
+                buy: st.buy.clone(),
+                sell: st.sell.clone(),
+                total_buy_quantity: st.total_buy,
+                total_sell_quantity: st.total_sell,
+                timestamp_ms: now,
+            }));
         }
     }
 
@@ -755,9 +770,7 @@ impl KotakFeed {
                 if st.ltp <= 0.0 {
                     return;
                 }
-                if let Some(t) = self.tick_for(&key, &st, now) {
-                    out.push(FeedEvent::Tick(t));
-                }
+                self.publish(&key, &st, now, out);
             }
             Sfeed::Index {
                 exchange,
@@ -898,6 +911,17 @@ impl BrokerFeed for KotakFeed {
         true
     }
 
+    /// The web pings the feed every 30 s and drops a socket that has not
+    /// answered 10 s later (`sfeed_websocket.py`: `run_forever(
+    /// ping_interval=30, ping_timeout=10)`).
+    fn heartbeat(&self) -> Option<(Duration, Message)> {
+        Some((WEB_PING_INTERVAL, ping()))
+    }
+
+    fn heartbeat_reply_timeout(&self) -> Option<Duration> {
+        Some(WEB_PING_TIMEOUT)
+    }
+
     fn subscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
         self.frames(subs, true)
     }
@@ -924,7 +948,13 @@ impl BrokerFeed for KotakFeed {
         if is_depth {
             vec![Self::event_frame("subscribeDepth", &[input], true)]
         } else {
-            self.state.remove(&Self::sub_key(new));
+            // The book goes with the depth stream; the price and the quote
+            // fields stay, so the next packet does not read them as zero.
+            if let Some(st) = self.state.get_mut(&Self::sub_key(new)) {
+                st.buy.clear();
+                st.sell.clear();
+                st.book = false;
+            }
             vec![Self::event_frame("unsubscribeDepth", &[input], false)]
         }
     }

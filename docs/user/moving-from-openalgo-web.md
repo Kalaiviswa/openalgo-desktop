@@ -75,7 +75,8 @@ There is no `.env` file. Each setting has a place in the app:
 | `REDIRECT_URL` | Automatic per broker; shown, and changeable, on Broker Configuration |
 | `FLASK_HOST_IP`, `FLASK_PORT` | Server Settings, App address and App port |
 | `WEBSOCKET_HOST`, `WEBSOCKET_PORT` | Server Settings, Market data address and Market data port |
-| `HOST_SERVER`, `NGROK_ALLOW`, `WEBSOCKET_URL` | Profile, Broker tab, Server Configuration |
+| `HOST_SERVER`, `NGROK_ALLOW`, `WEBSOCKET_URL` | Profile, Broker tab, Server Configuration (`NGROK_ALLOW` is **Enable Ngrok Tunnel**) |
+| The ngrok authtoken (ngrok's own configuration file on the web) | Profile, Broker tab, Server Configuration, **ngrok authtoken** (kept encrypted, never shown again) |
 | `APP_KEY`, `API_KEY_PEPPER` | Not needed. Created when you make your account and kept in `openalgo.db`, locked with your OpenAlgo password |
 
 ## What does not carry over
@@ -92,14 +93,33 @@ desktop:
 ## Webhooks from the internet
 
 TradingView, Chartink and GoCharting alerts are sent from their own servers.
-A web instance on a VPS had a public address; your desktop does not. To
-receive these alerts, run a tunnel such as ngrok or Cloudflare Tunnel that
-forwards to `http://127.0.0.1:5000`, then enter the tunnel's address as
-**Host Server URL** under **Server Configuration** on the Broker tab in
-Profile, so the webhook addresses the app shows use it.
+A web instance on a VPS had a public address; your desktop does not.
+OpenAlgo Desktop has ngrok built in, so there is nothing to install:
 
-A tunnel makes the OpenAlgo login page reachable from the internet. Use a
-strong password and turn on two-factor login on the **TOTP** tab in Profile.
+1. Sign up at ngrok.com (the free plan works) and copy your authtoken from
+   **Your Authtoken** and your free domain from **Domains** in the ngrok
+   dashboard.
+2. In OpenAlgo, open Profile, the Broker tab, **Server Configuration**. Paste
+   the authtoken and the domain and choose **Save authtoken and domain**.
+3. Tick **Enable Ngrok Tunnel** and choose **Save Ngrok Settings**. The
+   status changes to **Online** at `https://<your domain>`.
+
+Your Host Server URL is then `https://<your domain>`, as `HOST_SERVER` was
+on the web, whether the tunnel is online or not: the webhook addresses on
+the TradingView, GoCharting, Chartink and strategy pages use it, and so
+does the automatic broker redirect URL
+(`https://<your domain>/<broker>/callback`, which you may already have
+registered with your broker for the web). The tunnel opens
+each time you sign in to OpenAlgo and closes when you log out or quit; if
+the connection drops, OpenAlgo reconnects by itself.
+
+Through the built-in tunnel only alerts, API calls (with your API key) and
+AI clients (with Remote MCP on) reach OpenAlgo. The OpenAlgo pages and the
+login page stay on this computer: opening the tunnel's address in a browser
+shows a short notice instead. If you run your own tunnel (Cloudflare Tunnel,
+for example) instead, enter its address as **Host Server URL**; such a
+tunnel makes the login page reachable from the internet, so use a strong
+password and turn on two-factor login on the **TOTP** tab in Profile.
 
 Your own scripts, Amibroker and Excel on the same computer need no tunnel.
 

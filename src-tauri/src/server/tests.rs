@@ -231,6 +231,16 @@ mod credentials_lifecycle;
 mod key_vault;
 // NEW-SEC-01: browser origins compared whole, apart from Host names.
 mod origin;
+// docs-35: Server Status shows the desktop's parts with their real state.
+mod server_status;
+// docs-1, docs-19: each /api/v1 endpoint in its own window, at the web's limit.
+mod api_limits;
+// docs-20, docs-29: a request the broker's pacer refused answers 429.
+mod broker_busy;
+// docs-17, docs-30, docs-32: /api/v1 answers brought to the web's.
+mod api_parity;
+// The built-in ngrok tunnel in the app (services::tunnel, server::tunnel).
+mod tunnel;
 
 // ------------------------------------------------------------------ fixtures
 

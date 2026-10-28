@@ -3,6 +3,141 @@
 All notable changes to OpenAlgo Desktop are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 1.0.3
+
+A built-in ngrok tunnel for TradingView, Chartink and GoCharting alerts,
+steadier Kotak and INDmoney market data, API answers brought in line with
+OpenAlgo web, and screens that say what the desktop really does. If you run
+1.0.2, OpenAlgo offers this update in the app; choose Update when no live
+strategy is running.
+
+### Built-in ngrok tunnel
+
+- Paste your ngrok authtoken and your free ngrok domain in Profile, Broker
+  tab, Server Configuration, turn on Enable Ngrok Tunnel, and TradingView,
+  Chartink and GoCharting alerts reach OpenAlgo Desktop with nothing else to
+  install.
+- The tunnel always opens on your one ngrok domain, never on a random
+  address, so the webhook addresses you paste into TradingView, Chartink and
+  GoCharting never change. Host Server URL becomes `https://<your domain>`.
+- It opens when you sign in, closes when you sign out or quit, reconnects by
+  itself, and its status says what is wrong: the authtoken, the domain,
+  another ngrok agent already using the domain, or no internet.
+- Only the API, the strategy and Chartink webhooks and MCP are reachable
+  through it. The OpenAlgo pages and their login stay on your computer, and
+  a broker's sign-in redirect that arrives through the tunnel is passed back
+  to OpenAlgo on your computer.
+- With the tunnel on, the broker sign-in address is
+  `https://<your domain>/<broker>/callback`, as on OpenAlgo web: register it
+  with your broker, or keep a fixed local address on Broker Configuration.
+- If Enable Ngrok Tunnel was already on, the status asks for your authtoken
+  and domain; nothing changes until you add them.
+- Strategy webhook URLs show your Host Server URL instead of 127.0.0.1.
+
+### Market data
+
+- Kotak: live prices no longer pause and reload when the market is quiet.
+  The feed keeps its connection alive like OpenAlgo web and replaces a dead
+  one within 40 seconds.
+- Kotak: the option chain, order window and market depth move with every
+  price update, not only when the order book changes.
+- INDmoney: switching a symbol between quote and depth no longer interrupts
+  its prices.
+- Dhan, Samco, IIFL Capital and Nubra: quiet feeds stay connected instead of
+  reconnecting every minute and a half.
+- Health page: a new Broker Feed Connections card shows each broker feed's
+  state, how often it reconnected and why.
+
+### Compatibility with OpenAlgo web
+
+- API rate limits count each endpoint on its own, as on OpenAlgo web: ten
+  orders and ten cancels in the same second are no longer refused together.
+  Option Greeks and WhatsApp alerts are limited to 30 a minute, as on the
+  web.
+- When your broker's rate limit would make a request wait more than 10
+  seconds, OpenAlgo answers "too many requests" with a sentence telling you
+  to try again in a few seconds, and nothing is sent to the broker.
+- History from Historify works with just your API key, before you log in to
+  your broker.
+- In Semi-Auto, API tools can no longer switch analyzer mode; switch it in
+  the app.
+- The instruments CSV shows a crypto contract's exact lot size (0.0001), as
+  the JSON answer does.
+- Strategy API: the events filter accepts every event kind OpenAlgo writes,
+  and a strategy whose run cannot be read reports an error instead of
+  looking stopped.
+
+### Screens
+
+- Up and Down arrow keys move through the chart watchlist in the trading
+  terminal and load each chart (#198).
+- Profile, Broker, Server Status shows what is really running (the app, the
+  market data server, the broker feeds, order checks and health checks) and
+  what to do when a part is down.
+- A Semi-Auto order placed from the chart or an order ticket says it is
+  waiting for your approval in Action Center, instead of showing an error.
+- The FAQ lists all 37 brokers, Rupeezy included.
+- The Remote MCP, two-factor and TOTP screens no longer mention restarts,
+  backup codes or password resets the desktop does not have.
+
+### Health, monitoring and security
+
+- Health Monitor: a strategy exit or stop that waits more than 15 seconds to
+  be placed raises an alert, which clears itself once the exit is placed.
+- Traffic Monitor: the Error column of the CSV export says why a request was
+  refused, for example "Invalid openalgo apikey" or the missing field.
+- Security: the Repeat Limit help says it applies to the bans you enter on
+  the Security page; automatic bans always expire.
+
+### Chartink, Telegram and P&L Tracker
+
+- Chartink alerts read BUY, SELL, SHORT or COVER from the alert name, as the
+  Chartink pages say, and still from the scan name.
+- Chartink bulk import accepts the example header line and tells you how many
+  stocks were added.
+- Telegram's Rate Limit setting now works: alerts above it wait their turn
+  and arrive in order.
+- P&L Tracker shows today's MTM as a percentage of your sandbox capital in
+  analyzer mode, or of your account margin when live, instead of a fixed
+  1,00,000.
+
+### Brokers
+
+- Fyers loads NSE debt, warrant and InvIT series into the symbol master, and
+  Angel drops non-tradable bond and index rows, types its index rows EQ and
+  names the SENSEX 50 index SENSEX50, as Zerodha does. A port of
+  marketcalls/openalgo#2280, contributed by Kalaiviswa (#207).
+
+### Reliability
+
+- OpenAlgo Desktop no longer fails to start when the computer is very busy
+  at launch; it waits for its databases instead.
+- Strategy pages and the strategy API no longer hold up live price handling
+  while a long history loads.
+- Strategy fills recovered from the broker's order book no longer pause
+  price handling when the database is busy, and they reach each strategy in
+  the order the broker reported them.
+- On Linux, OpenAlgo returns memory it no longer uses to the system every
+  minute, so its memory grows about half as fast through a trading day.
+
+### Maintenance
+
+- Dependency updates (React Router 8.5, Vite 8.3.5, Biome 2.6.2, Tauri CLI
+  2.12.4, tokio, rmcp and others). Dependabot now waits 7 days after a
+  release before proposing it, as OpenAlgo web does (marketcalls/openalgo
+  24d81412b), and holds DuckDB at 1.x until Historify moves to DuckDB 2.0 as
+  a planned upgrade.
+- The release checks no longer fail at random: four tests that raced their
+  own timers now wait for what they check, and a slow Ubuntu mirror fails
+  its step with the cause instead of stalling the run.
+
+### Known limitations
+
+- Kotak positions do not yet carry OpenAlgo web's carry-forward valuation
+  marker in the position book.
+- AliceBlue and Angel market data keep their 1.0.2 keepalive until it is
+  checked against live accounts.
+
 ## 1.0.2
 
 Safety fixes from an independent production audit of 1.0.1: strategy stops

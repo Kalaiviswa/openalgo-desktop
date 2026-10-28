@@ -16,6 +16,7 @@ use openalgo_desktop_lib::brokers::hdfcsky::proto;
 use openalgo_desktop_lib::brokers::hdfcsky::HdfcSkyBroker;
 use openalgo_desktop_lib::brokers::types::*;
 use openalgo_desktop_lib::brokers::{Broker, BrokerCredentials};
+use openalgo_desktop_lib::websocket::handshake;
 use parking_lot::Mutex;
 use prost::Message as _;
 use serde_json::{json, Value};
@@ -151,7 +152,7 @@ fn route(fake: &Fake, s: &Seen) -> Response {
         (Method::PUT, "/oapi/v1/fetch-ltp") => {
             if fake
                 .ltp_429
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return status(
@@ -290,10 +291,10 @@ async fn serve_feed(seen: Arc<Mutex<Vec<String>>>) -> String {
                 let path = Arc::new(Mutex::new(String::new()));
                 let p2 = path.clone();
                 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
-                let cb = move |req: &Request, resp: Response| {
+                let cb = handshake::check(move |req: &Request, resp: Response| {
                     *p2.lock() = req.uri().to_string();
                     Ok(resp)
-                };
+                });
                 let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, cb).await else {
                     return;
                 };

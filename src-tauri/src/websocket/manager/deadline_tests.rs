@@ -1,6 +1,7 @@
 //! Session deadlines on a fake socket under a paused clock: a send the
-//! peer never takes (TIME-02) and a login the broker never confirms
-//! (TIME-05) both end the session, so the manager reconnects.
+//! peer never takes (TIME-02), a login the broker never confirms (TIME-05)
+//! and a heartbeat it never answers all end the session, so the manager
+//! reconnects; a quiet broker that answers its heartbeats keeps it.
 
 use super::*;
 use crate::brokers::common::streaming::AUTH_ACK_DEADLINE;
@@ -14,6 +15,9 @@ struct StuckSink {
     sent: Arc<Mutex<Vec<(Duration, String)>>>,
     take: usize,
     start: Instant,
+    /// The broker's side of the socket, when it answers a ping with a
+    /// pong as WebSocket servers do.
+    pongs: Option<mpsc::Sender<Message>>,
 }
 
 impl futures_util::Sink<Message> for StuckSink {
@@ -31,7 +35,15 @@ impl futures_util::Sink<Message> for StuckSink {
     }
 
     fn start_send(self: Pin<&mut Self>, item: Message) -> std::result::Result<(), WsError> {
-        let text = item.into_text().unwrap_or_default().to_string();
+        let text = match item {
+            Message::Ping(payload) => {
+                if let Some(broker) = &self.pongs {
+                    let _ = broker.try_send(Message::Pong(payload));
+                }
+                "<ping>".to_string()
+            }
+            other => other.into_text().unwrap_or_default().to_string(),
+        };
         self.sent.lock().push((self.start.elapsed(), text));
         Ok(())
     }
@@ -72,6 +84,7 @@ fn broker_frames() -> (mpsc::Sender<Message>, Frames) {
 struct ScriptedFeed {
     awaits_ack: bool,
     optional_ack: Option<Duration>,
+    reply_within: Option<Duration>,
 }
 
 impl BrokerFeed for ScriptedFeed {
@@ -101,6 +114,9 @@ impl BrokerFeed for ScriptedFeed {
     fn heartbeat(&self) -> Option<(Duration, Message)> {
         Some((Duration::from_secs(5), Message::Text("HB".into())))
     }
+    fn heartbeat_reply_timeout(&self) -> Option<Duration> {
+        self.reply_within
+    }
     fn parse(&mut self, msg: &Message) -> Vec<FeedEvent> {
         match msg {
             Message::Text(t) if t.as_str() == "PING" => {
@@ -114,7 +130,7 @@ impl BrokerFeed for ScriptedFeed {
 
 /// A supervisor for `feed` holding one subscription, and the sender of
 /// its commands.
-fn supervisor(feed: ScriptedFeed) -> (Supervisor, mpsc::Sender<Command>) {
+fn supervisor(feed: Box<dyn BrokerFeed>) -> (Supervisor, mpsc::Sender<Command>) {
     let (cmd_tx, cmd) = mpsc::channel(4);
     let sub = FeedSubscription {
         symbol: "SBIN".into(),
@@ -139,7 +155,7 @@ fn supervisor(feed: ScriptedFeed) -> (Supervisor, mpsc::Sender<Command>) {
         ..FeedConfig::default()
     };
     let s = Supervisor {
-        feed: Box::new(feed),
+        feed,
         cmd,
         registry: Arc::new(Mutex::new(registry)),
         events: broadcast::channel(4).0,
@@ -165,15 +181,38 @@ async fn run_session(
     script: Vec<(u64, &'static str)>,
     stop_at: Option<u64>,
 ) -> Run {
+    let socket = Socket {
+        take,
+        answers_pings: false,
+        limit: Duration::from_secs(120),
+    };
+    run_on(Box::new(feed), socket, script, stop_at).await
+}
+
+/// The fake socket: how many frames it takes, whether the broker answers
+/// pings, and the longest the test waits for the session to end.
+struct Socket {
+    take: usize,
+    answers_pings: bool,
+    limit: Duration,
+}
+
+async fn run_on(
+    feed: Box<dyn BrokerFeed>,
+    socket: Socket,
+    script: Vec<(u64, &'static str)>,
+    stop_at: Option<u64>,
+) -> Run {
     let start = Instant::now();
     let (mut sup, cmd) = supervisor(feed);
     let sent: Arc<Mutex<Vec<(Duration, String)>>> = Arc::default();
+    let (broker, mut read) = broker_frames();
     let mut write = StuckSink {
         sent: sent.clone(),
-        take,
+        take: socket.take,
         start,
+        pongs: socket.answers_pings.then(|| broker.clone()),
     };
-    let (broker, mut read) = broker_frames();
     let driver = tokio::spawn(async move {
         for (at, frame) in script {
             tokio::time::sleep_until(start + Duration::from_secs(at)).await;
@@ -186,16 +225,12 @@ async fn run_session(
         // Keep the socket open until the session is over.
         std::future::pending::<()>().await;
     });
-    let ended = tokio::time::timeout(
-        Duration::from_secs(120),
-        sup.session("mock", &mut write, &mut read),
-    )
-    .await;
+    let ended =
+        tokio::time::timeout(socket.limit, sup.session("mock", &mut write, &mut read)).await;
     driver.abort();
     let end = ended.ok().map(|e| match e {
         SessionEnd::Stopped => "stopped",
-        SessionEnd::Lost => "lost",
-        SessionEnd::Stalled => "stalled",
+        SessionEnd::Dropped(cause) => cause.name(),
         SessionEnd::AuthFailed(_) => "auth_failed",
     });
     let sent = sent.lock().clone();
@@ -210,6 +245,7 @@ fn plain() -> ScriptedFeed {
     ScriptedFeed {
         awaits_ack: false,
         optional_ack: None,
+        reply_within: None,
     }
 }
 
@@ -230,7 +266,12 @@ async fn a_send_the_peer_never_takes_ends_the_session() {
     ];
     for (i, (take, script, last, by)) in cases.into_iter().enumerate() {
         let run = run_session(plain(), take, script, None).await;
-        assert_eq!(run.end, Some("lost"), "case {}: the session must end", i);
+        assert_eq!(
+            run.end,
+            Some("not_taking_frames"),
+            "case {}: the session must end",
+            i
+        );
         assert!(
             run.at <= Duration::from_secs(by) + Duration::from_millis(50),
             "case {}: ended at {:?}, after {} s",
@@ -248,11 +289,11 @@ async fn a_send_the_peer_never_takes_ends_the_session() {
 async fn a_login_never_confirmed_reconnects_at_the_deadline() {
     let feed = ScriptedFeed {
         awaits_ack: true,
-        optional_ack: None,
+        ..plain()
     };
     let beats = (1..=8).map(|n| (n * 5, "HB")).collect();
     let run = run_session(feed, usize::MAX, beats, None).await;
-    assert_eq!(run.end, Some("lost"));
+    assert_eq!(run.end, Some("login_not_confirmed"));
     assert!(
         run.at >= AUTH_ACK_DEADLINE && run.at <= AUTH_ACK_DEADLINE + Duration::from_millis(50),
         "ended at {:?}",
@@ -271,7 +312,7 @@ async fn a_login_never_confirmed_reconnects_at_the_deadline() {
 async fn a_late_confirmation_and_an_optional_one_keep_the_session() {
     let required = ScriptedFeed {
         awaits_ack: true,
-        optional_ack: None,
+        ..plain()
     };
     let run = run_session(required, usize::MAX, vec![(15, "OK")], Some(30)).await;
     assert_eq!(run.end, Some("stopped"));
@@ -281,9 +322,172 @@ async fn a_late_confirmation_and_an_optional_one_keep_the_session() {
     let optional = ScriptedFeed {
         awaits_ack: true,
         optional_ack: Some(Duration::from_secs(2)),
+        ..plain()
     };
     let run = run_session(optional, usize::MAX, vec![], Some(30)).await;
     assert_eq!(run.end, Some("stopped"));
     let sub = run.sent.iter().find(|(_, f)| f == "SUB SBIN");
     assert_eq!(sub.map(|(at, _)| at.as_secs()), Some(2), "{:?}", run.sent);
+}
+
+/// A heartbeat the broker does not answer in time ends the session at the
+/// reply deadline; any frame after the heartbeat is an answer.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_heartbeat_ends_the_session_at_its_deadline() {
+    let feed = ScriptedFeed {
+        reply_within: Some(Duration::from_secs(2)),
+        ..plain()
+    };
+    // Heartbeats at 5, 10, 15 s; the broker answers the first two.
+    let run = run_session(feed, usize::MAX, vec![(6, "OK?"), (11, "OK?")], None).await;
+    assert_eq!(run.end, Some("heartbeat_unanswered"));
+    assert!(
+        run.at >= Duration::from_secs(17) && run.at <= Duration::from_millis(17_050),
+        "ended at {:?}",
+        run.at
+    );
+}
+
+const KOTAK_LOGIN_OK: &str =
+    r#"{"message_code":1119,"exchanges":{"nse_cm":{"value":1,"divider":100}}}"#;
+
+fn kotak() -> Box<dyn BrokerFeed> {
+    Box::new(crate::brokers::kotak::streaming::KotakFeed::new(
+        "wss://example.invalid/feed",
+        "sid",
+        "<USER_ID>".into(),
+        crate::brokers::common::symbols::SymbolResolver::new(),
+    ))
+}
+
+/// Kotak's market feed pings every 30 s, as the web does
+/// (`sfeed_websocket.py`: `run_forever(ping_interval=30, ping_timeout=10)`).
+/// Without it a quiet five minutes (an illiquid contract, the market
+/// closed) went past the 90 s stall watchdog, which dropped the socket and
+/// reconnected, and the trader saw prices lag each time.
+#[tokio::test(start_paused = true)]
+async fn kotak_pings_every_30_s_and_a_quiet_broker_keeps_the_feed() {
+    let socket = Socket {
+        take: usize::MAX,
+        answers_pings: true,
+        limit: Duration::from_secs(400),
+    };
+    let run = run_on(kotak(), socket, vec![(1, KOTAK_LOGIN_OK)], Some(310)).await;
+    assert_eq!(run.end, Some("stopped"), "sent {:?}", run.sent);
+    let pings: Vec<u64> = run
+        .sent
+        .iter()
+        .filter(|(_, f)| f == "<ping>")
+        .map(|(at, _)| at.as_secs())
+        .collect();
+    assert_eq!(pings, (1..=10).map(|n| n * 30).collect::<Vec<_>>());
+}
+
+/// A Kotak socket that stops answering is replaced 10 s after the ping it
+/// left unanswered, not after the 90 s stall watchdog.
+#[tokio::test(start_paused = true)]
+async fn kotak_replaces_a_socket_that_leaves_a_ping_unanswered() {
+    let socket = Socket {
+        take: usize::MAX,
+        answers_pings: false,
+        limit: Duration::from_secs(400),
+    };
+    let run = run_on(kotak(), socket, vec![(1, KOTAK_LOGIN_OK)], None).await;
+    assert_eq!(run.end, Some("heartbeat_unanswered"), "sent {:?}", run.sent);
+    assert!(
+        run.at >= Duration::from_secs(40) && run.at <= Duration::from_millis(40_050),
+        "ended at {:?}",
+        run.at
+    );
+}
+
+/// Feeds that sent no heartbeat although the web pings their sockets
+/// (Dhan market, 20-level depth and order updates, Samco, Kite): a quiet
+/// broker went past the stall watchdog and the socket was dropped and made
+/// again. Each now pings at the web's interval and keeps a quiet socket,
+/// as Upstox's order socket does at the web's 20 s.
+#[tokio::test(start_paused = true)]
+async fn quiet_feeds_that_ping_like_the_web_keep_their_socket() {
+    use crate::brokers::common::symbols::SymbolResolver;
+    let url = "wss://example.invalid/feed";
+    let feeds: Vec<(&str, Box<dyn BrokerFeed>, u64)> = vec![
+        (
+            "dhan",
+            Box::new(crate::brokers::dhan::streaming::DhanFeed::with_url(
+                url, "t", "c",
+            )),
+            30,
+        ),
+        (
+            "dhan 20 depth",
+            Box::new(crate::brokers::dhan::streaming::Dhan20DepthFeed::with_url(
+                url, "t", "c",
+            )),
+            30,
+        ),
+        (
+            "dhan orders",
+            Box::new(crate::brokers::dhan::streaming::DhanOrderFeed::new(
+                "t",
+                "c",
+                SymbolResolver::new(),
+            )),
+            20,
+        ),
+        (
+            "samco",
+            Box::new(crate::brokers::samco::streaming::SamcoFeed::new(
+                url,
+                "t",
+                Arc::default(),
+            )),
+            30,
+        ),
+        (
+            "kite",
+            Box::new(crate::brokers::zerodha::streaming::KiteFeed::new(
+                "k",
+                "t",
+                SymbolResolver::new(),
+            )),
+            30,
+        ),
+        // The web's order sockets ping every 20 s; this one pinged every 30.
+        (
+            "upstox orders",
+            Box::new(crate::brokers::upstox::streaming::UpstoxOrderFeed::new(
+                crate::brokers::upstox::streaming::Authorizer::orders(
+                    crate::brokers::common::http::client(),
+                    "http://127.0.0.1:9",
+                    "t",
+                ),
+                "http://127.0.0.1:9",
+                SymbolResolver::new(),
+            )),
+            20,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, feed, every) in feeds {
+        let socket = Socket {
+            take: usize::MAX,
+            answers_pings: true,
+            limit: Duration::from_secs(400),
+        };
+        let run = run_on(feed, socket, vec![], Some(305)).await;
+        let pings: Vec<u64> = run
+            .sent
+            .iter()
+            .filter(|(_, f)| f == "<ping>")
+            .map(|(at, _)| at.as_secs())
+            .collect();
+        let expected: Vec<u64> = (1..=300 / every).map(|n| n * every).collect();
+        if run.end != Some("stopped") || pings != expected {
+            wrong.push(format!(
+                "{}: ended {:?}, pings at {:?}",
+                name, run.end, pings
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{:#?}", wrong);
 }

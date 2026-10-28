@@ -203,7 +203,11 @@ pub async fn authorize(ctx: &AppState, key: &str, ip: IpAddr, auth: Auth) -> boo
     // charged per address before the handler).
     if ip == PROXIED_CALLER {
         let now = ctx.limiter.now();
-        let bucket = API_CALL.try_with(|c| c.bucket).unwrap_or(Bucket::Api);
+        // The endpoint the rate layer set; outside it, the window of a
+        // path no route serves.
+        let bucket = API_CALL
+            .try_with(|c| c.bucket)
+            .unwrap_or_else(|_| Bucket::for_api_path(""));
         if ctx
             .limiter
             .check(bucket, limiter_key(ip, "apikey", key), now)
@@ -259,11 +263,23 @@ pub async fn load(
     schema: &Schema,
     style: Style,
     auth: Auth,
-) -> Result<Value, Response> {
+) -> Result<Value, EarlyReply> {
+    load_choosing(ctx, ip, req, schema, style, |_| auth).await
+}
+
+/// [`load`] for an endpoint whose key check depends on what is asked
+/// (`history` from Historify needs no broker session).
+pub async fn load_choosing(
+    ctx: &AppState,
+    ip: IpAddr,
+    req: Request,
+    schema: &Schema,
+    style: Style,
+    auth: impl FnOnce(&Map<String, Value>) -> Auth,
+) -> Result<Value, EarlyReply> {
     let body = read_json_object(req, &()).await?;
-    check(ctx, ip, &body, schema, style, auth)
-        .await
-        .map_err(|r| *r)
+    let auth = auth(&body);
+    check(ctx, ip, &body, schema, style, auth).await
 }
 
 /// Query string as the web's `request.args` (`None` for absent keys).

@@ -24,6 +24,21 @@ pub use tokio_tungstenite::tungstenite::Message;
 /// (`BrokerFeed::auth_ack_deadline`).
 pub const AUTH_ACK_DEADLINE: Duration = Duration::from_secs(20);
 
+/// The keepalive most of the web's market data sockets run with
+/// (websocket-client `run_forever(ping_interval=30, ping_timeout=10)`): a
+/// WebSocket ping every 30 s, answered within 10 s.
+pub const WEB_PING_INTERVAL: Duration = Duration::from_secs(30);
+pub const WEB_PING_TIMEOUT: Duration = Duration::from_secs(10);
+/// The web's order update sockets ping every 20 s unless the broker's
+/// adapter says otherwise (`websocket_proxy/order_adapter.py`
+/// `ws_ping_interval`), with the same 10 s timeout.
+pub const WEB_ORDER_PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// A WebSocket ping control frame, the heartbeat of the feeds above.
+pub fn ping() -> Message {
+    Message::Ping(Vec::new())
+}
+
 /// OpenAlgo subscription mode (web modes 1/2/3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum FeedMode {
@@ -283,6 +298,14 @@ pub trait BrokerFeed: Send + Sync {
 
     /// Client heartbeat, if the broker wants one.
     fn heartbeat(&self) -> Option<(Duration, Message)> {
+        None
+    }
+
+    /// How soon some frame must follow a heartbeat before the connection
+    /// is taken as dead and replaced; `None` leaves a silent socket to the
+    /// stall watchdog. The web's websocket-client clients set it as
+    /// `ping_timeout` (Kotak: 10 s).
+    fn heartbeat_reply_timeout(&self) -> Option<Duration> {
         None
     }
 

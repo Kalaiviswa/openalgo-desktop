@@ -26,6 +26,7 @@ pub mod request_count;
 mod settings;
 pub mod strategy_portfolio;
 pub mod symbol;
+pub mod tunnel;
 pub mod user;
 pub mod watchlist;
 pub mod webui;
@@ -36,9 +37,49 @@ use models::Settings;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub type DbConn = PooledConnection<SqliteConnectionManager>;
+
+thread_local! {
+    /// Pooled connections this thread has taken, and how long it waited
+    /// for them ([`checkouts`]).
+    static CHECKOUTS: std::cell::Cell<(u32, Duration)> =
+        const { std::cell::Cell::new((0, Duration::ZERO)) };
+}
+
+/// Take a connection from `pool`, counted against this thread.
+pub(crate) fn checkout(pool: &Pool<SqliteConnectionManager>) -> Result<DbConn> {
+    let started = std::time::Instant::now();
+    let conn = pool.get();
+    let waited = started.elapsed();
+    CHECKOUTS.with(|c| {
+        let (n, w) = c.get();
+        c.set((n.wrapping_add(1), w.saturating_add(waited)));
+    });
+    Ok(conn?)
+}
+
+/// Pooled connections taken on this thread so far, and the time it spent
+/// waiting for them. A pool with no free connection holds the thread for
+/// the whole wait, so a test on a current-thread runtime reads it to prove
+/// a request never took one on the runtime that carries the feed and the
+/// risk owners (`tests/it/polled_reads.rs`).
+pub fn checkouts() -> (u32, Duration) {
+    CHECKOUTS.with(std::cell::Cell::get)
+}
+
+/// How long a checkout waits for a pooled connection.
+const POOL_WAIT: Duration = Duration::from_secs(10);
+
+/// How long opening a store waits, in all, for its first connection while
+/// it is still being opened. A machine that stalls at the app's start (a
+/// macOS CI runner froze every process for 10-16 s, twice in one run) or
+/// a disk scanned or busy then made the checkout deadline fail the start
+/// with `Pool(Error(None))`, although nothing had failed. A connection
+/// that fails still fails the open at the first deadline, with its error.
+const FIRST_CONNECTION_LIMIT: Duration = Duration::from_secs(120);
 
 /// Build a pool with the pragmas every connection needs, at the store's
 /// [`Durability`], applied to each connection the pool opens.
@@ -53,14 +94,74 @@ pub fn open_pool(
         c.execute_batch("PRAGMA foreign_keys=ON;")?;
         c.busy_handler(Some(retry_busy))
     });
+    let pool = build_pool(manager, max_size, POOL_WAIT, FIRST_CONNECTION_LIMIT)?;
+    crate::security::fsperm::restrict_db_files(path)?;
+    Ok(pool)
+}
+
+/// Why a connection the pool tried to open failed: logged, and kept for
+/// [`build_pool`]'s wait for the first one.
+#[derive(Debug)]
+struct ConnectFailure(Arc<parking_lot::Mutex<Option<rusqlite::Error>>>);
+
+impl r2d2::HandleError<rusqlite::Error> for ConnectFailure {
+    fn handle_error(&self, error: rusqlite::Error) {
+        tracing::error!("A database connection could not be opened: {}", error);
+        *self.0.lock() = Some(error);
+    }
+}
+
+/// The threads a pool opens connections and reaps idle ones on, ended
+/// with the pool. r2d2's own run every job still scheduled first, and the
+/// idle reaper is always scheduled (every 30 s), so each pool dropped left
+/// its three threads behind for up to 30 s: a test process that opened and
+/// dropped app contexts quickly (31 in one test) reached macOS's 2,048
+/// threads, and r2d2 could not start its next pool's threads.
+fn workers() -> Arc<scheduled_thread_pool::ScheduledThreadPool> {
+    Arc::new(
+        scheduled_thread_pool::ScheduledThreadPool::builder()
+            .num_threads(3)
+            .thread_name_pattern("r2d2-worker-{}")
+            .on_drop_behavior(scheduled_thread_pool::OnPoolDropBehavior::DiscardPendingScheduled)
+            .build(),
+    )
+}
+
+/// The pool, once its first connection is open. Every checkout waits at
+/// most `wait`; the first connection is waited for while it is being
+/// opened, up to `limit`, and a failure to open it ends the wait.
+fn build_pool(
+    manager: SqliteConnectionManager,
+    max_size: u32,
+    wait: Duration,
+    limit: Duration,
+) -> Result<Pool<SqliteConnectionManager>> {
+    let failure = Arc::new(parking_lot::Mutex::new(None));
     let pool = Pool::builder()
         .max_size(max_size)
         .min_idle(Some(1))
-        .connection_timeout(Duration::from_secs(10))
+        .connection_timeout(wait)
         .idle_timeout(Some(Duration::from_secs(300)))
-        .build(manager)?;
-    crate::security::fsperm::restrict_db_files(path)?;
-    Ok(pool)
+        .error_handler(Box::new(ConnectFailure(failure.clone())))
+        .thread_pool(workers())
+        .build_unchecked(manager);
+    let started = std::time::Instant::now();
+    loop {
+        let timed_out = match pool.get_timeout(wait) {
+            Ok(_) => return Ok(pool),
+            Err(e) => e,
+        };
+        if let Some(cause) = failure.lock().take() {
+            return Err(cause.into());
+        }
+        if started.elapsed() >= limit {
+            return Err(timed_out.into());
+        }
+        tracing::warn!(
+            "Opening a database is taking longer than usual ({} s so far); still waiting",
+            started.elapsed().as_secs()
+        );
+    }
 }
 
 /// Open a transaction that writes: `BEGIN IMMEDIATE`, which takes the
@@ -134,7 +235,7 @@ impl SqliteDb {
 
     /// Check out a pooled connection. Drop it before any network await.
     pub fn conn(&self) -> Result<DbConn> {
-        Ok(self.pool.get()?)
+        checkout(&self.pool)
     }
 
     /// Open and idle pooled connections (health monitor).
@@ -190,6 +291,50 @@ mod transaction_guard;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CI flake b: a store whose first connection takes longer to open
+    /// than a checkout may wait is opened, not refused. On a stalled macOS
+    /// runner the app's start failed with `Pool(Error(None))`: the
+    /// connection was still opening, nothing had failed.
+    #[test]
+    fn a_first_connection_slower_than_a_checkout_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SqliteConnectionManager::file(dir.path().join("slow.db")).with_init(|_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(())
+        });
+        let pool = build_pool(
+            manager,
+            2,
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        );
+        assert!(pool.is_ok(), "{:?}", pool.err());
+    }
+
+    /// A first connection that fails ends the wait at the first checkout
+    /// deadline, with SQLite's reason, never only at the open's limit.
+    #[test]
+    fn a_first_connection_that_fails_fails_the_open_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SqliteConnectionManager::file(dir.path().join("missing").join("x.db"));
+        let started = std::time::Instant::now();
+        let refused = build_pool(
+            manager,
+            2,
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        );
+        let Err(e) = refused else {
+            panic!("a database in a folder that does not exist opened");
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(e.to_string().contains("unable to open"), "{}", e);
+    }
 
     /// DB-01: a write waiting behind a transaction gets in during the
     /// master replacement's pause that follows it, every time. Checked by

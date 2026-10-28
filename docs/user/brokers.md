@@ -34,7 +34,12 @@ whatever you typed, so nothing typed for one broker is saved under another.
 
 **Redirect URL.** For brokers that sign in on their own website, the page
 fills in the redirect URL automatically: this app's address, or your Host
-Server URL while the tunnel (ngrok) is on. You can type another address; it
+Server URL while **Enable Ngrok Tunnel** is on. With the built-in tunnel
+that is `https://<your ngrok domain>/<broker>/callback`, the same whether
+the tunnel is online or not: register it with your broker, as OpenAlgo web
+users do (a sign-in that comes back through the tunnel is passed on to this
+computer and finishes as usual), or keep a fixed local address such as
+`http://127.0.0.1:5000/<broker>/callback` here. You can type another address; it
 must be a full address ending in `/<broker>/callback`. **Use automatic**
 goes back to the automatic address (an empty field means automatic too).
 The redirect URL is kept with that broker's keys.
