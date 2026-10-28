@@ -4,10 +4,12 @@
 //! `GrowwFeed` runs on the shared manager. Before every (re)connect its
 //! `prepare` does the Groww-specific work:
 //! 1. a fresh Ed25519 nkey pair; `POST /v1/api/apex/v1/socket/token/create/`
-//!    with `{"socketKey": "<U...>"}` -> `{token, subscriptionId}` (on any
-//!    failure the web falls back to the auth token and `direct_auth`);
+//!    with `{"socketKey": "<U...>"}` -> `{token, subscriptionId}`; a 401 or
+//!    403 is an expired login and stops the feed, any other failure is
+//!    retried, never the login token (web openalgo#2312);
 //! 2. `wss://socket-api.groww.in` with the web's headers;
-//! 3. NATS: server `INFO` (nonce) -> `CONNECT {jwt, nkey, sig}` + `PING`;
+//! 3. NATS: the first server `INFO` of a connection (nonce) ->
+//!    `CONNECT {jwt, nkey, sig}` + `PING`, once per connection;
 //!    `+OK` / the first `PONG` (or 2 s, like the web) means ready; server
 //!    `PING` gets `PONG`; the client pings every 10 s; `-ERR` naming
 //!    authorization ends the session as an auth failure.
@@ -175,9 +177,20 @@ pub struct Minted {
     key: Option<KeyPair>,
 }
 
-/// Socket token for a fresh key pair; falls back to the auth token
-/// (`direct_auth`, no signature) like the web.
-async fn socket_token(http: &reqwest::Client, url: &str, auth: &str) -> Minted {
+/// What the trader reads when Groww refuses the socket-token request: the
+/// login itself has expired (web `SESSION_EXPIRED_MESSAGE`, openalgo#2312).
+pub const LOGIN_EXPIRED: &str =
+    "Your Groww login has expired, so live market data stopped. Log in to Groww again.";
+
+/// Socket token for a fresh key pair (web `_generate_socket_token`). Groww's
+/// NATS server accepts only a socket token, so there is no fallback to the
+/// login token (web openalgo#2312): a 401 or 403 means the login expired and
+/// stops the feed; any other failure is retried with backoff.
+async fn socket_token(
+    http: &reqwest::Client,
+    url: &str,
+    auth: &str,
+) -> std::result::Result<Minted, PrepareError> {
     let key = KeyPair::generate();
     let resp = http
         .post(url)
@@ -192,36 +205,45 @@ async fn socket_token(http: &reqwest::Client, url: &str, auth: &str) -> Minted {
         .json(&json!({"socketKey": key.public_key()}))
         .send()
         .await;
-    if let Ok(r) = resp {
-        let status = r.status();
-        if status.is_success() {
-            if let Ok(v) = r.json::<Value>().await {
-                let token = v.get("token").and_then(Value::as_str).unwrap_or("");
-                let sub = v
-                    .get("subscriptionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !token.is_empty() {
-                    return Minted {
-                        jwt: Secret::new(token),
-                        subscription: sub.to_string(),
-                        key: Some(key),
-                    };
-                }
-            }
+    let r = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "Groww socket token request failed: {}",
+                crate::brokers::common::redact::url_safe_error(&e)
+            );
+            return Err(PrepareError::Unavailable);
         }
+    };
+    let status = r.status();
+    if matches!(status.as_u16(), 401 | 403) {
         tracing::warn!(
             status = status.as_u16(),
-            "Groww socket token not issued; using the session token directly"
+            "Groww refused the socket token request; the login has expired"
         );
-    } else {
-        tracing::warn!("Groww socket token request failed; using the session token directly");
+        return Err(PrepareError::AuthFailed(LOGIN_EXPIRED.into()));
     }
-    Minted {
-        jwt: Secret::new(auth),
-        subscription: "direct_auth".to_string(),
-        key: None,
+    if status.is_success() {
+        if let Ok(v) = r.json::<Value>().await {
+            let token = v.get("token").and_then(Value::as_str).unwrap_or("");
+            let sub = v
+                .get("subscriptionId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !token.is_empty() {
+                return Ok(Minted {
+                    jwt: Secret::new(token),
+                    subscription: sub.to_string(),
+                    key: Some(key),
+                });
+            }
+        }
     }
+    tracing::warn!(
+        status = status.as_u16(),
+        "Groww socket token not issued; retrying"
+    );
+    Err(PrepareError::Unavailable)
 }
 
 fn socket_request(ws_url: &str, m: &Minted, with_protocol: bool) -> Option<WsRequest> {
@@ -539,6 +561,13 @@ impl GrowwFeed {
         while let Some((op, n)) = next_op(&buf[used..]) {
             used += n;
             match op {
+                // Only the first INFO of a connection is the handshake: the
+                // server sends another after CONNECT, and a second CONNECT
+                // is refused ("maximum subscriptions exceeded") and closes
+                // the socket (web openalgo#2312).
+                Op::Info(_) if self.connect_sent => {
+                    tracing::debug!("Groww feed sent another INFO; the session's CONNECT stands")
+                }
                 Op::Info(info) => {
                     let connect = self.connect_reply(&info);
                     out.push(FeedEvent::Reply(Message::Text(connect)));
@@ -587,7 +616,7 @@ impl BrokerFeed for GrowwFeed {
                 &self.endpoints.socket_token_url,
                 self.auth_token.expose(),
             )
-            .await,
+            .await?,
         );
         self.with_protocol = true;
         Ok(())
