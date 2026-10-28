@@ -17,6 +17,7 @@
 
 pub mod account;
 pub mod answer;
+pub mod chart;
 pub mod indicators;
 pub mod instrument;
 pub mod live;
@@ -48,6 +49,7 @@ use std::sync::Arc;
 
 /// Every toolkit, one line each (`order` decides the model's order).
 pub const TOOLKITS: &[ToolGroup] = &[
+    chart::GROUP,
     market::GROUP,
     symbols::GROUP,
     indicators::GROUP,
