@@ -263,24 +263,28 @@ mod tests {
 
     /// BR-04: the shared client gives up on a broker that accepts the
     /// connection and never answers, after `REQUEST_TIMEOUT`.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_broker_that_never_answers_times_out() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/orders", l.local_addr().unwrap());
+        let (accepted, connected) = tokio::sync::oneshot::channel();
         let held = tokio::spawn(async move {
             let (s, _) = l.accept().await.unwrap();
+            let _ = accepted.send(());
             std::future::pending::<()>().await;
             drop(s);
         });
         let started = tokio::time::Instant::now();
-        let e = builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .get(url)
-            .send()
-            .await
-            .unwrap_err();
+        let send =
+            tokio::spawn(
+                async move { builder().no_proxy().build().unwrap().get(url).send().await },
+            );
+        // The clock runs ahead only once the connection is open: a paused
+        // clock would otherwise fire the connect timeout while the real
+        // connect is still pending (seen on a macOS runner).
+        connected.await.unwrap();
+        tokio::time::pause();
+        let e = send.await.unwrap().unwrap_err();
         assert!(e.is_timeout(), "{:?}", e);
         assert!(started.elapsed() >= REQUEST_TIMEOUT.min(READ_TIMEOUT));
         held.abort();
@@ -406,7 +410,10 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/orders", l.local_addr().unwrap());
         drop(l);
-        let e = shared_settings().post(&url).send().await.unwrap_err();
+        // No short read timeout: a refused connect takes about 2 s on
+        // Windows, which retries it.
+        let c = builder().no_proxy().build().unwrap();
+        let e = c.post(&url).send().await.unwrap_err();
         assert!(e.is_connect(), "{:?}", e);
         assert!(!unanswered(&AppError::from(e)));
     }
