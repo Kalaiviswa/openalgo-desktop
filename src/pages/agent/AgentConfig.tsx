@@ -36,8 +36,7 @@
  * render error so one broken panel cannot take the other two down with it.
  *
  * Desktop: a Trading safety section follows Trading (decision 1 of the 1.0.4
- * plan: every setting reachable in the app), and the External data section
- * is added by the part that owns it, at its web position marked below.
+ * plan: every setting reachable in the app).
  */
 
 import { ArrowLeft, Plus } from 'lucide-react'
@@ -46,6 +45,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { AddModelDialog } from '@/components/agent/config/AddModelDialog'
 import { ChatGptSubscriptionPanel } from '@/components/agent/config/ChatGptSubscriptionPanel'
+import { McpPanel } from '@/components/agent/config/McpPanel'
 import { ProviderCatalogPanel } from '@/components/agent/config/ProviderCatalogPanel'
 import { RegisteredModelsTable } from '@/components/agent/config/RegisteredModelsTable'
 import { TradingPanel } from '@/components/agent/config/TradingPanel'
@@ -167,7 +167,9 @@ export default function AgentConfig() {
             <Section name="Web search">
               <WebSearchPanel />
             </Section>
-            {/* External data goes here (the external data part). */}
+            <Section name="External data">
+              <McpPanel />
+            </Section>
           </div>
         </div>
       </div>
