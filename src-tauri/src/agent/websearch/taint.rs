@@ -13,6 +13,7 @@
 //! `Bearer ...`, prefixed keys and emails is still there; long high-entropy
 //! tokens go too. The marker it leaves is never sent.
 
+use crate::agent::words::{is_space, split, strip_edges};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -27,12 +28,6 @@ pub const MAX_QUERY_CHARS: usize = 400;
 pub const MIN_ENTROPY_CHARS: usize = 24;
 /// A pure hex run this long is a secret on its own (`MIN_HEX_CHARS`).
 pub const MIN_HEX_CHARS: usize = 32;
-
-/// Stripped from a token's ends before it is compared (`_EDGE_PUNCTUATION`).
-const EDGE: &[char] = &[
-    ' ', '\t', '\n', '\r', '"', '\'', '`', '.', ',', ';', ':', '!', '?', '(', ')', '[', ']', '{',
-    '}', '<', '>', '|', '\\', '/', '*', '~', '#',
-];
 
 fn compile(pattern: &str) -> Option<Regex> {
     Regex::new(pattern).ok()
@@ -55,22 +50,6 @@ static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .filter_map(|p| compile(p))
     .collect()
 });
-
-/// Python's `str.isspace` (what `str.split()` splits on): Unicode white
-/// space plus the four information separators.
-fn is_space(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
-}
-
-/// `str.split()`: runs of white space, none empty.
-pub fn split(text: &str) -> impl Iterator<Item = &str> {
-    text.split(is_space).filter(|t| !t.is_empty())
-}
-
-/// A token without its edge punctuation.
-pub fn strip_edges(token: &str) -> &str {
-    token.trim_matches(|c| EDGE.contains(&c))
-}
 
 /// A token that looks like a key rather than a word (`_is_high_entropy`).
 pub fn is_high_entropy(token: &str) -> bool {

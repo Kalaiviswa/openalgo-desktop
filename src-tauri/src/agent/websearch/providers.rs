@@ -283,8 +283,8 @@ const FINANCE_WORDS: &[&str] = &[
 
 /// Tavily's topic for a query: `finance` for a market question.
 pub fn tavily_topic(query: &str) -> &'static str {
-    let finance = super::taint::split(query)
-        .map(|t| super::taint::strip_edges(t).to_lowercase())
+    let finance = crate::agent::words::split(query)
+        .map(|t| crate::agent::words::strip_edges(t).to_lowercase())
         .any(|w| FINANCE_WORDS.contains(&w.as_str()));
     if finance {
         "finance"

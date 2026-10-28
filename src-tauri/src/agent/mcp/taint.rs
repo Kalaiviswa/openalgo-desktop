@@ -40,6 +40,7 @@
 //! ask, and nothing is sent until it does.
 
 use crate::agent::redact::{redact_secrets, REDACTED};
+use crate::agent::words::strip_edges;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -55,16 +56,11 @@ pub const MAX_FIXED_PIECES: usize = 8;
 /// The pieces one call may hold beyond the trader's word count.
 pub const EXTRA_PIECES: usize = 4;
 
-/// Stripped from a word's ends before it is compared (the web's
-/// `_EDGE_PUNCTUATION`, as the web search boundary strips it).
-const EDGE: &[char] = &[
-    ' ', '\t', '\n', '\r', '"', '\'', '`', '.', ',', ';', ':', '!', '?', '(', ')', '[', ']', '{',
-    '}', '<', '>', '|', '\\', '/', '*', '~', '#',
-];
-
+/// The words of `text`, each without the edge punctuation the web search
+/// boundary strips too ([`strip_edges`]).
 fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split_whitespace()
-        .map(|w| w.trim_matches(|c| EDGE.contains(&c)))
+        .map(strip_edges)
         .filter(|w| !w.is_empty())
 }
 
@@ -80,7 +76,7 @@ pub struct Vocabulary {
 
 impl Vocabulary {
     pub fn new(operator_message: &str) -> Vocabulary {
-        let marker = REDACTED.trim_matches(|c| EDGE.contains(&c)).to_lowercase();
+        let marker = strip_edges(REDACTED).to_lowercase();
         let redacted = redact_secrets(operator_message);
         let mut trader: HashMap<String, (String, usize)> = HashMap::new();
         let mut total = 0;

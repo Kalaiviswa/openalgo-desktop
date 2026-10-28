@@ -23,6 +23,8 @@
 //! - `tool_guard`: a call's arguments read, checked and coerced before the
 //!   tool runs, and the correction the model reads when they do not fit.
 //! - `redact`: secrets out of anything shown, stored or logged.
+//! - `words`: what a word of a message is to the two taint boundaries
+//!   (web search and external data).
 //! - `chat/`: the chat service the routes call; `run/`: one turn, its loop
 //!   and its stored state; `stream/`: its frames as SSE; `reply`: a refusal
 //!   before anything streams.
@@ -76,6 +78,7 @@ pub mod tool_guard;
 pub mod tools;
 pub mod voice;
 pub mod websearch;
+pub mod words;
 
 use contract::approval::ApprovalHook;
 use contract::model::{ModelResolver, NoModelConfigured};
