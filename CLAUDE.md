@@ -838,6 +838,13 @@ Every flaky test found so far was a race, not a slow machine:
   small runner locally.
 - A test that fails about one run in five is a bug. Run a suspect test 10 to
   30 times before calling it fixed.
+- A SQLite store is closed when its `-wal` and `-shm` are gone: the last
+  connection checkpoints the database and removes them. Background work can
+  still hold a connection when `AppState::shutdown` has returned, and on
+  Windows `logs.db-wal` and `-shm` vanished between a test's "before" and
+  "after" listings of the data folder. A test that compares a folder waits
+  for those files to go first (`data_upgrade::closed_and_checkpointed`);
+  it never leaves them out of the comparison.
 - Every `AppState` runs the order reconciler's task (a pass every 5 s while
   an owner holds an open order, and at once on a broker session change or a
   lost order fact). A test that counts order-book reads, or needs a gap to

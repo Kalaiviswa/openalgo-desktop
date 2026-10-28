@@ -44,6 +44,29 @@ async fn close(ctx: Arc<AppState>) {
     panic!("the app context was still held after shutdown");
 }
 
+/// Wait until every SQLite store in `dir` is closed. The last connection
+/// to a WAL database checkpoints it and removes its `-wal` and `-shm`, so
+/// their absence is the event: a connection that background work still held
+/// when `close` returned (Windows saw `logs.db-wal` and `-shm` vanish between
+/// two listings) is waited for, never left out of a comparison.
+async fn closed_and_checkpointed(dir: &Path) {
+    let open = || -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".db-wal") || n.ends_with(".db-shm"))
+            .collect()
+    };
+    for _ in 0..1000 {
+        if open().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("a store was still open after shutdown: {:?}", open());
+}
+
 /// The schema and the recorded migrations of a SQLite store.
 fn shape(db: &Path) -> (Vec<(String, String)>, Vec<String>, i64) {
     let c = rusqlite::Connection::open(db).unwrap();
@@ -267,6 +290,7 @@ async fn a_folder_written_by_a_newer_version_is_refused_before_anything_opens() 
     let dir = tempfile::tempdir().unwrap();
     let ctx = AppState::open_upgrading(dir.path(), opts(&keys), "1.2.0").unwrap();
     close(ctx).await;
+    closed_and_checkpointed(dir.path()).await;
     let files = |d: &Path| {
         let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
             .unwrap()
