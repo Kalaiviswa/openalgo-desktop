@@ -1404,6 +1404,10 @@ fn nats_handshake_replies_through_the_feed() {
     assert!(ups[0].contains("\"jwt\":\"JWT\""));
     assert_eq!(ups[1], "PING\r\n");
     assert!(!ev.contains(&FeedEvent::AuthOk));
+    // The server sends INFO again after CONNECT; a second CONNECT makes Groww
+    // close the session ("maximum subscriptions exceeded"), so it is ignored.
+    let ev = f.parse(&Message::Text("INFO {\"nonce\":\"N1\"}\r\n".into()));
+    assert!(replies(&ev).is_empty());
     // The PONG after CONNECT accepts the session; a server PING gets PONG.
     let ev = f.parse(&Message::Text("PONG\r\nPING\r\n".into()));
     assert!(ev.contains(&FeedEvent::AuthOk));
@@ -1956,6 +1960,51 @@ mod http_round_trip {
             api_key: "APIKEY".into(),
             ..Default::default()
         }
+    }
+
+    /// A feed whose socket-token endpoint answers with `status`.
+    async fn feed_against(status: StatusCode) -> GrowwFeed {
+        let app = Router::new().route(
+            "/token",
+            post(move || async move {
+                (
+                    status,
+                    Json(json!({"token": "SOCKETJWT", "subscriptionId": "SUB1"})),
+                )
+            }),
+        );
+        let base = serve(app).await;
+        GrowwFeed::new(
+            crate::brokers::common::http::client(),
+            "tok",
+            FeedEndpoints {
+                socket_token_url: format!("{}/token", base),
+                ws_url: WS_URL.into(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn socket_token_refusal_stops_and_outage_retries_without_fallback() {
+        use crate::brokers::common::streaming::PrepareError;
+        // Issued: the connect carries the socket token, never the login token.
+        let mut f = feed_against(StatusCode::OK).await;
+        assert!(f.prepare().await.is_ok());
+        let req = f.ws_request().unwrap();
+        assert_eq!(req.headers()["Authorization"], "Bearer SOCKETJWT");
+        assert_eq!(req.headers()["X-Subscription-Id"], "SUB1");
+        // Refused login: the manager stops until the trader logs in again.
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let mut f = feed_against(status).await;
+            assert!(matches!(
+                f.prepare().await,
+                Err(PrepareError::AuthFailed(_))
+            ));
+        }
+        // Outage: back off and retry; no connect with the login token.
+        let mut f = feed_against(StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert!(matches!(f.prepare().await, Err(PrepareError::Unavailable)));
+        assert!(f.ws_request().is_err());
     }
 
     #[tokio::test]

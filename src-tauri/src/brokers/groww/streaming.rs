@@ -4,10 +4,15 @@
 //! `GrowwFeed` runs on the shared manager. Before every (re)connect its
 //! `prepare` does the Groww-specific work:
 //! 1. a fresh Ed25519 nkey pair; `POST /v1/api/apex/v1/socket/token/create/`
-//!    with `{"socketKey": "<U...>"}` -> `{token, subscriptionId}` (on any
-//!    failure the web falls back to the auth token and `direct_auth`);
+//!    with `{"socketKey": "<U...>"}` -> `{token, subscriptionId}`. A 401/403
+//!    means the login expired and stops the feed; any other failure backs
+//!    off and retries. There is no fallback to the login token: the feed
+//!    server only accepts a socket token;
 //! 2. `wss://socket-api.groww.in` with the web's headers;
-//! 3. NATS: server `INFO` (nonce) -> `CONNECT {jwt, nkey, sig}` + `PING`;
+//! 3. NATS: server `INFO` (nonce) -> `CONNECT {jwt, nkey, sig}` + `PING`,
+//!    once per connection: the server sends another `INFO` after `CONNECT`,
+//!    and a second `CONNECT` makes Groww close the session with
+//!    `-ERR 'maximum subscriptions exceeded'`;
 //!    `+OK` / the first `PONG` (or 2 s, like the web) means ready; server
 //!    `PING` gets `PONG`; the client pings every 10 s; `-ERR` naming
 //!    authorization ends the session as an auth failure.
@@ -175,9 +180,13 @@ pub struct Minted {
     key: Option<KeyPair>,
 }
 
-/// Socket token for a fresh key pair; falls back to the auth token
-/// (`direct_auth`, no signature) like the web.
-async fn socket_token(http: &reqwest::Client, url: &str, auth: &str) -> Minted {
+/// Socket token for a fresh key pair. A refused login (401/403) is an auth
+/// failure; anything else is an outage to back off from.
+async fn socket_token(
+    http: &reqwest::Client,
+    url: &str,
+    auth: &str,
+) -> std::result::Result<Minted, PrepareError> {
     let key = KeyPair::generate();
     let resp = http
         .post(url)
@@ -192,36 +201,36 @@ async fn socket_token(http: &reqwest::Client, url: &str, auth: &str) -> Minted {
         .json(&json!({"socketKey": key.public_key()}))
         .send()
         .await;
-    if let Ok(r) = resp {
-        let status = r.status();
-        if status.is_success() {
-            if let Ok(v) = r.json::<Value>().await {
-                let token = v.get("token").and_then(Value::as_str).unwrap_or("");
-                let sub = v
-                    .get("subscriptionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !token.is_empty() {
-                    return Minted {
-                        jwt: Secret::new(token),
-                        subscription: sub.to_string(),
-                        key: Some(key),
-                    };
-                }
-            }
-        }
+    let Ok(r) = resp else {
+        tracing::warn!("Groww socket token request failed");
+        return Err(PrepareError::Unavailable);
+    };
+    let status = r.status();
+    if matches!(status.as_u16(), 401 | 403) {
         tracing::warn!(
             status = status.as_u16(),
-            "Groww socket token not issued; using the session token directly"
+            "Groww refused the socket token request; the login has expired"
         );
-    } else {
-        tracing::warn!("Groww socket token request failed; using the session token directly");
+        return Err(PrepareError::AuthFailed(refused()));
     }
-    Minted {
-        jwt: Secret::new(auth),
-        subscription: "direct_auth".to_string(),
-        key: None,
+    if status.is_success() {
+        if let Ok(v) = r.json::<Value>().await {
+            let token = v.get("token").and_then(Value::as_str).unwrap_or("");
+            let sub = v
+                .get("subscriptionId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !token.is_empty() {
+                return Ok(Minted {
+                    jwt: Secret::new(token),
+                    subscription: sub.to_string(),
+                    key: Some(key),
+                });
+            }
+        }
     }
+    tracing::warn!(status = status.as_u16(), "Groww socket token not issued");
+    Err(PrepareError::Unavailable)
 }
 
 fn socket_request(ws_url: &str, m: &Minted, with_protocol: bool) -> Option<WsRequest> {
@@ -539,12 +548,15 @@ impl GrowwFeed {
         while let Some((op, n)) = next_op(&buf[used..]) {
             used += n;
             match op {
-                Op::Info(info) => {
+                // Only the first INFO of a connection is the handshake; the
+                // one the server sends after CONNECT is informational.
+                Op::Info(info) if !self.connect_sent => {
                     let connect = self.connect_reply(&info);
                     out.push(FeedEvent::Reply(Message::Text(connect)));
                     out.push(FeedEvent::Reply(Message::Text("PING\r\n".into())));
                     self.connect_sent = true;
                 }
+                Op::Info(_) => {}
                 Op::Ping => out.push(FeedEvent::Reply(Message::Text("PONG\r\n".into()))),
                 Op::Pong => {
                     out.push(FeedEvent::Heartbeat);
@@ -587,29 +599,24 @@ impl BrokerFeed for GrowwFeed {
                 &self.endpoints.socket_token_url,
                 self.auth_token.expose(),
             )
-            .await,
+            .await?,
         );
         self.with_protocol = true;
         Ok(())
     }
 
     fn ws_request(&self) -> Result<WsRequest> {
-        let fallback;
-        let m = match &self.minted {
-            Some(m) => m,
-            None => {
-                fallback = Minted {
-                    jwt: self.auth_token.clone(),
-                    subscription: "direct_auth".into(),
-                    key: None,
-                };
-                &fallback
-            }
-        };
-        socket_request(&self.endpoints.ws_url, m, self.with_protocol).ok_or_else(|| {
-            tracing::error!("Groww feed request could not be built");
-            AppError::Broker("Groww live data could not be started. Log in to Groww again.".into())
-        })
+        // `prepare` mints the socket token before every connect; the login
+        // token itself is never accepted by the feed server.
+        self.minted
+            .as_ref()
+            .and_then(|m| socket_request(&self.endpoints.ws_url, m, self.with_protocol))
+            .ok_or_else(|| {
+                tracing::error!("Groww feed request could not be built");
+                AppError::Broker(
+                    "Groww live data could not be started. Log in to Groww again.".into(),
+                )
+            })
     }
 
     fn on_connect_failed(&mut self, error: &str) -> bool {
