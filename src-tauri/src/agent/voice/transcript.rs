@@ -10,18 +10,9 @@
 //! session always has somewhere to be found again. Recording never fails
 //! the caller: a line that cannot be written is logged.
 //!
-//! The trail is the orders lane's (`agent::safety::audit`, in `logs.db`);
-//! it is reached through [`TranscriptAudit`], installed at startup as
-//!
-//! ```text
-//! app.agent.voice().set_transcript_audit(transcript::audit_with(|app, l| async move {
-//!     agent::safety::audit::record_transcript(
-//!         &app, l.role, &l.text, l.conversation_id, l.run_id.as_deref()).await;
-//! }));
-//! ```
-//!
-//! Until then a line is not written anywhere, and its words are never
-//! logged.
+//! The trail is `agent::safety::audit`, in `logs.db`, reached through a
+//! [`TranscriptAudit`] ([`audit_trail`] unless a test installs a spy). A
+//! line's words are never logged.
 
 use crate::agent::chat::build::whole_number;
 use crate::agent::contract::tool::Surface;
@@ -62,15 +53,19 @@ where
     )
 }
 
-/// Before the audit trail is installed: nothing is written, and the line's
-/// words stay out of the log.
-pub fn not_installed() -> TranscriptAudit {
-    audit_with(|_, line| async move {
-        tracing::debug!(
-            "A spoken line ({}, {} characters) was not recorded: the audit trail is not installed",
+/// The audit trail's writer: each line becomes a `transcript` row (tool
+/// `voice:trader` or `voice:agent`); a row that cannot be written is logged
+/// without its words.
+pub fn audit_trail() -> TranscriptAudit {
+    audit_with(|app, line| async move {
+        crate::agent::safety::audit::record_transcript(
+            &app,
             line.role,
-            line.text.chars().count()
-        );
+            &line.text,
+            line.conversation_id,
+            line.run_id.as_deref(),
+        )
+        .await;
     })
 }
 

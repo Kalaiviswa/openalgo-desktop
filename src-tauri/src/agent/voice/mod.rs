@@ -61,7 +61,7 @@ impl Default for VoiceModule {
         VoiceModule {
             windows: ApprovalWindows::default(),
             client: Mutex::new(None),
-            audit: RwLock::new(transcript::not_installed()),
+            audit: RwLock::new(transcript::audit_trail()),
             #[cfg(test)]
             sessions_url: RwLock::new(None),
         }
@@ -101,7 +101,7 @@ impl VoiceModule {
         self.audit.read().clone()
     }
 
-    /// Install the audit trail's writer (the orders lane's, a test's spy).
+    /// Install another writer for spoken lines (a test's spy).
     pub fn set_transcript_audit(&self, audit: TranscriptAudit) {
         *self.audit.write() = audit;
     }

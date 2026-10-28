@@ -336,3 +336,30 @@ async fn every_spoken_line_is_recorded_and_the_first_opens_a_thread() {
     );
     assert_ne!(anonymous.await.0, StatusCode::OK);
 }
+
+/// The voice and orders parts joined: with no spy installed, a spoken line
+/// lands in the audit trail as a `transcript` row the audit route reads.
+#[tokio::test]
+async fn a_spoken_line_reaches_the_audit_trail() {
+    let (h, _fake) = voice_harness(vec![]).await;
+    switch_on(&h).await;
+    let (s, v) = h
+        .json(
+            "POST",
+            "/agent/api/voice/transcript",
+            Some(json!({"role": "trader", "text": "How is Nifty doing?", "run_id": "r9"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    let conv = v["data"]["conversation_id"].as_i64().expect("a thread");
+    let (s, trail) = h
+        .json("GET", "/agent/api/audit?tool=voice:trader", None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", trail);
+    let rows = trail["data"].as_array().cloned().unwrap_or_default();
+    assert_eq!(rows.len(), 1, "{}", trail);
+    assert_eq!(rows[0]["phase"], "transcript", "{}", trail);
+    assert_eq!(rows[0]["conversation_id"], conv, "{}", trail);
+    assert_eq!(rows[0]["run_id"], "r9", "{}", trail);
+    assert_eq!(rows[0]["args"]["text"], "How is Nifty doing?", "{}", trail);
+}
