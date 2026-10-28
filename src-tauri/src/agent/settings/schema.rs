@@ -204,7 +204,7 @@ pub fn field_of(key: &str) -> Option<&'static Field> {
 }
 
 /// The kill switch file's name inside the app's data folder.
-pub const KILL_SWITCH_FILE_NAME: &str = "agent_kill_switch";
+pub const KILL_SWITCH_FILE_NAME: &str = crate::agent::safety::kill_switch::FILE_NAME;
 
 /// The longest system prompt override a trader may save (D-014): the
 /// built-in sections it replaces come to about 20,000 characters, and the

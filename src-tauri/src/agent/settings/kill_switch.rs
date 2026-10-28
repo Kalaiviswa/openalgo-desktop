@@ -16,7 +16,7 @@ use super::schema::{KILL_SWITCH, KILL_SWITCH_FILE};
 use super::{store, Snapshot};
 use crate::state::AppState;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// What the file says to whoever finds it.
 const FILE_NOTE: &str = "While this file exists, the OpenAlgo Agent places, modifies and cancels no orders.\nDelete it, or release the kill switch in Agent settings, to allow them again.\n";
@@ -45,34 +45,16 @@ impl KillSwitchState {
 
 /// The file's path: `~` is the trader's home, and a relative path is taken
 /// inside the app's data folder (the web resolves against its repository
-/// root), so a value typed in the app means the same wherever the app runs.
-pub fn resolve(setting: &str, data_dir: &Path) -> PathBuf {
-    let text = setting.trim();
-    let expanded = match text.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-            match std::env::home_dir() {
-                Some(home) => home.join(rest.trim_start_matches(['/', '\\'])),
-                None => PathBuf::from(text),
-            }
-        }
-        _ => PathBuf::from(text),
-    };
-    if text.is_empty() {
-        return data_dir.join(super::schema::KILL_SWITCH_FILE_NAME);
-    }
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        data_dir.join(expanded)
-    }
-}
+/// root). One rule for the panel and the order guard, so the switch the
+/// panel shows is the file the guard checks.
+pub use crate::agent::safety::kill_switch::resolve;
 
 /// Whether the switch is engaged now: the setting read fresh, and the file.
 pub fn state(app: &AppState) -> KillSwitchState {
     let snapshot = Snapshot::read(app);
     let path = resolve(snapshot.text(KILL_SWITCH_FILE), &app.data_dir);
     let by_setting = snapshot.flag(KILL_SWITCH);
-    let by_file = path.exists();
+    let by_file = crate::agent::safety::kill_switch::present(&path);
     KillSwitchState {
         engaged: by_setting || by_file,
         by_setting,
