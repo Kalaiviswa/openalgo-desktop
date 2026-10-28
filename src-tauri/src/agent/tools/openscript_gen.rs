@@ -26,13 +26,14 @@ use crate::agent::contract::tool::{
     AgentTool, Surfaces, ToolCtx, ToolGroup, ToolOutcome, ToolSpec, MAX_RESULT_CHARS,
 };
 use crate::agent::prompts::untrusted::wrap_tool_result;
+use crate::agent::safety::audit::{self, Entry, Phase};
 use crate::agent::tools::service::py_repr;
 use crate::trading::names::is_script_name;
 use crate::trading::scripts::{Replace, SaveError, Saved, StoredScript, MAX_SOURCE_BYTES};
 use async_trait::async_trait;
 use chrono_tz::Asia::Kolkata;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -280,18 +281,30 @@ fn taken(name: &str, compiled: bool) -> ToolOutcome {
     )
 }
 
-/// The save's audit rows (the web's `audited` attempt and result: the file
-/// name, the size and the replace flag, never the source text). Written to
-/// the log; the Agent's audit trail joins here when it is in the same build.
-fn audit(phase: &str, name: &str, bytes: usize, replace: bool, outcome: &str) {
-    tracing::info!(
-        "Agent audit save_openscript {}: filename={} source_bytes={} replace={} {}",
-        phase,
-        name,
-        bytes,
-        replace,
-        outcome
-    );
+/// The save's rows in the Agent's audit trail (the web's `audited` attempt
+/// and result): the file name, the size and the replace flag, never the
+/// source text.
+fn audit_entry(ctx: &ToolCtx, phase: Phase) -> Entry {
+    let mut e = Entry::new(phase, "save_openscript");
+    e.conversation_id = ctx.conversation_id;
+    e.run_id = Some(ctx.run_id.clone());
+    e
+}
+
+/// The attempt row, before the store is touched; its id for the result row.
+async fn audit_attempt(ctx: &ToolCtx, name: &str, bytes: usize, replace: bool) -> Option<i64> {
+    let mut e = audit_entry(ctx, Phase::Attempt);
+    e.args = Some(json!({"filename": name, "source_bytes": bytes, "replace": replace}));
+    audit::append(&ctx.app, e).await
+}
+
+/// The result row, naming its attempt.
+async fn audit_result(ctx: &ToolCtx, attempt_id: Option<i64>, ok: bool, response: Value) {
+    let mut e = audit_entry(ctx, Phase::Result);
+    e.attempt_id = attempt_id;
+    e.ok = Some(ok);
+    e.response = Some(response);
+    audit::append(&ctx.app, e).await;
 }
 
 async fn save(ctx: &ToolCtx, args: &Map<String, Value>) -> ToolOutcome {
@@ -306,7 +319,7 @@ async fn save(ctx: &ToolCtx, args: &Map<String, Value>) -> ToolOutcome {
     };
     let bytes = text.len();
     let replace = args.get("replace") == Some(&Value::Bool(true));
-    audit("attempt", &name, bytes, replace, "");
+    let attempt_id = audit_attempt(ctx, &name, bytes, replace).await;
     let store = ctx.app.trading.scripts.clone();
     let (file, source) = (name.clone(), text.clone());
     let rule = Replace {
@@ -324,13 +337,13 @@ async fn save(ctx: &ToolCtx, args: &Map<String, Value>) -> ToolOutcome {
             });
     match saved {
         Ok(saved) => {
-            audit(
-                "result",
-                &name,
-                bytes,
-                replace,
-                &format!("ok replaced={}", saved.replaced),
-            );
+            audit_result(
+                ctx,
+                attempt_id,
+                true,
+                json!({"file": name, "replaced": saved.replaced}),
+            )
+            .await;
             tracing::info!("Agent saved OpenScript source {}", name);
             result(
                 tool,
@@ -349,13 +362,13 @@ async fn save(ctx: &ToolCtx, args: &Map<String, Value>) -> ToolOutcome {
         }
         Err(SaveError::Taken { compiled }) => {
             let reason = if compiled { "compiled" } else { "exists" };
-            audit(
-                "result",
-                &name,
-                bytes,
-                replace,
-                &format!("refused reason={}", reason),
-            );
+            audit_result(
+                ctx,
+                attempt_id,
+                false,
+                json!({"status": "refused", "reason": reason}),
+            )
+            .await;
             taken(&name, compiled)
         }
         Err(SaveError::Refused(r)) => {
@@ -364,7 +377,13 @@ async fn save(ctx: &ToolCtx, args: &Map<String, Value>) -> ToolOutcome {
                 name,
                 r.message
             );
-            audit("result", &name, bytes, replace, "error reason=write failed");
+            audit_result(
+                ctx,
+                attempt_id,
+                false,
+                json!({"status": "error", "reason": "write failed"}),
+            )
+            .await;
             result(
                 tool,
                 &Failed {

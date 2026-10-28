@@ -216,6 +216,51 @@ async fn a_taken_name_is_refused_without_replace_and_replaced_with_it() {
     assert_eq!(fresh["replaced"], false);
 }
 
+/// The skills and orders parts joined: a save writes the web's attempt and
+/// result rows to the Agent's audit trail, the size and never the source.
+#[tokio::test]
+async fn a_save_writes_its_attempt_and_result_to_the_audit_trail() {
+    use crate::agent::safety::audit::{store, Filter};
+    let t = app();
+    let save = json!({"filename": "trail", "source": SOURCE});
+    call(&t, "save_openscript", save.clone()).await;
+    call(&t, "save_openscript", save).await;
+    let filter = Filter {
+        tool: Some("save_openscript".into()),
+        limit: 10,
+        ..Filter::default()
+    };
+    let mut rows = store::list(&t.ctx.logs.conn().unwrap(), &filter).unwrap();
+    rows.reverse();
+    let shape: Vec<(Value, Value, Value)> = rows
+        .iter()
+        .map(|r| (r["phase"].clone(), r["ok"].clone(), r["response"].clone()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (json!("attempt"), Value::Null, Value::Null),
+            (
+                json!("result"),
+                json!(true),
+                json!({"file": "trail.oscript", "replaced": false})
+            ),
+            (json!("attempt"), Value::Null, Value::Null),
+            (
+                json!("result"),
+                json!(false),
+                json!({"status": "refused", "reason": "exists"})
+            ),
+        ]
+    );
+    assert_eq!(
+        rows[0]["args"],
+        json!({"filename": "trail.oscript", "source_bytes": SOURCE.len(), "replace": false})
+    );
+    assert_eq!(rows[1]["attempt_id"], rows[0]["id"]);
+    assert!(!Value::Array(rows).to_string().contains("study("));
+}
+
 #[tokio::test]
 async fn the_schema_tells_the_model_about_replace() {
     let t = app();
