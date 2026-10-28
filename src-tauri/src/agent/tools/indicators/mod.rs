@@ -33,7 +33,7 @@ use crate::agent::indicators::{
     compute, compute_batch, describe_indicator, get_spec, list_indicators, plan_scan,
     required_bars, scan_symbol, unknown_indicator, Comparison, Json,
 };
-use crate::agent::tools::answer::label;
+use crate::agent::tools::answer::{json_result_ordered, label};
 use crate::agent::tools::market::candles::{candle_columns, candle_frame, CandleFrame};
 use crate::agent::tools::market::normalise::{
     lookback_range, normalise_interval, normalise_pair, normalise_source, today,
@@ -43,7 +43,7 @@ use crate::agent::tools::specs;
 use crate::agent::tools::values::{py_str, text, truthy, truthy_text};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use payload::{answer, fit, shared, table, trimmed, unique, Shared};
+use payload::{fit, shared, table, trimmed, unique, Shared};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -135,7 +135,7 @@ impl AgentTool for IndicatorTool {
 fn list(args: &Map<String, Value>) -> Result<ToolOutcome, ToolOutcome> {
     let raw = |key: &str| args.get(key).map(py_str).unwrap_or_default();
     let payload = list_indicators(&raw("query"), &raw("category"))?;
-    Ok(answer("list_indicators", &payload, &[]))
+    Ok(json_result_ordered("list_indicators", &payload, &[]))
 }
 
 /// `describe_indicator(name)`.
@@ -143,7 +143,7 @@ fn describe(args: &Map<String, Value>) -> Result<ToolOutcome, ToolOutcome> {
     let raw = args.get("name").map(py_str).unwrap_or_default();
     let payload = describe_indicator(&raw)?;
     let cleaned = raw.trim().to_lowercase();
-    Ok(answer(
+    Ok(json_result_ordered(
         "describe_indicator",
         &payload,
         &[label("name", &cleaned)],
@@ -328,7 +328,7 @@ async fn compute_one(
     let result = compute(&name, &data, Some(&arguments), second.as_ref(), tail).map_err(retry)?;
     let head = w.head(fetched);
     let payload = fit(|limit| table(&result, &data, limit, &head), tail as usize);
-    Ok(answer(
+    Ok(json_result_ordered(
         "compute_indicator",
         &payload,
         &[
@@ -435,7 +435,7 @@ async fn compute_many(
         },
         tail as usize,
     );
-    Ok(answer(
+    Ok(json_result_ordered(
         "compute_indicators_batch",
         &payload,
         &[
@@ -566,7 +566,7 @@ async fn scan(
     }
     let name = plan.spec.name;
     let count = found.matched.len();
-    Ok(answer(
+    Ok(json_result_ordered(
         "scan_symbols",
         &scan_payload(
             name, &condition, args, &interval, &source, &arguments, found,
