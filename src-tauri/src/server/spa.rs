@@ -91,6 +91,7 @@ pub const SPA_ROUTES: &[&str] = &[
     "/scalping",
     "/search",
     "/search/token",
+    "/sector-rotation",
     "/settings/server",
     "/setup",
     "/straddle",

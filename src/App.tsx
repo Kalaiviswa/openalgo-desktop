@@ -76,6 +76,7 @@ const IVSmile = lazy(() => import('@/pages/IVSmile'))
 const OIProfile = lazy(() => import('@/pages/OIProfile'))
 const Arbitrage = lazy(() => import('@/pages/Arbitrage'))
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'))
+const SectorRotation = lazy(() => import('@/pages/SectorRotation'))
 const StrategyPortfolio = lazy(() => import('@/pages/StrategyPortfolio'))
 
 // Desktop: the Python Strategy Host (/python) and the Agent (/agent, /agent/config)
@@ -213,6 +214,7 @@ function App() {
                 <Route path="/oiprofile" element={<OIProfile />} />
                 <Route path="/arbitrage" element={<Arbitrage />} />
                 <Route path="/strategybuilder" element={<StrategyBuilder />} />
+                <Route path="/sector-rotation" element={<SectorRotation />} />
                 <Route path="/strategybuilder/portfolio" element={<StrategyPortfolio />} />
                 {/* Legacy /tools/strategy paths — redirect to the new route. */}
                 <Route

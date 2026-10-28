@@ -1,10 +1,11 @@
 {
-  "source": "OpenAlgo web restx_api at 8a1461a0c 2026-10-01",
+  "source": "OpenAlgo web restx_api at b7cdc028e 2026-10-27",
   "generated_by": "tests/fixtures/web/capture/route_inventory.py",
   "routes": [
     "GET /api/v1/chart",
     "GET /api/v1/instruments",
     "GET /api/v1/portfolio/benchmarks",
+    "GET /api/v1/sectorrotation/options",
     "GET /api/v1/sip/frequencies",
     "GET /api/v1/telegram/config",
     "GET /api/v1/telegram/preferences",
@@ -52,6 +53,7 @@
     "POST /api/v1/positionbook",
     "POST /api/v1/quotes",
     "POST /api/v1/search",
+    "POST /api/v1/sectorrotation",
     "POST /api/v1/sip/backtest",
     "POST /api/v1/splitorder",
     "POST /api/v1/strategy/close_all",

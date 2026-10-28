@@ -76,6 +76,7 @@ pub mod sandbox_feed;
 pub mod schema;
 pub mod schemas;
 pub mod search_ui_service;
+pub mod sector_rotation_service;
 pub mod security_service;
 pub mod session_account;
 pub mod settings_service;

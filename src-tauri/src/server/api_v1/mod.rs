@@ -19,6 +19,7 @@
 //! | `notify.rs` | telegram/notify, whatsapp/notify |
 //! | `telegram.rs` | telegram/config, start, stop, users, broadcast, stats, preferences, webhook |
 //! | `strategy.rs` | strategy/* |
+//! | `sector_rotation.rs` | sectorrotation, sectorrotation/options |
 //!
 //! `market/holidays` and `market/timings` are served by
 //! `crate::server::routes::market_calendar` and mounted here. Not served:
@@ -33,6 +34,7 @@ mod gtt;
 mod notify;
 mod options;
 mod orders;
+mod sector_rotation;
 mod strategy;
 mod telegram;
 
@@ -393,4 +395,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/v1/strategy/runs", post(strategy::runs))
         .route("/api/v1/strategy/orders", post(strategy::orders))
         .route("/api/v1/strategy/events", post(strategy::events))
+        // Sector Rotation (web restx_api/sector_rotation.py)
+        .route("/api/v1/sectorrotation", post(sector_rotation::rotation))
+        .route("/api/v1/sectorrotation/", post(sector_rotation::rotation))
+        .route(
+            "/api/v1/sectorrotation/options",
+            get(sector_rotation::options),
+        )
 }
