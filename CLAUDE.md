@@ -828,6 +828,10 @@ Every flaky test found so far was a race, not a slow machine:
 - **Fix the product when the race is real.** A Historify retry was claimed
   after its first `.await`, so two concurrent retries both ran; the fix
   claimed it before the await.
+- A test on a paused tokio clock that opens a real connection can see a
+  timer (the connect timeout) fire while the real connect is still pending:
+  the clock jumps whenever the runtime is idle. Pause once the connection
+  is open (`a_broker_that_never_answers_times_out`).
 - Rate-limit and expiry tests use the limiter's pinnable clock, not the wall
   clock.
 - Descriptor checks account for database pool growth: r2d2 refills `min_idle`
