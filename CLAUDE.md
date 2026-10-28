@@ -1423,6 +1423,21 @@ and add each new one here.
   field into memory, a stray secret included (PROD-SEC-01).
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
+- **The daily secret scan reads every branch on GitHub, not only master.**
+  `security.yml` runs `gitleaks git` over the full history of all refs with
+  master's `.github/gitleaks.toml`, so a fake value pushed on any branch
+  raises Code Scanning alerts against master until its allowlist entry is on
+  master. In 1.0.4 the unmerged Agent branches raised 25 that way.
+  - Prefer test values gitleaks does not match: the placeholders above, or a
+    fake assembled at runtime (`["a1b2c3", "d4e5f6"].concat()`).
+  - If an allowlist entry is unavoidable (vendored third-party test data, a
+    value already in pushed history), land it on master in its own commit
+    before pushing the branch that needs it, limited to the exact path and
+    value pattern.
+  - Before every push, run `gitleaks git --config .github/gitleaks.toml
+    --redact .` in the worktree; it scans all local refs, as the daily scan
+    does. A finding only in `refs/original` (left by a history rewrite) is
+    local: delete that ref once the rewritten branch is pushed.
 
 ### Working with several agents
 
