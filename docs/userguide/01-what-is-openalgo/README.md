@@ -173,7 +173,7 @@ webhooks).
 | Users and brokers | One user, one broker per instance | One user; keys for many brokers, one logged in at a time |
 | Raspberry Pi | Supported | Not supported: use OpenAlgo web |
 | Runs | All day on a server | While the app is open and you are signed in |
-| Python Strategy Host, Flow, pandas backtesters, the Agent | Included | Not included in this version |
+| Python Strategy Host, Flow, pandas backtesters | Included | Not included in this version (Flow is planned for 1.0.5) |
 
 Everything that talks to OpenAlgo web (the Python SDK, TradingView, Amibroker,
 Chartink, GoCharting, Excel, MCP clients) talks to OpenAlgo Desktop the same

@@ -170,12 +170,11 @@ differently, it is on purpose:
 - The Python Strategy Host. Python strategies still work as ordinary scripts
   using the OpenAlgo Python SDK against the desktop's API. The Telegram bot
   has no `/stoppython`, and its `/closeall` closes positions only.
-- The Agent: the `/agent` page, Agent Config under Admin, and the Assistant
-  panel in the `/trading` terminal. To use an AI assistant with your account,
-  connect Claude Desktop or Claude Code through MCP (see
-  [Connecting Claude Desktop and Claude Code](mcp.md)).
-- Flow, and the pandas backtesters (Portfolio Backtester, SIP Backtester,
-  Portfolio Analyzer).
+- Python strategies written by the Agent: the desktop's Agent writes
+  OpenScript instead, and does not offer models on Amazon Bedrock,
+  SageMaker or Google Vertex AI.
+- Flow (planned for 1.0.5), and the pandas backtesters (Portfolio
+  Backtester, SIP Backtester, Portfolio Analyzer).
 - The Socket.IO `/market` namespace of the web's WebSocket example page.
   It needs a signed-in browser session and no SDK, trading platform or
   page of the app uses it; the market data feed on port 8765 serves the

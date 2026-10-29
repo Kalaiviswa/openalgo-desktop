@@ -16,9 +16,8 @@ terminal's own toolbar, which still carries the broker, the **Live** or
 The chart loads history with your API key. If there is none, the page says so
 and links to the API Key page.
 
-In the desktop there is no chart **Assistant**: the Agent is not in this
-version. To use an AI assistant with your account, connect Claude Desktop or
-Claude Code through [MCP](../../user/mcp.md).
+The **Assistant** on the right rail is the Agent's chat about the chart in
+front of you; see [The Chart Assistant](#the-chart-assistant).
 
 ## The layout
 
@@ -27,7 +26,7 @@ Claude Code through [MCP](../../user/mcp.md).
 | Top toolbar | Symbol, interval, chart type, product, quantity, indicators, comparisons, templates, layout, chart sync, workspaces, **One-Click**, replay, undo and redo, full screen, camera and the account controls |
 | Left rail | Drawing tools in groups, magnet, keep tool selected, undo, redo, delete |
 | Centre | The chart grid: **Single**, **2 columns**, **2 rows**, **1 + 2**, **2 × 2**, **3 × 2** or **4 × 2** (up to eight charts) |
-| Right panel | **Watchlist**, **Option chain**, **Objects**, **Alerts**, **Data window**, **Scripts**, **Backtest** and **Strategies**, opened from the right rail |
+| Right panel | **Watchlist**, **Option chain**, **Objects**, **Alerts**, **Data window**, **Scripts**, **Backtest**, **Strategies** and **Assistant**, opened from the right rail |
 | Bottom dock | **Orders**, **Positions**, **Trades** and **GTT** across every symbol |
 
 One toolbar serves the whole grid. Click a chart (or use the chart selector)
@@ -270,6 +269,32 @@ runs need you to sign in and log in to your broker first).
 
 Custom chart indicators written in JavaScript load from the `indicators`
 folder of your data folder.
+
+## The Chart Assistant
+
+**Assistant**, last on the right rail, opens a chat that reads the chart you
+are looking at: its symbol, interval, chart type, visible bars, indicators and
+your own drawings. It can mark the chart up with levels, trend lines and
+zones, find patterns, and add or remove indicators. It never changes the
+chart's symbol, and its markup lives in its own groups, so clearing what it
+drew never removes a drawing of yours. The chips above the box fill in a
+question; they do not send it.
+
+**Orders.** It proposes orders only when **Allow the agent to place, modify
+and cancel orders** is on in **Admin**, **Agent Config**, the same switch the
+`/agent` page uses. Every order it proposes appears as an approval card that
+states the order, and nothing is sent until you choose **Approve**; the
+Trading safety limits and the kill switch on Agent Config still apply after
+that. In analyzer mode the order goes to the sandbox, and in Semi-Auto it
+waits in the Action Center.
+
+**OpenScript.** Ask it to write a study or strategy and it shows you the
+source, then saves it to your scripts once you approve, never over a compiled
+script. It is saved as source only: open it in **Scripts**, where it compiles
+and plots, and save it there once the console is clean before you run it as
+a strategy.
+
+It needs a model set up first, in **Admin**, **Agent Config**.
 
 ## What is remembered
 
