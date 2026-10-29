@@ -1,10 +1,10 @@
 /**
  * Desktop: every broker OpenAlgo Desktop signs in to, with the name the FAQ
- * shows. The web's FAQ says 36 broker plugins and leaves Rupeezy out,
- * although the web supports it (`broker/rupeezy`); the FAQ here takes its
- * count and its list from this table, and `brokerCatalog.test.ts` fails when
- * the table and the server's catalogue (`src-tauri/src/brokers/catalog.rs`,
- * `ALL_BROKERS`) differ (docs-39).
+ * shows. The web's FAQ says 36 broker plugins and leaves Rupeezy and Sahi
+ * out, although the web supports both (`broker/rupeezy`, `broker/sahi`); the
+ * FAQ here takes its count and its list from this table, and
+ * `brokerCatalog.test.ts` fails when the table and the server's catalogue
+ * (`src-tauri/src/brokers/catalog.rs`, `ALL_BROKERS`) differ (docs-39).
  */
 export interface SupportedBroker {
   /** The catalogue id, as in `/<id>/callback`. */

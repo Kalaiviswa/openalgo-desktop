@@ -241,6 +241,7 @@ All 38 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto.
 - Pocketful
 - RMoney
 - Rupeezy
+- Sahi
 - Samco
 - Shoonya
 - Tradejini

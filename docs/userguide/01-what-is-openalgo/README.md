@@ -112,9 +112,9 @@ and Delta Exchange (crypto):
 | Ibulls | IIFL | IIFL Capital | IndMoney |
 | JainamXts | Kotak Securities | Motilal Oswal | mStock by Mirae Asset |
 | Nubra | Paytm Money | Pocketful | RMoney |
-| Rupeezy | Samco | Shoonya | Tradejini |
-| TradeSmart | Upstox | Wisdom Capital | Zebu |
-| Zerodha | | | |
+| Rupeezy | Sahi | Samco | Shoonya |
+| Tradejini | TradeSmart | Upstox | Wisdom Capital |
+| Zebu | Zerodha | | |
 
 Exchanges use OpenAlgo's codes: `NSE` and `BSE` (equity), `NFO` and `BFO`
 (F&O), `CDS` and `BCD` (currency), `MCX` and `NCDEX` (commodity), the index
