@@ -229,7 +229,8 @@ pub fn parse(text: &str) -> Result<Vec<SymbolData>> {
         match row(&cols, &get) {
             Row::Skip => {}
             Row::BadExpiry => unreadable_expiry += 1,
-            Row::Ok(r) => {
+            Row::Ok(boxed) => {
+                let r = *boxed;
                 let id = get(cols.id).parse::<i64>().unwrap_or(i64::MAX);
                 let key = (r.symbol.clone(), r.exchange.clone());
                 if best.get(&key).is_none_or(|(old, _)| id < *old) {
@@ -250,7 +251,8 @@ pub fn parse(text: &str) -> Result<Vec<SymbolData>> {
 }
 
 enum Row {
-    Ok(SymbolData),
+    // Boxed: a master row is far larger than the other variants.
+    Ok(Box<SymbolData>),
     Skip,
     BadExpiry,
 }
@@ -309,7 +311,7 @@ fn row<'a>(c: &Cols, get: &dyn Fn(usize) -> &'a str) -> Row {
     if r.symbol.is_empty() || r.brsymbol.is_empty() {
         return Row::Skip;
     }
-    Row::Ok(r)
+    Row::Ok(Box::new(r))
 }
 
 /// Sahi drops the `-EQ` suffix on NSE but keeps other series
