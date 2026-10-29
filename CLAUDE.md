@@ -543,6 +543,13 @@ Decided:
     desktop routes it there too (`providers::target::request_adapter`).
     Check a provider change with a chat turn that calls a tool, not only
     with Test.
+  - **genai treats a tool by its name, not only its type.** Its Anthropic
+    and OpenAI Responses adapters sent any tool named `web_search` as the
+    provider's own paid search and dropped our schema, so the Agent's search
+    left the trader's provider and the web-search boundary. Patched in the
+    vendored crate (`vendor/genai-0.7.1/VENDORED.md`, change 3). After a
+    genai upgrade, rerun `agent::run::tests::a_tool_named_web_search_is_sent_as_ours`
+    and check the request body a provider receives, not only the reply.
 
 ## Testing
 

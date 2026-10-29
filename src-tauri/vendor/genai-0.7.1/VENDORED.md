@@ -1,9 +1,9 @@
 # genai 0.7.1, vendored
 
 This is the crates.io source of genai 0.7.1 (the Agent's provider layer),
-with two local changes. `src-tauri/Cargo.toml` points `genai` here with
+with three local changes. `src-tauri/Cargo.toml` points `genai` here with
 `[patch.crates-io]`; drop the patch and this folder when a genai release
-needs neither change.
+needs none of them.
 
 1. `Cargo.toml`: `serde_json` without the `preserve_order` feature. genai
    turns that feature on for every crate in the build, which changes the key
@@ -22,3 +22,15 @@ needs neither change.
    as configured and no effort or thinking field, as the web (LiteLLM)
    sends it; with an effort set, nothing changes. genai's own tests of the
    suffix no longer hold and are not run here.
+
+3. A custom tool named `web_search` stays a custom tool. The Anthropic
+   (`src/adapter/adapters/anthropic/adapter_shared.rs`) and OpenAI Responses
+   (`src/adapter/adapters/openai_resp/adapter_impl.rs`) adapters turned any
+   tool with that name into the provider's own server-side search
+   (`web_search_20250305`, `{"type": "web_search"}`) and dropped its schema,
+   so the Agent's `web_search` (the web's tool name) ran as Anthropic's or
+   OpenAI's paid search, outside the trader's chosen provider and the
+   web-search boundary, and on Anthropic the reply then failed to parse
+   (`server_tool_use`). Only `ToolName::WebSearch`, genai's built-in tool, is
+   the provider's search now. Pinned by
+   `agent::run::tests::a_tool_named_web_search_is_sent_as_ours`.

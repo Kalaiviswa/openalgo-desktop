@@ -263,3 +263,51 @@ async fn a_reasoning_gpt_with_tools_is_asked_on_the_responses_api() {
     assert_eq!(bodies[0]["tools"][0]["name"], "get_quote");
     assert_eq!(bodies[1]["reasoning_effort"], "medium");
 }
+
+/// The Agent's own `web_search` (the web's tool name) goes out as a
+/// function with its schema on every provider format. genai turned a tool
+/// with that name into Anthropic's and OpenAI's own server-side search
+/// (VENDORED.md, change 3): the search left the trader's chosen provider
+/// and the web-search boundary, and an Anthropic reply then failed.
+#[tokio::test]
+async fn a_tool_named_web_search_is_sent_as_ours() {
+    use genai::adapter::AdapterKind as A;
+    use genai::chat::Tool;
+    let fake = FakeProvider::start(vec![]).await;
+    let client = ModelClient::new().unwrap();
+    let schema = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+    let mut problems = Vec::new();
+    for (n, adapter) in [A::OpenAI, A::OpenAIResp, A::Anthropic, A::Gemini]
+        .into_iter()
+        .enumerate()
+    {
+        let model = fake_model(&fake.endpoint(), adapter);
+        let tool = Tool::new("web_search")
+            .with_description("Search the web.")
+            .with_schema(schema.clone());
+        let request = ChatRequest::from_user("search").with_tools(vec![tool]);
+        if let Ok(resp) = client.stream(&model, request, None).await {
+            let mut stream = resp.stream;
+            while let Some(Ok(_)) = stream.next().await {}
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fake.wait_for_requests(n + 1),
+        )
+        .await
+        .expect("a request");
+        let tools = fake.sent()[n]["tools"].to_string();
+        let ours = tools.contains("\"web_search\"") && tools.contains("\"query\"");
+        let builtin = [
+            "web_search_20250305",
+            "{\"type\":\"web_search\"}",
+            "googleSearch",
+        ]
+        .iter()
+        .any(|b| tools.contains(b));
+        if !ours || builtin {
+            problems.push(format!("{:?}: {}", adapter, tools));
+        }
+    }
+    assert!(problems.is_empty(), "{:#?}", problems);
+}

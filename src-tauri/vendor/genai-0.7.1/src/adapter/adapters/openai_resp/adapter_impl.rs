@@ -693,6 +693,9 @@ impl OpenAIRespAdapter {
 			..
 		} = tool;
 
+		// OpenAlgo Desktop (VENDORED.md, change 3): only the built-in tool is the
+		// provider's search; a custom tool named `web_search` stays a function.
+		let builtin_web_search = matches!(name, ToolName::WebSearch);
 		let name = match name {
 			ToolName::WebSearch => "web_search".to_string(),
 			ToolName::Custom(name) => name,
@@ -707,7 +710,7 @@ impl OpenAIRespAdapter {
 			})
 		} else {
 			match name.as_ref() {
-				"web_search" => {
+				"web_search" if builtin_web_search => {
 					let mut tool_value = json!({"type": "web_search"});
 					match config {
 						Some(ToolConfig::WebSearch(_ws_config)) => {
