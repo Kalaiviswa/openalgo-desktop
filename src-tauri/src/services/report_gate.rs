@@ -1,5 +1,6 @@
-//! The log reports (traffic, order, health, analyzer and latency logs) are
-//! built a few at a time. Each one reads and formats thousands of rows on
+//! The log reports (traffic, order, health, analyzer and latency logs, and
+//! the Telegram and WhatsApp bots' command statistics) are built a few at
+//! a time. Each one reads and formats thousands of rows on
 //! a blocking thread, which keeps a core busy for its whole build. Sixteen
 //! at once (two tabs opening every report page) took every core of a
 //! three-core machine, and the async worker that carries the feed and the

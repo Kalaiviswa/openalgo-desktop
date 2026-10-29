@@ -252,13 +252,14 @@ pub async fn send_message(State(ctx): Ctx, User(u): User, body: JsonBody) -> Res
 }
 
 /// A page's answer read on the blocking pool (the users and the command
-/// statistics, over a command log kept forever as on the web); `None`
-/// when the bot settings could not be read.
+/// statistics, over a command log kept forever as on the web), a report
+/// at a time ([`AppState::report`]); `None` when the bot settings could
+/// not be read.
 async fn read_page(
     ctx: &Arc<AppState>,
     read: impl FnOnce(&AppState) -> Option<Value> + Send + 'static,
 ) -> Response {
-    match ctx.blocking(move |c| Ok(read(c))).await {
+    match ctx.report(move |c| Ok(read(c))).await {
         Ok(Some(v)) => ok(v),
         Ok(None) => config_unreadable(),
         Err(e) => {
