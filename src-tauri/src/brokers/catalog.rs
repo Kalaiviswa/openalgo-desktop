@@ -1048,7 +1048,14 @@ mod tests {
         for b in ["shoonya", "zebu", "tradesmart", "rmoney"] {
             assert_eq!(sign_in(b), SignIn::Redirect, "{}", b);
         }
-        for b in ["fivepaisaxts", "jainamxts", "ibulls", "iifl", "wisdom"] {
+        for b in [
+            "fivepaisaxts",
+            "jainamxts",
+            "ibulls",
+            "iifl",
+            "sahi",
+            "wisdom",
+        ] {
             assert_eq!(sign_in(b), SignIn::SavedKeys, "{}", b);
         }
         assert_eq!(sign_in("deltaexchange"), SignIn::SavedKeys);
@@ -1094,7 +1101,7 @@ mod tests {
 
     #[test]
     fn catalogue_has_all_web_brokers() {
-        assert_eq!(ALL_BROKERS.len(), 37);
+        assert_eq!(ALL_BROKERS.len(), 38);
         assert_eq!(auth_type("angel"), AuthType::Form);
         assert_eq!(auth_type("zerodha"), AuthType::OAuth);
     }

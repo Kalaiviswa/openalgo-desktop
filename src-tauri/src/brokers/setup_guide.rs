@@ -668,7 +668,7 @@ mod tests {
     /// fit how it signs in.
     #[test]
     fn every_broker_has_help_consistent_with_its_sign_in() {
-        assert_eq!(ALL_BROKERS.len(), 37);
+        assert_eq!(ALL_BROKERS.len(), 38);
         let mut names = std::collections::HashSet::new();
         for b in ALL_BROKERS {
             let g = guide(b);

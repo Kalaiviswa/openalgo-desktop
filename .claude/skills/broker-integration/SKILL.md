@@ -112,6 +112,16 @@ holds a `Secret`; read it with `expose()` only where the request is built.
      in-app form fields and which `BrokerCredentials` slot each fills).
 3. The redirect URL stays byte-identical to the web:
    `http://127.0.0.1:5000/<broker>/callback` (`ServerConfig::redirect_url_for`).
+4. A new catalogue id changes the broker count, which three tests pin: the
+   `ALL_BROKERS.len()` checks in `catalog.rs` and `setup_guide.rs`, and the
+   `supported_brokers` answer recorded in
+   `tests/fixtures/web/websocket/01_connect_auth_subscribe_flow.jsonl`
+   (the feed server answers with `ALL_BROKERS`): add the id there by hand
+   in the web's `VALID_BROKERS` order and note it in
+   `tests/fixtures/web/INDEX.md`. The README, the guides and `CLAUDE.md`
+   give the count too (`src/lib/brokerCatalog.test.ts` checks them), and
+   the README and the user guide list every broker by name. Sahi's PR
+   missed the three tests.
 
 ## 4. Symbols: every book returns OpenAlgo symbols
 
