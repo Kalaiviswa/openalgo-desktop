@@ -11,11 +11,17 @@
 //!   last quantity, average price or total buy and sell quantity: those stay
 //!   0, as on the web, never derived.
 //! * The server pings every 30 s and closes with 4408 when no pong comes;
-//!   tungstenite answers its pings, so the feed sends no heartbeat.
-//! * Close codes (web `sahi_websocket.py`): 4401 token expired and 4403
-//!   forbidden end the session until the trader logs in again; 4408 ping
-//!   timeout, 4409 slow consumer and 4429 too many connections reconnect
-//!   with the manager's backoff.
+//!   tungstenite answers its pings, so the feed sends no heartbeat. The
+//!   pings also keep the manager's stall watchdog quiet.
+//! * A token Sahi no longer accepts (expired, or its key revoked) is
+//!   refused at the upgrade with HTTP 401 or 403 (docs.sahi.com), which
+//!   stops the feed until the trader logs in again. A socket Sahi closes
+//!   (4401 or 4403 for a token revoked mid-session, 4408 ping timeout,
+//!   4429 too many connections) is reconnected with the manager's capped
+//!   backoff, since the manager does not read close codes; after a
+//!   revocation that next upgrade is the 401 or 403 that stops it. The web
+//!   (`sahi_websocket.py`) stops on the close code itself and waits 60 to
+//!   300 s after a 4429.
 
 mod proto;
 #[cfg(test)]
@@ -103,7 +109,8 @@ pub(crate) fn rupees(paise: i64) -> f64 {
     paise as f64 / 100.0
 }
 
-/// Whether a close code or handshake status means the token is dead.
+/// Whether a handshake status (or, should the manager pass one, a close
+/// code) means the token is dead.
 pub(crate) fn is_auth_close(code: u16) -> bool {
     matches!(code, 401 | 403 | CLOSE_TOKEN_EXPIRED | CLOSE_FORBIDDEN)
 }

@@ -234,6 +234,18 @@ account:
 6. The feed: one JSON subscribe per ticker, mode replaced by re-subscribing, binary packet layout, protocol pings kept alive, a 401 handshake when the token expires.
 7. GTT OCO with `product`, and modify by leg id with a trailing stop.
 
+### Sahi live checks
+
+From PR #213 (Sahi, the desktop port of web openalgo#2320), which was built
+without a Sahi account, against docs.sahi.com and recorded shapes:
+
+1. Sign-in with an approved key, and the answers for a key not approved today (403 `Forbidden`) and a locked account; that `/v1/profile` `user_id` is the account id the session records.
+2. The static IP: orders from an unregistered address are refused with 403 `IP_NOT_ALLOWED` and the trader reads the static-IP message; the address that counts is the computer's public egress address.
+3. Orders on each segment's products (NSE C and I, BSE C and I, NFO and BFO M and I), MKT and SL-MKT sent with price 0 and converted by Sahi to protected limits (the book then shows LMT); a quantity above the freeze quantity is refused (Sahi does not slice); whether `AwaitingTrigger` ever appears as an order status.
+4. The trade book, read as one call per filled order, against Sahi's per-day budgets (order book, order detail and trades share 10,000 reads a day) with the order reconciler's polling.
+5. Positions and holdings valued at `/v1/marketdata/ltp`; funds against Sahi's own figures (`option_premium.paid` is a net account figure).
+6. The feed: the Bearer upgrade with a User-Agent, a 401 or 403 at the upgrade once the token is revoked (the docs say so), mode changes in place, and the 1000-instrument cap per connection.
+
 ## Checking the script itself
 
 The script has a self-test that runs every step against a fake app on
