@@ -1,0 +1,52 @@
+{
+  "orders": [
+    {
+      "order_id": "26101900133912345678",
+      "exchange_order_id": "1300000123456789",
+      "exchange_segment": "NSE",
+      "symbol": "M&M",
+      "txn_type": "B",
+      "order_type": "LMT",
+      "product": "I",
+      "validity": "DAY",
+      "qty": 10,
+      "disclosed_qty": 0,
+      "filled_qty": 4,
+      "price": 250000,
+      "trigger_price": 0,
+      "avg_price": 249975,
+      "status": "OpenPartial",
+      "rejection_reason": null,
+      "created_at": 1747798201123,
+      "placed_at": 1747798201456,
+      "completed_at": null,
+      "cancelled_at": null,
+      "rejected_at": null,
+      "last_modified_at": 1747798202789
+    },
+    {
+      "order_id": "26101900133912345679",
+      "exchange_order_id": null,
+      "exchange_segment": "NFO",
+      "symbol": "NIFTY27OCT26C25000",
+      "txn_type": "S",
+      "order_type": "SL-MKT",
+      "product": "M",
+      "validity": "DAY",
+      "qty": 65,
+      "disclosed_qty": 0,
+      "filled_qty": 0,
+      "price": 0,
+      "trigger_price": 12050,
+      "avg_price": 0,
+      "status": "Rejected",
+      "rejection_reason": "Insufficient margin",
+      "created_at": 1747798301000,
+      "placed_at": null,
+      "completed_at": null,
+      "cancelled_at": null,
+      "rejected_at": 1747798301500,
+      "last_modified_at": 1747798301500
+    }
+  ]
+}

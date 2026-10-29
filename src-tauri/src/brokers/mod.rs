@@ -40,6 +40,7 @@ pub mod paytm;
 pub mod pocketful;
 pub mod rmoney;
 pub mod rupeezy;
+pub mod sahi;
 pub mod samco;
 // CI's native E2E test build (src/e2e.rs) and the tests of it.
 #[cfg(any(test, feature = "test-support"))]
@@ -694,6 +695,7 @@ impl BrokerRegistry {
             Arc::new(hdfcsky::HdfcSkyBroker::new(symbols.clone())),
             Arc::new(hdfcsecurities::HdfcSecuritiesBroker::new(symbols.clone())),
             Arc::new(rupeezy::RupeezyBroker::new(symbols.clone())),
+            Arc::new(sahi::SahiBroker::new(symbols.clone())),
             Arc::new(samco::SamcoBroker::new(symbols.clone())),
             Arc::new(aliceblue::AliceBlueBroker::new(symbols.clone())),
             Arc::new(definedge::DefinedgeBroker::new(symbols.clone())),
@@ -809,6 +811,7 @@ mod tests {
                 "pocketful",
                 "rmoney",
                 "rupeezy",
+                "sahi",
                 "samco",
                 "shoonya",
                 "tradejini",

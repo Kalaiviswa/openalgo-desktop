@@ -183,6 +183,7 @@ A change to the broker's adapter, or a broker API change, needs a new run.
 | pocketful | | | | pending | |
 | rmoney | | | | pending | |
 | rupeezy | | | | pending (adapter in PR #137) | |
+| sahi | | | | pending | |
 | samco | | | | pending | |
 | shoonya | | | | pending | |
 | tradejini | | | | pending | |

@@ -100,7 +100,7 @@ opens in a browser on the same computer at `http://127.0.0.1:5000`.
 
 ## Brokers and exchanges
 
-OpenAlgo Desktop supports all 37 brokers of OpenAlgo web, including Rupeezy
+OpenAlgo Desktop supports all 38 brokers of OpenAlgo web, including Rupeezy
 and Delta Exchange (crypto):
 
 | | | | |

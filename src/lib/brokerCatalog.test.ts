@@ -37,7 +37,7 @@ describe('the broker catalogue the FAQ shows', () => {
 
   it('names Rupeezy and reads as one list', () => {
     const sentence = brokerNamesSentence()
-    expect(sentence).toContain('RMoney, Rupeezy, Samco')
+    expect(sentence).toContain('RMoney, Rupeezy, Sahi, Samco')
     expect(sentence.startsWith('5 Paisa, 5 Paisa (XTS), ')).toBe(true)
     expect(sentence.endsWith(', Zebu and Zerodha')).toBe(true)
   })

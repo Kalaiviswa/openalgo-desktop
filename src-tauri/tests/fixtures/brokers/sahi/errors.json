@@ -1,0 +1,9 @@
+{
+  "ip_not_allowed": {"code": "IP_NOT_ALLOWED", "message": "Request IP is not on the allowlist"},
+  "unauthorized": {"code": "UNAUTHORIZED", "message": "Token expired"},
+  "forbidden": {"code": "FORBIDDEN", "message": "Missing scope orders.write"},
+  "validation": {"code": "VALIDATION_FAILED", "message": "qty must not exceed the exchange freeze quantity of 1800 for this instrument"},
+  "maintenance": {"code": "UNDER_MAINTENANCE", "message": "Margin service under maintenance"},
+  "login_forbidden": {"code": "Forbidden", "message": "API key not approved for today"},
+  "login_locked": {"code": "Locked", "message": "Account locked"}
+}
