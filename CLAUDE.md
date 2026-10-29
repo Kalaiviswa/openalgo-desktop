@@ -478,9 +478,11 @@ Out of scope, by the maintainer's decision (2026-10-03), so the desktop needs
 no Python runtime:
 
 - Python Strategy Host (`/python`)
-- Flow (`/flow`)
 - pandas-based backtesters: Portfolio Backtester, SIP Backtester, Portfolio
   Analyzer
+
+Flow (`/flow`) was on this list until 2026-10-29; it is now planned for 1.0.5
+(see Decided).
 
 **Removed from this version** (maintainer, 2026-10-12): the Python Strategy
 Host. No code for it ships, and nothing in the UI leads to it: no route,
@@ -489,6 +491,18 @@ unknown page (the app's 404 page) and its API paths are the JSON 404.
 
 Decided:
 
+- **Flow comes in 1.0.5, native Rust** (maintainer, 2026-10-29; 1.0.4 ships
+  first). Parity with the web's `/flow`: the editor, every node type, the
+  workflow validator, the scheduler, the price and order-update monitors,
+  webhooks and the import format (`docs/prompt/flow-import-format.md`), plus
+  the Agent's Flow tools (`flow_gen`) and the `flow-builder` skill. The
+  Indicator node runs on `oa_core`, the Rust core of the openalgo library
+  that `agent/indicators` already uses (the same 127 indicators as the web's
+  `openalgo.ta`), so Flow needs no Python. The web computes that node in
+  `services/indicator_service.py` (nested series, the fixed-length tail,
+  bar offsets), which is a different dispatcher from the Agent's: port it,
+  do not reuse the Agent's shape. Until Flow lands it has no route, menu
+  entry or docs claiming it.
 - **OpenScript** runs on the existing TypeScript engine (`openalgo-script`).
   Backtests already run in a Web Worker. Live runs use the same engine in a
   hidden Tauri window: the app reads new bars every 10 s (`bar_poll`) and
@@ -520,8 +534,8 @@ Decided:
   surfaces, approval list) and reach OpenAlgo through the in-process
   `/api/v1` path MCP uses (`agent/tools/service.rs`). The stream frames and
   the system prompt are pinned byte for byte against fixtures recorded from
-  the web (`scripts/agent/`). Flow (`flow_gen`) and Python strategy
-  generation (`strategy_gen`) are not in this version.
+  the web (`scripts/agent/`). Flow (`flow_gen`) comes with Flow in
+  1.0.5; Python strategy generation (`strategy_gen`) stays out.
   - **A model that passes its Test can still fail every chat turn.** The
     Test sends no tools (as the web's does), and OpenAI refuses tools on
     Chat Completions while a GPT-5.4 or later model reasons, which it does
