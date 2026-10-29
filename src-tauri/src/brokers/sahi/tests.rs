@@ -270,6 +270,9 @@ fn status_map() {
     assert_eq!(order_status("Completed"), "complete");
     assert_eq!(order_status("PartialFilled"), "cancelled");
     assert_eq!(order_status("Open"), "open");
+    // Named in Sahi's docs outside their status table: an OpenAlgo status,
+    // never an unknown word.
+    assert_eq!(order_status("AwaitingTrigger"), "trigger pending");
     assert!(is_working("OpenPartial") && !is_working("PartialFilled"));
 }
 

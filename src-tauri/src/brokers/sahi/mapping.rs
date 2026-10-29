@@ -140,9 +140,13 @@ pub fn segment(exchange: Exchange) -> Result<&'static str> {
 /// Sahi order status to OpenAlgo's (web `ORDER_STATUS_MAP`). PartialFilled
 /// is terminal (the remainder was cancelled or an IOC expired), so it reads
 /// as cancelled; a stop order waiting for its trigger is reported as Open.
+/// Sahi's docs also name `AwaitingTrigger` (an order not yet at the
+/// exchange) outside their status table; it reads as OpenAlgo's `trigger
+/// pending` rather than an unknown word (the web lower-cases it).
 pub fn order_status(status: &str) -> String {
     match status {
         "Open" | "OpenPartial" => "open".to_string(),
+        "AwaitingTrigger" => "trigger pending".to_string(),
         "PartialFilled" | "Cancelled" => "cancelled".to_string(),
         "Completed" => "complete".to_string(),
         "Rejected" => "rejected".to_string(),
