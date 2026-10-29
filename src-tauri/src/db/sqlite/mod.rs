@@ -188,6 +188,21 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// transactions, the master replacement's (`master_swap`), kept missing
 /// the pauses between them (DB-01). `attempt` is 0 on the first call of
 /// each wait, on the thread running the statement.
+#[cfg(test)]
+thread_local! {
+    /// The longest a statement on this thread has waited for another
+    /// writer's lock, since [`take_lock_wait`] last read it.
+    static LOCK_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// How long this thread's statements waited for another writer's lock at
+/// most, since the last call: the wait alone, without the statement's own
+/// work or its commit.
+#[cfg(test)]
+pub(crate) fn take_lock_wait() -> Duration {
+    LOCK_WAIT.with(|w| w.replace(Duration::ZERO))
+}
+
 fn retry_busy(attempt: i32) -> bool {
     thread_local! {
         static WAITING_SINCE: std::cell::Cell<Option<std::time::Instant>> =
@@ -200,6 +215,8 @@ fn retry_busy(attempt: i32) -> bool {
         }
         s.get().unwrap_or(now)
     });
+    #[cfg(test)]
+    LOCK_WAIT.with(|w| w.set(w.get().max(now.duration_since(since))));
     if now.duration_since(since) >= BUSY_TIMEOUT {
         return false;
     }
