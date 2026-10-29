@@ -1,0 +1,16 @@
+{
+  "trades": [
+    {
+      "exchange_trade_id": "80123456",
+      "order_id": "26101900133912345678",
+      "exchange_order_id": "1300000123456789",
+      "exchange_segment": "NSE",
+      "symbol": "M&M",
+      "txn_type": "B",
+      "product": "I",
+      "qty": 4,
+      "price": 249950,
+      "traded_at": 1747798201789
+    }
+  ]
+}

@@ -45,6 +45,7 @@ export const SUPPORTED_BROKERS: readonly SupportedBroker[] = [
   { id: 'pocketful', name: 'Pocketful' },
   { id: 'rmoney', name: 'RMoney' },
   { id: 'rupeezy', name: 'Rupeezy' },
+  { id: 'sahi', name: 'Sahi' },
   { id: 'samco', name: 'Samco' },
   { id: 'shoonya', name: 'Shoonya (Finvasia)' },
   { id: 'tradesmart', name: 'TradeSmart' },

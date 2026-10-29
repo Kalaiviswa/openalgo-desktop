@@ -45,6 +45,7 @@ pub const ALL_BROKERS: &[&str] = &[
     "pocketful",
     "rmoney",
     "rupeezy",
+    "sahi",
     "samco",
     "shoonya",
     "tradejini",
@@ -84,8 +85,9 @@ pub fn auth_type(broker: &str) -> AuthType {
 
 /// Brokers that sign in from the saved API key and secret alone, with no
 /// extra input (web brlogin signs these in on the first visit to
-/// `/<broker>/callback`): the XTS direct logins, Delta Exchange and Dhan's
-/// sandbox, whose access token is the saved secret. Samco also needs no
+/// `/<broker>/callback`): the XTS direct logins, Delta Exchange, Sahi (its
+/// key id and secret mint the day's token) and Dhan's sandbox, whose
+/// access token is the saved secret. Samco also needs no
 /// input but has its own connect page (the static IP check).
 pub const SAVED_KEY_BROKERS: &[&str] = &[
     "deltaexchange",
@@ -94,6 +96,7 @@ pub const SAVED_KEY_BROKERS: &[&str] = &[
     "ibulls",
     "iifl",
     "jainamxts",
+    "sahi",
     "wisdom",
 ];
 
