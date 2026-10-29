@@ -119,10 +119,14 @@ pub struct UncertainOrder {
     /// orders, so it can be found in the broker's order book.
     pub client_tag: Option<String>,
     /// It came from a transport or parsing failure, which the order
-    /// service answers on the wire as before (500, its internal-error
-    /// text); otherwise the wire carries `message` with 400, as a broker
-    /// error always has. The uncertainty itself never reaches the wire.
+    /// service answers on the wire with 500 and its internal-error text;
+    /// otherwise the wire carries `message` with 400, as a broker error
+    /// always has.
     pub internal: bool,
+    /// The request was sent and its answer was lost on the way back (a
+    /// transport failure after sending). A placement answers it with the
+    /// web's 502 "may have been placed" (web openalgo#2305).
+    pub unanswered: bool,
     /// The broker said the session had ended, but only after a server
     /// error in the same placement (review P2-4): the order service
     /// answers it as the session error it reads as (403, `message`).
@@ -136,6 +140,7 @@ impl AppError {
             message: message.into(),
             client_tag,
             internal: false,
+            unanswered: false,
             session: false,
         }))
     }

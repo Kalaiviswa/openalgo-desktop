@@ -88,15 +88,17 @@ impl HistorySource for BrokerSource {
             start,
             end,
         };
-        h.broker.get_history(&h.auth, &req).await.map_err(|e| {
-            tracing::warn!(
-                "Historify download of {}:{} {} failed: {}",
-                exchange,
-                symbol,
-                interval,
-                e
-            );
-            e.client_message()
-        })
+        crate::services::market_data_service::broker_candles(&ctx, &h, &req)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "Historify download of {}:{} {} failed: {}",
+                    exchange,
+                    symbol,
+                    interval,
+                    e
+                );
+                e.client_message()
+            })
     }
 }

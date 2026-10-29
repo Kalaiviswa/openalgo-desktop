@@ -141,9 +141,10 @@ pub async fn stats(
 ) -> Response {
     match query_and_key(&ctx, ip, &headers, q).await {
         Ok(args) => {
-            // A year of the command log at most, read on the blocking pool.
+            // A year of the command log at most, read on the blocking pool
+            // a report at a time (AppState::report).
             let days = args.get("days").and_then(Value::as_str).map(String::from);
-            let read = ctx.blocking(move |c| Ok(admin::stats_reply(c, days.as_deref())));
+            let read = ctx.report(move |c| Ok(admin::stats_reply(c, days.as_deref())));
             send(read.await.unwrap_or_else(|e| {
                 tracing::error!("Reading Telegram command stats failed: {}", e);
                 crate::services::core::Reply::error(500, "Failed to get statistics")

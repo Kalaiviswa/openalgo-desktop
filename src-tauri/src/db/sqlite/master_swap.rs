@@ -423,17 +423,26 @@ mod tests {
             .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worst_us = Arc::new(AtomicU64::new(0));
+        let worst_wait_us = Arc::new(AtomicU64::new(0));
         let writes = Arc::new(AtomicU64::new(0));
         let writer = {
-            let (pool, stop, worst_us, writes) =
-                (pool.clone(), stop.clone(), worst_us.clone(), writes.clone());
+            let (pool, stop, worst_us, worst_wait_us, writes) = (
+                pool.clone(),
+                stop.clone(),
+                worst_us.clone(),
+                worst_wait_us.clone(),
+                writes.clone(),
+            );
             std::thread::spawn(move || {
                 let w = pool.get().unwrap();
+                crate::db::sqlite::take_lock_wait();
                 while !stop.load(Ordering::SeqCst) {
                     let t = Instant::now();
                     w.execute("INSERT INTO order_rows (at) VALUES ('now')", [])
                         .unwrap();
                     worst_us.fetch_max(t.elapsed().as_micros() as u64, Ordering::SeqCst);
+                    let waited = crate::db::sqlite::take_lock_wait();
+                    worst_wait_us.fetch_max(waited.as_micros() as u64, Ordering::SeqCst);
                     writes.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(2));
                 }
@@ -446,16 +455,21 @@ mod tests {
         writer.join().unwrap();
         assert_eq!(count_symbols(&conn).unwrap(), 60_000);
         let worst = Duration::from_micros(worst_us.load(Ordering::SeqCst));
+        let waited = Duration::from_micros(worst_wait_us.load(Ordering::SeqCst));
         // A small part of the replacement, never the whole of it (one
         // transaction made the write wait for nearly all of it), and well
-        // inside the 5 s busy budget. The time includes the write's own
-        // commit and each short transaction's (fsyncs, at FULL): slow on a
-        // CI runner's disk (946 ms of a 21 s debug replacement on Windows),
-        // so the bound is relative, not a fixed few milliseconds.
+        // inside the 5 s busy budget. What is measured is the wait for the
+        // lock, which the replacement decides. The write's own statement
+        // and commit (an fsync at FULL) are not the replacement's: a write
+        // took 2.2 s in all during an 8.2 s replacement on a Windows
+        // runner. The wait includes each short transaction's commit, slow
+        // on such a disk too (946 ms of a 21 s debug replacement), so the
+        // bound is relative, not a fixed few milliseconds.
         let bound = (took / 4).min(Duration::from_secs(2));
         assert!(
-            worst < bound,
-            "a write waited {:?} during a {:?} replacement",
+            waited < bound,
+            "a write waited {:?} for the lock (took {:?} in all) during a {:?} replacement",
+            waited,
             worst,
             took
         );

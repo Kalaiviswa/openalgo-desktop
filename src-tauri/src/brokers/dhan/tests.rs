@@ -44,6 +44,26 @@ fn d(y: i32, m: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, day).unwrap()
 }
 
+/// Web openalgo#2308: every intraday series is trimmed at its exchange's
+/// close, never a daily one, and never GIFT NIFTY, which trades about 06:30
+/// to 02:45 under NSE_INDEX.
+#[test]
+fn intraday_history_is_trimmed_at_the_close_except_gift_nifty() {
+    let req = |exchange: &str, symbol: &str, interval: &str| HistoryRequest {
+        key: QuoteKey::new(exchange, symbol),
+        interval: interval.into(),
+        start: d(2026, 10, 27),
+        end: d(2026, 10, 27),
+    };
+    let b = DhanBroker::new(SymbolResolver::new());
+    assert!(b.history_trims_after_close(&req("BSE_INDEX", "SENSEX", "15m")));
+    assert!(b.history_trims_after_close(&req("NSE", "SBIN", "1m")));
+    assert!(!b.history_trims_after_close(&req("BSE_INDEX", "SENSEX", "D")));
+    assert!(!b.history_trims_after_close(&req("NSE_INDEX", "GIFTNIFTY", "5m")));
+    let sandbox = crate::brokers::dhan_sandbox::broker(SymbolResolver::new());
+    assert!(sandbox.history_trims_after_close(&req("NSE_INDEX", "NIFTY", "15m")));
+}
+
 // ---------------------------------------------------------------------------
 // Master contract
 // ---------------------------------------------------------------------------
@@ -53,6 +73,8 @@ fn master_contract_maps_segments_and_symbols() {
     let rows = parse_scrip_master(fixture!("api-scrip-master.csv"), Variant::Live).unwrap();
     // 25 data rows; the bond (segment X) is dropped.
     assert_eq!(rows.len(), 28);
+    // 28 data rows; the bond (segment X) is dropped.
+    assert_eq!(rows.len(), 27);
     let r = master();
     let sbin = r.by_symbol("NSE", "SBIN").unwrap();
     assert_eq!(
@@ -121,6 +143,7 @@ fn master_contract_indices() {
         r.by_symbol("BSE_INDEX", "SENSEX").unwrap().instrument_type,
         "EQ"
     );
+    assert_eq!(nifty.brexchange, "IDX_I");
     // INDEX tick sizes are already rupees.
     assert_eq!(nifty.tick_size, 0.05);
     assert!(r.by_symbol("NSE_INDEX", "BANKNIFTY").is_some());
@@ -149,6 +172,67 @@ fn master_contract_indices() {
     assert!(r.by_symbol("BSE_INDEX", "BSEMOI").is_none());
     assert_eq!(r.by_symbol("BSE_INDEX", "SENSEX").unwrap().tick_size, 0.01);
     assert_eq!(r.by_symbol("BSE_INDEX", "BSEAUTO").unwrap().token, "52");
+}
+
+/// Web openalgo#2306 (QA MC-04, MC-05): index rows are typed EQ, as Kite
+/// types its indices (the `*_INDEX` exchange says they are indices), and
+/// neither index nor equity rows carry an expiry.
+#[test]
+fn index_rows_are_typed_eq_with_no_expiry() {
+    let rows = parse_scrip_master(fixture!("api-scrip-master.csv"), Variant::Live).unwrap();
+    let indices: Vec<_> = rows
+        .iter()
+        .filter(|r| r.exchange.ends_with("_INDEX"))
+        .collect();
+    assert_eq!(indices.len(), 9);
+    for r in indices
+        .iter()
+        .copied()
+        .chain(rows.iter().filter(|r| r.exchange == "NSE"))
+    {
+        assert_eq!(r.instrument_type, "EQ", "{}", r.symbol);
+        assert_eq!(r.expiry, "", "{}", r.symbol);
+    }
+    // History still asks Dhan for instrument INDEX: it comes from the
+    // exchange, not from the stored type.
+    assert_eq!(
+        history_instrument_type("NSE_INDEX", "NIFTY100ALPHA30").unwrap(),
+        "INDEX"
+    );
+}
+
+/// Web openalgo#2306 (QA MC-08): every NSE index is normalised, with no
+/// allow-list keeping Dhan's raw name, and the BSE indices Dhan lists under
+/// its own codes take their documented names.
+#[test]
+fn every_index_takes_its_canonical_name() {
+    let r = master();
+    assert_eq!(
+        r.by_symbol("NSE_INDEX", "NIFTY100ALPHA30")
+            .unwrap()
+            .brsymbol,
+        "Nifty100 Alpha 30"
+    );
+    assert_eq!(
+        r.by_symbol("NSE_INDEX", "NIFTYSOMETHINGNEW").unwrap().token,
+        "99"
+    );
+    assert!(r.by_symbol("NSE_INDEX", "NIFTY SOMETHING NEW").is_none());
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "BSEMOMENTUM").unwrap().brsymbol,
+        "BSEMOI"
+    );
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "BSEDIVIDENDSTABILITY")
+            .unwrap()
+            .token,
+        "1003"
+    );
+    // The shared BSE renames still apply.
+    assert_eq!(
+        r.by_symbol("BSE_INDEX", "BSEAUTO").unwrap().brsymbol,
+        "AUTO"
+    );
 }
 
 #[test]

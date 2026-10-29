@@ -32,6 +32,9 @@ pub enum ApiRate {
     TelegramBroadcast,
     /// `WHATSAPP_RATE_LIMIT`, 30 per minute (`whatsapp/notify`).
     WhatsApp,
+    /// `SECTOR_ROTATION_API_RATE_LIMIT`, 30 per minute (the map and its
+    /// options; not in `.sample.env`, so the decorator's default).
+    SectorRotation,
 }
 
 impl ApiRate {
@@ -40,7 +43,9 @@ impl ApiRate {
         match self {
             ApiRate::Api => (100, 1),
             ApiRate::Order | ApiRate::SmartOrder => (10, 1),
-            ApiRate::Greeks | ApiRate::Telegram | ApiRate::WhatsApp => (30, 60),
+            ApiRate::Greeks | ApiRate::Telegram | ApiRate::WhatsApp | ApiRate::SectorRotation => {
+                (30, 60)
+            }
             ApiRate::TelegramBroadcast => (5, 60),
         }
     }
@@ -120,6 +125,8 @@ const ENDPOINTS: &[(&str, ApiRate)] = &[
     ("telegram/preferences", ApiRate::Telegram),
     ("telegram/webhook", ApiRate::Api),
     ("whatsapp/notify", ApiRate::WhatsApp),
+    ("sectorrotation", ApiRate::SectorRotation),
+    ("sectorrotation/options", ApiRate::SectorRotation),
     ("strategy/list", ApiRate::Api),
     ("strategy/status", ApiRate::Api),
     ("strategy/start", ApiRate::Api),

@@ -83,6 +83,9 @@ pub fn assign_values(
         // Indices are typed EQ, as Kite types its INDICES segment; the
         // *_INDEX exchange is what says the row is an index (web b0b51f800,
         // QA MC-04). History still asks Dhan for INDEX, from the exchange.
+        // Typed EQ, as Kite types its INDICES segment: the *_INDEX exchange
+        // says the row is an index (web openalgo#2306, QA MC-04). History
+        // still asks Dhan for instrument INDEX, derived from the exchange.
         ("I", "NSE") if instrument == "INDEX" => ("NSE_INDEX", "IDX_I", "EQ".into()),
         ("I", "BSE") if instrument == "INDEX" => ("BSE_INDEX", "IDX_I", "EQ".into()),
         ("D", "NSE") if EQUITY_FNO.contains(&instrument) => ("NFO", "NSE_FNO", deriv),
@@ -216,6 +219,10 @@ impl Cols {
 /// fell back to Dhan's raw name outside a fixed allow-list, so each index
 /// added to the documented set stayed as "Nifty100 Alpha 30" instead of
 /// NIFTY100ALPHA30 (web 8053a6eb8, QA MC-08).
+/// Every NSE index, upper case without spaces or hyphens, then renamed
+/// where Dhan's name differs (web openalgo#2306, QA MC-08: an allow-list
+/// once kept Dhan's raw name for any index missing from it, so
+/// "Nifty100 Alpha 30" never became NIFTY100ALPHA30).
 fn nse_index_symbol(raw: &str) -> String {
     let compact = raw.to_ascii_uppercase().replace([' ', '-'], "");
     rename(NSE_INDEX_FIXUPS, &compact)
@@ -223,9 +230,36 @@ fn nse_index_symbol(raw: &str) -> String {
         .unwrap_or(compact)
 }
 
+/// BSE indices that Dhan lists under its own codes, matched by
+/// `SEM_CUSTOM_SYMBOL` ("BSE Momentum Index") or, where Dhan gives only the
+/// code, by BSE's index code (DSI, LVI, QUI). Fyers maps the same names
+/// from its codes (web openalgo#2306, QA MC-08). Dhan's own codes, so they
+/// stay out of the shared [`BSE_INDEX_RENAMES`].
+const DHAN_BSE_INDEX_RENAMES: &[(&str, &str)] = &[
+    ("ALLCAP", "BSEALLCAP"),
+    ("BHRT22", "BSEBHARAT22INDEX"),
+    ("BSEDSI", "BSEDIVIDENDSTABILITY"),
+    ("BSEEVI", "BSEENHANCEDVALUE"),
+    ("BSELVI", "BSELOWVOLATILITY"),
+    ("BSEMOI", "BSEMOMENTUM"),
+    ("BSEPBI", "BSEPRIVATEBANKS"),
+    ("BSEQUI", "BSEQUALITY"),
+    ("COMDTY", "BSEBASICMATERIALS"),
+    ("CONDIS", "BSECONSUMERDISCRETIONARYGOODS&SERVICES"),
+    ("DFRGRI", "BSEDIVERSIFIEDFINANCIALSREVENUEGROWTHINDEX"),
+    ("ESG100", "BSE100ESG"),
+    ("FOCIT", "BSEFOCUSEDIT"),
+    ("LCTMCI", "BSE100LARGECAPTMCINDEX"),
+    ("MFG", "BSEINDIAMANUFACTURING"),
+    ("SML250", "BSE250SMALLCAPINDEX"),
+    ("UTILS", "BSEUTILITIES"),
+];
+
 fn bse_index_symbol(raw: &str) -> String {
     rename(DHAN_BSE_INDEX_CODES, raw)
         .or_else(|| rename(BSE_INDEX_RENAMES, raw))
+    rename(BSE_INDEX_RENAMES, raw)
+        .or_else(|| rename(DHAN_BSE_INDEX_RENAMES, raw))
         .map(str::to_string)
         .unwrap_or_else(|| raw.to_string())
 }

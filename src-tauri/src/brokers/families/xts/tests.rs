@@ -1634,3 +1634,159 @@ mod subscription_batches {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Credentials in log lines
+// ---------------------------------------------------------------------------
+
+/// Names that hold a credential (web test_xts_credential_logging.py).
+const CREDENTIAL_NAMES: &[&str] = &[
+    "token",
+    "auth_token",
+    "feed_token",
+    "session_token",
+    "access_token",
+    "secret",
+    "api_secret",
+    "api_key",
+    "password",
+    "headers",
+    "auth",
+    "creds",
+    "totp",
+    "user_key",
+];
+
+fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("tests.rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// The argument text of every `trace!` .. `error!` call in `src`.
+fn log_calls(src: &str) -> Vec<String> {
+    let b = src.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = Vec::new();
+    for i in 0..b.len() {
+        let Some(level) = ["trace!(", "debug!(", "info!(", "warn!(", "error!("]
+            .iter()
+            .find(|l| b[i..].starts_with(l.as_bytes()))
+        else {
+            continue;
+        };
+        if i > 0 && ident(b[i - 1]) {
+            continue;
+        }
+        let start = i + level.len();
+        let (mut depth, mut j, mut in_str) = (1, start, false);
+        while j < b.len() && depth > 0 {
+            match (b[j], in_str) {
+                (b'\\', true) => j += 1,
+                (b'"', _) => in_str = !in_str,
+                (b'(', false) => depth += 1,
+                (b')', false) => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        out.push(src[start..j.saturating_sub(1)].to_string());
+    }
+    out
+}
+
+/// The credential names a log call's arguments interpolate: as an argument
+/// or as a `{name}` capture in its format string, other than through
+/// `.len()`, `.is_empty()`, `.is_some()` or `.is_none()`.
+fn credential_uses(args: &str) -> Vec<String> {
+    // String literals reduced to their inline captures.
+    let mut code = String::new();
+    let mut rest = args;
+    while let Some(q) = rest.find('"') {
+        code.push_str(&rest[..q]);
+        let lit = &rest[q + 1..];
+        let mut end = 0;
+        let lb = lit.as_bytes();
+        while end < lb.len() && lb[end] != b'"' {
+            end += if lb[end] == b'\\' { 2 } else { 1 };
+        }
+        let lit = &lit[..end.min(lit.len())];
+        for cap in lit.split('{').skip(1) {
+            let name: String = cap
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            code.push(' ');
+            code.push_str(&name);
+            code.push(' ');
+        }
+        rest = rest.get(q + 1 + end + 1..).unwrap_or("");
+    }
+    code.push_str(rest);
+    let mut found = Vec::new();
+    let cb = code.as_bytes();
+    let mut i = 0;
+    while i < cb.len() {
+        let c = cb[i];
+        if !(c.is_ascii_alphabetic() || c == b'_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < cb.len() && (cb[i].is_ascii_alphanumeric() || cb[i] == b'_' || cb[i] == b'.') {
+            i += 1;
+        }
+        let path = code[start..i].trim_end_matches('.');
+        let parts: Vec<&str> = path.split('.').collect();
+        let checked = matches!(
+            parts.last(),
+            Some(&"len") | Some(&"is_empty") | Some(&"is_some") | Some(&"is_none")
+        ) && code[i..].starts_with('(');
+        if !checked && parts.iter().any(|p| CREDENTIAL_NAMES.contains(p)) {
+            found.push(path.to_string());
+        }
+    }
+    found
+}
+
+/// Web test/test_xts_credential_logging.py (b06c14d29, de03682a9,
+/// openalgo#2313): no log line of the XTS family, nor of Samco (which
+/// logged its session token's ends the same way on the web), interpolates
+/// a credential other than through its length. Static, as on the web: every
+/// tracing call outside the tests is read.
+#[test]
+fn no_log_line_carries_a_credential() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/brokers");
+    let mut files = Vec::new();
+    for dir in ["families/xts", "samco"] {
+        rust_sources(&root.join(dir), &mut files);
+    }
+    let (mut calls, mut leaks) = (0, Vec::new());
+    for f in &files {
+        let src = std::fs::read_to_string(f).unwrap();
+        let code = src.split("#[cfg(test)]\nmod tests {").next().unwrap_or("");
+        for args in log_calls(code) {
+            calls += 1;
+            for name in credential_uses(&args) {
+                leaks.push(format!("{}: {} in {}", f.display(), name, args.trim()));
+            }
+        }
+    }
+    assert!(calls > 20, "the scan read only {} log calls", calls);
+    assert!(leaks.is_empty(), "{:#?}", leaks);
+    // The scan finds what it looks for.
+    assert_eq!(
+        credential_uses(r#""Using {}", s.session_token"#),
+        vec!["s.session_token"]
+    );
+    assert_eq!(
+        credential_uses(r#"n = token.len(), "x {feed_token}""#),
+        vec!["feed_token"]
+    );
+    assert!(credential_uses(r#""Market data session renewed""#).is_empty());
+}

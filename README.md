@@ -482,9 +482,8 @@ Receive your strategy alerts on **Telegram** and **WhatsApp**.
 
 ### Data Visualization & Editors
 
-- **openalgo-charts**: the `/trading` charting terminal
+- **openalgo-charts**: every chart: the `/trading` terminal, scalping, P&L, health and the options charts
 - **openalgo-script**: OpenScript, compiled and run in the app
-- **TradingView Lightweight Charts**: P&L and market data charts
 - **Plotly**: options analytics charts
 - **CodeMirror**: script and JSON editing
 
@@ -1017,8 +1016,7 @@ below. We are grateful to all of them.
 
 ### Data Visualization
 
-- **[openalgo-charts](https://www.npmjs.com/package/openalgo-charts)** - Apache-2.0 - the `/trading` charting terminal
-- **[TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)** - Apache-2.0 - financial charting library
+- **[openalgo-charts](https://www.npmjs.com/package/openalgo-charts)** - Apache-2.0 - every chart in the app, including the `/trading` charting terminal
 - **[Plotly](https://plotly.com/javascript/)** - MIT License - interactive charts for options analytics
 
 ### Code Editors and OpenScript

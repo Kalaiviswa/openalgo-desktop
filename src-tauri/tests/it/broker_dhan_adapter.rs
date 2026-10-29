@@ -1001,6 +1001,7 @@ async fn master_contract_downloads_and_parses() {
     let s = serve(&m).await;
     let rows = broker(&s).download_master_contract(&auth()).await.unwrap();
     assert_eq!(rows.len(), 28);
+    assert_eq!(rows.len(), 27);
     let m2 = Mock::default();
     let s2 = serve(&m2).await;
     assert!(broker(&s2).download_master_contract(&auth()).await.is_err());

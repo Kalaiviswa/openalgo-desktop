@@ -29,7 +29,7 @@ pub mod streaming;
 mod tests;
 
 use crate::brokers::common::http;
-use crate::brokers::common::mapping::Exchange;
+use crate::brokers::common::mapping::{Exchange, Product};
 use crate::brokers::common::ratelimit::Pacer;
 use crate::brokers::common::streaming::BrokerFeed;
 use crate::brokers::common::symbols::SymbolResolver;
@@ -498,6 +498,16 @@ impl Broker for XtsBroker {
 
     async fn get_positions(&self, auth: &AuthToken) -> Result<Vec<Position>> {
         orders::get_positions(self, auth).await
+    }
+
+    async fn get_open_position(
+        &self,
+        auth: &AuthToken,
+        symbol: &str,
+        exchange: Exchange,
+        product: Product,
+    ) -> Result<i64> {
+        orders::get_open_position(self, auth, symbol, exchange.as_str(), product.as_str()).await
     }
 
     async fn get_holdings(&self, auth: &AuthToken) -> Result<Vec<Holding>> {

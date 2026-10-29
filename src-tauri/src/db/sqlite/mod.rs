@@ -181,6 +181,21 @@ pub(crate) fn write_transaction(
 /// How long a statement waits for another writer before it fails busy.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+thread_local! {
+    /// The longest a statement on this thread has waited for another
+    /// writer's lock, since [`take_lock_wait`] last read it.
+    static LOCK_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// How long this thread's statements waited for another writer's lock at
+/// most, since the last call: the wait alone, without the statement's own
+/// work or its commit.
+#[cfg(test)]
+pub(crate) fn take_lock_wait() -> Duration {
+    LOCK_WAIT.with(|w| w.replace(Duration::ZERO))
+}
+
 /// The busy handler of every pooled connection: try again every
 /// millisecond (every timer tick where sleeps are coarser), up to
 /// [`BUSY_TIMEOUT`] in all. SQLite's own (`busy_timeout`) backs off to
@@ -200,6 +215,8 @@ fn retry_busy(attempt: i32) -> bool {
         }
         s.get().unwrap_or(now)
     });
+    #[cfg(test)]
+    LOCK_WAIT.with(|w| w.set(w.get().max(now.duration_since(since))));
     if now.duration_since(since) >= BUSY_TIMEOUT {
         return false;
     }

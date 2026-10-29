@@ -483,13 +483,9 @@ no Python runtime:
   Analyzer
 
 **Removed from this version** (maintainer, 2026-10-12): the Python Strategy
-Host and the Agent. No code for either ships, and nothing in the UI leads to
-them: no route, navigation or menu entry, Admin card, `/trading` side panel
-or button, Telegram command. `/python` and `/agent` are unknown pages (the
-app's 404 page), `/agent/api/*` is an unknown API path (the JSON 404), and a
-saved terminal layout that still names the Agent panel opens with no panel.
-A later version that brings either back adds it as a new page, with its
-route, SPA path and navigation entry in one change.
+Host. No code for it ships, and nothing in the UI leads to it: no route,
+navigation or menu entry, Admin card, Telegram command. `/python` is an
+unknown page (the app's 404 page) and its API paths are the JSON 404.
 
 Decided:
 
@@ -514,20 +510,18 @@ Decided:
     crate that the web's `wars` package wraps with PyO3. Same pairing (QR and
     pair code), session export/import as an encrypted blob, alerts and bot
     commands as the web. The web's notes on `wars` threading do not apply.
-- **Agent: not in this version** (maintainer, 2026-10-12, replacing the
-  2026-10-07 deferral that kept its pages with a "not available" message).
-  Its pages, the Assistant panel in `/trading`, the `@openuidev` packages and
-  the `/agent/api` route group were removed. Working notes for a future
-  version, which would be a native Rust Agent with no Python runtime: a
-  provider layer of our own (OpenAI chat and Responses, Anthropic Messages,
-  Gemini; Ollama and OpenAI-compatible providers through the OpenAI format),
-  model list and pricing from LiteLLM's public catalogue with a bundled
-  fallback, tools calling desktop services directly. Do not depend on
-  `LiteLLM-Labs/litellm-rust`, a proof of concept; revisit if BerriAI ships an
-  official Rust crate. The web's frontend for it (`pages/agent`,
-  `components/agent`, `lib/agent`, `api/agent.ts`,
-  `components/trading/AgentPanel.tsx`, `lib/trading/chartContract.ts`) is the
-  starting point to carry over.
+- **Agent: back in 1.0.4** (maintainer, 2026-10-27), at parity with the
+  web's `/agent`, `/agent/config`, the `/trading` Assistant panel and voice.
+  A native Rust Agent with no Python runtime and no agent framework:
+  `src-tauri/src/agent/` (start at its `mod.rs`), genai 0.7.1 for the
+  providers over the Agent's own reqwest 0.13 client (rustls on ring), our
+  own run loop (`agent/run`), which owns pause for approval and resume.
+  Tools mirror the web's agent tools (names, arguments, descriptions,
+  surfaces, approval list) and reach OpenAlgo through the in-process
+  `/api/v1` path MCP uses (`agent/tools/service.rs`). The stream frames and
+  the system prompt are pinned byte for byte against fixtures recorded from
+  the web (`scripts/agent/`). Flow (`flow_gen`) and Python strategy
+  generation (`strategy_gen`) are not in this version.
 
 ## Testing
 
@@ -828,12 +822,29 @@ Every flaky test found so far was a race, not a slow machine:
 - **Fix the product when the race is real.** A Historify retry was claimed
   after its first `.await`, so two concurrent retries both ran; the fix
   claimed it before the await.
+- A test on a paused tokio clock that opens a real connection can see a
+  timer (the connect timeout) fire while the real connect is still pending:
+  the clock jumps whenever the runtime is idle. Pause once the connection
+  is open (`a_broker_that_never_answers_times_out`).
 - Rate-limit and expiry tests use the limiter's pinnable clock, not the wall
   clock.
 - Descriptor checks account for database pool growth: r2d2 refills `min_idle`
   and each SQLite connection holds two descriptors (database and WAL).
+- **CPU-heavy work on the blocking pool can starve the runtime.** Sixteen
+  log reports built at once took every core of a three-core macOS runner,
+  and the runtime thread waited up to 0.55 s for one; they now take turns
+  (`AppState::report`). `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="taskpolicy
+  -b"` runs a test binary on a Mac's efficiency cores, which reproduces a
+  small runner locally.
 - A test that fails about one run in five is a bug. Run a suspect test 10 to
   30 times before calling it fixed.
+- A SQLite store is closed when its `-wal` and `-shm` are gone: the last
+  connection checkpoints the database and removes them. Background work can
+  still hold a connection when `AppState::shutdown` has returned, and on
+  Windows `logs.db-wal` and `-shm` vanished between a test's "before" and
+  "after" listings of the data folder. A test that compares a folder waits
+  for those files to go first (`data_upgrade::closed_and_checkpointed`);
+  it never leaves them out of the comparison.
 - Every `AppState` runs the order reconciler's task (a pass every 5 s while
   an owner holds an open order, and at once on a broker session change or a
   lost order fact). A test that counts order-book reads, or needs a gap to
@@ -938,6 +949,11 @@ Every flaky test found so far was a race, not a slow machine:
   and the fill it applies to the run hold `fold_gate` together, so fills
   reach the run in the order their folds committed; the follow-ups (a
   pending stop, a finished run) run after it is released.
+- A latency bound bounds only what the code under test decides. A write's
+  own commit at `synchronous=FULL` is an fsync, and on a CI runner's disk
+  one took 2.2 s, so a test of how long a write waits for another
+  writer's lock measures that wait (`db::sqlite::take_lock_wait`), not the
+  whole statement.
 
 ### Data and migrations
 
@@ -1419,6 +1435,21 @@ and add each new one here.
   field into memory, a stray secret included (PROD-SEC-01).
 - Fake tokens in fixtures must match the allowlist in `.github/gitleaks.toml`;
   prefer the `<APIKEY>`, `<USER_ID>`, `<EMAIL>` placeholders.
+- **The daily secret scan reads every branch on GitHub, not only master.**
+  `security.yml` runs `gitleaks git` over the full history of all refs with
+  master's `.github/gitleaks.toml`, so a fake value pushed on any branch
+  raises Code Scanning alerts against master until its allowlist entry is on
+  master. In 1.0.4 the unmerged Agent branches raised 25 that way.
+  - Prefer test values gitleaks does not match: the placeholders above, or a
+    fake assembled at runtime (`["a1b2c3", "d4e5f6"].concat()`).
+  - If an allowlist entry is unavoidable (vendored third-party test data, a
+    value already in pushed history), land it on master in its own commit
+    before pushing the branch that needs it, limited to the exact path and
+    value pattern.
+  - Before every push, run `gitleaks git --config .github/gitleaks.toml
+    --redact .` in the worktree; it scans all local refs, as the daily scan
+    does. A finding only in `refs/original` (left by a history rewrite) is
+    local: delete that ref once the rewritten branch is pushed.
 
 ### Working with several agents
 

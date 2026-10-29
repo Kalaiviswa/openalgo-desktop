@@ -142,11 +142,12 @@ fn refused(o: &PlaceOutcome) -> bool {
 
 #[tokio::test]
 async fn a_refused_stream_is_retried_then_refused() {
-    // REFUSED_STREAM: closed before any processing. reqwest sends it again
-    // twice; a third refusal is the broker's definite "not placed".
+    // REFUSED_STREAM: closed before any processing. The shared client
+    // sends it once more (`http::retry_policy`); a second refusal is the
+    // broker's definite "not placed".
     let (o, orders) = outcome(Answer::Reset(REFUSED_STREAM)).await;
     assert!(refused(&o), "{:?}", o);
-    assert_eq!(orders, 3);
+    assert_eq!(orders, 2);
 }
 
 #[tokio::test]
@@ -159,7 +160,7 @@ async fn a_graceful_goaway_before_the_order_is_retried_then_refused() {
     assert!(refused(&o), "{:?}", o);
     // Retried on a new connection; a retry that met the closing one again
     // fails before it is sent, so not every retry reaches the server.
-    assert!((1..=3).contains(&orders), "{}", orders);
+    assert!((1..=2).contains(&orders), "{}", orders);
 }
 
 #[tokio::test]

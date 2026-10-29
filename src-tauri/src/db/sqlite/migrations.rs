@@ -104,6 +104,12 @@ const RUST_MIGRATIONS: &[(&str, Step)] = &[
         crate::messaging::whatsapp::db::migrate_executed_at,
     ),
     ("096_ngrok_tunnel", super::tunnel::migrate),
+    (
+        "097_agent_core",
+        crate::agent::conversations::store::migrate,
+    ),
+    ("098_agent_config", crate::agent::models::migration::migrate),
+    ("099_agent_safety", crate::agent::safety::migrate),
 ];
 
 /// Run all database migrations

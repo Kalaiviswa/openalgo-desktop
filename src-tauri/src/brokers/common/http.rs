@@ -17,6 +17,13 @@
 //!
 //! What a failed HTTP/2 order request means for the order (RFC 9113
 //! section 8.7) is decided in `outcome::after_send`.
+//!
+//! A read (GET, HEAD, OPTIONS) whose connection broke is sent once more, on
+//! a new connection; a timed-out read is not, since that would double an
+//! already long wait. A write (an order) is never sent again, unless the
+//! broker's HTTP/2 server said it did not process it (a REFUSED_STREAM
+//! reset or a graceful GOAWAY), so an order whose answer was lost is never
+//! doubled (web `_BrokerTransport`, openalgo#2305).
 
 use crate::error::{AppError, Result};
 use serde::de::DeserializeOwned;
@@ -59,6 +66,65 @@ pub(super) fn builder() -> reqwest::ClientBuilder {
         .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
         .tcp_keepalive(Duration::from_secs(60))
         .user_agent(concat!("openalgo-desktop/", env!("CARGO_PKG_VERSION")))
+        .retry(retry_policy())
+}
+
+/// Every broker host: the retry scope (reqwest scopes a policy by host).
+struct AnyHost;
+
+impl PartialEq<&str> for AnyHost {
+    fn eq(&self, _: &&str) -> bool {
+        true
+    }
+}
+
+/// One more send, at most, for a request that provably did not reach the
+/// broker's processing or that changes nothing there (see the module doc).
+/// No retry budget: one extra send per request cannot become a storm.
+fn retry_policy() -> reqwest::retry::Builder {
+    reqwest::retry::for_host(AnyHost)
+        .no_budget()
+        .max_retries_per_request(1)
+        .classify_fn(|rr| {
+            let retry = rr
+                .error()
+                .is_some_and(|e| protocol_nack(e) || (is_read(rr.method()) && !timed_out(e)));
+            if retry {
+                rr.retryable()
+            } else {
+                rr.success()
+            }
+        })
+}
+
+fn is_read(method: &reqwest::Method) -> bool {
+    [
+        reqwest::Method::GET,
+        reqwest::Method::HEAD,
+        reqwest::Method::OPTIONS,
+    ]
+    .contains(method)
+}
+
+fn timed_out(e: &(dyn std::error::Error + 'static)) -> bool {
+    e.downcast_ref::<reqwest::Error>()
+        .is_some_and(reqwest::Error::is_timeout)
+}
+
+/// The broker's HTTP/2 server did not process the request: it refused the
+/// stream, or closed the connection gracefully before it (RFC 9113 section
+/// 8.7), as reqwest's default policy reads it.
+fn protocol_nack(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(e);
+    while let Some(c) = cause {
+        if let Some(h2) = c.downcast_ref::<h2::Error>() {
+            return h2.is_remote()
+                && ((h2.is_go_away() && h2.reason() == Some(h2::Reason::NO_ERROR))
+                    || (h2.is_reset() && h2.reason() == Some(h2::Reason::REFUSED_STREAM)));
+        }
+        cause = c.source();
+    }
+    false
 }
 
 /// The client `settings` build, or none (BR-04: fail closed). Building
@@ -197,27 +263,159 @@ mod tests {
 
     /// BR-04: the shared client gives up on a broker that accepts the
     /// connection and never answers, after `REQUEST_TIMEOUT`.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_broker_that_never_answers_times_out() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/orders", l.local_addr().unwrap());
+        let (accepted, connected) = tokio::sync::oneshot::channel();
         let held = tokio::spawn(async move {
             let (s, _) = l.accept().await.unwrap();
+            let _ = accepted.send(());
             std::future::pending::<()>().await;
             drop(s);
         });
         let started = tokio::time::Instant::now();
-        let e = builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .get(url)
-            .send()
-            .await
-            .unwrap_err();
+        let send =
+            tokio::spawn(
+                async move { builder().no_proxy().build().unwrap().get(url).send().await },
+            );
+        // The clock runs ahead only once the connection is open: a paused
+        // clock would otherwise fire the connect timeout while the real
+        // connect is still pending (seen on a macOS runner).
+        connected.await.unwrap();
+        tokio::time::pause();
+        let e = send.await.unwrap().unwrap_err();
         assert!(e.is_timeout(), "{:?}", e);
         assert!(started.elapsed() >= REQUEST_TIMEOUT.min(READ_TIMEOUT));
         held.abort();
+    }
+
+    /// What the scripted server does with one connection after reading
+    /// its request.
+    #[derive(Clone, Copy)]
+    enum Then {
+        /// Close it without answering.
+        Drop,
+        /// Answer with bytes that are not HTTP.
+        Garbage,
+        /// Answer nothing, past the client's read timeout.
+        Stall,
+        /// Answer 200.
+        Answer,
+    }
+
+    /// A server that handles its connections in `script` order (the last
+    /// entry repeats) and counts the requests that fully arrived.
+    async fn scripted(script: Vec<Then>) -> (String, Arc<AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/orders", l.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            let mut n = 0;
+            while let Ok((mut s, _)) = l.accept().await {
+                let then = script[n.min(script.len() - 1)];
+                n += 1;
+                let count = count.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let mut got = Vec::new();
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(k) => got.extend_from_slice(&buf[..k]),
+                        }
+                    }
+                    count.fetch_add(1, Ordering::SeqCst);
+                    match then {
+                        Then::Drop => drop(s),
+                        Then::Garbage => {
+                            let _ = s.write_all(b"not http at all\r\n\r\n").await;
+                        }
+                        Then::Stall => std::future::pending::<()>().await,
+                        Then::Answer => {
+                            let ok = b"HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\n{}";
+                            let _ = s.write_all(ok).await;
+                        }
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    fn shared_settings() -> reqwest::Client {
+        builder()
+            .read_timeout(Duration::from_millis(300))
+            .no_proxy()
+            .build()
+            .unwrap()
+    }
+
+    /// Web test_unanswered_order_writes.py::test_a_broken_read_is_sent_again_once
+    /// (ReadError, RemoteProtocolError).
+    #[tokio::test]
+    async fn a_broken_read_is_sent_again_once() {
+        for first in [Then::Drop, Then::Garbage] {
+            let (url, seen) = scripted(vec![first, Then::Answer]).await;
+            let r = shared_settings().get(&url).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(seen.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    /// Web ...::test_a_read_that_breaks_twice_still_raises.
+    #[tokio::test]
+    async fn a_read_that_breaks_twice_still_fails() {
+        let (url, seen) = scripted(vec![Then::Drop]).await;
+        assert!(shared_settings().get(&url).send().await.is_err());
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    /// Web ...::test_a_read_timeout_is_not_retried.
+    #[tokio::test]
+    async fn a_read_timeout_is_not_retried() {
+        let (url, seen) = scripted(vec![Then::Stall]).await;
+        let e = shared_settings().get(&url).send().await.unwrap_err();
+        assert!(e.is_timeout(), "{:?}", e);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// Web ...::test_a_write_is_never_resent_and_is_recorded: a write whose
+    /// answer was lost (dropped, unreadable or timed out) goes out once, and
+    /// reads as sent and unanswered.
+    #[tokio::test]
+    async fn a_write_is_never_resent_and_reads_as_unanswered() {
+        use super::super::outcome::unanswered;
+        for method in ["POST", "PUT", "DELETE", "PATCH"] {
+            for then in [Then::Drop, Then::Garbage, Then::Stall] {
+                let (url, seen) = scripted(vec![then]).await;
+                let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+                let e = shared_settings()
+                    .request(m, &url)
+                    .body("order")
+                    .send()
+                    .await
+                    .unwrap_err();
+                assert_eq!(seen.load(Ordering::SeqCst), 1, "{} sent twice", method);
+                assert!(unanswered(&AppError::from(e)), "{}", method);
+            }
+        }
+    }
+
+    /// Web ...::test_a_write_that_never_left_is_not_recorded.
+    #[tokio::test]
+    async fn a_write_that_never_left_is_not_unanswered() {
+        use super::super::outcome::unanswered;
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/orders", l.local_addr().unwrap());
+        drop(l);
+        // No short read timeout: a refused connect takes about 2 s on
+        // Windows, which retries it.
+        let c = builder().no_proxy().build().unwrap();
+        let e = c.post(&url).send().await.unwrap_err();
+        assert!(e.is_connect(), "{:?}", e);
+        assert!(!unanswered(&AppError::from(e)));
     }
 
     #[test]
