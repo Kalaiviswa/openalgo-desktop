@@ -949,6 +949,11 @@ Every flaky test found so far was a race, not a slow machine:
   and the fill it applies to the run hold `fold_gate` together, so fills
   reach the run in the order their folds committed; the follow-ups (a
   pending stop, a finished run) run after it is released.
+- A latency bound bounds only what the code under test decides. A write's
+  own commit at `synchronous=FULL` is an fsync, and on a CI runner's disk
+  one took 2.2 s, so a test of how long a write waits for another
+  writer's lock measures that wait (`db::sqlite::take_lock_wait`), not the
+  whole statement.
 
 ### Data and migrations
 
