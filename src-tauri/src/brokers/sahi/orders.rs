@@ -293,9 +293,13 @@ pub async fn get_open_position(
     exchange: Exchange,
     product: Product,
 ) -> Result<i64> {
-    let row = b.resolver().by_symbol(exchange.as_str(), symbol);
     let segment = mapping::segment(exchange)?;
-    let brsymbol = row.as_ref().map(|r| r.br_symbol().to_string());
+    // As Angel and Kotak: the master's broker symbol, else the symbol
+    // itself, so a row without a symbol never matches an unknown one.
+    let brsymbol = b
+        .resolver()
+        .br_symbol(symbol, exchange.as_str())
+        .unwrap_or_else(|| symbol.to_string());
     let rows = raw_positions(b, auth).await.map_err(|e| {
         tracing::warn!("Sahi positions unreadable for a smart order: {}", e.code());
         position_read::unread("Sahi")
@@ -304,7 +308,7 @@ pub async fn get_open_position(
     Ok(rows
         .iter()
         .find(|p| {
-            p.get("symbol").and_then(Value::as_str) == brsymbol.as_deref()
+            p.get("symbol").and_then(Value::as_str) == Some(brsymbol.as_str())
                 && p.get("exchange_segment").and_then(Value::as_str) == Some(segment)
                 && p.get("product").and_then(Value::as_str) == Some(code)
         })

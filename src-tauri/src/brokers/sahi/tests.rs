@@ -622,6 +622,32 @@ async fn an_unreadable_position_book_is_never_flat() {
     assert!(e.client_message().contains("so no order was sent"));
 }
 
+/// A symbol the master does not know is looked up by its own name, as on
+/// Angel and Kotak: it never matches a position row that names no symbol.
+#[tokio::test]
+async fn an_unknown_symbol_never_matches_a_row_without_one() {
+    let app = Router::new().route(
+        "/v1/positions",
+        get(|| async {
+            Json(json!({"positions": [
+                {"exchange_segment": "NSE", "product": "I", "net_qty": 3},
+                {"exchange_segment": "NSE", "symbol": "NOTINMASTER", "product": "I", "net_qty": 7}
+            ]}))
+        }),
+    );
+    let b = broker(&serve(app).await);
+    let open = b
+        .get_open_position(&auth(), "NOTINMASTER", Exchange::Nse, Product::Mis)
+        .await
+        .unwrap();
+    assert_eq!(open, 7);
+    let none = b
+        .get_open_position(&auth(), "ABSENT", Exchange::Nse, Product::Mis)
+        .await
+        .unwrap();
+    assert_eq!(none, 0);
+}
+
 #[tokio::test]
 async fn history_pages_backward() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
