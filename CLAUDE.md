@@ -522,6 +522,13 @@ Decided:
   the system prompt are pinned byte for byte against fixtures recorded from
   the web (`scripts/agent/`). Flow (`flow_gen`) and Python strategy
   generation (`strategy_gen`) are not in this version.
+  - **A model that passes its Test can still fail every chat turn.** The
+    Test sends no tools (as the web's does), and OpenAI refuses tools on
+    Chat Completions while a GPT-5.4 or later model reasons, which it does
+    by default. LiteLLM bridges such a request to the Responses API, so the
+    desktop routes it there too (`providers::target::request_adapter`).
+    Check a provider change with a chat turn that calls a tool, not only
+    with Test.
 
 ## Testing
 

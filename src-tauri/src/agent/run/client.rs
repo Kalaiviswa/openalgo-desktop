@@ -10,6 +10,7 @@
 //! the request that uses it.
 
 use crate::agent::contract::model::{ModelError, ResolvedModel};
+use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ChatRequest, ChatStreamResponse, ReasoningEffort};
 use genai::resolver::{AuthData, Endpoint};
 use genai::{ModelIden, ServiceTarget};
@@ -114,18 +115,30 @@ impl ModelClient {
             .as_ref()
             .map(|k| k.expose().to_string())
             .unwrap_or_default();
+        let effort = effort.and_then(reasoning_effort);
+        let adapter = crate::agent::providers::target::request_adapter(
+            model.adapter,
+            &model.provider_kind,
+            &model.endpoint,
+            &model.model_name,
+            request.tools.as_ref().is_some_and(|t| !t.is_empty()),
+            effort.is_some(),
+        );
         let target = ServiceTarget {
             endpoint: Endpoint::from_owned(model.endpoint.clone()),
             auth: AuthData::from_single(key),
-            model: ModelIden::new(model.adapter, model.model_name.clone()),
+            model: ModelIden::new(adapter, model.model_name.clone()),
         };
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
             .with_capture_content(true)
-            .with_capture_reasoning_content(true)
+            // A Responses request sends the effort alone, as LiteLLM does
+            // (no `summary`, no `include`): OpenAI may require a verified
+            // organisation before it returns reasoning summaries.
+            .with_capture_reasoning_content(adapter != AdapterKind::OpenAIResp)
             .with_capture_tool_calls(true)
             .with_stream_read_timeout(STREAM_READ_TIMEOUT);
-        if let Some(e) = effort.and_then(reasoning_effort) {
+        if let Some(e) = effort {
             options = options.with_reasoning_effort(e);
         }
         if !auth.headers.is_empty() {
