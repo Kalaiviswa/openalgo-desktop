@@ -102,6 +102,9 @@ pub fn modify_order_body(m: &ResolvedModify) -> Value {
         "exchange": m.exchange.as_str(),
         "disclosedquantity": m.disclosed_quantity.to_string(),
         "stoploss": num(m.trigger_price),
+        // Angel reads an SL / SL-M order's trigger from triggerprice;
+        // stoploss alone leaves it unchanged (web openalgo#2279).
+        "triggerprice": num(m.trigger_price),
     })
 }
 

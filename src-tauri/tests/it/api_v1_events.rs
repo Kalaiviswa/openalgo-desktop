@@ -540,10 +540,10 @@ async fn an_unreadable_analyzer_mode_refuses_orders_and_sends_nothing_live() {
     assert!(h.mock.calls().is_empty(), "{:?}", h.mock.calls());
 }
 
-/// LOG-08 P2-9 and P2-10: the /api/v1 wire for a placement is the web's,
-/// unchanged by the three outcomes. A broker refusal answers 400 with the
-/// broker's text and publishes order.failed; an answer lost after the order
-/// was sent answers the web's internal-error 500 and publishes
+/// LOG-08 P2-9 and P2-10: the /api/v1 wire for a placement is the web's.
+/// A broker refusal answers 400 with the broker's text and publishes
+/// order.failed; an answer lost after the order was sent answers the web's
+/// 502 "may have been placed" (web openalgo#2305) and publishes
 /// order.unconfirmed, never order.failed (the order may exist).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_placement_wire_is_the_webs_and_a_lost_answer_is_unconfirmed_not_failed() {
@@ -567,10 +567,10 @@ async fn the_placement_wire_is_the_webs_and_a_lost_answer_is_unconfirmed_not_fai
         .lock()
         .push_back((AfterSend::Dropped, "open"));
     let (s, v, t) = topics_of(&h, "/api/v1/placeorder", order_body(), 1).await;
-    assert_eq!(s, 500);
+    assert_eq!(s, 502);
     assert_eq!(
         v,
-        json!({"status": "error", "message": "Failed to place order due to internal error"})
+        json!({"status": "error", "message": openalgo_desktop_lib::brokers::common::outcome::UNANSWERED_ORDER_MESSAGE})
     );
     assert_eq!(t, vec!["order.unconfirmed"], "never order.failed");
     match h.recorder.events.lock()[0].as_ref() {
@@ -705,7 +705,7 @@ async fn a_lost_answer_has_the_order_book_read_at_once() {
         .lock()
         .push_back((AfterSend::Dropped, "open"));
     let (s, _) = call(&h, "/api/v1/placeorder", order_body()).await;
-    assert_eq!(s, 500);
+    assert_eq!(s, 502, "may have been placed (web openalgo#2305)");
     assert_eq!(requested(), before + 1, "a pass is asked for at once");
     h.shutdown().await;
 }

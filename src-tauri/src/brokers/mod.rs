@@ -489,6 +489,15 @@ pub trait Broker: Send + Sync {
     /// Candles for `req`, epoch seconds, oldest first, with OI.
     async fn get_history(&self, auth: &AuthToken, req: &HistoryRequest) -> Result<Vec<Candle>>;
 
+    /// Whether this broker's history for `req` can carry bars that start
+    /// after the session close (Dhan appends one to index series after the
+    /// close; web openalgo#2308). The history service then drops them
+    /// against the market calendar, which an adapter cannot read. Default:
+    /// no.
+    fn history_trims_after_close(&self, _req: &HistoryRequest) -> bool {
+        false
+    }
+
     // ---- GTT (optional) ----
 
     async fn place_gtt(&self, _auth: &AuthToken, _req: &GttRequest) -> Result<GttResponse> {

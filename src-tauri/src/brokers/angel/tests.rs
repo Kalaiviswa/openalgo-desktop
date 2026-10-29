@@ -265,6 +265,36 @@ fn place_body_matches_web_payload() {
     assert_eq!(m["producttype"], "DELIVERY");
 }
 
+/// Web test/test_angel_modify_order_mapping.py (openalgo#2279): a modify
+/// carries the new trigger as `triggerprice`, which Angel reads for SL and
+/// SL-M orders, and 0 when there is none.
+#[test]
+fn modify_sends_the_new_trigger_as_triggerprice() {
+    let body = |pricetype: &str, price: f64, trigger_price: f64| {
+        let m = ModifyOrderRequest {
+            symbol: "SBIN".into(),
+            exchange: "NSE".into(),
+            action: "SELL".into(),
+            product: "MIS".into(),
+            pricetype: pricetype.into(),
+            quantity: 195,
+            price,
+            trigger_price,
+            disclosed_quantity: 0,
+        };
+        modify_order_body(&ResolvedModify::resolve("261023000520814", &m, &master()).unwrap())
+    };
+    let sl = body("SL", 142.5, 150.0);
+    assert_eq!(sl["variety"], "STOPLOSS");
+    assert_eq!(sl["ordertype"], "STOPLOSS_LIMIT");
+    assert_eq!(sl["price"], "142.5");
+    assert_eq!(sl["triggerprice"], "150");
+    let slm = body("SL-M", 0.0, 150.0);
+    assert_eq!(slm["ordertype"], "STOPLOSS_MARKET");
+    assert_eq!(slm["triggerprice"], "150");
+    assert_eq!(body("LIMIT", 16.5, 0.0)["triggerprice"], "0");
+}
+
 #[test]
 fn modify_and_cancel_bodies_are_complete() {
     let m = ModifyOrderRequest {

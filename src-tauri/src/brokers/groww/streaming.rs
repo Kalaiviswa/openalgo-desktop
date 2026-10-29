@@ -13,6 +13,12 @@
 //!    once per connection: the server sends another `INFO` after `CONNECT`,
 //!    and a second `CONNECT` makes Groww close the session with
 //!    `-ERR 'maximum subscriptions exceeded'`;
+//!    with `{"socketKey": "<U...>"}` -> `{token, subscriptionId}`; a 401 or
+//!    403 is an expired login and stops the feed, any other failure is
+//!    retried, never the login token (web openalgo#2312);
+//! 2. `wss://socket-api.groww.in` with the web's headers;
+//! 3. NATS: the first server `INFO` of a connection (nonce) ->
+//!    `CONNECT {jwt, nkey, sig}` + `PING`, once per connection;
 //!    `+OK` / the first `PONG` (or 2 s, like the web) means ready; server
 //!    `PING` gets `PONG`; the client pings every 10 s; `-ERR` naming
 //!    authorization ends the session as an auth failure.
@@ -182,6 +188,15 @@ pub struct Minted {
 
 /// Socket token for a fresh key pair. A refused login (401/403) is an auth
 /// failure; anything else is an outage to back off from.
+/// What the trader reads when Groww refuses the socket-token request: the
+/// login itself has expired (web `SESSION_EXPIRED_MESSAGE`, openalgo#2312).
+pub const LOGIN_EXPIRED: &str =
+    "Your Groww login has expired, so live market data stopped. Log in to Groww again.";
+
+/// Socket token for a fresh key pair (web `_generate_socket_token`). Groww's
+/// NATS server accepts only a socket token, so there is no fallback to the
+/// login token (web openalgo#2312): a 401 or 403 means the login expired and
+/// stops the feed; any other failure is retried with backoff.
 async fn socket_token(
     http: &reqwest::Client,
     url: &str,
@@ -204,6 +219,15 @@ async fn socket_token(
     let Ok(r) = resp else {
         tracing::warn!("Groww socket token request failed");
         return Err(PrepareError::Unavailable);
+    let r = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "Groww socket token request failed: {}",
+                crate::brokers::common::redact::url_safe_error(&e)
+            );
+            return Err(PrepareError::Unavailable);
+        }
     };
     let status = r.status();
     if matches!(status.as_u16(), 401 | 403) {
@@ -212,6 +236,7 @@ async fn socket_token(
             "Groww refused the socket token request; the login has expired"
         );
         return Err(PrepareError::AuthFailed(refused()));
+        return Err(PrepareError::AuthFailed(LOGIN_EXPIRED.into()));
     }
     if status.is_success() {
         if let Ok(v) = r.json::<Value>().await {
@@ -230,6 +255,10 @@ async fn socket_token(
         }
     }
     tracing::warn!(status = status.as_u16(), "Groww socket token not issued");
+    tracing::warn!(
+        status = status.as_u16(),
+        "Groww socket token not issued; retrying"
+    );
     Err(PrepareError::Unavailable)
 }
 
@@ -551,6 +580,14 @@ impl GrowwFeed {
                 // Only the first INFO of a connection is the handshake; the
                 // one the server sends after CONNECT is informational.
                 Op::Info(info) if !self.connect_sent => {
+                // Only the first INFO of a connection is the handshake: the
+                // server sends another after CONNECT, and a second CONNECT
+                // is refused ("maximum subscriptions exceeded") and closes
+                // the socket (web openalgo#2312).
+                Op::Info(_) if self.connect_sent => {
+                    tracing::debug!("Groww feed sent another INFO; the session's CONNECT stands")
+                }
+                Op::Info(info) => {
                     let connect = self.connect_reply(&info);
                     out.push(FeedEvent::Reply(Message::Text(connect)));
                     out.push(FeedEvent::Reply(Message::Text("PING\r\n".into())));

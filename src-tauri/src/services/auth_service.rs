@@ -397,6 +397,7 @@ impl AuthService {
         confirm: &str,
     ) -> Result<()> {
         Self::check_new_password(new, confirm)?;
+        ctx.agent.stop_all();
         if let Err(e) = crate::services::broker_auth_service::BrokerAuthService::revoke(
             ctx,
             crate::events::SessionEndReason::Logout,
@@ -437,6 +438,7 @@ impl AuthService {
     /// next sign-in brings them back (`messaging::autostart`).
     pub async fn lock_everything(ctx: &std::sync::Arc<AppState>) {
         ctx.security.lock_with(|| ctx.sessions.clear());
+        ctx.agent.stop_all();
         ctx.messaging.shutdown().await;
         ctx.tunnel
             .stop(crate::services::tunnel::Off::SignedOut)
@@ -516,6 +518,7 @@ impl AuthService {
                 conn.execute("DELETE FROM whatsapp_users", [])?;
                 crate::messaging::whatsapp::db::clear_session(&conn)?;
                 crate::db::sqlite::tunnel::forget_authtoken(&conn)?;
+                crate::agent::models::secrets::wipe(&conn)?;
                 // The keys go with the account; the next setup makes new
                 // ones (KEY-01).
                 crate::db::sqlite::key_vault::delete(&conn)?;
@@ -577,6 +580,7 @@ impl AuthService {
     /// cannot be written) and the bots, wipe and rotate (`reset_account`,
     /// which deletes the stored row), then sign every window out.
     pub async fn reset_account_everywhere(ctx: &std::sync::Arc<AppState>) -> Result<()> {
+        ctx.agent.stop_all();
         if let Err(e) = crate::services::broker_auth_service::BrokerAuthService::revoke(
             ctx,
             crate::events::SessionEndReason::Logout,

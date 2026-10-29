@@ -643,6 +643,26 @@ fn no_interior_gaps(counts: &[(NaiveDate, NaiveDate, usize)]) -> Result<()> {
     Ok(())
 }
 
+/// Listed under an exchange whose calendar is not theirs: GIFT NIFTY (NSE
+/// IFSC) trades about 06:30 to 02:45, so NSE's 15:30 close would cut real
+/// bars (web `_OWN_HOURS`).
+const OWN_HOURS: &[(&str, &str)] = &[("NSE_INDEX", "GIFTNIFTY")];
+
+/// After the close, Dhan's `/v2/charts/intraday` appends one flat,
+/// zero-volume bar stamped at the request time to NSE and BSE index series
+/// (SENSEX 15m: 15:15, then 16:00). No session contains it, so the
+/// `/trading` chart's resampler refused the whole series on 30m. Its shape
+/// cannot single it out (Dhan sends no index volume, and a quiet GIFT
+/// NIFTY bar is flat too), so every intraday series is trimmed at its
+/// exchange's close by the history service (web `_drop_bars_after_close`,
+/// openalgo#2308). Daily bars are left alone.
+pub fn trims_after_close(req: &HistoryRequest) -> bool {
+    req.interval != "D"
+        && !OWN_HOURS
+            .iter()
+            .any(|(ex, sym)| req.key.exchange == *ex && req.key.symbol == *sym)
+}
+
 pub async fn get_history(
     b: &DhanBroker,
     auth: &AuthToken,

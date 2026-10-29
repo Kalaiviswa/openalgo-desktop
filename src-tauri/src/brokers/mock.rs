@@ -82,6 +82,31 @@ pub async fn after_send_error(kind: AfterSend) -> AppError {
     }
 }
 
+/// A real transport error before anything was sent: the connection to a
+/// port nobody listens on is refused.
+pub async fn never_sent_error() -> AppError {
+    let addr = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => match l.local_addr() {
+            Ok(a) => a,
+            Err(e) => return AppError::Io(e),
+        },
+        Err(e) => return AppError::Io(e),
+    };
+    let client = match reqwest::Client::builder().no_proxy().build() {
+        Ok(c) => c,
+        Err(e) => return e.into(),
+    };
+    match client
+        .post(format!("http://{}/orders", addr))
+        .body("order")
+        .send()
+        .await
+    {
+        Err(e) => e.into(),
+        Ok(_) => AppError::Internal("the refused connection answered".into()),
+    }
+}
+
 /// A pause inside `place_order`: `entered` fires when an order arrives, and
 /// the order goes on once `release` fires.
 #[derive(Default)]
@@ -132,6 +157,9 @@ pub struct MockBroker {
     /// first, with the status the kept order then has (`complete` fills
     /// it in full at `after_send_price`).
     pub after_send: Mutex<VecDeque<(AfterSend, &'static str)>>,
+    /// This many placements fail before anything is sent: the connection
+    /// to the broker is refused ([`never_sent_error`]).
+    pub never_sent: Mutex<u32>,
     pub after_send_price: Mutex<f64>,
     /// The order time (IST, `YYYY-MM-DD HH:MM:SS`) such an order shows in
     /// the book; empty by default.
@@ -153,6 +181,9 @@ pub struct MockBroker {
     pub quotes: Mutex<HashMap<String, Quote>>,
     pub depth: Mutex<Option<Scripted<MarketDepth>>>,
     pub history: Mutex<Option<Scripted<Vec<Candle>>>>,
+    /// `history_trims_after_close` answers this (Dhan's index bar after the
+    /// close).
+    pub trims_after_close: Mutex<bool>,
     pub gtt: Mutex<Option<Scripted<GttResponse>>>,
     pub gtt_book: Mutex<Option<Scripted<Vec<GttOrder>>>>,
     pub master: Mutex<Option<Scripted<Vec<SymbolData>>>>,
@@ -224,6 +255,7 @@ impl MockBroker {
             calls: Mutex::new(Vec::new()),
             order_ids: Mutex::new(VecDeque::new()),
             after_send: Mutex::new(VecDeque::new()),
+            never_sent: Mutex::new(0),
             after_send_price: Mutex::new(100.0),
             after_send_time: Mutex::new(String::new()),
             panic_after_place: Mutex::new(false),
@@ -239,6 +271,7 @@ impl MockBroker {
             quotes: Mutex::new(HashMap::new()),
             depth: Mutex::new(None),
             history: Mutex::new(None),
+            trims_after_close: Mutex::new(false),
             gtt: Mutex::new(None),
             gtt_book: Mutex::new(None),
             master: Mutex::new(None),
@@ -388,6 +421,15 @@ impl Broker for MockBroker {
         self.record(MockCall::PlaceOrder(order.clone()));
         if *self.panic_after_place.lock() {
             panic!("mock broker: failure after the order reached the broker");
+        }
+        let refused = {
+            let mut n = self.never_sent.lock();
+            let refused = *n > 0;
+            *n = n.saturating_sub(1);
+            refused
+        };
+        if refused {
+            return Err(never_sent_error().await);
         }
         let fault = self.after_send.lock().pop_front();
         if let Some((kind, status)) = fault {
@@ -644,6 +686,10 @@ impl Broker for MockBroker {
         self.pace().await?;
         self.record(MockCall::History(req.clone()));
         out(&self.history, Vec::new)
+    }
+
+    fn history_trims_after_close(&self, _: &HistoryRequest) -> bool {
+        *self.trims_after_close.lock()
     }
 
     async fn place_gtt(&self, _: &AuthToken, _: &GttRequest) -> Result<GttResponse> {

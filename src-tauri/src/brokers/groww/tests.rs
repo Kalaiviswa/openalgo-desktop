@@ -18,7 +18,7 @@ use super::*;
 use crate::brokers::common::mapping::{Action, PriceType, Validity};
 use crate::brokers::common::order_poll::{clamp_interval, diff};
 use crate::brokers::common::streaming::{
-    BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message,
+    BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, PrepareError,
 };
 use prost::Message as _;
 use serde_json::{json, Value};
@@ -2498,4 +2498,87 @@ async fn order_feed_is_the_poller_and_logout_stops_it() {
     let closed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
     assert!(matches!(closed, Ok(None)));
     assert!(b.create_order_feed(&AuthToken::new(" ")).is_err());
+}
+
+/// Web openalgo#2312: the server sends a second INFO after CONNECT; it is
+/// not answered with a second CONNECT (which Groww refuses with "maximum
+/// subscriptions exceeded" and closes the socket). The next connection
+/// handshakes again.
+#[test]
+fn connect_goes_out_once_per_connection() {
+    let mut f = GrowwFeed::new(
+        crate::brokers::common::http::client(),
+        "tok",
+        FeedEndpoints::default(),
+    );
+    f.set_minted("JWT", Some(KeyPair::from_seed(&[7u8; 32])));
+    f.on_connected();
+    let first = f.parse(&Message::Text("INFO {\"nonce\":\"N0\"}\r\n".into()));
+    assert!(replies(&first)[0].starts_with("CONNECT "));
+    let again = f.parse(&Message::Text("INFO {\"nonce\":\"N1\"}\r\n".into()));
+    assert!(replies(&again).is_empty(), "{:?}", replies(&again));
+    f.on_connected();
+    let next = f.parse(&Message::Text("INFO {\"nonce\":\"N2\"}\r\n".into()));
+    assert!(replies(&next)[0].starts_with("CONNECT "));
+}
+
+/// A token server answering every request with `status` and `body`.
+async fn token_answer(status: u16, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/token", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let mut buf = vec![0u8; 8192];
+            let _ = s.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 {} X\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = s.write_all(reply.as_bytes()).await;
+        }
+    });
+    url
+}
+
+/// Web openalgo#2312: the NATS server accepts only a socket token, so a
+/// refused or failed socket-token request never falls back to the login
+/// token. 401 / 403 is an expired login and stops the feed; anything else
+/// is retried with backoff.
+#[tokio::test]
+async fn a_refused_socket_token_stops_the_feed_without_the_login_token() {
+    let feed = |url: String| {
+        GrowwFeed::new(
+            crate::brokers::common::http::client(),
+            "LOGINTOKEN",
+            FeedEndpoints {
+                socket_token_url: url,
+                ws_url: "ws://127.0.0.1:9/".into(),
+            },
+        )
+    };
+    for status in [401, 403] {
+        let mut f = feed(token_answer(status, "{}").await);
+        match f.prepare().await {
+            Err(PrepareError::AuthFailed(m)) => assert_eq!(m, LOGIN_EXPIRED),
+            other => panic!(
+                "{}: {:?}",
+                status,
+                other.err().map(|_| "not an expired login")
+            ),
+        }
+    }
+    let mut f = feed(token_answer(500, "{}").await);
+    assert!(matches!(f.prepare().await, Err(PrepareError::Unavailable)));
+    let mut f = feed(token_answer(200, "{}").await);
+    assert!(matches!(f.prepare().await, Err(PrepareError::Unavailable)));
+    let mut f = feed("http://127.0.0.1:9/token".into());
+    assert!(matches!(f.prepare().await, Err(PrepareError::Unavailable)));
+    let mut f = feed(token_answer(200, r#"{"token":"SOCKETJWT","subscriptionId":"s1"}"#).await);
+    assert!(f.prepare().await.is_ok());
+    let req = f.ws_request().unwrap();
+    let text = format!("{:?}", req.headers());
+    assert!(text.contains("SOCKETJWT") && !text.contains("LOGINTOKEN"));
 }

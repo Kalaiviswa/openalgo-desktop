@@ -32,6 +32,60 @@ pub fn sort_dedupe(mut candles: Vec<Candle>) -> Vec<Candle> {
     candles
 }
 
+/// The exchange whose session an exchange's bars follow: an index
+/// exchange shares its cash exchange's (web dhan `_SESSION_EXCHANGE`).
+pub fn session_exchange(exchange: &str) -> &str {
+    match exchange {
+        "NSE_INDEX" => "NSE",
+        "BSE_INDEX" => "BSE",
+        "MCX_INDEX" => "MCX",
+        other => other,
+    }
+}
+
+/// Drop intraday candles that start at or after the session close of their
+/// IST day (web dhan `_drop_bars_after_close`, openalgo#2308). `close_of`
+/// answers a day's close in epoch milliseconds, or `None` when the calendar
+/// has no session that day, which leaves the day as it is; it is asked once
+/// per day.
+pub fn drop_bars_after_close(
+    candles: Vec<Candle>,
+    mut close_of: impl FnMut(NaiveDate) -> Option<i64>,
+) -> Vec<Candle> {
+    let mut closes: Vec<(NaiveDate, Option<i64>)> = Vec::new();
+    let before = candles.len();
+    let kept: Vec<Candle> = candles
+        .into_iter()
+        .filter(|c| {
+            let Some(day) = ist_day(c.timestamp) else {
+                return true;
+            };
+            let close = match closes.iter().find(|(d, _)| *d == day) {
+                Some((_, close)) => *close,
+                None => {
+                    let close = close_of(day);
+                    closes.push((day, close));
+                    close
+                }
+            };
+            close.is_none_or(|ms| c.timestamp.saturating_mul(1000) < ms)
+        })
+        .collect();
+    if kept.len() < before {
+        tracing::debug!(
+            "Dropped {} history bar(s) after the session close",
+            before - kept.len()
+        );
+    }
+    kept
+}
+
+/// The IST calendar day of an epoch-seconds timestamp.
+fn ist_day(ts: i64) -> Option<NaiveDate> {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|d| d.with_timezone(&chrono_tz::Asia::Kolkata).date_naive())
+}
+
 /// Parse an ISO-8601 timestamp with offset (`2024-03-28T09:15:00+0530` or
 /// `+05:30`) to epoch seconds.
 pub fn parse_iso_epoch(s: &str) -> Option<i64> {
@@ -44,6 +98,79 @@ pub fn parse_iso_epoch(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bar(ts: i64) -> Candle {
+        Candle {
+            timestamp: ts,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            ..Default::default()
+        }
+    }
+
+    /// Epoch seconds of an IST wall-clock time.
+    fn ist(y: i32, m: u32, day: u32, h: u32, min: u32) -> i64 {
+        d(y, m, day)
+            .and_hms_opt(h, min, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            - 19_800
+    }
+
+    /// Web openalgo#2308: SENSEX 15m after the close ends 15:15, then Dhan's
+    /// 16:00 bar; the 16:00 bar goes, a bar at the close goes, the session's
+    /// bars stay, and a day the calendar has no session for is left alone.
+    #[test]
+    fn bars_from_the_close_on_are_dropped_day_by_day() {
+        let close =
+            |day: NaiveDate| (day == d(2026, 10, 27)).then(|| ist(2026, 10, 27, 15, 30) * 1000);
+        let candles = vec![
+            bar(ist(2026, 10, 27, 9, 15)),
+            bar(ist(2026, 10, 27, 15, 15)),
+            bar(ist(2026, 10, 27, 15, 30)),
+            bar(ist(2026, 10, 27, 16, 0)),
+            // No session in the calendar: left as it is.
+            bar(ist(2026, 10, 25, 16, 0)),
+        ];
+        let kept: Vec<i64> = drop_bars_after_close(candles, close)
+            .iter()
+            .map(|c| c.timestamp)
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                ist(2026, 10, 27, 9, 15),
+                ist(2026, 10, 27, 15, 15),
+                ist(2026, 10, 25, 16, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_calendar_is_asked_once_per_day() {
+        let mut asked = Vec::new();
+        let candles = (0..4)
+            .map(|i| bar(ist(2026, 10, 27, 10, i * 15)))
+            .chain([bar(ist(2026, 10, 28, 10, 0))])
+            .collect();
+        let kept = drop_bars_after_close(candles, |day| {
+            asked.push(day);
+            None
+        });
+        assert_eq!(kept.len(), 5);
+        assert_eq!(asked, vec![d(2026, 10, 27), d(2026, 10, 28)]);
+    }
+
+    #[test]
+    fn index_exchanges_follow_their_cash_session() {
+        assert_eq!(session_exchange("NSE_INDEX"), "NSE");
+        assert_eq!(session_exchange("BSE_INDEX"), "BSE");
+        assert_eq!(session_exchange("MCX_INDEX"), "MCX");
+        assert_eq!(session_exchange("MCX"), "MCX");
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()

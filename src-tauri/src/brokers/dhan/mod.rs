@@ -550,6 +550,10 @@ impl Broker for DhanBroker {
         data::get_history(self, auth, req).await
     }
 
+    fn history_trims_after_close(&self, req: &HistoryRequest) -> bool {
+        data::trims_after_close(req)
+    }
+
     async fn place_gtt(&self, auth: &AuthToken, req: &GttRequest) -> Result<GttResponse> {
         if self.is_sandbox() {
             return Err(AppError::Unsupported("gtt"));

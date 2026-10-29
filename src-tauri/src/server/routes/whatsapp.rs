@@ -290,10 +290,10 @@ pub async fn stats(
         .map(|d| d.clamp(1, 365))
         .unwrap_or(7);
     // Up to a year of the command log (kept forever as on the web), read on
-    // the blocking pool. Desktop: a log that cannot be read says so; the web
-    // answers zero commands, which reads as a bot nobody used (lead,
-    // 2026-10-20).
-    match ctx.blocking(move |c| page::command_stats(c, days)).await {
+    // the blocking pool a report at a time (AppState::report). Desktop: a
+    // log that cannot be read says so; the web answers zero commands, which
+    // reads as a bot nobody used (lead, 2026-10-20).
+    match ctx.report(move |c| page::command_stats(c, days)).await {
         Ok(data) => ok(json!({"status": "success", "data": data})),
         Err(e) => {
             tracing::error!("Reading WhatsApp stats failed: {}", e);

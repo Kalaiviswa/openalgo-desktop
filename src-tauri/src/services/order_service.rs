@@ -205,8 +205,8 @@ pub fn broker_error_reply(e: &AppError, internal: &str) -> Reply {
         }
         // Not sent: the web's busy refusal (docs-20).
         AppError::Busy(_) => Reply::broker_failure(e, 429),
-        // The wire never says "uncertain": a broker's text keeps its 400, a
-        // transport failure its 500 (LOG-08).
+        // A broker's text keeps its 400, a transport failure its 500; a
+        // placement answers a lost reply itself (`placement_reply`, 502).
         AppError::Uncertain(u) if u.internal => {
             tracing::error!("Broker call failed with no definite answer: {}", e);
             Reply::error(500, internal)
@@ -359,10 +359,12 @@ pub async fn place_live(h: &BrokerHandle, ctx: &AppState, req: &Value) -> Reply 
     reply
 }
 
-/// The reply for one live placement, carrying its outcome. An uncertain
-/// placement keeps the web's error shape (500, a message telling the client
-/// to check the order book), while in-process callers read
-/// `Reply::placement` and never take it for a refusal.
+/// The reply for one live placement, carrying its outcome. A placement
+/// sent but never answered says it may have been placed (502, the web's
+/// message telling the client to check the order book; web openalgo#2305),
+/// whether the adapter raised the transport failure or passed it on;
+/// in-process callers read `Reply::placement` and never take an uncertain
+/// placement for a refusal.
 pub fn placement_reply(
     order: &ResolvedOrder,
     placed: crate::error::Result<crate::brokers::types::OrderResponse>,
@@ -377,11 +379,13 @@ pub fn placement_reply(
             client_tag.as_deref().unwrap_or("none")
         );
     }
-    // The wire answer is the web's, exactly as before LOG-08; the outcome
-    // travels beside it.
+    // The wire answer is the web's; the outcome travels beside it.
     let wire = match (&outcome, &placed) {
         (PlaceOutcome::Accepted { order_id }, _) => {
             Reply::ok(json!({"status": "success", "orderid": order_id}))
+        }
+        (_, Err(e)) if outcome::unanswered(e) => {
+            Reply::error(502, outcome::UNANSWERED_ORDER_MESSAGE)
         }
         (_, Ok(r)) => Reply::error(
             400,
