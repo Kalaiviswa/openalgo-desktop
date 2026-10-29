@@ -216,7 +216,7 @@ Logging out of OpenAlgo also ends the broker session.
 | Logged in but no quotes or feed | Data subscription (Zerodha, Dhan); Market Data keys (XTS brokers, CompositEdge, RMoney) |
 | Samco refuses the login | Your internet address must be the static IP registered with Samco |
 | Sahi says the API key is not approved for today | Approve the key in Sahi web, Profile, API Dashboard, then log in again |
-| Sahi refuses orders from this computer | Register this computer's internet address as the key's static IP in the Sahi API Dashboard |
+| Sahi refuses orders from this computer | Register the internet address this computer's traffic leaves from as a static IP on your Sahi account (Sahi web, Profile, API Dashboard) |
 | Symbols missing | **Master Contract** page in the profile menu: **Force Download** |
 | Switch to another broker refused | Stop the Live strategies, OpenScript runs or scalping protection the card names, or let pending orders settle |
 
