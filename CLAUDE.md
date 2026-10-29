@@ -817,6 +817,14 @@ worktree onto master. CI builds fresh and is unaffected.
   Not on Windows: an app built on the mock runtime links window code that
   needs the common-controls v6 manifest, and a test executable without it
   fails to load (`0xc0000139`, STATUS_ENTRYPOINT_NOT_FOUND).
+- **A Tauri plugin anchors a scope rule itself.** The shell plugin compiles
+  `plugins.shell.open` as `^{rule}$`, so the rule written `^https?://`
+  became `^^https?://$`, matched no real address, and every link the app
+  opens in the browser (the ChatGPT sign-in page, the update notice's
+  release page) failed silently through 1.0.3. Write the rule unanchored
+  (`https?://\S+`); `commands/open_link_tests.rs` pins it. A link that
+  "does nothing" in the window is this kind of refusal: the page swallows
+  the error.
 
 ### Tests that pass locally and fail in CI
 
