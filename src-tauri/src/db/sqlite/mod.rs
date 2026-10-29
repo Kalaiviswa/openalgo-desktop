@@ -181,13 +181,6 @@ pub(crate) fn write_transaction(
 /// How long a statement waits for another writer before it fails busy.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The busy handler of every pooled connection: try again every
-/// millisecond (every timer tick where sleeps are coarser), up to
-/// [`BUSY_TIMEOUT`] in all. SQLite's own (`busy_timeout`) backs off to
-/// 100 ms between tries, so a write waiting behind a series of short
-/// transactions, the master replacement's (`master_swap`), kept missing
-/// the pauses between them (DB-01). `attempt` is 0 on the first call of
-/// each wait, on the thread running the statement.
 #[cfg(test)]
 thread_local! {
     /// The longest a statement on this thread has waited for another
@@ -203,6 +196,13 @@ pub(crate) fn take_lock_wait() -> Duration {
     LOCK_WAIT.with(|w| w.replace(Duration::ZERO))
 }
 
+/// The busy handler of every pooled connection: try again every
+/// millisecond (every timer tick where sleeps are coarser), up to
+/// [`BUSY_TIMEOUT`] in all. SQLite's own (`busy_timeout`) backs off to
+/// 100 ms between tries, so a write waiting behind a series of short
+/// transactions, the master replacement's (`master_swap`), kept missing
+/// the pauses between them (DB-01). `attempt` is 0 on the first call of
+/// each wait, on the thread running the statement.
 fn retry_busy(attempt: i32) -> bool {
     thread_local! {
         static WAITING_SINCE: std::cell::Cell<Option<std::time::Instant>> =
