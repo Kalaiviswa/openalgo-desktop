@@ -258,7 +258,7 @@ fn decode(status: StatusCode, bytes: &[u8]) -> Result<Value> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(Value::Null);
     }
-    serde_json::from_slice(bytes).or_else(|e| {
+    serde_json::from_slice(bytes).map_err(|e| {
         tracing::warn!(
             broker = "sahi",
             status = status.as_u16(),
@@ -267,15 +267,13 @@ fn decode(status: StatusCode, bytes: &[u8]) -> Result<Value> {
         );
         let unreadable = "Sahi sent a response OpenAlgo could not read. Try again shortly.";
         if status == StatusCode::TOO_MANY_REQUESTS {
-            Err(outcome::refusal(
-                "Sahi is limiting requests right now. Wait a moment and try again.",
-            ))
+            outcome::refusal("Sahi is limiting requests right now. Wait a moment and try again.")
         } else if status.is_client_error() {
-            Err(outcome::refusal(unreadable))
+            outcome::refusal(unreadable)
         } else if status.is_server_error() {
-            Err(AppError::Broker(http::SERVER_ERROR.into()))
+            AppError::Broker(http::SERVER_ERROR.into())
         } else {
-            Err(AppError::Broker(unreadable.into()))
+            AppError::Broker(unreadable.into())
         }
     })
 }
