@@ -753,6 +753,9 @@ impl AnthropicAdapter {
 			..
 		} = tool;
 
+		// OpenAlgo Desktop (VENDORED.md, change 3): only the built-in tool is the
+		// provider's search; a custom tool named `web_search` stays a function.
+		let builtin_web_search = matches!(name, ToolName::WebSearch);
 		let name = match name {
 			ToolName::WebSearch => "web_search".to_string(),
 			ToolName::Custom(name) => name,
@@ -761,12 +764,8 @@ impl AnthropicAdapter {
 		let mut tool_value = json!({"name": name});
 
 		// -- Add type for builtin tool
-		#[allow(clippy::single_match)] // will have more
-		match name.as_str() {
-			"web_search" => {
-				tool_value.x_insert("type", "web_search_20250305")?;
-			}
-			_ => (),
+		if builtin_web_search {
+			tool_value.x_insert("type", "web_search_20250305")?;
 		}
 
 		// NOTE: Fo now, if tool_value.type then, assume bultin and set config as propertie

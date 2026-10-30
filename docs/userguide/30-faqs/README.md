@@ -18,7 +18,7 @@ any tunnel service you use may cost money.
 
 ### Which brokers are supported?
 
-37 brokers, the same as OpenAlgo web: Indian brokers from 5 Paisa to Zerodha
+38 brokers, the same as OpenAlgo web: Indian brokers from 5 Paisa to Zerodha
 (Rupeezy included), and Delta Exchange for crypto. One set of keys can be saved for each broker, and one
 broker is logged in at a time. How each one signs in:
 [Broker sign-in](../../user/brokers.md).
@@ -44,11 +44,12 @@ is entered inside it.
 | The Python Strategy Host (`/python`) | Run your Python scripts yourself with the OpenAlgo SDK against the desktop's API, or use OpenAlgo web. See [20 - Python Strategies](../20-python-strategies/README.md) |
 | Flow (`/flow`) | OpenAlgo web. See [21 - Flow Visual Builder](../21-flow-visual-builder/README.md) |
 | Portfolio Backtester, SIP Backtester, Portfolio Analyzer | OpenAlgo web |
-| The Agent (`/agent`, and the Assistant panel in `/trading`) | Connect Claude Desktop or Claude Code through MCP: [MCP](../../user/mcp.md) |
 
-These were left out so the desktop needs no Python runtime (maintainer
-decisions, 2026-10-03 and 2026-10-12). The app has no pages, menu entries or
-buttons for them.
+The app has no pages, menu entries or buttons for these. The Python Strategy
+Host and the pandas backtesters were left out so the desktop needs no Python
+runtime (maintainer decisions, 2026-10-03 and 2026-10-12). Flow is planned
+for OpenAlgo Desktop 1.0.5. The Agent, left out of 1.0.0 to 1.0.3, is
+included from 1.0.4.
 
 ### Can I have several users or several brokers at once?
 
@@ -220,8 +221,12 @@ Amibroker and Excel on the same computer need no tunnel.
 
 ### Can I connect Claude or another AI assistant?
 
-Yes, through the built-in MCP server. Create a token on the API Key page and
-follow [Connecting Claude Desktop and Claude Code](../../user/mcp.md).
+Yes, in two ways. The built-in Agent (profile menu, **Agent**; the
+**Assistant** panel in `/trading`) runs on a model you set up in **Admin**,
+**Agent Config**, and asks for your approval before every order. Or connect
+Claude Desktop or Claude Code through the built-in MCP server: create a token
+on the API Key page and follow
+[Connecting Claude Desktop and Claude Code](../../user/mcp.md).
 
 ### I am moving from OpenAlgo web. What changes?
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-OpenAlgo Desktop works with 37 brokers, including Rupeezy and Delta Exchange
+OpenAlgo Desktop works with 38 brokers, including Rupeezy and Delta Exchange
 (crypto). You enter each broker's keys inside the app, there is no `.env`
 file, and:
 
@@ -122,7 +122,7 @@ What happens next depends on how your broker signs in:
 | --- | --- | --- |
 | On the broker's website | Zerodha, Fyers, Upstox, Dhan, Arrow, Paytm Money, Pocketful, HDFC Sky, HDFC Securities, IIFL Capital, Alice Blue, CompositEdge, RMoney, Flattrade, Shoonya, Zebu, TradeSmart, Rupeezy | Log in on the broker's page and approve access; the broker sends you back to OpenAlgo |
 | A form in the app | Angel One, Kotak Securities, 5 Paisa, Firstock, Motilal Oswal, mStock, Tradejini, Nubra, IndMoney, Definedge, Groww; Samco on its own **Connect** page | Type the TOTP, PIN, OTP or password the card asks for. OpenAlgo uses them for that login only and does not save them |
-| One click from saved keys | 5 Paisa (XTS), JainamXts, Ibulls, IIFL, Wisdom Capital, Delta Exchange, Dhan (Sandbox) | Nothing to type |
+| One click from saved keys | 5 Paisa (XTS), JainamXts, Ibulls, IIFL, Wisdom Capital, Delta Exchange, Sahi, Dhan (Sandbox) | Nothing to type |
 
 For the XTS brokers (and CompositEdge and RMoney), also fill in the **Market
 Data App Key** and **Market Data Secret Key**: quotes and the live feed need
@@ -215,6 +215,8 @@ Logging out of OpenAlgo also ends the broker session.
 | TOTP rejected | Wait for a fresh code; check that the computer's clock is set automatically |
 | Logged in but no quotes or feed | Data subscription (Zerodha, Dhan); Market Data keys (XTS brokers, CompositEdge, RMoney) |
 | Samco refuses the login | Your internet address must be the static IP registered with Samco |
+| Sahi says the API key is not approved for today | Approve the key in Sahi web, Profile, API Dashboard, then log in again |
+| Sahi refuses orders from this computer | Register the internet address this computer's traffic leaves from as a static IP on your Sahi account (Sahi web, Profile, API Dashboard) |
 | Symbols missing | **Master Contract** page in the profile menu: **Force Download** |
 | Switch to another broker refused | Stop the Live strategies, OpenScript runs or scalping protection the card names, or let pending orders settle |
 

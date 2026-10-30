@@ -271,3 +271,102 @@ fn the_catalogue_overrules_a_wrong_box_and_the_box_decides_the_unknown() {
     assert!(!capable(&c, unknown, false, Probe::Vision));
     assert!(!capable(&c, "gpt-3.5-turbo", true, Probe::Reasoning));
 }
+
+/// LiteLLM's Responses bridge: an OpenAI request for GPT-5.4 or later that
+/// carries tools goes to the Responses API, because Chat Completions
+/// refuses tools while the model reasons. Found when gpt-6-luna passed its
+/// Test (no tools) and every chat turn failed.
+#[test]
+fn a_reasoning_gpt_with_tools_goes_to_the_responses_api() {
+    use super::target::request_adapter;
+    const OPENAI: &str = "https://api.openai.com/v1/";
+    const LOCAL: &str = "http://localhost:1234/v1/";
+    let to = |kind: &str, endpoint: &str, name: &str, tools: bool, effort: bool| {
+        request_adapter(AdapterKind::OpenAI, kind, endpoint, name, tools, effort)
+    };
+    for name in [
+        "gpt-6-luna",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.6-sol",
+        "gpt-7",
+    ] {
+        assert_eq!(
+            to("openai", OPENAI, name, true, false),
+            AdapterKind::OpenAIResp,
+            "{}",
+            name
+        );
+        assert_eq!(
+            to("litellm", OPENAI, name, true, true),
+            AdapterKind::OpenAIResp,
+            "{}",
+            name
+        );
+        assert_eq!(
+            to("openai", OPENAI, name, false, true),
+            AdapterKind::OpenAI,
+            "{} without tools stays on Chat Completions",
+            name
+        );
+    }
+    for name in [
+        "gpt-4o",
+        "gpt-4.1-mini",
+        "gpt-5",
+        "gpt-5.1",
+        "gpt-5-chat-latest",
+        "gpt-5.4-search-preview",
+        "o4-mini",
+        "gpt-oss-120b",
+    ] {
+        assert_eq!(
+            to("openai", OPENAI, name, true, true),
+            AdapterKind::OpenAI,
+            "{}",
+            name
+        );
+    }
+    // A private-link host of OpenAI's API enforces the same rule.
+    assert_eq!(
+        to(
+            "openai",
+            "https://eu.api.openai.com/v1/",
+            "gpt-6-luna",
+            true,
+            false
+        ),
+        AdapterKind::OpenAIResp
+    );
+    // A server of the trader's own is bridged only when an effort is sent.
+    assert_eq!(
+        to("openai_compatible", LOCAL, "gpt-6-luna", true, false),
+        AdapterKind::OpenAI
+    );
+    assert_eq!(
+        to("openai_compatible", LOCAL, "gpt-6-luna", true, true),
+        AdapterKind::OpenAIResp
+    );
+    // Another provider on the OpenAI format is never bridged.
+    assert_eq!(
+        to(
+            "litellm",
+            "https://api.perplexity.ai/",
+            "gpt-6-luna",
+            true,
+            true
+        ),
+        AdapterKind::OpenAI
+    );
+    assert_eq!(
+        request_adapter(
+            AdapterKind::Anthropic,
+            "anthropic",
+            "https://api.anthropic.com/v1/",
+            "gpt-6-luna",
+            true,
+            true
+        ),
+        AdapterKind::Anthropic
+    );
+}

@@ -204,7 +204,7 @@ Tauri window ---- loads ----> http://127.0.0.1:5000  (React app, same as web)
 
 ### Brokers
 
-All 37 web brokers are in scope, Delta Exchange (crypto) among them. They are built by
+All 38 web brokers are in scope, Delta Exchange (crypto) among them. They are built by
 **auth family**, not one by one:
 
 | Family | Implementation | Members |
@@ -212,7 +212,7 @@ All 37 web brokers are in scope, Delta Exchange (crypto) among them. They are bu
 | Noren / Finvasia | generic `NorenBroker<Config>` with hooks | shoonya, flattrade, tradesmart, zebu (firstock is separate: own JSON transport) |
 | Symphony XTS | generic `XtsBroker<Config>` | fivepaisaxts, jainamxts, compositedge, rmoney, ibulls, wisdom, and others per the audit |
 | OAuth redirect | per broker | zerodha, upstox, fyers, dhan, groww, arrow, paytm, aliceblue, definedge, pocketful, hdfcsky, hdfcsecurities, rupeezy |
-| Direct login + TOTP | per broker | angel, kotak, mstock, motilal, samco, tradejini, fivepaisa, nubra, indmoney |
+| Direct login + TOTP | per broker | angel, kotak, mstock, motilal, samco, sahi, tradejini, fivepaisa, nubra, indmoney |
 | Bespoke | per broker | iiflcapital (REST + MQTT), deltaexchange (HMAC, `CRYPTO` exchange, leverage) |
 
 Priority order: zerodha, fyers, upstox, dhan, kotak, groww, angel, then the
@@ -478,9 +478,11 @@ Out of scope, by the maintainer's decision (2026-10-03), so the desktop needs
 no Python runtime:
 
 - Python Strategy Host (`/python`)
-- Flow (`/flow`)
 - pandas-based backtesters: Portfolio Backtester, SIP Backtester, Portfolio
   Analyzer
+
+Flow (`/flow`) was on this list until 2026-10-29; it is now planned for 1.0.5
+(see Decided).
 
 **Removed from this version** (maintainer, 2026-10-12): the Python Strategy
 Host. No code for it ships, and nothing in the UI leads to it: no route,
@@ -489,6 +491,18 @@ unknown page (the app's 404 page) and its API paths are the JSON 404.
 
 Decided:
 
+- **Flow comes in 1.0.5, native Rust** (maintainer, 2026-10-29; 1.0.4 ships
+  first). Parity with the web's `/flow`: the editor, every node type, the
+  workflow validator, the scheduler, the price and order-update monitors,
+  webhooks and the import format (`docs/prompt/flow-import-format.md`), plus
+  the Agent's Flow tools (`flow_gen`) and the `flow-builder` skill. The
+  Indicator node runs on `oa_core`, the Rust core of the openalgo library
+  that `agent/indicators` already uses (the same 127 indicators as the web's
+  `openalgo.ta`), so Flow needs no Python. The web computes that node in
+  `services/indicator_service.py` (nested series, the fixed-length tail,
+  bar offsets), which is a different dispatcher from the Agent's: port it,
+  do not reuse the Agent's shape. Until Flow lands it has no route, menu
+  entry or docs claiming it.
 - **OpenScript** runs on the existing TypeScript engine (`openalgo-script`).
   Backtests already run in a Web Worker. Live runs use the same engine in a
   hidden Tauri window: the app reads new bars every 10 s (`bar_poll`) and
@@ -520,8 +534,22 @@ Decided:
   surfaces, approval list) and reach OpenAlgo through the in-process
   `/api/v1` path MCP uses (`agent/tools/service.rs`). The stream frames and
   the system prompt are pinned byte for byte against fixtures recorded from
-  the web (`scripts/agent/`). Flow (`flow_gen`) and Python strategy
-  generation (`strategy_gen`) are not in this version.
+  the web (`scripts/agent/`). Flow (`flow_gen`) comes with Flow in
+  1.0.5; Python strategy generation (`strategy_gen`) stays out.
+  - **A model that passes its Test can still fail every chat turn.** The
+    Test sends no tools (as the web's does), and OpenAI refuses tools on
+    Chat Completions while a GPT-5.4 or later model reasons, which it does
+    by default. LiteLLM bridges such a request to the Responses API, so the
+    desktop routes it there too (`providers::target::request_adapter`).
+    Check a provider change with a chat turn that calls a tool, not only
+    with Test.
+  - **genai treats a tool by its name, not only its type.** Its Anthropic
+    and OpenAI Responses adapters sent any tool named `web_search` as the
+    provider's own paid search and dropped our schema, so the Agent's search
+    left the trader's provider and the web-search boundary. Patched in the
+    vendored crate (`vendor/genai-0.7.1/VENDORED.md`, change 3). After a
+    genai upgrade, rerun `agent::run::tests::a_tool_named_web_search_is_sent_as_ours`
+    and check the request body a provider receives, not only the reply.
 
 ## Testing
 
@@ -810,6 +838,14 @@ worktree onto master. CI builds fresh and is unaffected.
   Not on Windows: an app built on the mock runtime links window code that
   needs the common-controls v6 manifest, and a test executable without it
   fails to load (`0xc0000139`, STATUS_ENTRYPOINT_NOT_FOUND).
+- **A Tauri plugin anchors a scope rule itself.** The shell plugin compiles
+  `plugins.shell.open` as `^{rule}$`, so the rule written `^https?://`
+  became `^^https?://$`, matched no real address, and every link the app
+  opens in the browser (the ChatGPT sign-in page, the update notice's
+  release page) failed silently through 1.0.3. Write the rule unanchored
+  (`https?://\S+`); `commands/open_link_tests.rs` pins it. A link that
+  "does nothing" in the window is this kind of refusal: the page swallows
+  the error.
 
 ### Tests that pass locally and fail in CI
 

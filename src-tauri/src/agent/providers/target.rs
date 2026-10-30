@@ -185,6 +185,77 @@ fn litellm_target(catalog: &Catalog, id: &str) -> Result<Target, String> {
     })
 }
 
+/// The adapter one request goes to: the row's own, except that an OpenAI
+/// request for a GPT-5.4 or later model that carries tools goes to the
+/// Responses API, as LiteLLM bridges it (`responses_api_bridge_check` in
+/// 1.104.0). Chat Completions refuses function tools while such a model
+/// reasons ("Function tools with reasoning_effort are not supported ... use
+/// /v1/responses"), and it reasons unless the effort is `none`, which the
+/// desktop never sends: a row left at `off` sends no effort and OpenAI
+/// reasons at its own default. A server that is not OpenAI's own (an
+/// OpenAI-compatible endpoint) is bridged only when an effort is sent, as
+/// LiteLLM does, since it may have no Responses route.
+pub fn request_adapter(
+    adapter: AdapterKind,
+    provider_kind: &str,
+    endpoint: &str,
+    model: &str,
+    has_tools: bool,
+    effort_sent: bool,
+) -> AdapterKind {
+    let on_openai = openai_host(endpoint);
+    let openai_provider =
+        adapter == AdapterKind::OpenAI && (provider_kind == "openai_compatible" || on_openai);
+    let bridged =
+        openai_provider && has_tools && reasons_by_default(model) && (effort_sent || on_openai);
+    if bridged {
+        AdapterKind::OpenAIResp
+    } else {
+        adapter
+    }
+}
+
+/// OpenAI's own API, or a private-link host of it (`<region>.api.openai.com`).
+fn openai_host(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "api.openai.com" || h.ends_with(".api.openai.com"))
+}
+
+/// A GPT-5.4 or later name other than a chat-only or search variant
+/// (LiteLLM's `is_model_gpt_5_4_plus_model`, less its `gpt-5`/`gpt-6`
+/// marker list, so a later series is bridged without a desktop release).
+fn reasons_by_default(model: &str) -> bool {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    if name.starts_with("gpt-5-chat") || name.contains("search") {
+        return false;
+    }
+    gpt_series_version(name).is_some_and(|v| v >= (5, 4))
+}
+
+/// `gpt-5.4-mini` -> (5, 4), `gpt-6-luna` -> (6, 0), `gpt-4o` -> none
+/// (LiteLLM's `^gpt-(\d+)(?:\.(\d+))?(?=[.-]|$)`).
+fn gpt_series_version(name: &str) -> Option<(u32, u32)> {
+    let rest = name.strip_prefix("gpt-")?;
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let major_len = digits(rest);
+    let major = rest[..major_len].parse().ok()?;
+    let mut rest = &rest[major_len..];
+    let mut minor = 0;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let minor_len = digits(after_dot);
+        if minor_len > 0 {
+            minor = after_dot[..minor_len].parse().ok()?;
+            rest = &after_dot[minor_len..];
+        }
+    }
+    match rest.chars().next() {
+        None | Some('.') | Some('-') => Some((major, minor)),
+        _ => None,
+    }
+}
+
 /// A `litellm` name that names no provider the catalogue knows.
 fn unknown_provider_message(id: &str) -> String {
     format!(

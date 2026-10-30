@@ -62,6 +62,7 @@ Choose your initial at the right of the top bar.
 | **Profile** | Account and password, Broker summary and server configuration, Alerts (toasts and sounds), Theme, TOTP (two-factor sign-in) |
 | **API Key** | Your API key, Auto or Semi-Auto order mode, the Playground, and tokens for AI clients ([chapter 09](../09-api-key-management/README.md)) |
 | **Action Center** | Orders waiting for approval in Semi-Auto mode |
+| **Agent** | Ask about your account and the market in a chat, on a model you set up in **Admin**, **Agent Config**; it asks for your approval before every order |
 | **Master Contract** | Symbol list status per exchange, **Force Download**, **Reload Cache** |
 | **Telegram Bot** | Telegram alerts and commands |
 | **WhatsApp Bot** | WhatsApp alerts and commands |
@@ -73,13 +74,13 @@ Choose your initial at the right of the top bar.
 | **Sandbox** | Analyzer-mode settings: capital, leverage, square-off times, My P&L |
 | **Leverage** | Leverage settings (shown only for a crypto broker) |
 | **Server Settings** | Ports, addresses, and access from other devices |
-| **Admin** | Freeze quantities, market holidays and timings, Diagnostics, Remote MCP, security, traffic and latency dashboards |
+| **Admin** | Freeze quantities, market holidays and timings, Diagnostics, Agent Config, Remote MCP, security, traffic and latency dashboards |
 | **Check for Updates** | Ask GitHub for a newer version ([guide](../../user/updating.md)) |
 | **Docs** | [docs.openalgo.in](https://docs.openalgo.in) in your browser |
 | **Logout** | Sign out after a confirmation |
 
-In the desktop the menu has no Flow Editor, Python Strategies or Agent
-entries: those are not in this version. **Server Settings** and **Check for
+In the desktop the menu has no Flow Editor or Python Strategies entries:
+those are not in this version. **Server Settings** and **Check for
 Updates** exist only in the desktop.
 
 ### Logging out

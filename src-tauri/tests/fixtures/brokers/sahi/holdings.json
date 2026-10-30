@@ -1,0 +1,27 @@
+{
+  "holdings": [
+    {
+      "isin": "INE002A01018",
+      "instrument_ids": [12027, 725069],
+      "t1_qty": 2,
+      "dp_qty": 8,
+      "holding_qty": 10,
+      "holding_avg_price": 245050,
+      "authorised_qty": 10,
+      "net_qty": 10,
+      "net_avg_price": 245050,
+      "position": {"net_qty": 0, "net_avg_price": 0, "buy_qty": 0, "buy_avg_price": 0, "sell_qty": 0, "sell_avg_price": 0},
+      "last_modified_at": 0
+    },
+    {
+      "isin": "INE000000000",
+      "instrument_ids": [999999],
+      "t1_qty": 0,
+      "dp_qty": 0,
+      "holding_qty": 0,
+      "holding_avg_price": 0,
+      "net_qty": 5,
+      "net_avg_price": 10000
+    }
+  ]
+}

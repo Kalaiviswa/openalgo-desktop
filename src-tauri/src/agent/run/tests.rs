@@ -157,8 +157,7 @@ const EFFORT_FIELDS: [&str; 7] = [
 /// and an effort is sent only when one is set: genai read a name ending in
 /// an effort word as that effort (`gpt-5.1-codex-max` went out as
 /// `gpt-5.1-codex` with effort max). A request to capture reasoning
-/// (Responses `reasoning.summary`, Gemini `includeThoughts`) is not an
-/// effort and is sent either way.
+/// (Gemini `includeThoughts`) is not an effort and is sent either way.
 #[tokio::test]
 async fn a_model_name_is_sent_exactly_as_configured() {
     use genai::adapter::AdapterKind as A;
@@ -223,6 +222,91 @@ async fn a_model_name_is_sent_exactly_as_configured() {
                     problems.push(format!("{}: no effort sent", case));
                 }
             }
+        }
+    }
+    assert!(problems.is_empty(), "{:#?}", problems);
+}
+
+/// The bridge is applied where the request is sent: with tools a GPT-5.4 or
+/// later model is asked on `/responses` with the effort alone (no
+/// `summary`, no `include`, as LiteLLM sends it); without tools, on
+/// `/chat/completions` as before.
+#[tokio::test]
+async fn a_reasoning_gpt_with_tools_is_asked_on_the_responses_api() {
+    use genai::chat::Tool;
+    let fake = FakeProvider::start(vec![]).await;
+    let client = ModelClient::new().unwrap();
+    let mut model = fake_model(&fake.endpoint(), genai::adapter::AdapterKind::OpenAI);
+    model.provider_kind = "openai_compatible".into();
+    model.model_name = "gpt-6-luna".into();
+    let tool = Tool::new("get_quote").with_schema(json!({"type": "object", "properties": {}}));
+    let with_tools = ChatRequest::from_user("quote of INFY").with_tools(vec![tool]);
+    for (n, request) in [with_tools, ChatRequest::from_user("hi")]
+        .into_iter()
+        .enumerate()
+    {
+        if let Ok(resp) = client.stream(&model, request, Some("medium")).await {
+            let mut stream = resp.stream;
+            while let Some(Ok(_)) = stream.next().await {}
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fake.wait_for_requests(n + 1),
+        )
+        .await
+        .expect("a request");
+    }
+    let (paths, bodies) = (fake.paths(), fake.sent());
+    assert_eq!(paths, vec!["/v1/responses", "/v1/chat/completions"]);
+    assert_eq!(bodies[0]["reasoning"], json!({"effort": "medium"}));
+    assert!(bodies[0].get("include").is_none(), "{}", bodies[0]);
+    assert_eq!(bodies[0]["tools"][0]["name"], "get_quote");
+    assert_eq!(bodies[1]["reasoning_effort"], "medium");
+}
+
+/// The Agent's own `web_search` (the web's tool name) goes out as a
+/// function with its schema on every provider format. genai turned a tool
+/// with that name into Anthropic's and OpenAI's own server-side search
+/// (VENDORED.md, change 3): the search left the trader's chosen provider
+/// and the web-search boundary, and an Anthropic reply then failed.
+#[tokio::test]
+async fn a_tool_named_web_search_is_sent_as_ours() {
+    use genai::adapter::AdapterKind as A;
+    use genai::chat::Tool;
+    let fake = FakeProvider::start(vec![]).await;
+    let client = ModelClient::new().unwrap();
+    let schema = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+    let mut problems = Vec::new();
+    for (n, adapter) in [A::OpenAI, A::OpenAIResp, A::Anthropic, A::Gemini]
+        .into_iter()
+        .enumerate()
+    {
+        let model = fake_model(&fake.endpoint(), adapter);
+        let tool = Tool::new("web_search")
+            .with_description("Search the web.")
+            .with_schema(schema.clone());
+        let request = ChatRequest::from_user("search").with_tools(vec![tool]);
+        if let Ok(resp) = client.stream(&model, request, None).await {
+            let mut stream = resp.stream;
+            while let Some(Ok(_)) = stream.next().await {}
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fake.wait_for_requests(n + 1),
+        )
+        .await
+        .expect("a request");
+        let tools = fake.sent()[n]["tools"].to_string();
+        let ours = tools.contains("\"web_search\"") && tools.contains("\"query\"");
+        let builtin = [
+            "web_search_20250305",
+            "{\"type\":\"web_search\"}",
+            "googleSearch",
+        ]
+        .iter()
+        .any(|b| tools.contains(b));
+        if !ours || builtin {
+            problems.push(format!("{:?}: {}", adapter, tools));
         }
     }
     assert!(problems.is_empty(), "{:#?}", problems);

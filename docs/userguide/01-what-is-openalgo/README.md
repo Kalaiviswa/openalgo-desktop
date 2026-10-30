@@ -100,7 +100,7 @@ opens in a browser on the same computer at `http://127.0.0.1:5000`.
 
 ## Brokers and exchanges
 
-OpenAlgo Desktop supports all 37 brokers of OpenAlgo web, including Rupeezy
+OpenAlgo Desktop supports all 38 brokers of OpenAlgo web, including Rupeezy
 and Delta Exchange (crypto):
 
 | | | | |
@@ -112,9 +112,9 @@ and Delta Exchange (crypto):
 | Ibulls | IIFL | IIFL Capital | IndMoney |
 | JainamXts | Kotak Securities | Motilal Oswal | mStock by Mirae Asset |
 | Nubra | Paytm Money | Pocketful | RMoney |
-| Rupeezy | Samco | Shoonya | Tradejini |
-| TradeSmart | Upstox | Wisdom Capital | Zebu |
-| Zerodha | | | |
+| Rupeezy | Sahi | Samco | Shoonya |
+| Tradejini | TradeSmart | Upstox | Wisdom Capital |
+| Zebu | Zerodha | | |
 
 Exchanges use OpenAlgo's codes: `NSE` and `BSE` (equity), `NFO` and `BFO`
 (F&O), `CDS` and `BCD` (currency), `MCX` and `NCDEX` (commodity), the index
@@ -173,7 +173,7 @@ webhooks).
 | Users and brokers | One user, one broker per instance | One user; keys for many brokers, one logged in at a time |
 | Raspberry Pi | Supported | Not supported: use OpenAlgo web |
 | Runs | All day on a server | While the app is open and you are signed in |
-| Python Strategy Host, Flow, pandas backtesters, the Agent | Included | Not included in this version |
+| Python Strategy Host, Flow, pandas backtesters | Included | Not included in this version (Flow is planned for 1.0.5) |
 
 Everything that talks to OpenAlgo web (the Python SDK, TradingView, Amibroker,
 Chartink, GoCharting, Excel, MCP clients) talks to OpenAlgo Desktop the same

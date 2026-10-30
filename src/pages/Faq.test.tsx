@@ -41,7 +41,7 @@ describe('FAQ brokers', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Which brokers are supported?' }))
     const answer = await screen.findByText(/^OpenAlgo supports \d+ broker plugins/)
     expect(answer).toHaveTextContent(`OpenAlgo supports ${BROKER_COUNT} broker plugins:`)
-    expect(answer).toHaveTextContent('RMoney, Rupeezy, Samco')
+    expect(answer).toHaveTextContent('RMoney, Rupeezy, Sahi, Samco')
     await userEvent.click(screen.getByRole('button', { name: 'What is OpenAlgo?' }))
     expect(
       await screen.findByText(

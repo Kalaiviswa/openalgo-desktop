@@ -17,7 +17,7 @@
 OpenAlgo Desktop is a free, open source, single-user desktop version of
 [OpenAlgo web](https://github.com/marketcalls/openalgo). It runs on Windows,
 macOS and Linux (x64 or ARM64), with the same screens, the same API and the
-same market data feed as the web version, and connects to all **37 brokers**
+same market data feed as the web version, and connects to all **38 brokers**
 of OpenAlgo web, Delta Exchange for crypto among them. There is no server to
 set up, no Python to install and no `.env` file: every setting and credential
 is entered inside the app, and secrets are kept encrypted with a key locked by
@@ -63,11 +63,12 @@ Moving over from OpenAlgo web? See
 
 | Surface | Route | Who it's for |
 | --- | --- | --- |
-| **Unified Broker API** | `/api/v1/` | External platforms and your own code: TradingView, Amibroker, Chartink, GoCharting, Excel, the Python SDK and the other official SDKs, and AI clients over MCP. One contract across 37 brokers, answering exactly as OpenAlgo web does. |
+| **Unified Broker API** | `/api/v1/` | External platforms and your own code: TradingView, Amibroker, Chartink, GoCharting, Excel, the Python SDK and the other official SDKs, and AI clients over MCP. One contract across 38 brokers, answering exactly as OpenAlgo web does. |
 | **Strategy Module and RMS** | `/strategy` | Traders who run multi-leg options strategies, or trade TradingView and GoCharting alerts one signal at a time, with stop, target and trailing rules decided by one risk engine. |
 | **Charting Terminal and OpenScript** | `/trading` | Traders who trade from the chart: a full-screen terminal with an order dock, custom indicators, and OpenScript studies and strategies that are backtested and run live on the same engine. |
 | **Scalping Terminal** | `/scalping` | Fast intraday trades in options, futures and equity from the keyboard, with stop-loss, target and trailing protection that OpenAlgo watches for you. |
-| **Options Trading Suite** | `/tools` | Options traders: sixteen tools (Strategy Builder with payoff diagrams and live Greeks, Strategy Portfolio, Option Chain, Option Greeks, OI Tracker, OI Range, Max Pain, Straddle Chart, Straddle PnL, Vol Surface, GEX Dashboard, Strike Profile, Gamma Density, IV Smile, OI Profile, Arbitrage). Each one uses your connected broker's data. |
+| **Options Trading Suite** | `/tools` | Options traders: seventeen tools (Strategy Builder with payoff diagrams and live Greeks, Strategy Portfolio, Sector Rotation, Option Chain, Option Greeks, OI Tracker, OI Range, Max Pain, Straddle Chart, Straddle PnL, Vol Surface, GEX Dashboard, Strike Profile, Gamma Density, IV Smile, OI Profile, Arbitrage). Each one uses your connected broker's data. |
+| **AI Agent** | `/agent` | Traders who would rather ask: a chat, also a panel beside the `/trading` chart, that reads your own account and market data through OpenAlgo, draws charts, computes 127 indicators and marks up your chart. It places an order only after you approve that order. Bring a model from OpenAI, Anthropic, Gemini and others, a ChatGPT Plus or Pro plan, or a local model through Ollama. |
 
 Every one of them can run in sandbox mode (analyzer mode) first: while it is
 on, every order from the app, the API, webhooks and MCP clients goes to the
@@ -206,7 +207,7 @@ it again.
 
 ## Supported Brokers
 
-All 37 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto.
+All 38 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto.
 
 <details>
 <summary>View all supported brokers</summary>
@@ -240,6 +241,7 @@ All 37 brokers of OpenAlgo web, including Rupeezy and Delta Exchange for crypto.
 - Pocketful
 - RMoney
 - Rupeezy
+- Sahi
 - Samco
 - Shoonya
 - Tradejini
@@ -286,7 +288,7 @@ from a live web instance:
 
 ### Options & Strategy Analytics Tools (`/tools`)
 
-Sixteen tools for options trading and market analysis, on the **Tools** page.
+Seventeen tools for options trading and market analysis, on the **Tools** page.
 They use your connected broker's data; market data entitlement and exchange
 coverage still apply:
 
@@ -294,6 +296,7 @@ coverage still apply:
 | --- | --- | --- |
 | **Strategy Builder** | `/strategybuilder` | Build multi-leg option strategies with live Greeks, payoff diagram and what-if simulators |
 | **Strategy Portfolio** | `/strategybuilder/portfolio` | Saved strategies across MyTrades and Simulation watchlists |
+| **Sector Rotation** | `/sector-rotation` | Every NSE sector index, or your own list of stocks and indices, on a four-quadrant relative rotation map against a benchmark, daily or weekly, with trails |
 | **Option Chain** | `/optionchain` | Real-time option chain with live Greeks, OI data, and quick order placement |
 | **Option Greeks** | `/ivchart` | Historical IV, Delta, Theta, Vega, and Gamma charts for ATM options |
 | **OI Tracker** | `/oitracker` | Open Interest analysis with CE/PE OI bars, PCR overlay, and ATM strike marker |
@@ -367,6 +370,23 @@ TradingView and GoCharting from the symbol and order you choose.
 
 Historical market data on your computer, in DuckDB: download jobs, a
 scheduler, exports and charts.
+
+### AI Agent (`/agent`)
+
+A built-in agent, on its own page and as the Assistant panel beside the
+`/trading` chart:
+
+- Reads quotes, depth, history, option chains, Greeks and your books through
+  OpenAlgo's own services, and in analyzer mode your sandbox account
+- Draws price, open interest, gamma exposure, volatility surface and payoff
+  charts in the chat, and marks levels, trend lines and zones on your chart
+- Computes 127 indicators with the same results as OpenAlgo web's
+  `openalgo.ta`, and writes OpenScript studies and strategies
+- **Every order pauses for your approval**, with a kill switch and risk
+  limits on Agent Config that are checked again after you approve
+- Models from OpenAI, Anthropic, Gemini and other providers, a ChatGPT Plus
+  or Pro plan, or a local model through Ollama or any OpenAI-compatible
+  server; keys kept encrypted in OpenAlgo's data, never in a file
 
 ### AI-Powered Trading (MCP Server)
 
@@ -779,23 +799,23 @@ book, trade book, positions and holdings; the `/trading` charting terminal and
 scalping; the strategy module with risk management; TradingView, GoCharting
 and Chartink webhooks; Action Center for semi-automatic orders; options tools
 (option chain, Greeks, OI tracker, max pain, IV charts, GEX, straddles, strategy
-builder); Historify; OpenScript; the Playground; API key management; logs,
-latency and traffic monitoring; Telegram and WhatsApp alerts and bots; sandbox
-mode; and an MCP server for AI clients.
+builder, Sector Rotation); Historify; OpenScript; the Playground; API key
+management; logs, latency and traffic monitoring; Telegram and WhatsApp
+alerts and bots; sandbox mode; an MCP server for AI clients; and the
+**Agent** (`/agent`, its settings under Admin, and the Assistant panel in the
+`/trading` terminal), which answers from your own account and market data on
+a model you choose and asks for your approval before every order.
 
 Not included in this version:
 
 - the Python Strategy Host (`/python`)
-- the **Agent** (`/agent`, its settings page, and the Assistant panel in the
-  `/trading` terminal)
-- Flow (`/flow`)
+- Flow (`/flow`), planned for 1.0.5
 - the pandas-based backtesters: Portfolio Backtester, SIP Backtester and
   Portfolio Analyzer
 
 The app has no pages, menu entries or buttons for them. Python strategies
 still run as ordinary scripts with the OpenAlgo Python SDK against the
-desktop's API, and AI clients such as Claude Desktop connect through the MCP
-server.
+desktop's API.
 
 Other differences from the web: one user per installation, and one broker
 connected at a time.

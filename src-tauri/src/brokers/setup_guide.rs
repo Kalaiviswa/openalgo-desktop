@@ -508,6 +508,21 @@ fn guide_r_to_t(broker: &str) -> Option<SetupGuide> {
             banner: "Login with Rupeezy takes you to Rupeezy's login page. Log in there and Rupeezy sends you back to OpenAlgo, which checks it is the client ID you saved.",
             redirect_hint: REDIRECT_REGISTER,
         },
+        "sahi" => SetupGuide {
+            name: "Sahi",
+            fields: const { &[
+                key(
+                    "API Key",
+                    "The key id of an API key from Sahi web, Profile, API Dashboard (it starts with pk_). Create it with Full access to place orders.",
+                ),
+                secret(
+                    "API Secret",
+                    "The secret shown once when that key was created (it starts with sahi_sk_).",
+                ),
+            ] },
+            banner: "Login with Sahi signs you in with one click using the API key and secret you saved. Approve the key in Sahi's API Dashboard once each trading day first, and register the internet address this computer's traffic leaves from as a static IP on your Sahi account: Sahi refuses orders from any other address.",
+            redirect_hint: "",
+        },
         "samco" => SetupGuide {
             name: "Samco",
             fields: const { &[
@@ -653,7 +668,7 @@ mod tests {
     /// fit how it signs in.
     #[test]
     fn every_broker_has_help_consistent_with_its_sign_in() {
-        assert_eq!(ALL_BROKERS.len(), 37);
+        assert_eq!(ALL_BROKERS.len(), 38);
         let mut names = std::collections::HashSet::new();
         for b in ALL_BROKERS {
             let g = guide(b);

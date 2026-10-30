@@ -149,7 +149,7 @@ pub fn main_window_may_load(url: &url::Url, live: u16, development: bool) -> boo
 /// Grant the main window's pages on `port` their permissions. Called when
 /// the server starts and again when it moves to another port, before the
 /// window is sent there.
-pub fn trust_app_origin(app: &AppHandle, port: u16) {
+pub fn trust_app_origin<R: tauri::Runtime>(app: &AppHandle<R>, port: u16) {
     let mut cap = tauri::ipc::CapabilityBuilder::new(format!("remote-app-{}", port))
         .window("main")
         .local(false);
@@ -595,6 +595,8 @@ pub async fn restart_to_update(
     )
 }
 
+#[cfg(test)]
+mod open_link_tests;
 #[cfg(test)]
 mod reset_tests {
     use super::{remote_app_urls, reset_caller_allowed};

@@ -1,0 +1,28 @@
+{
+  "available": {
+    "stocks_delivery": 10500000,
+    "intraday_and_fno_selling": 11500000,
+    "options_buying": {"equity_fno": 11000000, "mcx": 10500000, "ncom": 10500000}
+  },
+  "balance": {
+    "opening_balance": 10000000,
+    "payin": 500000,
+    "payout": 0,
+    "collateral": 2000000,
+    "delivery_sell_credit": 0
+  },
+  "utilised": {
+    "span": 800000,
+    "exposure": 200000,
+    "delivery_margin": 0,
+    "intraday_margin": 0,
+    "delivery_buy": 0,
+    "charges": 12500,
+    "mtm_loss": 0
+  },
+  "option_premium": {
+    "paid": 0,
+    "received": 500000,
+    "by_pool": {"equity_fno": -500000, "mcx": 0, "ncom": 0}
+  }
+}

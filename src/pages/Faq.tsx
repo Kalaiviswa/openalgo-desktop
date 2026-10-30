@@ -37,7 +37,7 @@ const faqData = [
       {
         question: 'What is OpenAlgo?',
         // Desktop: the counts and the list come from the broker catalogue
-        // (the web's FAQ says 36 and leaves out Rupeezy).
+        // (the web's FAQ says 36 and leaves out Rupeezy and Sahi).
         answer: `OpenAlgo is an open-source algorithmic trading platform that provides a unified API layer across ${BROKER_COUNT} broker plugins: ${SECURITIES_BROKER_COUNT} securities integrations and Delta Exchange for crypto derivatives. It enables seamless integration with TradingView, Amibroker, Excel, Python, and AI agents, allowing traders to automate their trading strategies without being locked into a single broker.`,
       },
       {

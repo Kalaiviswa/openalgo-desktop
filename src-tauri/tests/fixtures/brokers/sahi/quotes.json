@@ -1,0 +1,21 @@
+{
+  "data": {
+    "12027": {
+      "last_trade_price": 251000,
+      "last_trade_time": 1747798260123,
+      "volume_today": 12450,
+      "dpr_upper": 276100,
+      "dpr_lower": 225900,
+      "prev_open_interest": null,
+      "open_interest": null,
+      "best_buys": [
+        {"price": 250950, "qty": 100, "num_orders": 3},
+        {"price": 250900, "qty": 250, "num_orders": 7}
+      ],
+      "best_sells": [
+        {"price": 251050, "qty": 80, "num_orders": 2}
+      ]
+    },
+    "5073182": null
+  }
+}

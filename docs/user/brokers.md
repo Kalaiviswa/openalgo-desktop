@@ -154,12 +154,22 @@ Notes:
 ## Brokers that sign in with saved keys
 
 The Symphony XTS brokers (5 Paisa (XTS), JainamXts, Ibulls, IIFL, Wisdom
-Capital), Delta Exchange and Dhan (Sandbox) sign in with the keys you saved:
+Capital), Delta Exchange, Sahi and Dhan (Sandbox) sign in with the keys you saved:
 **Login with** signs you in with one click, with nothing to type. For the
 XTS brokers (and CompositEdge and RMoney, which sign in on their own
 website), also fill in the **Market Data App Key** and **Market Data Secret
 Key** on the Broker Configuration page; they are the market data keys from
 the same XTS account, and quotes and the live feed need them.
+
+**Sahi**: the API key is the key id (`pk_...`) and the API secret the
+`sahi_sk_...` secret from Sahi web, Profile, API Dashboard. Approve the key
+there once every trading day (Sahi's trading day starts at 06:00) before you
+log in, or Sahi refuses the login. Sahi places, changes and cancels orders
+only from a static IP registered on your Sahi account, in the same API
+Dashboard (one address covers all your keys), so register the internet
+address this computer's traffic leaves from. Sahi lists commodity (MCX,
+NCOM) contracts but its API does not trade them, so OpenAlgo loads NSE,
+BSE, NFO and BFO only.
 
 Delta Exchange is a crypto exchange: its symbols use the `CRYPTO` exchange.
 Its live feed carries the last price, open, high, low, close, volume and
