@@ -194,6 +194,9 @@ impl GrowwCore {
                 .timeout(http::REQUEST_TIMEOUT)
                 .header("Authorization", authorization)
                 .header("Accept", "application/json")
+                // On every call, a GET included, as the web's
+                // `_groww_headers` (order_api.py:78-85).
+                .header("Content-Type", "application/json")
                 .header("X-API-VERSION", "1.0");
             if let Some(b) = body {
                 req = req.json(b);
@@ -541,6 +544,10 @@ impl Broker for GrowwBroker {
             auth.raw(),
             self.feed.clone(),
         )))
+    }
+
+    fn feed_refusal(&self, exchange: &str) -> Option<String> {
+        streaming::refusal(exchange)
     }
 
     /// The order-book poller (web `PollingOrderUpdateAdapter`, 5 s); it

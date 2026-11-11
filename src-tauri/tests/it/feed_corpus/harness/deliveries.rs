@@ -1,0 +1,548 @@
+//! What the web's 8765 server sends each client, from `web.json`
+//! (review R107-13): `scripts/feed_corpus/web_expected.py` runs the web
+//! server's own subscription and delivery methods (`webserver.py`) in front
+//! of the broker's web adapter, and records, for every step that made the
+//! adapter publish (a delivery point), each frame a client gets: the
+//! publication it came from, the mode it is tagged with, the publication's
+//! mode, and the client's held modes it answers (`serves`).
+//!
+//! The desktop sends one frame per held mode (C08), so a client's frame at
+//! a mode consumes the next delivery that serves that mode; a delivery is
+//! consumed at most once per mode, and every delivery that serves a held
+//! mode must be consumed by a frame or declared by a `silence` step naming
+//! it before the next delivery point. The web's fan-out to a lower-mode
+//! holder that serves none of its held modes is not a frame the desktop
+//! sends (the approved `one-frame-per-held-mode` rule): the case declares it
+//! (`Consumer::fan_out`), and a frame may still pair with it when nothing
+//! serves its mode.
+
+use super::case::bad;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// One frame the web sends one client.
+#[derive(Debug, Clone)]
+pub(crate) struct Delivery {
+    pub(crate) client: String,
+    pub(crate) publication: usize,
+    /// The publication's mode (market data); `None` for an order update.
+    topic_mode: Option<u64>,
+    /// The held modes it answers; for an order update, the update itself.
+    serves: Vec<u64>,
+    /// The mode the web tags the client's frame with (market data).
+    pub(crate) tag: Option<u64>,
+    /// The broker the web's envelope names (market data).
+    pub(crate) broker: Option<String>,
+}
+
+/// A web frame a client's frame was paired with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Paired<'a> {
+    pub(crate) publication: &'a Value,
+    pub(crate) delivery: &'a Delivery,
+}
+
+/// The web's fan-out beyond a client's held modes.
+#[derive(Debug, Clone)]
+pub(crate) struct FanOut {
+    pub(crate) text: String,
+    /// Which frame it is, as a deviation's `allows` records it.
+    pub(crate) identity: Value,
+}
+
+/// A frame the case says the web sends nothing for.
+#[derive(Debug, Clone)]
+struct WebFalse {
+    line: usize,
+    client: String,
+    /// Its order id, for an order update; else its instrument and mode.
+    orderid: Option<Value>,
+    mode: Option<u64>,
+    symbol: Value,
+    exchange: Value,
+}
+
+/// A delivery point: one step's publications and what each client got.
+#[derive(Debug, Clone)]
+pub(crate) struct Point {
+    pub(crate) published: Vec<Value>,
+    pub(crate) deliveries: Vec<Delivery>,
+}
+
+/// An order update's place in `serves`.
+const ORDER: u64 = 0;
+
+/// The delivery points of a `web.json`, by script line.
+pub(crate) fn points(at: &str, web: &Value) -> BTreeMap<usize, Point> {
+    let line_of = |v: &Value| {
+        v.as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or_else(|| bad(at, "a delivery point without its script line"))
+    };
+    web["pushes"]
+        .as_array()
+        .unwrap_or_else(|| bad(at, "no \"pushes\""))
+        .iter()
+        .map(|p| {
+            let published = p["published"]
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| bad(at, "a point without \"published\""));
+            let deliveries = p["deliveries"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    bad(
+                        at,
+                        "a point without \"deliveries\": run scripts/feed_corpus/web_expected.py again",
+                    )
+                })
+                .iter()
+                .map(|d| delivery(at, d, published.len()))
+                .collect();
+            (line_of(&p["line"]), Point { published, deliveries })
+        })
+        .collect()
+}
+
+fn delivery(at: &str, d: &Value, publications: usize) -> Delivery {
+    let publication = d["publication"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n < publications)
+        .unwrap_or_else(|| bad(at, format!("a delivery of no publication: {}", d)));
+    let order = d.get("order").is_some_and(|o| o == true);
+    let serves = d["serves"]
+        .as_array()
+        .unwrap_or_else(|| bad(at, format!("a delivery without \"serves\": {}", d)))
+        .iter()
+        .map(|s| match (s.as_u64(), s.as_str()) {
+            (Some(m), _) => m,
+            (_, Some("order")) => ORDER,
+            _ => bad(at, format!("a delivery serving {}", s)),
+        })
+        .collect();
+    Delivery {
+        client: d["client"].as_str().unwrap_or_default().to_string(),
+        publication,
+        topic_mode: if order {
+            None
+        } else {
+            d["topic_mode"].as_u64()
+        },
+        serves,
+        tag: d["mode"].as_u64(),
+        broker: d["broker"].as_str().map(String::from),
+    }
+}
+
+/// One delivery point's deliveries, consumed by the case's steps.
+pub(crate) struct Consumer<'a> {
+    pub(crate) line: usize,
+    point: &'a Point,
+    /// (delivery, what consumed it): a held mode, an order, or a fold pair.
+    used: BTreeSet<(usize, String)>,
+    /// The frames marked `"web": false` at this point.
+    web_false: Vec<WebFalse>,
+    /// The deliveries a `silence` declared as frames the desktop does not
+    /// send: paired, but with no frame the client received.
+    declared_missing: BTreeSet<usize>,
+}
+
+impl<'a> Consumer<'a> {
+    pub(crate) fn new(line: usize, point: &'a Point) -> Consumer<'a> {
+        Consumer {
+            line,
+            point,
+            used: BTreeSet::new(),
+            web_false: Vec::new(),
+            declared_missing: BTreeSet::new(),
+        }
+    }
+
+    fn publication(&self, d: &Delivery) -> &'a Value {
+        &self.point.published[d.publication]
+    }
+
+    fn paired(&self, d: &'a Delivery) -> Paired<'a> {
+        Paired {
+            publication: self.publication(d),
+            delivery: d,
+        }
+    }
+
+    /// `frame` (client `client`, script line `line`) is marked `"web":
+    /// false`: the end of the point checks the web really is silent.
+    pub(crate) fn web_false(&mut self, line: usize, client: &str, frame: &Value) {
+        self.web_false.push(WebFalse {
+            line,
+            client: client.to_string(),
+            orderid: (frame["type"] == "order_update").then(|| frame["orderid"].clone()),
+            mode: frame["mode"].as_u64(),
+            symbol: frame["symbol"].clone(),
+            exchange: frame["exchange"].clone(),
+        });
+    }
+
+    fn touched(&self, i: usize) -> bool {
+        self.used.iter().any(|(j, _)| *j == i)
+    }
+
+    /// The web's fan-out to a lower-mode holder that answers none of its
+    /// held modes and that no frame paired with. The desktop sends one
+    /// frame per held mode, so a case declares these (`fan-out`).
+    pub(crate) fn fan_out(&self) -> Vec<FanOut> {
+        self.point
+            .deliveries
+            .iter()
+            .enumerate()
+            .filter(|(i, d)| d.serves.is_empty() && !self.touched(*i))
+            .map(|(_, d)| {
+                let p = self.publication(d);
+                FanOut {
+                    text: format!(
+                        "after line {} the web also sends client {} publication {} (topic mode {:?})",
+                        self.line, d.client, d.publication, d.topic_mode
+                    ),
+                    identity: serde_json::json!({
+                        "symbol": p["symbol"],
+                        "exchange": p["exchange"],
+                        "mode": d.topic_mode,
+                        "client": d.client,
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// Every frame marked `"web": false` while the web does send that
+    /// client a frame for the same instrument (or order id) that no received
+    /// frame paired with: the mark says something the web's output denies. A
+    /// delivery a `silence` declared missing is no pairing: a frame of the
+    /// same instrument and mode marked `"web": false` beside it is the one
+    /// occurrence written as two, which would hide its values.
+    pub(crate) fn not_silent(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for f in &self.web_false {
+            for (i, d) in self.point.deliveries.iter().enumerate() {
+                let declared = self.declared_missing.contains(&i);
+                if d.client != f.client || (self.touched(i) && !declared) {
+                    continue;
+                }
+                let p = self.publication(d);
+                let same = match (&f.orderid, d.topic_mode) {
+                    (Some(id), None) => p["frame"]["orderid"] == *id,
+                    (None, Some(_)) => {
+                        p["symbol"] == f.symbol
+                            && p["exchange"] == f.exchange
+                            && (!declared || f.mode == d.tag)
+                    }
+                    _ => false,
+                };
+                if same {
+                    out.push(format!(
+                        "script.jsonl:{} is marked \"web\": false, but after line {} the web sends client {} publication {}",
+                        f.line, self.line, d.client, d.publication
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The web frame a `silence` declares the desktop does not send.
+    pub(crate) fn web_only(
+        &mut self,
+        client: &str,
+        symbol: &str,
+        exchange: &str,
+        mode: u64,
+    ) -> Option<Paired<'a>> {
+        let i = self.market_delivery(client, symbol, exchange, mode)?;
+        self.declared_missing.insert(i);
+        Some(self.paired(&self.point.deliveries[i]))
+    }
+
+    /// The publication a client's market frame at `mode` answers: the next
+    /// delivery serving that held mode, else (the web's fan-out beyond the
+    /// modes held) the next one of that mode, or of the lowest richer one.
+    pub(crate) fn market(
+        &mut self,
+        client: &str,
+        symbol: &str,
+        exchange: &str,
+        mode: u64,
+    ) -> Option<Paired<'a>> {
+        let i = self.market_delivery(client, symbol, exchange, mode)?;
+        Some(self.paired(&self.point.deliveries[i]))
+    }
+
+    /// The delivery `market` pairs, marked used. A richer publication stands
+    /// in only for a mode with no stream of its own at this point: where one
+    /// existed and is spent, a further frame has no counterpart.
+    fn market_delivery(
+        &mut self,
+        client: &str,
+        symbol: &str,
+        exchange: &str,
+        mode: u64,
+    ) -> Option<usize> {
+        let point = self.point;
+        let ds: Vec<(usize, &Delivery)> = point
+            .deliveries
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.client == client && d.topic_mode.is_some())
+            .filter(|(_, d)| {
+                let p = &point.published[d.publication];
+                p["symbol"] == symbol && p["exchange"] == exchange
+            })
+            .collect();
+        let held = format!("m{}", mode);
+        if let Some((i, _)) = ds
+            .iter()
+            .find(|(i, d)| d.serves.contains(&mode) && !self.used.contains(&(*i, held.clone())))
+        {
+            let i = *i;
+            self.used.insert((i, held));
+            return Some(i);
+        }
+        if ds.iter().any(|(_, d)| d.serves.contains(&mode)) {
+            return None;
+        }
+        let fold = format!("fold{}", mode);
+        let i = ds
+            .iter()
+            .filter(|(i, d)| {
+                d.topic_mode.is_some_and(|t| t >= mode) && !self.used.contains(&(*i, fold.clone()))
+            })
+            .min_by_key(|(i, d)| (d.topic_mode != Some(mode), d.topic_mode, *i))?
+            .0;
+        self.used.insert((i, fold));
+        Some(i)
+    }
+
+    /// The order update a client's frame answers: the next one to that
+    /// client with the same order id, else the next one to that client.
+    pub(crate) fn order(&mut self, client: &str, orderid: &Value) -> Option<Paired<'a>> {
+        let point = self.point;
+        let ds: Vec<(usize, &Delivery)> = point
+            .deliveries
+            .iter()
+            .enumerate()
+            .filter(|(i, d)| {
+                d.client == client
+                    && d.topic_mode.is_none()
+                    && !self.used.contains(&(*i, "order".to_string()))
+            })
+            .collect();
+        let (i, d) = ds
+            .iter()
+            .find(|(_, d)| point.published[d.publication]["frame"]["orderid"] == *orderid)
+            .or_else(|| ds.first())?;
+        self.used.insert((*i, "order".to_string()));
+        Some(self.paired(d))
+    }
+
+    /// Every delivery that answers a held mode (or is an order update) and
+    /// that no step accounted for. One web frame may answer several held
+    /// modes (the desktop sends a frame per held mode), but it is sent
+    /// once, so one of them accounts for it.
+    pub(crate) fn unconsumed(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, d) in self.point.deliveries.iter().enumerate() {
+            let consumed = self.used.iter().any(|(j, how)| {
+                *j == i && (how == "order" || d.serves.iter().any(|m| *how == format!("m{}", m)))
+            });
+            if d.serves.is_empty() || consumed {
+                continue;
+            }
+            let p = self.publication(d);
+            let what = match d.topic_mode {
+                None => format!("the order update {}", p["frame"]["orderid"]),
+                Some(t) => format!(
+                    "{} {} (publication {}, topic mode {}, serving held modes {:?}): {}",
+                    p["exchange"], p["symbol"], d.publication, t, d.serves, p["data"]
+                ),
+            };
+            out.push(format!(
+                "after line {} the web sends client {} {}",
+                self.line, d.client, what
+            ));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Two Kite quote packets for one instrument in one frame (count 2):
+    /// the web publishes 1500.0 then 1501.0, both to the Quote holder.
+    fn two_quotes() -> Point {
+        let web = json!({"pushes": [{
+            "line": 3,
+            "published": [
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 2, "data": {"ltp": 1500.0}},
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 2, "data": {"ltp": 1501.0}}
+            ],
+            "deliveries": [
+                {"client": "a", "publication": 0, "mode": 2, "topic_mode": 2, "serves": [2]},
+                {"client": "a", "publication": 1, "mode": 2, "topic_mode": 2, "serves": [2]}
+            ]
+        }]});
+        points("t", &web).remove(&3).unwrap()
+    }
+
+    /// Review R107-13's probe: each web publication is consumed once, in
+    /// order, so a second frame repeating the first price is compared with
+    /// the second publication (1501.0), never the first again.
+    #[test]
+    fn each_web_frame_is_consumed_once_in_order() {
+        let point = two_quotes();
+        let mut c = Consumer::new(3, &point);
+        let first = c.market("a", "INFY", "NSE", 2).unwrap().publication;
+        let second = c.market("a", "INFY", "NSE", 2).unwrap().publication;
+        assert_eq!(first["data"]["ltp"], json!(1500.0));
+        assert_eq!(second["data"]["ltp"], json!(1501.0));
+        assert!(c.market("a", "INFY", "NSE", 2).is_none());
+        assert!(c.unconsumed().is_empty());
+    }
+
+    /// A web frame no step accounts for fails the case.
+    #[test]
+    fn an_unconsumed_web_frame_is_named() {
+        let point = two_quotes();
+        let mut c = Consumer::new(3, &point);
+        c.market("a", "INFY", "NSE", 2);
+        let left = c.unconsumed();
+        assert_eq!(left.len(), 1, "{:?}", left);
+        assert!(left[0].contains("publication 1"), "{:?}", left);
+    }
+
+    /// The web's fan-out to a lower-mode holder that serves none of its
+    /// held modes need not be received, but is named so the case declares
+    /// it; an order update pairs by its id.
+    #[test]
+    fn fan_out_beyond_held_modes_is_named_and_orders_pair_by_id() {
+        let web = json!({"pushes": [{
+            "line": 5,
+            "published": [
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 2, "data": {"ltp": 1.0}},
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 1, "data": {"ltp": 1.0}},
+                {"kind": "order", "frame": {"orderid": "A1"}},
+                {"kind": "order", "frame": {"orderid": "B2"}}
+            ],
+            "deliveries": [
+                {"client": "a", "publication": 0, "mode": 1, "topic_mode": 2, "serves": []},
+                {"client": "a", "publication": 1, "mode": 1, "topic_mode": 1, "serves": [1]},
+                {"client": "a", "publication": 2, "order": true, "serves": ["order"]},
+                {"client": "a", "publication": 3, "order": true, "serves": ["order"]}
+            ]
+        }]});
+        let point = points("t", &web).remove(&5).unwrap();
+        let mut c = Consumer::new(5, &point);
+        assert_eq!(
+            c.market("a", "INFY", "NSE", 1).unwrap().publication["mode"],
+            json!(1)
+        );
+        assert_eq!(
+            c.order("a", &json!("B2")).unwrap().publication["frame"]["orderid"],
+            json!("B2")
+        );
+        let left = c.unconsumed();
+        assert_eq!(left.len(), 1, "{:?}", left);
+        assert!(left[0].contains("\"A1\""), "{:?}", left);
+        // The richer fan-out nothing paired with has to be declared.
+        let fan = c.fan_out();
+        assert_eq!(fan.len(), 1, "{:?}", fan);
+        assert!(fan[0].text.contains("publication 0"), "{:?}", fan);
+    }
+
+    fn ltp_and_quote() -> Point {
+        let web = json!({"pushes": [{
+            "line": 3,
+            "published": [
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 2, "data": {"ltp": 1500.0}},
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 1, "data": {"ltp": 1500.0}}
+            ],
+            "deliveries": [
+                {"client": "a", "publication": 0, "mode": 2, "topic_mode": 2, "serves": [2]},
+                {"client": "a", "publication": 1, "mode": 1, "topic_mode": 1, "serves": [1]}
+            ]
+        }]});
+        points("t", &web).remove(&3).unwrap()
+    }
+
+    /// Review 3, O14: requests [1, 2, 1] on one LTP and one Quote: the third
+    /// has no counterpart, where the richer fold used to reuse the Quote.
+    #[test]
+    fn a_richer_publication_does_not_stand_in_for_a_spent_stream() {
+        let point = ltp_and_quote();
+        let mut c = Consumer::new(3, &point);
+        assert!(c.market("a", "INFY", "NSE", 1).is_some());
+        assert!(c.market("a", "INFY", "NSE", 2).is_some());
+        assert!(c.market("a", "INFY", "NSE", 1).is_none());
+        assert!(c.unconsumed().is_empty());
+    }
+
+    /// One publication for a mode with no stream of its own still answers it.
+    #[test]
+    fn a_richer_publication_answers_a_mode_with_no_stream() {
+        let web = json!({"pushes": [{
+            "line": 3,
+            "published": [
+                {"kind": "market", "symbol": "INFY", "exchange": "NSE", "mode": 2, "data": {"ltp": 1500.0}}
+            ],
+            "deliveries": [
+                {"client": "a", "publication": 0, "mode": 1, "topic_mode": 2, "serves": []}
+            ]
+        }]});
+        let point = points("t", &web).remove(&3).unwrap();
+        let mut c = Consumer::new(3, &point);
+        assert!(c.market("a", "INFY", "NSE", 1).is_some());
+        assert!(c.market("a", "INFY", "NSE", 1).is_none());
+    }
+
+    /// Review 3, O8: a frame marked `"web": false` and a `silence` declaring
+    /// the real web frame of that instrument and mode are one occurrence
+    /// written as two.
+    #[test]
+    fn a_web_false_frame_cannot_hide_behind_a_declared_missing_frame() {
+        let point = two_quotes();
+        let mut c = Consumer::new(3, &point);
+        assert!(c.web_only("a", "INFY", "NSE", 2).is_some());
+        c.web_false(
+            4,
+            "a",
+            &json!({"type": "market_data", "symbol": "INFY", "exchange": "NSE", "mode": 2}),
+        );
+        let found = c.not_silent();
+        assert!(!found.is_empty(), "{:?}", found);
+        assert!(found[0].contains("script.jsonl:4"), "{:?}", found);
+    }
+
+    /// `"web": false` is checked against what the web sends: a frame for
+    /// the same instrument nothing paired with denies it; another
+    /// instrument's does not.
+    #[test]
+    fn a_web_false_frame_is_checked_against_the_web() {
+        let point = two_quotes();
+        let mut c = Consumer::new(3, &point);
+        c.web_false(
+            4,
+            "a",
+            &json!({"type": "market_data", "symbol": "TCS", "exchange": "NSE"}),
+        );
+        assert!(c.not_silent().is_empty());
+        c.web_false(
+            5,
+            "a",
+            &json!({"type": "market_data", "symbol": "INFY", "exchange": "NSE"}),
+        );
+        let found = c.not_silent();
+        assert_eq!(found.len(), 2, "{:?}", found);
+        assert!(found[0].contains("script.jsonl:5"), "{:?}", found);
+    }
+}

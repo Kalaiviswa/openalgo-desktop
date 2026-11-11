@@ -1,0 +1,25 @@
+{
+  "broker": "angel",
+  "data": {
+    "average_price": 1498.76,
+    "close": 1488.0,
+    "exchange": "NSE",
+    "high": 1510.0,
+    "last_quantity": 25,
+    "last_trade_quantity": 25,
+    "low": 1485.0,
+    "ltp": 1500.05,
+    "ltt": 1746171226000,
+    "mode": 2,
+    "open": 1490.0,
+    "symbol": "RELIANCE",
+    "timestamp": "<receipt_ms>",
+    "total_buy_quantity": 1000.0,
+    "total_sell_quantity": 2000.0,
+    "volume": 123456
+  },
+  "exchange": "NSE",
+  "mode": 2,
+  "symbol": "RELIANCE",
+  "type": "market_data"
+}

@@ -29,7 +29,13 @@ the `client_id:::key` prefix, for Dhan and the Noren family; the client id
 entered on Broker Configuration for Arrow, HDFC Sky, HDFC Securities,
 AliceBlue and Rupeezy), else the account of the last session with that broker. A
 mismatch is refused and the live session and its stored row are left as they
-were. Saving a broker's settings again forgets an ended session's account,
+were. That account is the one the broker itself names for the session
+(marketcalls/openalgo#2337): Dhan's consent answer or its fund limits for a
+pasted token, never the client id saved here, and a token whose account Dhan
+does not name is refused; RMoney's profile of the posted session token, never
+the `userID` posted beside it, refused when RMoney does not confirm it. A
+CompositEdge or RMoney session whose account is not the market data keys'
+account is refused too. Saving a broker's settings again forgets an ended session's account,
 which is how a trader switches accounts. A state-less callback with no known
 account is refused.
 
@@ -63,6 +69,7 @@ router runs:
 | `/api/v1/*` | API key in the body | The web's limits; behind the tunnel a valid key gets its own window |
 | `POST /strategy/webhook/{token}` | The secret address | An IP allowlist with entries refuses tunnel callers |
 | `POST /chartink/webhook/{webhook_id}` | The secret address | |
+| `POST /flow/webhook/{token}`, `POST /flow/webhook/{token}/{symbol}` | The token address plus the workflow's secret (in the body, or `?secret=` for URL auth) | 100 a minute per workflow; ten wrong secrets in 10 minutes lock that workflow's webhook for 15 minutes; `/flow/api/*` and the Flow pages are not reachable |
 | `/mcp`, `/mcp/healthz` | MCP bearer token | Not there at all unless Remote MCP is on |
 | `/{broker}/callback` (catalogue brokers) | none here | Answered with a 307 to the same path and query on `http://127.0.0.1:<port>`, where the browser session that started the sign-in is; nothing is processed through the tunnel |
 
@@ -121,7 +128,7 @@ share one identity. A low limit on that identity would let any stranger
 who finds the tunnel address use it up and block the trader's own tunnel
 callers, TradingView alerts included. So every surface that takes a random
 credential (API keys, MCP tokens, feed keys, strategy webhook tokens,
-Chartink webhook ids) works in this order:
+Chartink webhook ids, Flow webhook tokens) works in this order:
 
 1. A resource guard on every request, this computer's included, 1000
    a second per caller (`Bucket::Guard`), far above legitimate use. Over

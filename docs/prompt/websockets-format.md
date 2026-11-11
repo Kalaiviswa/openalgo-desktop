@@ -528,6 +528,26 @@ asked for (see [Depth levels](#depth-levels)). `oi` and `open_interest` are
 `0` when the broker sends no open interest. An index subscribed in Depth
 mode receives the index Quote fields and no `depth`.
 
+A quote field the broker's feed does not carry is left out of Quote and
+Depth data rather than sent as `0` (as OpenAlgo web does since its
+openalgo#2376): Sahi carries no open, high, low, previous close, last
+quantity, average price or totals; Fyers sends only what its feed sent;
+Kotak's ticks before a full quote carry only the price, the previous close
+and the last trade. `ltt` is left out when there is no trade time. A Depth
+frame that arrives before the instrument's first quote (a 50-level Fyers or
+20-level Dhan book can) carries `ltp`, `timestamp`, the totals and the book
+only.
+
+Since openalgo#2377 and #2361: `close` is the previous day's close on Dhan
+(left out until Dhan has sent it, never the day's own close after the
+market) and on Upstox (`cp`, never today's candle); Upstox and Groww send
+the last value of each field their feed has sent and leave out one it has
+never sent (Groww's feed carries no last quantity, average price, totals
+or open interest, and an index only its value); a Zerodha index frame
+carries no open interest. Groww streams NSE, BSE, NFO, BFO and indices
+only: a subscribe on any other exchange is answered with an error saying
+so (openalgo#2341).
+
 #### Field names by broker
 
 `data.mode` is `ltp`, `quote` or `depth`. On OpenAlgo web this inner label
@@ -548,10 +568,13 @@ written for either works:
 | `change` | `price_change` | Fyers, Arrow, HDFC Securities, HDFC Sky, Rupeezy, Tradejini, Samco |
 | `change_absolute` | `price_change` | Paytm |
 | `change_percent` | `price_change_percent` | Fyers, AliceBlue, Arrow, HDFC Securities, HDFC Sky, Definedge, Paytm, Rupeezy, Tradejini |
-| `percent_change` | `price_change_percent` | Shoonya, Flattrade, Zebu, TradeSmart |
+| `percent_change` | `price_change_percent` | Shoonya, Flattrade, Zebu, TradeSmart, Fyers, Kotak |
 | `change_percentage` | `price_change_percent` | Samco |
+| `last_trade_time` | `ltt` | Sahi, Kotak, Upstox; Fyers and Dhan in epoch seconds, as their web adapters send it |
 
 The change names appear only where `price_change` does, that is, on indices.
+`last_trade_time` appears wherever `ltt` does, LTP frames included. A name
+whose value is left out is left out too.
 
 #### What the Python SDK hands your callback
 
@@ -763,7 +786,12 @@ In the desktop:
   most 32 from any one network address, so they can never use up the places of
   your own programs. A network address blocked on the Security page is
   disconnected before the handshake.
-- **Every tick is forwarded.** There is no throttling of market data.
+- **No throttling.** Each tick the broker's feed sends is forwarded as it
+  arrives; there is no time throttle (a slow reader gets the latest frame, as
+  above). Which exchange ticks arrive, and how often, depends on the broker's
+  feed, and ticks missed while a client was disconnected are not replayed. A
+  subscription that succeeded means the request was taken, not that a price
+  has arrived yet.
 
 ### Security
 

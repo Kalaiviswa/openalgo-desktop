@@ -31,12 +31,58 @@ const STATES: Record<FeedConnection['state'], string> = {
   reconnecting: 'Reconnecting',
   disconnected: 'Not connected',
   auth_failed: 'Refused by the broker',
+  connection_limit: 'Too many connections',
+  ended_by_broker: 'Stopped by the broker',
+}
+
+/** The broker refused or ended the connection: it streams nothing until the trader acts. */
+function stoppedState(state: FeedConnection['state']): boolean {
+  return state === 'auth_failed' || state === 'connection_limit' || state === 'ended_by_broker'
+}
+
+function stopped(c: FeedConnection): boolean {
+  return stoppedState(c.state)
 }
 
 /** A reconnect this recent still explains a pause the trader just saw. */
 export const RECENT_RECONNECT_MS = 15 * 60 * 1000
 
 type Feed = BrokerFeedLosses & { connection: FeedConnection }
+
+/** One pooled connection after the first that carries symbols and is not streaming. */
+interface SilentConnection {
+  n: number
+  instruments: number
+  state: FeedConnection['state']
+}
+
+/**
+ * The feed's further connections that carry symbols and stream nothing:
+ * the first connection being up says nothing about them (review R107-16).
+ */
+function silentConnections(f: Feed): SilentConnection[] {
+  return (f.connections?.open ?? [])
+    .map((c, i) => ({ n: i + 1, instruments: c.instruments, state: c.state }))
+    .filter((c) => c.n > 1 && c.instruments > 0 && c.state !== 'connected')
+}
+
+function symbols(n: number): string {
+  return `${n.toLocaleString('en-IN')} ${n === 1 ? 'symbol' : 'symbols'}`
+}
+
+/** What the trader does about a connection that streams nothing. */
+function remedy(state: FeedConnection['state']): string {
+  switch (state) {
+    case 'auth_failed':
+      return 'Log in to your broker again.'
+    case 'connection_limit':
+      return 'Close other apps streaming on your broker login, then reconnect.'
+    case 'ended_by_broker':
+      return 'Reconnect your app to OpenAlgo; if it keeps happening, contact your broker.'
+    default:
+      return 'They resume once it is back.'
+  }
+}
 
 function reconnectedAt(c: FeedConnection): number | null {
   const at = c.last_reconnect ? Date.parse(c.last_reconnect.at) : Number.NaN
@@ -64,18 +110,22 @@ function inSentence(f: Feed): { feed: string; paused: string } {
 }
 
 function level(feeds: Feed[], now: number): HealthLevel {
-  if (feeds.some((f) => f.connection.state === 'auth_failed')) return 'fail'
+  const silent = feeds.flatMap(silentConnections)
+  if (feeds.some((f) => stopped(f.connection))) return 'fail'
+  if (silent.some((c) => stoppedState(c.state))) return 'fail'
   const recent = (f: Feed) => {
     const at = reconnectedAt(f.connection)
     return at !== null && now - at < RECENT_RECONNECT_MS
   }
   if (feeds.some((f) => f.connection.state === 'reconnecting' || recent(f))) return 'warn'
+  if (silent.length > 0) return 'warn'
   return 'pass'
 }
 
 /** What a red or amber card means and what the trader can do. */
 function warning(feeds: Feed[], now: number): string | null {
   const notes: string[] = []
+  let network = false
   for (const f of feeds) {
     const c = f.connection
     const at = reconnectedAt(c)
@@ -84,18 +134,33 @@ function warning(feeds: Feed[], now: number): string | null {
       notes.push(
         `The broker refused its ${feed}, so it is not streaming. Log in to your broker again.`
       )
+    } else if (c.state === 'connection_limit' || c.state === 'ended_by_broker') {
+      // The broker's own words and what to do; the feed comes back when an
+      // app reconnects to OpenAlgo, without a logout.
+      notes.push(c.message ?? `The broker ended its ${feed}, so it is not streaming.`)
     } else if (c.state === 'reconnecting') {
+      network = true
       notes.push(
         `The ${feed} is reconnecting because ${reason(c)}; ${paused} pause until it is back.`
       )
     } else if (at !== null && now - at < RECENT_RECONNECT_MS) {
+      network = true
       notes.push(
         `The ${feed} reconnected at ${readTime(at, now)} because ${reason(c)}; ${paused} paused until it was back.`
       )
     }
   }
+  for (const f of feeds) {
+    const { feed, paused } = inSentence(f)
+    for (const c of silentConnections(f)) {
+      if (!stoppedState(c.state)) network = true
+      notes.push(
+        `Connection ${c.n} of the ${feed} carries ${symbols(c.instruments)} and is not streaming (${(STATES[c.state] ?? c.state).toLowerCase()}); their ${paused} have stopped. ${remedy(c.state)}`
+      )
+    }
+  }
   if (notes.length === 0) return null
-  if (notes.some((n) => !n.includes('Log in'))) {
+  if (network) {
     notes.push('If this keeps happening, check your internet connection.')
   }
   return notes.join(' ')
@@ -138,6 +203,14 @@ export function FeedConnectionsCard({
         {feeds.map((f) => (
           <Fragment key={f.name}>
             <Row label={feedName(f)} value={STATES[f.connection.state] ?? f.connection.state} />
+            {(f.connections?.open ?? []).length > 1 &&
+              (f.connections?.open ?? []).map((c, i) => (
+                <Row
+                  key={`${f.name}-${i + 1}`}
+                  label={`Connection ${i + 1}`}
+                  value={`${STATES[c.state] ?? c.state}, ${symbols(c.instruments)}`}
+                />
+              ))}
             <Row label="Reconnects" value={reconnects(f.connection)} />
             <Row label="Last reconnect" value={lastReconnect(f.connection, now)} />
           </Fragment>

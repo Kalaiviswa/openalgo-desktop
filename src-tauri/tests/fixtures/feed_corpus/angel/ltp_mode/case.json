@@ -1,0 +1,32 @@
+{
+  "broker": "angel",
+  "summary": "An LTP subscription: SmartStream's 51-byte LTP packet gives the price and the exchange time as ltt.",
+  "scenarios": [
+    "first-full-packet"
+  ],
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "upstream_ignore": [
+    "ping"
+  ],
+  "provenance": {
+    "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+    "method": "by-hand",
+    "sources": [
+      "broker/angel/streaming/smartWebSocketV2.py::SmartWebSocketV2._parse_binary_data",
+      "broker/angel/streaming/angel_adapter.py::AngelWebSocketAdapter._on_data",
+      "broker/angel/streaming/angel_adapter.py::AngelWebSocketAdapter._normalize_market_data"
+    ],
+    "notes": [
+      "Worked by hand from angel_adapter.py:779 (mode 1: ltp, ltt from the exchange timestamp) and the packet layout of test/test_angel_quote_feed.py::_packet."
+    ]
+  },
+  "deviations": []
+}

@@ -1,0 +1,162 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "sahi",
+  "inputs_sha256": "5f3e036ce2b4f363d69556bcce8772cced6731c27e0cc9ccaeaad7f925361369",
+  "instruments": [
+    {
+      "symbol": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "token": "26000",
+      "instrumenttype": "INDEX"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "sahi"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "sahi"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "sahi"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "sahi"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_LTP",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 1,
+          "data": {
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "mode": "ltp",
+            "ltp": 24567.35,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "sahi",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_LTP",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 1,
+          "data": {
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "mode": "ltp",
+            "ltp": 24567.5,
+            "timestamp": "<receipt_ms>"
+          }
+        },
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_QUOTE",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 2,
+          "data": {
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "mode": "quote",
+            "ltp": 24567.5,
+            "timestamp": "<receipt_ms>",
+            "volume": 0,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 0.0,
+            "lower_circuit": 0.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "sahi",
+          "serves": [
+            1
+          ]
+        },
+        {
+          "client": "a",
+          "publication": 1,
+          "mode": 1,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": []
+        },
+        {
+          "client": "b",
+          "publication": 1,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

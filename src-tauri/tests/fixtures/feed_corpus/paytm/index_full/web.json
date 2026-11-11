@@ -1,0 +1,110 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "paytm",
+  "inputs_sha256": "e2ef50125bf747db3a2024d739751ffddbbadf291a53c0ee04b6094f96590e91",
+  "instruments": [
+    {
+      "symbol": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "token": "13",
+      "brsymbol": "NIFTY 50",
+      "brexchange": "NSE",
+      "instrumenttype": "INDEX"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "Depth",
+              "depth": 5,
+              "broker": "paytm"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "mode": "Depth",
+              "status": "success",
+              "broker": "paytm"
+            }
+          ],
+          "failed": [],
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_DEPTH",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 3,
+          "data": {
+            "ltp": 24515.6,
+            "ltt": 0,
+            "volume": 0,
+            "open": 24450.0,
+            "high": 24560.4,
+            "low": 24380.25,
+            "close": 24400.1,
+            "last_quantity": 0,
+            "average_price": 0,
+            "total_buy_quantity": 0,
+            "total_sell_quantity": 0,
+            "change_absolute": 115.5,
+            "change_percent": 0.47,
+            "52_week_high": 0,
+            "52_week_low": 0,
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "mode": 3,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 3,
+          "topic_mode": 3,
+          "broker": "paytm",
+          "serves": [
+            3
+          ]
+        }
+      ]
+    }
+  ]
+}

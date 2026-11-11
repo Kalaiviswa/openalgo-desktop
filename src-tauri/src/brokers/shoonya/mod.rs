@@ -75,6 +75,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
         (("NSE_INDEX", "INDIAVIX"), "India VIX"),
     ],
     history_repair: true,
+    day_end_repair: true,
     eod_widen: false,
     strict_candles: false,
     today_bar_utc: true,
@@ -92,6 +93,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
     tradebook_time_only: true,
     orderbook_price_fallback: false,
     depth_oi: false,
+    feed_oi: FeedOi::TotalInDepth,
     rate: RateLimits {
         order: None,
         data: None,

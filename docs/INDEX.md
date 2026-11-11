@@ -57,6 +57,7 @@ page per endpoint.
 | Symbol services (search, symbol, expiry, instruments) | [api/symbol-services/](api/symbol-services/) |
 | Market data (quotes, multi-quotes, depth, history, intervals, ticker) | [api/market-data/](api/market-data/) |
 | Options services (option symbol, chain, Greeks, multi-option Greeks, synthetic future) | [api/options-services/](api/options-services/) |
+| Analytics services (sector rotation map) | [api/analytics-services/](api/analytics-services/) |
 | Chart services (chart workspace preferences per API key) | [api/chart-services/](api/chart-services/) |
 | Market calendar (holidays, timings) | [api/market-calendar/](api/market-calendar/) |
 | WebSocket streaming (the 8765 feed: LTP, Quote, Depth, order updates) | [api/websocket-streaming/](api/websocket-streaming/) |
@@ -103,13 +104,13 @@ Docker, use [OpenAlgo web](https://github.com/marketcalls/openalgo)
 | OpenScript in `/trading`: backtests and live runs | [openscript.md](openscript.md) |
 | Sandbox mode (analyzer mode) | [user/sandbox.md](user/sandbox.md) |
 | MCP server for AI clients (stdio through `openalgo-desktop mcp`, and HTTP at `/mcp`) | [user/mcp.md](user/mcp.md) · [mcp-tool-reference.md](mcp-tool-reference.md) |
+| Flow (`/flow`): the visual workflow builder, its webhooks and triggers, import and export with OpenAlgo web | [User guide chapter 21](userguide/21-flow-visual-builder/README.md) · [the workflow JSON format](prompt/flow-import-format.md) |
 | The Agent: `/agent`, Agent Config under Admin, and the Assistant panel in `/trading` | [The Chart Assistant](userguide/32-charting-terminal/README.md#the-chart-assistant) · [what 1.0.4 brings](../CHANGELOG.md#104) |
 | Telegram and WhatsApp (native in the desktop, no Python) | [api/telegram-services/](api/telegram-services/) · [api/whatsapp-services/](api/whatsapp-services/) · [port/messaging-manual-test.md](port/messaging-manual-test.md) |
 | The market data feed: how broker ticks reach the app, your scripts and the sandbox | [websocket-architecture.md](websocket-architecture.md) |
 
-Not in the desktop: the Python Strategy Host (`/python`), Flow (`/flow`,
-planned for 1.0.5) and the pandas backtesters (Portfolio Backtester, SIP
-Backtester, Portfolio Analyzer). The app has no pages for them; README,
+Not in the desktop: the Python Strategy Host (`/python`) and the pandas
+backtesters (Portfolio Backtester, SIP Backtester, Portfolio Analyzer). The app has no pages for them; README,
 [What is included, and what is not](../README.md#what-is-included-and-what-is-not)
 says what to use instead. The web's scanner architecture page describes a
 separate service built on the web's stack, not a page of the app, and has no
@@ -128,6 +129,7 @@ desktop counterpart.
 | Adding or changing a broker in Rust | [broker-integration-guide.md](broker-integration-guide.md) · the `broker-integration` skill ([.claude/skills/broker-integration/SKILL.md](../.claude/skills/broker-integration/SKILL.md)) |
 | Every route and Socket.IO event the frontend uses, page by page | [port/frontend-backend-contract.md](port/frontend-backend-contract.md) |
 | Order placement outcomes (accepted, refused, uncertain) per broker adapter | [port/order-outcomes.md](port/order-outcomes.md) |
+| What a `market_data` frame carries per broker and mode, and what a client holding several modes receives | [port/market-data-frames.md](port/market-data-frames.md) |
 | The key vault in `openalgo.db`, lock and unlock, caches (KEY-01) | [port/no-keychain.md](port/no-keychain.md) |
 | Data-folder upgrades: backup, restore, downgrade refusal (REL-02) | [port/data-upgrades.md](port/data-upgrades.md) |
 | Golden fixtures recorded from OpenAlgo web, and the web defects not reproduced | `tests/fixtures/web/INDEX.md` |

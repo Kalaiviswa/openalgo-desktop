@@ -6,8 +6,11 @@
 //!   batched per (type, exchange code) like the web (#2176); unsubscribe
 //!   one instrument per frame with `"a":"unsubscribe"`. Types: `marketdata` (detailed, mode 1),
 //!   `compact_marketdata` (mode 2), `full_snapquote` (mode 4). OpenAlgo
-//!   LTP -> compact, QUOTE -> detailed, DEPTH -> snapquote
-//!   (`pocketful_adapter.py` `pocketful_mode_map`).
+//!   LTP -> compact, QUOTE -> detailed (`pocketful_adapter.py`
+//!   `pocketful_mode_map`), DEPTH -> snapquote with the detailed stream
+//!   beside it: a snapquote has no trade price, and the detailed packet
+//!   brings it (lead decision 2026-11-09, R107-07; the web streams the
+//!   snapquote alone and passes its average off as `ltp`).
 //! * Heartbeat: text `{"a":"h"}` every 15 s. The server answers it, so a
 //!   socket can stay "alive" with no market data: once data has been seen
 //!   in three 30 s buckets within 5 minutes, 90 s without market data
@@ -23,7 +26,7 @@
 use super::mapping::{self, exchange_code, map_status, oa_pricetype, oa_product, text, text_any};
 use crate::brokers::common::streaming::{
     now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, OrderUpdate, WsRequest,
+    NormalizedTick, OrderUpdate, QuoteField, WsRequest,
 };
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::DepthLevel;
@@ -59,6 +62,17 @@ pub fn pocketful_mode(mode: FeedMode) -> u8 {
         FeedMode::Ltp => MODE_COMPACT,
         FeedMode::Quote => MODE_DETAILED,
         FeedMode::Depth => MODE_SNAPQUOTE,
+    }
+}
+
+/// The Pocketful streams an OpenAlgo mode runs: its own, and for Depth the
+/// detailed stream first, whose packets carry the trade price, last
+/// quantity, trade time and OI the snapquote lacks (R107-07).
+fn streams(mode: FeedMode) -> &'static [u8] {
+    match pocketful_mode(mode) {
+        MODE_SNAPQUOTE => &[MODE_DETAILED, MODE_SNAPQUOTE],
+        MODE_COMPACT => &[MODE_COMPACT],
+        _ => &[MODE_DETAILED],
     }
 }
 
@@ -267,8 +281,9 @@ pub fn decode_compact(b: &[u8]) -> Option<Compact> {
 }
 
 /// Snapquote (mode 4, at least 166 bytes; `decodeSnapquoteData`,
-/// `packet_decoder.py:83-137`). No LTP: the web uses the average trade
-/// price as `ltp` (`pocketful_adapter.py`, `data.py`).
+/// `packet_decoder.py:83-137`). No trade price: `average_price` is the
+/// day's average trade price, which the web passes off as `ltp`
+/// (`pocketful_adapter.py:676`, a web defect the feed does not copy).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapquote {
     pub exchange_code: u8,
@@ -460,6 +475,19 @@ pub fn decode_binary(b: &[u8]) -> Option<Packet> {
     }
 }
 
+/// What a compact (LTP) packet carries beyond its mode, as the web's LTP
+/// frame publishes it (`pocketful_adapter.py:629-637`): the change, the
+/// OI (not for an index, whose packet fills it with 0) and the best bid
+/// and ask prices.
+fn compact_extras(t: &mut NormalizedTick, c: &Compact, index: bool) {
+    t.mark_carried(QuoteField::Change);
+    if !index {
+        t.mark_carried(QuoteField::OpenInterest);
+    }
+    t.extras.bid_price = Some(c.bid);
+    t.extras.ask_price = Some(c.ask);
+}
+
 /// Exchange last-trade time to epoch ms, when it looks like epoch seconds.
 fn ltt_ms(ltt: u32) -> i64 {
     // Anything before 2001 is not an epoch-seconds value; report 0.
@@ -467,6 +495,16 @@ fn ltt_ms(ltt: u32) -> i64 {
         i64::from(ltt) * 1000
     } else {
         0
+    }
+}
+
+/// The packet's trade time; none before the first trade (0, or anything
+/// before 2001): no `ltt` then, never the receipt time (the web sends the
+/// raw value; lead decision 2026-11-09, review round).
+fn set_trade_time(t: &mut NormalizedTick, ltt: u32) {
+    t.last_trade_time_ms = ltt_ms(ltt);
+    if t.last_trade_time_ms == 0 {
+        t.mark_absent(QuoteField::LastTradeTime);
     }
 }
 
@@ -478,7 +516,6 @@ fn ltt_ms(ltt: u32) -> i64 {
 struct SubInfo {
     symbol: String,
     exchange: String,
-    mode: FeedMode,
 }
 
 pub struct PocketfulFeed {
@@ -521,23 +558,26 @@ impl PocketfulFeed {
         let mut t = NormalizedTick {
             symbol: sub.symbol.clone(),
             exchange: sub.exchange.clone(),
-            mode: sub.mode.code(),
             timestamp_ms: now,
             ..Default::default()
         };
+        let index = sub.exchange.ends_with("_INDEX");
         match p {
             Packet::Compact(c) => {
+                t.mode = FeedMode::Ltp.code();
                 t.ltp = c.ltp;
                 t.oi = c.oi;
-                t.last_trade_time_ms = ltt_ms(c.ltt);
+                set_trade_time(&mut t, c.ltt);
                 t.change = mapping_round2(c.change);
                 let prev = c.ltp - c.change;
                 if prev > 0.0 && c.ltp > 0.0 {
                     t.change_percent = mapping_round2(c.change / prev * 100.0);
                 }
+                compact_extras(&mut t, c, index);
                 vec![FeedEvent::Tick(t)]
             }
             Packet::Detailed(d) => {
+                t.mode = FeedMode::Quote.code();
                 t.ltp = d.ltp;
                 t.open = d.open;
                 t.high = d.high;
@@ -549,32 +589,21 @@ impl PocketfulFeed {
                 t.total_buy_quantity = d.total_buy_qty;
                 t.total_sell_quantity = d.total_sell_qty;
                 t.oi = d.oi;
-                t.last_trade_time_ms = ltt_ms(d.ltt);
+                set_trade_time(&mut t, d.ltt);
+                // The web's Quote frame carries the packet's OI
+                // (`pocketful_adapter.py:592`), an index's zero excepted.
+                if index {
+                    t.mark_absent(QuoteField::OpenInterest);
+                } else {
+                    t.mark_carried(QuoteField::OpenInterest);
+                }
                 t.derive_change();
                 vec![FeedEvent::Tick(t)]
             }
-            Packet::Snapquote(s) => {
-                t.ltp = s.average_price;
-                t.open = s.open;
-                t.high = s.high;
-                t.low = s.low;
-                t.close = s.close;
-                t.volume = s.volume;
-                t.total_buy_quantity = s.total_buy_qty;
-                t.total_sell_quantity = s.total_sell_qty;
-                t.derive_change();
-                let depth = NormalizedDepth {
-                    symbol: t.symbol.clone(),
-                    exchange: t.exchange.clone(),
-                    ltp: t.ltp,
-                    buy: s.bids.clone(),
-                    sell: s.asks.clone(),
-                    total_buy_quantity: s.total_buy_qty,
-                    total_sell_quantity: s.total_sell_qty,
-                    timestamp_ms: now,
-                };
-                vec![FeedEvent::Tick(t), FeedEvent::Depth(depth)]
-            }
+            Packet::Snapquote(s) => vec![
+                FeedEvent::Tick(snapquote_tick(t, s)),
+                FeedEvent::Depth(snapquote_book(sub, s, now)),
+            ],
             _ => Vec::new(),
         }
     }
@@ -649,6 +678,48 @@ impl PocketfulFeed {
     }
 }
 
+/// A snapquote's quote: its OHLC, volume, book totals and average trade
+/// price, with no trade price, trade time, last quantity or OI (it carries
+/// none; R107-07). Knowing no price, it only updates the instrument's
+/// snapshot, and its book reaches Depth holders alone with the last trade
+/// price the detailed stream brought (`feed::bridge::pairing`).
+fn snapquote_tick(mut t: NormalizedTick, s: &Snapquote) -> NormalizedTick {
+    t.mode = FeedMode::Depth.code();
+    for f in [
+        QuoteField::Ltp,
+        QuoteField::LastTradeTime,
+        QuoteField::LastQuantity,
+        QuoteField::OpenInterest,
+    ] {
+        t.mark_absent(f);
+    }
+    t.average_price = s.average_price;
+    t.open = s.open;
+    t.high = s.high;
+    t.low = s.low;
+    t.close = s.close;
+    t.volume = s.volume;
+    t.total_buy_quantity = s.total_buy_qty;
+    t.total_sell_quantity = s.total_sell_qty;
+    t
+}
+
+/// A snapquote's book, without a price of its own.
+fn snapquote_book(sub: &SubInfo, s: &Snapquote, now: i64) -> NormalizedDepth {
+    let mut d = NormalizedDepth {
+        symbol: sub.symbol.clone(),
+        exchange: sub.exchange.clone(),
+        buy: s.bids.clone(),
+        sell: s.asks.clone(),
+        total_buy_quantity: s.total_buy_qty,
+        total_sell_quantity: s.total_sell_qty,
+        timestamp_ms: now,
+        ..Default::default()
+    };
+    d.absent = d.absent.with(QuoteField::Ltp);
+    d
+}
+
 fn mapping_round2(v: f64) -> f64 {
     crate::brokers::common::streaming::round2(v)
 }
@@ -691,17 +762,18 @@ impl BrokerFeed for PocketfulFeed {
                 SubInfo {
                     symbol: s.symbol.clone(),
                     exchange: s.exchange.clone(),
-                    mode: s.mode,
                 },
             );
-            let group = (pocketful_mode(s.mode), key.0);
-            match groups.iter_mut().find(|(g, _)| *g == group) {
-                Some((_, v)) => {
-                    if !v.contains(&key) {
-                        v.push(key)
+            for &stream in streams(s.mode) {
+                let group = (stream, key.0);
+                match groups.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, v)) => {
+                        if !v.contains(&key) {
+                            v.push(key)
+                        }
                     }
+                    None => groups.push((group, vec![key])),
                 }
-                None => groups.push((group, vec![key])),
             }
         }
         groups
@@ -710,17 +782,36 @@ impl BrokerFeed for PocketfulFeed {
             .collect()
     }
 
+    /// Only the difference between the two modes' streams: Quote and
+    /// Depth both run the detailed stream, which stays up between them.
+    fn mode_change_frames(
+        &mut self,
+        old: &FeedSubscription,
+        new: &FeedSubscription,
+    ) -> Vec<Message> {
+        let Some(key) = Self::key(new) else {
+            return Vec::new();
+        };
+        let (before, after) = (streams(old.mode), streams(new.mode));
+        let frame = |action, stream: &u8| sub_frame(action, key.0, key.1, *stream);
+        let leaving = before.iter().filter(|s| !after.contains(s));
+        let arriving = after.iter().filter(|s| !before.contains(s));
+        leaving
+            .map(|s| frame("unsubscribe", s))
+            .chain(arriving.map(|s| frame("subscribe", s)))
+            .collect()
+    }
+
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
         let mut out = Vec::new();
         for s in subs {
             let Some(key) = Self::key(s) else { continue };
             self.subs.remove(&key);
-            out.push(sub_frame(
-                "unsubscribe",
-                key.0,
-                key.1,
-                pocketful_mode(s.mode),
-            ));
+            out.extend(
+                streams(s.mode)
+                    .iter()
+                    .map(|&stream| sub_frame("unsubscribe", key.0, key.1, stream)),
+            );
         }
         out
     }

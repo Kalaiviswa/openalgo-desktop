@@ -1,0 +1,288 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "rupeezy",
+  "inputs_sha256": "ee8b2baf3479ff2f5cb38a264a757ba792e4295f43e245b4f7ed5be021aee7ee",
+  "instruments": [
+    {
+      "symbol": "NIFTY24NOV26FUT",
+      "exchange": "NFO",
+      "token": "35001",
+      "brsymbol": "NIFTY26NOVFUT",
+      "brexchange": "NSE_FO",
+      "name": "NIFTY",
+      "expiry": "24-NOV-26",
+      "lotsize": 75,
+      "instrumenttype": "FUT"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "LTP",
+              "depth": null,
+              "broker": "rupeezy"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "rupeezy"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Depth",
+              "depth": 5,
+              "broker": "rupeezy"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "rupeezy"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "mode": "Depth",
+              "status": "success",
+              "broker": "rupeezy"
+            }
+          ],
+          "failed": [],
+          "broker": "rupeezy"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 13,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "rupeezy"
+            }
+          ],
+          "failed": [],
+          "broker": "rupeezy"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY24NOV26FUT_LTP",
+          "exchange": "NFO",
+          "symbol": "NIFTY24NOV26FUT",
+          "mode": 1,
+          "data": {
+            "symbol": "NIFTY24NOV26FUT",
+            "exchange": "NFO",
+            "token": "35001",
+            "ltp": 24605.5,
+            "last_price": 24605.5,
+            "ltt": 1791000400000,
+            "timestamp": 1791000401000,
+            "close": 24520.0,
+            "prev_close": 24520.0,
+            "change": 85.5,
+            "change_percent": 0.35
+          }
+        },
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY24NOV26FUT_DEPTH",
+          "exchange": "NFO",
+          "symbol": "NIFTY24NOV26FUT",
+          "mode": 3,
+          "data": {
+            "symbol": "NIFTY24NOV26FUT",
+            "exchange": "NFO",
+            "token": "35001",
+            "ltp": 24605.5,
+            "last_price": 24605.5,
+            "ltt": 1791000400000,
+            "timestamp": 1791000401000,
+            "close": 24520.0,
+            "prev_close": 24520.0,
+            "change": 85.5,
+            "change_percent": 0.35,
+            "open": 24550.0,
+            "high": 24640.0,
+            "low": 24530.5,
+            "volume": 1875000,
+            "last_quantity": 75,
+            "average_price": 24590.25,
+            "total_buy_quantity": 450000,
+            "total_sell_quantity": 375000,
+            "oi": 12345600,
+            "open_interest": 12345600,
+            "depth": {
+              "buy": [
+                {
+                  "price": 24605.0,
+                  "quantity": 750,
+                  "orders": 5
+                },
+                {
+                  "price": 24604.5,
+                  "quantity": 1500,
+                  "orders": 9
+                },
+                {
+                  "price": 24604.0,
+                  "quantity": 2250,
+                  "orders": 11
+                },
+                {
+                  "price": 24603.5,
+                  "quantity": 300,
+                  "orders": 2
+                },
+                {
+                  "price": 24603.0,
+                  "quantity": 825,
+                  "orders": 6
+                }
+              ],
+              "sell": [
+                {
+                  "price": 24606.0,
+                  "quantity": 600,
+                  "orders": 4
+                },
+                {
+                  "price": 24606.5,
+                  "quantity": 1200,
+                  "orders": 8
+                },
+                {
+                  "price": 24607.0,
+                  "quantity": 975,
+                  "orders": 7
+                },
+                {
+                  "price": 24607.5,
+                  "quantity": 150,
+                  "orders": 1
+                },
+                {
+                  "price": 24608.0,
+                  "quantity": 2100,
+                  "orders": 12
+                }
+              ]
+            },
+            "upper_circuit": 26972.0,
+            "lower_circuit": 22068.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "rupeezy",
+          "serves": [
+            1
+          ]
+        },
+        {
+          "client": "a",
+          "publication": 1,
+          "mode": 1,
+          "topic_mode": 3,
+          "broker": "rupeezy",
+          "serves": []
+        },
+        {
+          "client": "b",
+          "publication": 1,
+          "mode": 3,
+          "topic_mode": 3,
+          "broker": "rupeezy",
+          "serves": [
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "line": 10,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY24NOV26FUT_LTP",
+          "exchange": "NFO",
+          "symbol": "NIFTY24NOV26FUT",
+          "mode": 1,
+          "data": {
+            "symbol": "NIFTY24NOV26FUT",
+            "exchange": "NFO",
+            "token": "35001",
+            "ltp": 24607.25,
+            "last_price": 24607.25,
+            "ltt": null,
+            "timestamp": null
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "rupeezy",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

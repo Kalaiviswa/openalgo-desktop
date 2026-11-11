@@ -10,6 +10,65 @@
 //! before every (re)connect. Protocol replies (NATS `CONNECT` and `PONG`)
 //! are returned from `parse` as `FeedEvent::Reply` and written to the
 //! socket by the manager.
+//!
+//! # What a tick says it carries (WebSocket parity, audit C03-C06)
+//!
+//! A `market_data` frame leaves out a field the broker did not send; it
+//! never sends it as 0 (web openalgo#2376). A genuine zero (no volume yet,
+//! an OI of 0, a cleared book side) is sent. So every [`NormalizedTick`]
+//! says what its packet carries:
+//!
+//! * **By mode.** `mode` 1 (LTP) carries `ltp`; 2 (Quote) also open, high,
+//!   low, previous close, volume, average price, last quantity, the book
+//!   totals and the change; 3 (Depth) also open interest. The trade time
+//!   counts when `last_trade_time_ms` is above 0.
+//! * **Less:** `t.mark_absent(QuoteField::Open)` for a field this packet
+//!   lacks (a sparse or incremental packet), or `t.absent =
+//!   AbsentFields::of(&[..])` for what the whole stream lacks. A packet with
+//!   no trade price marks `QuoteField::Ltp` and leaves `ltp` at 0: the
+//!   bridge then publishes nothing for it but keeps its other fields, so no
+//!   frame ever shows an invented LTP.
+//! * **More:** `t.mark_carried(QuoteField::OpenInterest)` for OI in a Quote
+//!   packet (C05), `QuoteField::LastQuantity` for a last quantity in an LTP
+//!   packet, `QuoteField::Change` for a change the broker sent as 0 with no
+//!   previous close. A change is otherwise known when it is not 0 or a
+//!   previous close above 0 backs it (`derive_change`), for every exchange
+//!   (C04).
+//! * **Book:** [`NormalizedDepth::absent`] names what a book message lacks:
+//!   its totals (the frame takes the tick's), its own LTP, and `Orders` for
+//!   a book whose levels have no order count (Upstox).
+//! * **Optional shared fields** ([`QuoteExtras`], C06): `t.extras.
+//!   upper_circuit = Some(v)`, likewise the 52-week range, the best bid and
+//!   ask, previous OI, OI change, total OI, the day's close and the packet's
+//!   exchange time. Leave `None` what the packet did not carry (the
+//!   bridge keeps the last value); `t.extras.clear(ExtraField::BidPrice)` or
+//!   `clear_best_bid_ask()` for what the packet says is gone (an emptied
+//!   book). The exchange time belongs to its packet alone and is never
+//!   kept.
+//! * **Gone:** `t.mark_cleared(QuoteField::TotalBuyQuantity)` drops a quote
+//!   field from what the bridge keeps (`mark_absent` keeps it);
+//!   `t.book_absent = true` sends a full packet's Depth frame without a book
+//!   (the last book is not shown for it, and is kept).
+//! * **Number form:** `t.numbers.set(Number::Ltp, NumberForm::Integer)` (a
+//!   whole value as an integer, as 5paisa's JSON sends it) or
+//!   `NumberForm::Double` (Jainam's 1105 text event), for this packet;
+//!   `t.time_text = Some(TimeText::TimeOfDay)` for the text form of its trade
+//!   time (Definedge passes `HH:MM:SS` or epoch seconds through).
+//! * **Broker-only fields** ([`BrokerField`]): `t.broker_fields.set(
+//!   BrokerField::IndicativeEquilibriumPrice, BrokerValue::Float(v))`. The
+//!   set of keys is fixed in `fields.rs`, so a broker field can never
+//!   overwrite an identity, mode or canonical key; add a variant there for
+//!   a new one.
+//!
+//! The bridge (`feed::bridge`) keeps each instrument's last known value of
+//! every field within one broker connection and merges each packet into it
+//! by these marks, never by a zero test, so an LTPC-only or OI-only packet
+//! keeps the quote it did not repeat. Which name each field goes out under
+//! is `feed::dialect`'s: the canonical names plus the names the broker's
+//! web adapter uses, per mode (`feed/dialect/names.rs`; a broker's web
+//! names are added there, not in the adapter). `fields.rs` lists, per
+//! broker, what its web adapter publishes and which of these the adapter
+//! fills.
 
 use crate::brokers::types::DepthLevel;
 use crate::error::Result;
@@ -19,6 +78,14 @@ use std::sync::Arc;
 use std::time::Duration;
 pub use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
 pub use tokio_tungstenite::tungstenite::Message;
+
+mod fields;
+mod numbers;
+pub use fields::{
+    AbsentFields, BrokerField, BrokerFields, BrokerValue, ClearedExtras, ExtraField, QuoteExtras,
+    QuoteField,
+};
+pub use numbers::{Number, NumberForm, NumberForms, TimeText};
 
 /// Longest a feed waits for a required login acknowledgement
 /// (`BrokerFeed::auth_ack_deadline`).
@@ -91,7 +158,10 @@ impl FeedSubscription {
     }
 }
 
-/// A normalised tick. Fields a mode does not carry are zero.
+/// A normalised tick: what one broker packet says about an instrument.
+/// Its `mode` (1 LTP, 2 Quote, 3 Depth) says which fields it carries
+/// unless it marks them (see the module doc); a field it does not carry is
+/// left at zero and never reaches a frame as one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct NormalizedTick {
     pub symbol: String,
@@ -116,6 +186,40 @@ pub struct NormalizedTick {
     pub last_trade_time_ms: i64,
     /// When this tick was produced, epoch ms.
     pub timestamp_ms: i64,
+    /// What this packet (or the whole stream) does not carry although its
+    /// mode would: left out of the frames built on it, and the bridge keeps
+    /// the instrument's last known value of each instead.
+    #[serde(skip_serializing_if = "AbsentFields::is_empty")]
+    pub absent: AbsentFields,
+    /// What this packet carries beyond its mode: open interest in a Quote
+    /// packet, a change the broker sent as 0 with no previous close.
+    #[serde(skip_serializing_if = "AbsentFields::is_empty")]
+    pub carried: AbsentFields,
+    /// The optional shared fields this packet carried (`None`: not sent).
+    #[serde(skip_serializing_if = "QuoteExtras::is_empty")]
+    pub extras: QuoteExtras,
+    /// The broker-only fields this packet carried.
+    #[serde(skip_serializing_if = "BrokerFields::is_empty")]
+    pub broker_fields: BrokerFields,
+    /// The JSON number form of this packet's values where the broker's own
+    /// JSON decides it (`numbers.rs`), for this packet only; canonical keys
+    /// and the broker's names alike.
+    #[serde(skip)]
+    pub numbers: NumberForms,
+    /// The text form of this packet's trade time where the broker's web
+    /// adapter passes the broker's text through (`numbers.rs`); it stays
+    /// with the trade time.
+    #[serde(skip)]
+    pub time_text: Option<TimeText>,
+    /// A full packet that says it has no book (HDFC's empty depth list,
+    /// which proto3 cannot tell from a cleared book): its Depth frame goes
+    /// out without `depth` rather than with the last book, which stays for
+    /// the next packet that carries one.
+    #[serde(skip)]
+    pub book_absent: bool,
+    /// What this packet says is gone (`mark_cleared`).
+    #[serde(skip_serializing_if = "AbsentFields::is_empty")]
+    pub cleared: AbsentFields,
 }
 
 impl NormalizedTick {
@@ -126,19 +230,85 @@ impl NormalizedTick {
             self.change_percent = round2((self.ltp - self.close) / self.close * 100.0);
         }
     }
+
+    /// This packet does not carry `field`.
+    pub fn mark_absent(&mut self, field: QuoteField) {
+        self.absent = self.absent.with(field);
+        self.carried = self.carried.without(field);
+    }
+
+    /// This packet carries `field` although its mode would not.
+    /// `field` is gone: not in this packet, and dropped from what the
+    /// bridge keeps for the instrument until a packet carries it again
+    /// (web Tradejini and Samco prune the book's totals when the Depth
+    /// holder leaves). `mark_absent` keeps the last value instead. Not for
+    /// the price or the trade time, which go with each packet anyway.
+    pub fn mark_cleared(&mut self, field: QuoteField) {
+        self.mark_absent(field);
+        self.cleared = self.cleared.with(field);
+    }
+
+    pub fn mark_carried(&mut self, field: QuoteField) {
+        self.carried = self.carried.with(field);
+        self.absent = self.absent.without(field);
+    }
+
+    /// The fields this packet carries: its mode's, with what it marks
+    /// carried and without what it marks absent. A change counts when the
+    /// broker sent one (a value, or `mark_carried`) or a previous close
+    /// above 0 backs it; the trade time when it is above 0.
+    pub fn known(&self) -> AbsentFields {
+        use QuoteField as F;
+        let mut k = AbsentFields::of_mode(self.mode)
+            .union(self.carried)
+            .minus(self.absent);
+        let backed_by_close = k.contains(F::Close) && self.close > 0.0 && self.ltp > 0.0;
+        let sent = self.change != 0.0 || self.change_percent != 0.0;
+        if !self.carried.contains(F::Change) && !sent && !backed_by_close {
+            k = k.without(F::Change);
+        }
+        if self.absent.contains(F::LastTradeTime) || self.last_trade_time_ms <= 0 {
+            k = k.without(F::LastTradeTime);
+        } else {
+            k = k.with(F::LastTradeTime);
+        }
+        k.without(F::Orders)
+    }
+
+    /// Whether this packet carries `field` ([`known`](Self::known)).
+    pub fn knows(&self, field: QuoteField) -> bool {
+        self.known().contains(field)
+    }
 }
 
-/// Normalised market depth.
+/// Normalised market depth: one full snapshot of the book, each side best
+/// price first. A side with no levels is a cleared side, not a missing one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct NormalizedDepth {
     pub symbol: String,
     pub exchange: String,
+    /// The book message's own last traded price; 0 when it has none (the
+    /// frame then takes the instrument's tick's).
     pub ltp: f64,
     pub buy: Vec<DepthLevel>,
     pub sell: Vec<DepthLevel>,
     pub total_buy_quantity: i64,
     pub total_sell_quantity: i64,
     pub timestamp_ms: i64,
+    /// What this book message does not carry: its totals
+    /// (`TotalBuyQuantity`, `TotalSellQuantity`: the frame then takes the
+    /// instrument's tick's, if any), the order count of its levels
+    /// (`Orders`), its own LTP (`Ltp`).
+    #[serde(skip_serializing_if = "AbsentFields::is_empty")]
+    pub absent: AbsentFields,
+    /// The book packet's own feed time, epoch ms, where the broker sends one
+    /// (Fyers TBT `feed_time`, fyers_tbt_websocket.py:511).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_time_ms: Option<i64>,
+    /// The broker-only fields the book packet carried (Fyers' depth packet
+    /// `update_type`): its Depth frame names them, over the tick's.
+    #[serde(skip_serializing_if = "BrokerFields::is_empty")]
+    pub broker_fields: BrokerFields,
 }
 
 /// A normalised order update (web `order_update` event fields).
@@ -208,6 +378,89 @@ impl std::fmt::Debug for OrderFeed {
 /// Events published to subscribers of the manager (shared, cheap to clone).
 pub type MarketEvent = Arc<FeedEvent>;
 
+/// The instruments a broker refused to release (or, for an admission, to
+/// stream), each with why, for the trader (`BrokerFeed::release_frames`,
+/// `BrokerFeed::admission_frames`).
+pub type ReleaseRefusals = Vec<(FeedSubscription, String)>;
+
+/// Where a broker that answers a release or an admission apart from the
+/// socket sends that answer (`BrokerFeed::release_frames`,
+/// `BrokerFeed::admission_frames`).
+pub type ReleaseAnswer = tokio::sync::oneshot::Receiver<ReleaseRefusals>;
+
+/// A broker's step before a new instrument is subscribed
+/// (`Broker::feed_presubscribe`): each subscription as the feed will
+/// stream it (only its broker fields, `token`, `brsymbol` and
+/// `brexchange`, may change), or why it cannot be, in the web's words, in
+/// the order asked. Samco looks an index's streaming id up over REST, as
+/// the web does when subscribing. The manager awaits it within a deadline
+/// and holds no lock meanwhile.
+pub type Presubscribe = Arc<
+    dyn Fn(
+            Vec<FeedSubscription>,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Vec<std::result::Result<FeedSubscription, String>>,
+        > + Send
+        + Sync,
+>;
+
+/// What the broker session hears when no consumer holds these instruments
+/// any more (`Broker::feed_let_go`), whether or not a socket carried the
+/// release: a feed that is not connected never hears of one. Motilal's wire
+/// keys follow who holds an instrument through it. Called with the
+/// manager's registry locked, so that an instrument placed again keeps what
+/// it holds: it must be quick and must not call back into the manager.
+pub type FeedLetGo = Arc<dyn Fn(&[FeedSubscription]) + Send + Sync>;
+
+/// What the broker session hears when the manager has placed instruments
+/// (`Broker::feed_held`): some consumer holds each of them, however long no
+/// socket registers them. Called with the manager's registry locked, like
+/// `FeedLetGo`.
+pub type FeedHeld = Arc<dyn Fn(&[FeedSubscription]) + Send + Sync>;
+
+/// Why the broker session's feed refuses a subscription outright (a mode,
+/// depth or exchange its web adapter refuses), in the web's words; `None`
+/// takes it. Every consumer of the feed hears it, not only feed clients.
+pub type FeedRefusal = Arc<dyn Fn(&FeedSubscription) -> Option<String> + Send + Sync>;
+
+/// How a broker socket ended, for `BrokerFeed::on_ended` (audit P-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended<'a> {
+    /// The connection closed: the broker's close code and reason, the code
+    /// `None` on a read error or the end of the stream.
+    Closed { code: Option<u16>, reason: &'a str },
+    /// The broker refused the WebSocket upgrade with this HTTP status, one
+    /// `BrokerFeed::is_auth_failure` does not claim.
+    Refused(u16),
+}
+
+/// What the manager does after a socket ended (`BrokerFeed::on_ended`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconnect {
+    /// Connect again after the manager's capped backoff.
+    Backoff,
+    /// Connect again after this long, as the broker asks.
+    After(Duration),
+    /// Do not connect again until the next broker sign-in; the message is
+    /// the trader's, and the kind says what the status and Health tell
+    /// them ("log in again" only for `StopKind::Auth`).
+    Stop { kind: StopKind, message: String },
+}
+
+/// Why a broker ended its feed for good (`Reconnect::Stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopKind {
+    /// The login is no longer valid: the trader logs in again.
+    Auth,
+    /// Too many connections on one login (another app or session holds
+    /// them): the trader closes the others.
+    ConnectionLimit,
+    /// Any other reason the broker gave.
+    Other,
+}
+
 /// The per-broker streaming adapter.
 #[async_trait]
 pub trait BrokerFeed: Send + Sync {
@@ -273,6 +526,32 @@ pub trait BrokerFeed: Send + Sync {
     /// subscribed with).
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message>;
 
+    /// Frames that release these instruments, and, when the broker answers
+    /// a release apart from the socket (XTS releases over REST), a receiver
+    /// of the ones it refused to let go, with why. The manager asks this
+    /// for a release a caller waits on (audit C01); a sender dropped
+    /// without an answer means the release was not confirmed. Default: the
+    /// unsubscribe frames, whose writing is the whole release.
+    fn release_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        (self.unsubscribe_frames(subs), None)
+    }
+
+    /// The subscribe frames for `subs` when the manager waits on the
+    /// admission, and where a broker that answers subscribes apart from the
+    /// socket (XTS over REST) sends the instruments it refused, with why
+    /// (review R107-03); a sender dropped without an answer refuses
+    /// nothing (the next connection subscribes them again). Default: the
+    /// subscribe frames, whose writing is the whole admission.
+    fn admission_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        (self.subscribe_frames(subs), None)
+    }
+
     /// Frames that move an instrument from one effective mode to another.
     /// Default: unsubscribe the old mode, subscribe the new one.
     fn mode_change_frames(
@@ -283,6 +562,57 @@ pub trait BrokerFeed: Send + Sync {
         let mut v = self.unsubscribe_frames(std::slice::from_ref(old));
         v.extend(self.subscribe_frames(std::slice::from_ref(new)));
         v
+    }
+
+    /// Whether this broker answers subscribes itself, apart from the
+    /// socket (`admission_frames`, `resync_frames`): a subscribe made
+    /// before a session is up then waits for the broker's answer to that
+    /// session's whole set (review B2). Default: no; a subscribe is taken
+    /// once written, as the web's adapters take it.
+    fn answers_admissions(&self) -> bool {
+        false
+    }
+
+    /// The frames that subscribe a new session's whole set `subs`, and, for
+    /// a broker that answers subscribes itself, where it says what it
+    /// refused. Default: the subscribe frames.
+    fn resync_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        (self.subscribe_frames(subs), None)
+    }
+
+    /// The frames for mode downgrades `(old, new)` a release left, whose
+    /// caller waits, and, for a broker that answers releases itself, where
+    /// it says what it refused: a refusal keeps the higher mode (review
+    /// B3). Default: the plain mode changes, whose writing is the whole
+    /// change.
+    fn mode_downgrade_frames(
+        &mut self,
+        changes: &[(FeedSubscription, FeedSubscription)],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        let frames = changes
+            .iter()
+            .flat_map(|(old, new)| self.mode_change_frames(old, new))
+            .collect();
+        (frames, None)
+    }
+
+    /// The frames for mode upgrades `(old, new)` a caller waits on, and,
+    /// for a broker that answers subscribes apart from the socket, where
+    /// its refusals come (keyed by the new subscription, like
+    /// `admission_frames`): what it refuses keeps the old mode (review X2).
+    /// Default: the plain mode changes, whose writing is the whole change.
+    fn mode_upgrade_frames(
+        &mut self,
+        changes: &[(FeedSubscription, FeedSubscription)],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        let frames = changes
+            .iter()
+            .flat_map(|(old, new)| self.mode_change_frames(old, new))
+            .collect();
+        (frames, None)
     }
 
     /// Decode one frame.
@@ -319,6 +649,32 @@ pub trait BrokerFeed: Send + Sync {
     fn is_auth_failure(&self, http_status: Option<u16>) -> bool {
         matches!(http_status, Some(401) | Some(403))
     }
+
+    /// The socket ended (a close frame, a read error, or an upgrade refused
+    /// with a status `is_auth_failure` does not claim): what the manager
+    /// does next. A broker whose close codes mean something (Sahi's 4429
+    /// for too many connections on one token) answers by them; the
+    /// default is the capped backoff (audit P-12).
+    fn on_ended(&mut self, _ended: Ended<'_>) -> Reconnect {
+        Reconnect::Backoff
+    }
+
+    /// What the feed tells the broker before the manager closes its socket
+    /// deliberately (a logout, a broker switch, quitting, or an extra
+    /// connection that carries nothing any more); never after an error or
+    /// a close the broker made. Motilal's order socket says
+    /// `{"clientid", "action":"logout"}` there, as the web's adapter does
+    /// (motilal_order_adapter.py:131-139). Sent with a short bounded wait.
+    /// Default: nothing.
+    fn farewell_frames(&self) -> Vec<Message> {
+        Vec::new()
+    }
+
+    /// The trader asked to connect again after this feed answered
+    /// `Reconnect::Stop` with a kind other than `Auth` (a feed client
+    /// signed in, or the computer woke): start the broker's retry budget
+    /// afresh, as the web's rebuilt adapter does.
+    fn on_resume(&mut self) {}
 }
 
 /// A handshake request whose URL has no path (`wss://ws.kite.trade?api_key=..`)
@@ -393,5 +749,37 @@ mod tests {
         t.derive_change();
         assert_eq!(t.change, 6.0);
         assert_eq!(t.change_percent, 0.42);
+    }
+
+    /// C03: a packet carries its mode's fields, less what it marks absent,
+    /// more what it marks carried; a change needs a value or a close above
+    /// 0; a trade time needs a value.
+    #[test]
+    fn a_packet_knows_its_modes_fields_and_its_marks() {
+        use QuoteField as F;
+        let mut t = NormalizedTick {
+            mode: 1,
+            ltp: 101.0,
+            ..Default::default()
+        };
+        assert_eq!(t.known(), AbsentFields::of(&[F::Ltp]));
+        t.mode = 2;
+        assert!(t.knows(F::Volume) && !t.knows(F::OpenInterest));
+        assert!(!t.knows(F::Change), "no close, no change");
+        t.close = 100.0;
+        assert!(t.knows(F::Change), "a close above 0 backs the change");
+        t.mark_absent(F::Close);
+        assert!(!t.knows(F::Close) && !t.knows(F::Change));
+        t.mark_carried(F::OpenInterest);
+        assert!(t.knows(F::OpenInterest));
+        t.mode = 3;
+        t.mark_absent(F::OpenInterest);
+        assert!(!t.knows(F::OpenInterest), "absent wins over the mode");
+        assert!(!t.knows(F::LastTradeTime));
+        t.last_trade_time_ms = 1;
+        assert!(t.knows(F::LastTradeTime));
+        t.mark_absent(F::LastTradeTime);
+        assert!(!t.knows(F::LastTradeTime));
+        assert!(!t.knows(F::Orders), "a tick has no book");
     }
 }

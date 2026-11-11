@@ -1,0 +1,109 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "pocketful",
+  "inputs_sha256": "7c09a6cc8e3672c0d7bfd3fa4cfaf28fb727640f73ec5a5488cdc9d470b35341",
+  "instruments": [
+    {
+      "symbol": "NIFTY25NOV25FUT",
+      "exchange": "NFO",
+      "token": "52345",
+      "brsymbol": "NIFTY25NOVFUT",
+      "brexchange": "NFO",
+      "lotsize": 75,
+      "instrumenttype": "FUT",
+      "expiry": "25-NOV-25"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY25NOV25FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "pocketful"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "pocketful"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY25NOV25FUT",
+              "exchange": "NFO",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "pocketful"
+            }
+          ],
+          "failed": [],
+          "broker": "pocketful"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV25FUT_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV25FUT",
+          "mode": 2,
+          "data": {
+            "ltp": 24680.5,
+            "ltt": 1762656910,
+            "volume": 4567800,
+            "open": 24550.0,
+            "high": 24750.0,
+            "low": 24500.0,
+            "close": 24490.0,
+            "last_trade_quantity": 75,
+            "average_price": 24655.25,
+            "total_buy_quantity": 912000,
+            "total_sell_quantity": 845000,
+            "oi": 12345675,
+            "symbol": "NIFTY25NOV25FUT",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "pocketful",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

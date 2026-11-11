@@ -13,7 +13,7 @@ Every endpoint has its own window per caller, as on the web: ten `/placeorder` a
 | Limit | Endpoints (each in its own window) |
 |-------|------------------------------------|
 | 10 per second | `/placeorder`, `/modifyorder`, `/cancelorder`, `/optionsorder`, `/optionsmultiorder`, `/placegttorder`, `/modifygttorder`, `/cancelgttorder`, `/placesmartorder` |
-| 30 per minute | `/optiongreeks`, `/whatsapp/notify`, and every `/telegram/*` endpoint except the two below |
+| 30 per minute | `/optiongreeks`, `/sectorrotation`, `/sectorrotation/options`, `/whatsapp/notify`, and every `/telegram/*` endpoint except the two below |
 | 5 per minute | `/telegram/broadcast` |
 | 100 per second | Every other `/api/v1` endpoint: market data, account books, symbols, the other options analytics, the `/strategy/*` endpoints, `/cancelallorder`, `/closeposition`, `/basketorder`, `/splitorder`, `/margin`, `/telegram/webhook` and the rest |
 
@@ -64,7 +64,26 @@ Invalid API keys are counted per caller: 10 a minute. A caller that keeps sendin
 |----------|-------|
 | `/strategy/webhook/<token>` | 100 per minute per caller |
 | `/chartink/webhook/<webhook_id>` | 100 per minute per caller |
+| `/flow/webhook/<token>` and `/flow/webhook/<token>/<symbol>` (one window for both) | 100 per minute per caller, and 100 per minute per workflow |
 | Wrong webhook addresses | 10 per minute per caller; further wrong ones are refused at once |
+
+A Flow webhook over its limit is answered as on the web: HTTP 429 with a
+`Retry-After` header and
+
+```json
+{
+  "status": "error",
+  "message": "Rate limit exceeded. Please slow down your requests.",
+  "limit": "100 per 1 minute",
+  "retry_after": 60
+}
+```
+
+In the desktop, wrong secrets for a Flow webhook count against the caller's
+budget for wrong webhook addresses, and ten for one workflow within 10
+minutes lock that workflow's webhook for 15 minutes (OpenAlgo web has no
+lockout). Behind the built-in tunnel every caller shares one identity, so the
+per-workflow window is what limits a tunnel caller.
 
 ## Sign-in Limits
 
@@ -94,11 +113,12 @@ Every caller is also limited to 1000 requests a second across the whole app. Pas
 
 ## In the desktop
 
-- In the desktop, the limits cannot be changed. They are the web's sample settings (`.sample.env`); the web reads them from `.env` (`API_RATE_LIMIT`, `ORDER_RATE_LIMIT`, `SMART_ORDER_RATE_LIMIT`, `WEBHOOK_RATE_LIMIT`, `GREEKS_RATE_LIMIT`, `TELEGRAM_RATE_LIMIT`, `WHATSAPP_RATE_LIMIT`).
+- In the desktop, the limits cannot be changed. They are the web's sample settings (`.sample.env`); the web reads them from `.env` (`API_RATE_LIMIT`, `ORDER_RATE_LIMIT`, `SMART_ORDER_RATE_LIMIT`, `WEBHOOK_RATE_LIMIT`, `GREEKS_RATE_LIMIT`, `TELEGRAM_RATE_LIMIT`, `WHATSAPP_RATE_LIMIT`, `SECTOR_ROTATION_API_RATE_LIMIT`).
 - In the desktop, `/telegram/webhook` has the general limit of 100 per second; the web sets none on it.
 - In the desktop, orders are paced at the broker for every broker, including those the web does not pace (Samco, Tradejini, HDFC Sky, HDFC Securities, Pocketful, 5paisa), and a request that would wait more than 10 seconds is always refused with HTTP 429. The web bounds the wait only on a multi-threaded server (gthread) and answers 429 there.
 - In the desktop, the WebSocket feed limits the messages each client may send; the web reads messages without a limit.
-- In the desktop, the Chartink strategy management pages (create, configure, delete) have no request limit of their own; the web limits them to 200 per minute. They need the signed-in session either way. The web's Flow webhook limit has no counterpart: Flow is not in the desktop.
+- In the desktop, the Chartink strategy management pages (create, configure, delete) have no request limit of their own; the web limits them to 200 per minute. They need the signed-in session either way.
+- In the desktop, the Flow webhook limit is counted per workflow with the token kept as a keyed digest; the web keeps each token, guesses included, as text in its limiter's memory.
 
 ---
 

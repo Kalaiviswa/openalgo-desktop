@@ -48,12 +48,13 @@ use tower_http::trace::TraceLayer;
 /// An unknown path there is a mistyped or removed endpoint, never a page, so
 /// it answers the JSON 404 on every method instead of the app's 404 page: an
 /// API caller gets a body it can parse. The web's 404 handler does this for
-/// `/api/`; the desktop extends it to the per-area API prefixes, where the web
-/// still answers with its page.
+/// `/api/` and Flow's `/flow/webhook/`; the desktop extends it to the
+/// per-area API prefixes, where the web still answers with its page.
 fn is_api_path(path: &str) -> bool {
     let mut segments = path.strip_prefix('/').unwrap_or(path).split('/');
     match (segments.next(), segments.next()) {
         (Some("api"), Some(_)) => true,
+        (Some("flow"), Some("webhook")) => true,
         (Some(area), Some("api")) => !area.is_empty(),
         _ => false,
     }
@@ -129,7 +130,10 @@ pub fn router(ctx: Arc<AppState>) -> (Router, socketioxide::SocketIo) {
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(sio_layer)
-        .layer(mw::from_fn_with_state(ctx.clone(), middleware::session_layer))
+        .layer(mw::from_fn_with_state(
+            ctx.clone(),
+            middleware::session_layer,
+        ))
         .layer(DefaultBodyLimit::max(crate::config::BODY_LIMIT_BYTES))
         .layer(mw::from_fn_with_state(ctx.clone(), middleware::host_check))
         // Traffic, latency and blocked-address checks (services::monitor).
@@ -158,7 +162,9 @@ pub fn router(ctx: Arc<AppState>) -> (Router, socketioxide::SocketIo) {
         .layer(cors(ctx.clone()))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &Request<Body>| {
-                tracing::debug_span!("http", method = %req.method(), path = %req.uri().path())
+                // Webhook paths carry their credential: never logged whole.
+                let path = crate::services::monitor::loggable_path(req.uri().path());
+                tracing::debug_span!("http", method = %req.method(), path = %path)
             }),
         )
         .with_state(ctx);
@@ -183,6 +189,44 @@ pub fn port_in_use_message(port: u16) -> String {
     format!(
         "OpenAlgo could not start because port {} is already used by another program.{} You can also choose a different port.",
         port, mac
+    )
+}
+
+/// Windows' "access denied" for a bind (WSAEACCES): the port lies in a
+/// range Windows reserved (Hyper-V, WSL, Docker and the NAT service
+/// reserve ranges, and the ranges can change after an update or a
+/// restart), not a port another program holds.
+const WSAEACCES: i32 = 10013;
+
+/// What the trader is told when the app's port cannot be opened: the
+/// port taken by another program (with the fix), a port Windows
+/// reserved (with the fix), or anything else.
+pub(crate) fn bind_failure(port: u16, e: &std::io::Error) -> ServerStatus {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        return ServerStatus::PortInUse {
+            port,
+            message: port_in_use_message(port),
+        };
+    }
+    if e.raw_os_error() == Some(WSAEACCES) {
+        return ServerStatus::Failed {
+            message: port_reserved_message(port),
+        };
+    }
+    ServerStatus::Failed {
+        message: format!(
+            "OpenAlgo could not open port {}. Choose a different port and try again.",
+            port
+        ),
+    }
+}
+
+/// A port Windows reserved, in a trader's words: the cause, another port,
+/// and the broker's redirect URL that must follow it.
+fn port_reserved_message(port: u16) -> String {
+    let other = if port == 5001 { 5002 } else { 5001 };
+    format!(
+        "OpenAlgo could not start because Windows has reserved port {port} for its own use (Hyper-V, WSL or Docker reserve ranges of ports, and the ranges can change after an update or a restart). Enter another port, such as {other}, and choose Try again. Then change the redirect URL in your broker's app to the new port (for example http://127.0.0.1:{other}/zerodha/callback), or the broker login will not complete."
     )
 }
 
@@ -226,23 +270,9 @@ pub async fn start(ctx: Arc<AppState>) -> Result<ServerHandle, ServerStatus> {
     };
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            tracing::error!("Port {} is already in use", cfg.http_port);
-            let st = ServerStatus::PortInUse {
-                port: cfg.http_port,
-                message: port_in_use_message(cfg.http_port),
-            };
-            *ctx.server_status.write() = st.clone();
-            return Err(st);
-        }
         Err(e) => {
             tracing::error!("Could not bind {}: {}", addr, e);
-            let st = ServerStatus::Failed {
-                message: format!(
-                    "OpenAlgo could not open port {}. Choose a different port and try again.",
-                    cfg.http_port
-                ),
-            };
+            let st = bind_failure(cfg.http_port, &e);
             *ctx.server_status.write() = st.clone();
             return Err(st);
         }

@@ -51,6 +51,8 @@ skill instead of improvising the procedure:
 - **`version-bump`**: changing the app version and preparing a release.
 - **`chart-indicator`** and **`openscript`**: writing a custom chart indicator
   or an OpenScript study for the `/trading` terminal.
+- **`flow-builder`**: writing, editing or debugging a Flow workflow JSON; it
+  checks the result against the desktop's own validator.
 
 ## The compatibility contract
 
@@ -126,8 +128,25 @@ Observed quirks that are part of the contract and must be reproduced, not
   limit by its endpoint), moving window, no rate-limit headers, at the web's
   `.sample.env` values: 100 per second, 10 per second for place, modify and
   cancel (options orders and GTT writes included) and smart orders, 30 per
-  minute for `optiongreeks`, Telegram and WhatsApp, 5 per minute for the
-  Telegram broadcast (`server::ratelimit::api_limits`).
+  minute for `optiongreeks`, `sectorrotation`, Telegram and WhatsApp, 5 per
+  minute for the Telegram broadcast (`server::ratelimit::api_limits`).
+- A `market_data` frame leaves out a quote field the broker's feed does not
+  carry, never sends it as 0 (web openalgo#2376, `docs/api/websocket-streaming/quote.md`).
+  An adapter says per packet what it carried (`NormalizedTick::absent`,
+  `mark_carried`, `mark_cleared`, `extras`, `broker_fields`, number forms,
+  `book_absent`: the module doc of `brokers::common::streaming`), and each
+  broker's frame follows its own web adapter's keys, names, units and
+  types (`feed/dialect/names.rs`, `docs/port/market-data-frames.md`). A
+  depth frame before its instrument's first tick leaves out the quote
+  fields but keeps `ltp` and `timestamp`, which the SDK's Depth callback
+  reads (the web leaves `ltp` out too).
+- WebSocket parity is proven broker by broker, not argued (1.0.7): the feed
+  corpus (`src-tauri/tests/fixtures/feed_corpus/`, README there) replays a
+  broker's raw frames through its real decoder to the public frame and
+  compares every key and number with the web adapter's own output
+  (`scripts/feed_corpus/web_expected.py`); every difference is declared
+  with its kind and reason, and `docs/port/feed-parity-matrix.md`
+  (`parity_matrix.py --check`) shows each broker x mode x order stream.
 
 ## Ports
 
@@ -481,8 +500,8 @@ no Python runtime:
 - pandas-based backtesters: Portfolio Backtester, SIP Backtester, Portfolio
   Analyzer
 
-Flow (`/flow`) was on this list until 2026-10-29; it is now planned for 1.0.5
-(see Decided).
+Flow (`/flow`) was on this list until 2026-10-29; it is in the desktop from
+1.0.5 (see Decided).
 
 **Removed from this version** (maintainer, 2026-10-12): the Python Strategy
 Host. No code for it ships, and nothing in the UI leads to it: no route,
@@ -491,18 +510,29 @@ unknown page (the app's 404 page) and its API paths are the JSON 404.
 
 Decided:
 
-- **Flow comes in 1.0.5, native Rust** (maintainer, 2026-10-29; 1.0.4 ships
-  first). Parity with the web's `/flow`: the editor, every node type, the
-  workflow validator, the scheduler, the price and order-update monitors,
+- **Flow is native Rust, in the desktop from 1.0.5** (maintainer,
+  2026-10-29). Parity with the web's `/flow`: the editor, every node type,
+  the workflow validator, the scheduler, the price and order-update monitors,
   webhooks and the import format (`docs/prompt/flow-import-format.md`), plus
   the Agent's Flow tools (`flow_gen`) and the `flow-builder` skill. The
+  backend is `src-tauri/src/flow/` (start at its `mod.rs`): nodes reach
+  OpenAlgo through the in-process `/api/v1` path the Agent and MCP use, so
+  analyzer mode and Semi-Auto apply. The session routes are under
+  `/flow/api/`; the public webhook `/flow/webhook/<token>[/<symbol>]` is
+  secret-verified, rate limited and reachable through the tunnel. The
+  frontend is the web's, carried over by diff (`src/**/flow*`; desktop-only
+  glue in `src/components/desktop/Flow*`, `src/lib/desktopFlow.ts` and
+  `src/api/flowDesktop.ts`). The
   Indicator node runs on `oa_core`, the Rust core of the openalgo library
   that `agent/indicators` already uses (the same 127 indicators as the web's
-  `openalgo.ta`), so Flow needs no Python. The web computes that node in
+  `openalgo.ta`), so Flow needs no Python; Flow's port of the web's
   `services/indicator_service.py` (nested series, the fixed-length tail,
-  bar offsets), which is a different dispatcher from the Agent's: port it,
-  do not reuse the Agent's shape. Until Flow lands it has no route, menu
-  entry or docs claiming it.
+  bar offsets) is `flow/indicator_service/`, a different dispatcher from
+  the Agent's. Where the desktop departs from the web (IST everywhere,
+  schedules only while the app is open, a webhook secret always required,
+  no stored API key, the httpRequest guard), the import format says so in
+  sentences starting **Desktop**, and the user guide's chapter 21 for
+  traders.
 - **OpenScript** runs on the existing TypeScript engine (`openalgo-script`).
   Backtests already run in a Web Worker. Live runs use the same engine in a
   hidden Tauri window: the app reads new bars every 10 s (`bar_poll`) and
@@ -534,7 +564,8 @@ Decided:
   surfaces, approval list) and reach OpenAlgo through the in-process
   `/api/v1` path MCP uses (`agent/tools/service.rs`). The stream frames and
   the system prompt are pinned byte for byte against fixtures recorded from
-  the web (`scripts/agent/`). Flow (`flow_gen`) comes with Flow in
+  the web (`scripts/agent/`). The Flow tools (`flow_gen`: `validate_flow`,
+  `save_flow`, chat only) and the `flow-builder` skill ship with Flow in
   1.0.5; Python strategy generation (`strategy_gen`) stays out.
   - **A model that passes its Test can still fail every chat turn.** The
     Test sends no tools (as the web's does), and OpenAI refuses tools on
@@ -1026,6 +1057,15 @@ Every flaky test found so far was a race, not a slow machine:
   so a migration that changes its indexes goes through
   `master_swap::create_indexes`; a view or trigger on `symtoken` would follow
   the rename to the dropped table, so add none.
+- **SQLite keeps no queue of writers.** A waiting statement polls, and a
+  thread that has just committed can begin its next write between two
+  polls. On a Windows runner a write polled about 3,300 times over the whole
+  5 s and failed "database is locked" (`concurrent_searches_lose_no_count`,
+  eight threads writing in a loop). A checkout while a statement is waiting
+  steps back 2 ms first (`db::sqlite::writer_turn`). The same build failed
+  that test 2 times in 80 on one Windows runner and 112 in 160 on another,
+  so judge a change to this by runs side by side, never against an older
+  run.
 - **Open a writing transaction IMMEDIATE** (`db::sqlite::write_transaction`,
   or `BEGIN IMMEDIATE`). A read transaction that upgrades to a write is not
   retried by the busy handler: a deferred transaction that reads first
@@ -1203,6 +1243,64 @@ and add each new one here.
   `cutoff` table. Test the arithmetic against values worked by hand,
   never against the kernel under test.
 
+### Feed parity with the web
+
+The rules the 1.0.7 parity work settled (in detail in
+`docs/port/market-data-frames.md`; each corpus case declares its own
+differences with their reasons):
+
+- **Authority:** golden fixtures, then the web docs, then the adapter code.
+  The docs win over an adapter that sends 0 or null for something the
+  broker did not send: the field is left out, and no key is ever null.
+- **Never copy a web defect** (a wrong number or unit, lost or stale data,
+  a starved client): keep the right behaviour and declare it as a
+  web-defect deviation with its reason. A type-only difference (1000.0 vs
+  1000) is not a defect: follow the web, per packet if the web does.
+- **A web alias follows its adapter** (unit, type, text form); the docs
+  keys `ltt` and `timestamp` are always epoch ms.
+- **Book levels are what the broker sent**: never pad, never drop a zero
+  slot the broker sends; a Depth holder gets only books at its own depth.
+- **A packet without a trade price** publishes no LTP or Quote frame; its
+  book reaches Depth holders only.
+- **Market-state values overlay** in the snapshot and go only on an
+  explicit clear; per-packet values (exchange time) never carry over. A
+  reconnect starts the merge afresh.
+- **On a partial-update feed an omitted field is unchanged, not unknown**
+  (the Noren four, Firstock, AliceBlue: their `tf` packets carry only what
+  changed). `ft`, `ltt` and `pc` overlay within a connection as on the web;
+  dropping them made `ltt` come and go on same-second ticks where every web
+  client sees it. Where no value is known yet, the key is left out; a change
+  is never worked out from the close when the broker's feed forwards its own.
+- **A broker message is one packet.** Its Tick and Depth reach the bridge
+  together, tagged with the connection session that sent them
+  (`websocket/manager/packet.rs`): pair only inside a packet, never by
+  peeking at a channel, and forget only what a replaced session said, so a
+  pooled connection opening or a deep socket reconnecting leaves the others'
+  quotes alone.
+- **Acknowledgements tell the truth**: a subscribe is answered from the
+  broker side, per item, before any of its data; an unsubscribe the broker
+  refused keeps the owner. The web's refusal words are matched per broker
+  (`feed::refusals`).
+- **What the desktop sends the broker is part of parity**: match it unless
+  it provably has no effect at the broker (logout frames included,
+  `BrokerFeed::farewell_frames`).
+- **One slow broker answer holds nothing else up.** A reconcile pass in the
+  bridge only plans; admissions and releases run in tasks the bridge owns,
+  and a tick loop never awaits a subscribe. A waited subscribe once held
+  every other client's subscribe and the sandbox's prices.
+- **A waited answer follows every path to the broker.** XTS refuses on the
+  HTTP call, so first subscribes, cold-start replays, upgrades and
+  downgrades all go through `BrokerFeed::admission_frames`,
+  `mode_upgrade_frames` or `mode_downgrade_frames`. An upgrade or downgrade
+  asks for the new mode first and lets the old one go only once the new one
+  was taken (`Command::then_release`).
+- **A retry joins the release already in flight** and answers with its
+  outcome: asking again while the broker has not answered never reports
+  success.
+- Adding or changing a broker's feed means corpus cases for every mode it
+  offers, its order stream, a reconnect and a book clear, with `web.json`
+  computed by its glue, before the change is done.
+
 ### Broker request limits
 
 - **A broker's quota is per category and per window.** Fyers counts market
@@ -1313,8 +1411,11 @@ and add each new one here.
   module to its own `tests.rs` (`foo.rs` declares `#[cfg(test)] mod tests;`,
   the body goes in `foo/tests.rs`), which `.github/codeql/codeql-config.yml`
   excludes by path; dismiss as "used in tests" only where it cannot move,
-  after checking the line really sits in the test module. A variable named
-  `iv` that means interval trips the hard-coded-crypto rule; rename it.
+  after checking the line really sits in the test module. Test files named
+  `foo_tests.rs` or `foo_tests/` are excluded too, and the code-health gate
+  (`codeql_hidden`) fails CI if any glob in that config would leave out
+  production code. A variable named `iv` trips the hard-coded-crypto rule,
+  whether it means an interval or CPython's `float_pow` operand; rename it.
 - Read a CodeQL taint alert's path (the SARIF's code flow, `gh api
   .../code-scanning/analyses/<id>` with `Accept: application/sarif+json`)
   before changing the sink. CodeQL resolves a call on `Box<dyn BrokerFeed>`
@@ -1504,3 +1605,9 @@ and add each new one here.
 - If GitHub rejects pushes with server errors, a merge through
   `gh api repos/<owner>/<repo>/merges` works; confirm the resulting tree SHA
   matches the tested one.
+- Several agents each running `gh run watch` at its default 3-second interval
+  put the account on GitHub's secondary rate limit (2026-11-08): every
+  `gh run view` and job-log call answered 403 for a while. Poll with
+  `--interval 120` (or `gh run view --json status` and a 120 s sleep), one
+  poller per run, fetch a job's log once after the run completes, and wait
+  5 minutes after a 403.

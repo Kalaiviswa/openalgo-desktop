@@ -15,11 +15,12 @@
 //! * history: `GET /api/mkt-data/chart/interval-data?id=<brsymbol>&interval=
 //!   &from=<epoch s>&to=`, from 09:15:00 IST of the start date to 23:59:59
 //!   IST of the end date, one request (no chunking), bars as objects
-//!   `{time,open,high,low,close,volume}` or arrays `[t,o,h,l,c,v]`.
+//!   `{time,open,high,low,close,volume}` or arrays `[t,o,h,l,c,v]`,
+//!   repaired into bars a chart accepts (`history::repair_candles`).
 
 use super::streaming::{self, decode_message, Packet, L1, L5};
 use super::{mapping, Body, TradejiniBroker, TIMEFRAME_MAP};
-use crate::brokers::common::history::sort_dedupe;
+use crate::brokers::common::history::{repair_candles, sort_dedupe};
 use crate::brokers::common::redact::ws_error_kind;
 use crate::brokers::common::streaming::Message;
 use crate::brokers::types::*;
@@ -403,8 +404,32 @@ pub fn history_window(req: &HistoryRequest) -> (i64, i64) {
     (at(req.start, 9, 15, 0), at(req.end, 23, 59, 59))
 }
 
+/// A bar's price: NaN when it is missing or not a number, so the repair
+/// drops the bar rather than draw a wick to 0 (web `_price`,
+/// openalgo#2359).
+fn bar_price(v: Option<&Value>) -> f64 {
+    match v {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(f64::NAN),
+        Some(Value::String(s)) => s.trim().parse::<f64>().unwrap_or(f64::NAN),
+        _ => f64::NAN,
+    }
+}
+
+/// A bar's volume: 0 when it is missing or not a finite number (the web
+/// fills it with 0 in the repair).
+fn bar_volume(v: Option<&Value>) -> i64 {
+    let n = bar_price(v);
+    if n.is_finite() {
+        n as i64
+    } else {
+        0
+    }
+}
+
 /// Bars from a `d.bars` array. Times in epoch seconds; epoch milliseconds
-/// (any bar above 1e12) are scaled down, like the web.
+/// (any bar above 1e12) are scaled down, like the web. A bar without a
+/// time cannot be placed and is skipped (it read as a 1970 bar); a missing
+/// price is NaN for `repair_candles` to drop (web openalgo#2359).
 pub fn parse_bars(v: &Value) -> Vec<Candle> {
     let bars = v
         .get("d")
@@ -414,28 +439,30 @@ pub fn parse_bars(v: &Value) -> Vec<Candle> {
         .unwrap_or_default();
     let mut out: Vec<Candle> = Vec::with_capacity(bars.len());
     for bar in &bars {
-        let c = match bar {
-            Value::Object(_) => Candle {
-                timestamp: mapping::i(bar, "time"),
-                open: mapping::f(bar, "open"),
-                high: mapping::f(bar, "high"),
-                low: mapping::f(bar, "low"),
-                close: mapping::f(bar, "close"),
-                volume: mapping::i(bar, "volume"),
-                oi: 0,
-            },
-            Value::Array(a) if a.len() >= 5 => Candle {
-                timestamp: mapping::num(a.first()) as i64,
-                open: mapping::num(a.get(1)),
-                high: mapping::num(a.get(2)),
-                low: mapping::num(a.get(3)),
-                close: mapping::num(a.get(4)),
-                volume: mapping::num(a.get(5)) as i64,
-                oi: 0,
-            },
-            _ => continue,
+        let fields: [Option<&Value>; 6] = match bar {
+            Value::Object(o) => {
+                ["time", "open", "high", "low", "close", "volume"].map(|k| o.get(k))
+            }
+            Value::Array(a) if a.len() >= 5 => std::array::from_fn(|i| a.get(i)),
+            _ => {
+                tracing::debug!("Tradejini history: skipping a bar of unknown shape");
+                continue;
+            }
         };
-        out.push(c);
+        let [time, open, high, low, close, volume] = fields;
+        if matches!(time, None | Some(Value::Null)) {
+            tracing::warn!("Tradejini history: skipping a bar without a time");
+            continue;
+        }
+        out.push(Candle {
+            timestamp: mapping::num(time) as i64,
+            open: bar_price(open),
+            high: bar_price(high),
+            low: bar_price(low),
+            close: bar_price(close),
+            volume: bar_volume(volume),
+            oi: 0,
+        });
     }
     if out.iter().any(|c| c.timestamp > 1_000_000_000_000) {
         for c in &mut out {
@@ -484,5 +511,9 @@ pub async fn get_history(
             Body::None,
         )
         .await?;
-    Ok(parse_bars(&v))
+    // Tradejini's chart API sends bars /trading refuses (MCX
+    // GOLDPETAL30NOV26FUT 1m at 2026-10-27 09:00: open 14328 under low
+    // 14334), web openalgo#2341.
+    let what = format!("{}:{} {}", req.key.exchange, req.key.symbol, req.interval);
+    Ok(repair_candles(parse_bars(&v), &what))
 }

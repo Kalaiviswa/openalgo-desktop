@@ -1,0 +1,215 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "kotak",
+  "inputs_sha256": "24dfa9ed948a975dc0cbab92e78392c4c620004e7a2e0a155a970ac7fc38265d",
+  "instruments": [
+    {
+      "symbol": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "token": "26000",
+      "brsymbol": "NIFTY",
+      "brexchange": "NSE_INDEX",
+      "instrumenttype": "INDEX"
+    },
+    {
+      "symbol": "NIFTY50",
+      "exchange": "NSE_INDEX",
+      "token": "26999",
+      "brsymbol": "NIFTY50",
+      "brexchange": "NSE_INDEX",
+      "instrumenttype": "INDEX"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY50",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 10,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "kotak"
+            }
+          ],
+          "failed": [],
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 15,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY50",
+              "exchange": "NSE_INDEX",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "kotak"
+            }
+          ],
+          "failed": [],
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_QUOTE",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 2,
+          "data": {
+            "ltp": 21350.0,
+            "volume": 0,
+            "open": 21000.0,
+            "high": 21500.0,
+            "low": 20900.0,
+            "close": 21100.0,
+            "percent_change": 1.18,
+            "ltt": 1762666200000,
+            "last_trade_time": 1762666200000,
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "timestamp": "<receipt_ms>"
+          }
+        },
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY50_LTP",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY50",
+          "mode": 1,
+          "data": {
+            "ltp": 21350.0,
+            "ltt": 1762666200000,
+            "symbol": "NIFTY50",
+            "exchange": "NSE_INDEX",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "kotak",
+          "serves": [
+            2
+          ]
+        },
+        {
+          "client": "b",
+          "publication": 1,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "kotak",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY50_LTP",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY50",
+          "mode": 1,
+          "data": {
+            "ltp": 21360.0,
+            "ltt": 1762666201000,
+            "symbol": "NIFTY50",
+            "exchange": "NSE_INDEX",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "b",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "kotak",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

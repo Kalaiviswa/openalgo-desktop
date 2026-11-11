@@ -25,6 +25,13 @@ macro_rules! fixture {
     };
 }
 
+/// Web test/test_tradejini_history_candles.py (openalgo#2341).
+mod history_candles;
+/// Web test/test_tradejini_quote_feed.py (openalgo#2383).
+mod quote_feed;
+/// Web test/test_tradejini_stream_lifecycle.py (openalgo#2341).
+mod stream_lifecycle;
+
 fn json(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
@@ -127,7 +134,8 @@ fn index_rows_and_renames() {
     assert_eq!(n.brsymbol, "IDX_NIFTY_NSE");
     assert_eq!(n.brexchange, "NSE");
     assert_eq!(n.token, "26000");
-    assert_eq!(n.instrument_type, "INDEX");
+    // Web openalgo#2341 (MC-04): OpenAlgo has no INDEX type.
+    assert_eq!(n.instrument_type, "EQ");
     assert_eq!(n.name, "NIFTY 50");
     assert!(r.by_symbol("NSE_INDEX", "INDIAVIX").is_some());
     // Unlisted: uppercased, spaces removed.
@@ -886,22 +894,27 @@ fn feed_ticks_depth_and_auth() {
         true,
     );
     let ev = f.parse(&Message::Binary(frame));
-    assert_eq!(ev.len(), 3);
+    // The first book sends the quote again, now with its totals.
+    assert_eq!(ev.len(), 4);
     assert_eq!(ev[0], FeedEvent::AuthOk);
     let FeedEvent::Tick(t) = &ev[1] else { panic!() };
     assert_eq!(t.symbol, "RELIANCE");
-    assert_eq!(t.mode, 3);
+    // L1 is a quote packet, whatever mode holds the instrument.
+    assert_eq!(t.mode, 2);
     assert_eq!(t.ltp, 1424.6);
     assert_eq!(t.close, 1418.0);
     assert_eq!(t.change, 6.6);
     assert_eq!(t.last_trade_time_ms, 1_759_475_100_000);
-    let FeedEvent::Depth(d) = &ev[2] else {
+    let FeedEvent::Tick(t) = &ev[2] else { panic!() };
+    assert_eq!((t.total_buy_quantity, t.total_sell_quantity), (10, 20));
+    let FeedEvent::Depth(d) = &ev[3] else {
         panic!()
     };
     assert_eq!(d.ltp, 1424.6);
     assert_eq!(d.buy[0].price, 1424.55);
     assert_eq!(d.sell[0].orders, 2);
-    assert_eq!(d.buy.len(), 5);
+    // The one level Tradejini sent, not padded to five.
+    assert_eq!(d.buy.len(), 1);
     assert_eq!(d.total_sell_quantity, 20);
     // A delta carrying only ltp keeps the cached open/close.
     let delta = build::frame(
@@ -913,7 +926,7 @@ fn feed_ticks_depth_and_auth() {
     );
     let ev = f.parse(&Message::Binary(delta));
     let FeedEvent::Tick(t) = &ev[0] else { panic!() };
-    assert_eq!((t.symbol.as_str(), t.ltp, t.mode), ("SBIN", 801.5, 1));
+    assert_eq!((t.symbol.as_str(), t.ltp, t.mode), ("SBIN", 801.5, 2));
     let ev = f.parse(&Message::Binary(build::frame(&[build::auth(0)], false)));
     assert!(matches!(ev[0], FeedEvent::AuthFailed(_)));
     assert!(f.cached() <= 3);
@@ -931,7 +944,9 @@ fn adapter_identity_and_capabilities() {
     assert!(c.history && c.streaming && c.multiquotes_batch);
     assert!(!c.margin && !c.gtt && !c.order_feed);
     assert_eq!(b.timeframe_map(), TIMEFRAME_MAP);
-    assert!(b.supported_exchanges().contains(&Exchange::Bcd));
+    // Web openalgo#2341: the symbol store lists no BCD contract.
+    assert!(!b.supported_exchanges().contains(&Exchange::Bcd));
+    assert!(b.supported_exchanges().contains(&Exchange::Cds));
     assert!(b.create_feed(&AuthToken::new("nocolon")).is_err());
     assert!(b.create_feed(&AuthToken::new("k:t")).is_ok());
 }

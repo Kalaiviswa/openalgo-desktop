@@ -1,0 +1,251 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "sahi",
+  "inputs_sha256": "ae3b263d56edc2377724454eb5765b1e38c4b9e9d5a4e1e3e543840d54a6f250",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885"
+    },
+    {
+      "symbol": "TCS",
+      "exchange": "NSE",
+      "token": "11536"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "sahi"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "sahi"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "TCS",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "sahi"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "sahi"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1290.5,
+            "timestamp": "<receipt_ms>",
+            "ltt": 1761700000123,
+            "last_trade_time": 1761700000123,
+            "volume": 987654,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 1419.5,
+            "lower_circuit": 1161.5
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1291.0,
+            "timestamp": "<receipt_ms>",
+            "volume": 0,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 0.0,
+            "lower_circuit": 0.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 9,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_TCS_QUOTE",
+          "exchange": "NSE",
+          "symbol": "TCS",
+          "mode": 2,
+          "data": {
+            "symbol": "TCS",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1290.5,
+            "timestamp": "<receipt_ms>",
+            "ltt": 1761700000123,
+            "last_trade_time": 1761700000123,
+            "volume": 987654,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 1419.5,
+            "lower_circuit": 1161.5
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1291.0,
+            "timestamp": "<receipt_ms>",
+            "volume": 0,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 0.0,
+            "lower_circuit": 0.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_TCS_QUOTE",
+          "exchange": "NSE",
+          "symbol": "TCS",
+          "mode": 2,
+          "data": {
+            "symbol": "TCS",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1291.0,
+            "timestamp": "<receipt_ms>",
+            "volume": 0,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 0.0,
+            "lower_circuit": 0.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -14,8 +14,12 @@
 //! The feed speaks Engine.IO through `FeedEvent::Reply`: the Socket.IO
 //! connect `40` after the server's open, pongs to server pings (with a
 //! heartbeat so a quiet market is not mistaken for a stall); the connect
-//! ack accepts the session and `44` refuses it. Subscriptions are REST, not
-//! socket frames: `POST {subscription_path}/instruments/subscription`
+//! ack accepts the session and `44` refuses it. A server that ends the
+//! session while the socket stays open (an Engine.IO close `1` or a
+//! namespace disconnect `41`) ends the connection: the feed closes the
+//! socket and the manager reconnects (audit appendix item 6).
+//! Subscriptions are REST, not socket frames:
+//! `POST {subscription_path}/instruments/subscription`
 //! (`PUT` to unsubscribe) with `Authorization: <socket token>`, at most 50
 //! instruments per call, 0.5 s apart, run in order by one worker task the
 //! feed owns (`worker`: aborted on reconnect and when the feed is dropped;
@@ -39,17 +43,16 @@ use super::auth::{market_login_with, MarketSession};
 use super::binary;
 use super::mapping;
 use super::socketio::{self, EioPacket, SioPacket};
-use super::{BinaryDecoder, MarketKeys, XtsConfig};
+use super::{BinaryDecoder, EventCode, MarketKeys, XtsConfig};
 use crate::brokers::common::mapping::Exchange;
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedSubscription, Message, NormalizedDepth, NormalizedTick,
-    PrepareError, WsRequest,
+    BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, PrepareError, ReleaseAnswer,
+    WsRequest,
 };
-use crate::brokers::types::DepthLevel;
 use crate::error::{AppError, Result};
 use crate::security::Secret;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -57,7 +60,18 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use worker::{subscription_worker, WorkerSetup};
 
+mod calls;
+mod normalise;
+mod release;
+mod sides;
+mod variants;
 pub(crate) mod worker;
+
+pub use calls::{
+    is_already_subscribed, is_invalid_token, run_command, subscription_call,
+    token_transport_allowed, CallError, CallOutcome, Command, CommandReport, SubscriptionTarget,
+};
+pub use normalise::{normalise_message, xts_time_ms, XTS_EPOCH_OFFSET_SECS};
 
 /// Instruments per subscription call (web F `adapter.py:36`).
 pub const SUBSCRIBE_BATCH: usize = 50;
@@ -68,8 +82,6 @@ const COMMAND_QUEUE: usize = 256;
 /// Undelivered subscribe snapshots per session (extra ones are dropped;
 /// live events follow anyway).
 const SNAPSHOT_QUEUE: usize = 512;
-/// XTS times are seconds since 1980-01-01 IST.
-pub const XTS_EPOCH_OFFSET_SECS: i64 = 315_532_800 - 19_800;
 
 /// Credentials the feed connects with.
 #[derive(Clone, Default)]
@@ -171,264 +183,6 @@ impl Connector {
 }
 
 // ---------------------------------------------------------------------------
-// Subscriptions (REST, one worker per connection)
-// ---------------------------------------------------------------------------
-
-/// A subscription request queued for the worker.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Command {
-    pub subscribe: bool,
-    pub code: u16,
-    pub instruments: Vec<Value>,
-}
-
-/// Whether the market-data token may be sent to `url`.
-///
-/// Every XTS member is served over TLS (web `broker/*/baseurl.py`: all
-/// `https://`), so the `Authorization` token only ever travels encrypted.
-/// Plain `http://` is accepted for loopback hosts only, which is what the
-/// local test doubles use; any other URL is refused before a byte is sent.
-pub fn token_transport_allowed(url: &str) -> bool {
-    let Ok(u) = url::Url::parse(url) else {
-        return false;
-    };
-    match u.scheme() {
-        "https" => true,
-        "http" => match u.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-            None => false,
-        },
-        _ => false,
-    }
-}
-
-/// What one subscription call achieved.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CallOutcome {
-    /// Accepted; the snapshot strings of `listQuotes`.
-    Done(Vec<String>),
-    /// Refused because an instrument is already subscribed (non-fatal).
-    AlreadySubscribed,
-}
-
-/// Why a subscription call failed (BF-03).
-#[derive(Debug, PartialEq, Eq)]
-pub enum CallError {
-    /// No answer, or a server error or rate limit: the batch is retried.
-    Transient(String),
-    /// The broker refused the request (a validation error): not retried.
-    Refused(String),
-    /// The market-data token is no longer accepted: the feed reconnects
-    /// (a new token, then every subscription again) instead of retrying.
-    InvalidToken,
-}
-
-impl std::fmt::Display for CallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CallError::Transient(m) | CallError::Refused(m) => f.write_str(m),
-            CallError::InvalidToken => f.write_str("the market data token was refused"),
-        }
-    }
-}
-
-/// XTS's refusal of an expired or unknown market-data token.
-pub fn is_invalid_token(body: &str) -> bool {
-    let b = body.to_ascii_lowercase();
-    b.contains("invalid token") || b.contains("token expired") || b.contains("invalid session")
-}
-
-/// XTS's "Instrument Already Subscribed" refusal (`e-session-0002`), in a
-/// JSON description or a plain-text body.
-pub fn is_already_subscribed(body: &str) -> bool {
-    let b = body.to_ascii_lowercase();
-    b.contains("already subscribed") || b.contains("e-session-0002")
-}
-
-/// One subscription call.
-pub async fn subscription_call(
-    http: &reqwest::Client,
-    url: &str,
-    token: &str,
-    subscribe: bool,
-    code: u16,
-    instruments: &[Value],
-) -> std::result::Result<CallOutcome, CallError> {
-    if !token_transport_allowed(url) {
-        tracing::error!("XTS subscription refused: market-data host is not served over TLS");
-        return Err(CallError::Refused(
-            "Live market data could not be started because the broker connection is not secure. Check the broker address in Broker Configuration.".into(),
-        ));
-    }
-    let req = if subscribe {
-        http.post(url)
-    } else {
-        http.put(url)
-    };
-    let transient = |e: reqwest::Error| {
-        CallError::Transient(crate::brokers::common::redact::url_safe_error(&e))
-    };
-    let resp = req
-        .header("Authorization", token)
-        .header("Content-Type", "application/json")
-        .json(&json!({"instruments": instruments, "xtsMessageCode": code}))
-        .send()
-        .await
-        .map_err(transient)?;
-    let status = resp.status();
-    let body = resp.text().await.map_err(transient)?;
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    if v.get("type").and_then(Value::as_str) != Some("success") {
-        if is_already_subscribed(&body) {
-            return Ok(CallOutcome::AlreadySubscribed);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || is_invalid_token(&body) {
-            return Err(CallError::InvalidToken);
-        }
-        let why = mapping::error_text(&v);
-        let why = if why.is_empty() {
-            "The broker refused the market data subscription.".to_string()
-        } else {
-            why
-        };
-        return Err(
-            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                CallError::Transient(why)
-            } else {
-                CallError::Refused(why)
-            },
-        );
-    }
-    Ok(CallOutcome::Done(
-        v.get("result")
-            .and_then(|r| r.get("listQuotes"))
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .map(|q| match q {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    ))
-}
-
-/// Where one command's calls go, and how far apart.
-pub struct SubscriptionTarget<'a> {
-    pub broker: &'static str,
-    pub http: &'a reqwest::Client,
-    pub url: &'a str,
-    pub token: &'a str,
-    pub gap: Duration,
-    /// `XtsHooks::split_duplicate_batch` of the member.
-    pub split_duplicates: bool,
-}
-
-/// What running one command left to do.
-#[derive(Debug, Default, PartialEq)]
-pub struct CommandReport {
-    /// Calls made.
-    pub calls: usize,
-    /// Instruments of the batches that failed for a passing reason (no
-    /// answer, a server error, a rate limit), to send again.
-    pub retry: Vec<Value>,
-    /// The token was refused: the feed must reconnect.
-    pub reconnect: bool,
-}
-
-/// Run one command: at most `SUBSCRIBE_BATCH` instruments per call, `gap`
-/// between calls. With `split_duplicates`, a subscribe batch refused as
-/// already subscribed is retried one instrument at a time; without it the
-/// refusal is non-fatal. A batch that failed for a passing reason is
-/// reported for a retry (BF-03; the web retries rmoney's on a timer).
-pub async fn run_command(
-    t: &SubscriptionTarget<'_>,
-    cmd: &Command,
-    snapshots: &mpsc::Sender<String>,
-    first: &mut bool,
-) -> CommandReport {
-    let mut calls = 0;
-    let mut call = |batch: Vec<Value>| {
-        let wait = !*first;
-        *first = false;
-        calls += 1;
-        async move {
-            if wait {
-                tokio::time::sleep(t.gap).await;
-            }
-            let r =
-                subscription_call(t.http, t.url, t.token, cmd.subscribe, cmd.code, &batch).await;
-            (batch, r)
-        }
-    };
-    let mut outcomes = Vec::new();
-    for batch in cmd.instruments.chunks(SUBSCRIBE_BATCH) {
-        let (batch, r) = call(batch.to_vec()).await;
-        match r {
-            Ok(CallOutcome::AlreadySubscribed)
-                if t.split_duplicates && cmd.subscribe && batch.len() > 1 =>
-            {
-                tracing::info!(
-                    broker = t.broker,
-                    code = cmd.code,
-                    "Batch holds an instrument already subscribed; subscribing one by one"
-                );
-                for inst in batch {
-                    let (one, r) = call(vec![inst]).await;
-                    outcomes.push((one, r));
-                }
-            }
-            r => outcomes.push((batch, r)),
-        }
-    }
-    let mut report = CommandReport::default();
-    for (batch, r) in outcomes {
-        match r {
-            Ok(CallOutcome::Done(list)) => {
-                if cmd.subscribe {
-                    for s in list {
-                        let _ = snapshots.try_send(s);
-                    }
-                }
-            }
-            Ok(CallOutcome::AlreadySubscribed) => {
-                tracing::debug!(broker = t.broker, "Instrument already subscribed")
-            }
-            Err(CallError::Transient(e)) => {
-                tracing::warn!(
-                    broker = t.broker,
-                    code = cmd.code,
-                    subscribe = cmd.subscribe,
-                    "Subscription call failed, will retry: {}",
-                    e
-                );
-                report.retry.extend(batch);
-            }
-            Err(CallError::InvalidToken) => {
-                tracing::warn!(
-                    broker = t.broker,
-                    "Subscription refused the market data token; reconnecting"
-                );
-                report.reconnect = true;
-            }
-            Err(CallError::Refused(e)) => tracing::warn!(
-                broker = t.broker,
-                code = cmd.code,
-                subscribe = cmd.subscribe,
-                "Subscription call refused: {}",
-                e
-            ),
-        }
-    }
-    report.calls = calls;
-    report
-}
-
-// ---------------------------------------------------------------------------
 // Feed (manager side)
 // ---------------------------------------------------------------------------
 
@@ -439,6 +193,8 @@ pub struct XtsFeed {
     socket: Option<(Secret, Secret)>,
     /// `(segment code, instrument id)` -> subscription.
     book: HashMap<(i64, String), FeedSubscription>,
+    /// RMoney's last book sides per instrument (`sides`, audit R107-09).
+    sides: sides::KeptSides,
     commands: Option<mpsc::Sender<Command>>,
     worker: Option<JoinHandle<()>>,
     snapshots_tx: mpsc::Sender<String>,
@@ -508,6 +264,18 @@ fn is_market_event(name: &str) -> bool {
     )
 }
 
+/// The code an event's name carries (`1502` in `1502-json-full`).
+fn event_code(name: &str) -> Option<i64> {
+    name.split_once('-')?.0.parse().ok()
+}
+
+/// `MessageCode` set to `code` (a JSON message object).
+fn set_code(v: &mut Value, code: i64) {
+    if let Value::Object(m) = v {
+        m.insert("MessageCode".into(), Value::from(code));
+    }
+}
+
 fn now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -540,6 +308,7 @@ impl XtsFeed {
             },
             socket: None,
             book: HashMap::new(),
+            sides: Default::default(),
             commands: None,
             worker: None,
             snapshots_tx,
@@ -629,12 +398,12 @@ impl XtsFeed {
     fn drain_snapshots(&mut self) -> Vec<FeedEvent> {
         let mut out = Vec::new();
         while let Ok(s) = self.snapshots_rx.try_recv() {
-            out.extend(self.handle_payload(&Value::String(s)));
+            out.extend(self.handle_payload(None, &Value::String(s)));
         }
         out
     }
 
-    fn key(sub: &FeedSubscription) -> Option<(i64, String)> {
+    pub(super) fn key(sub: &FeedSubscription) -> Option<(i64, String)> {
         let ex: Exchange = sub.exchange.parse().ok()?;
         Some((mapping::segment_code(ex)?, sub.token.trim().to_string()))
     }
@@ -643,11 +412,9 @@ impl XtsFeed {
     pub fn commands(&self, subs: &[FeedSubscription], subscribe: bool) -> Vec<Command> {
         let mut by_code: Vec<(u16, Vec<Value>)> = Vec::new();
         for s in subs {
-            let Some((seg, token)) = Self::key(s) else {
+            let Some((code, inst)) = self.instrument(s) else {
                 continue;
             };
-            let code = self.cfg.mode_code(s.mode.code());
-            let inst = json!({"exchangeSegment": seg, "exchangeInstrumentID": mapping::instrument_id(&token)});
             match by_code.iter_mut().find(|(c, _)| *c == code) {
                 Some((_, v)) => v.push(inst),
                 None => by_code.push((code, vec![inst])),
@@ -659,30 +426,83 @@ impl XtsFeed {
                 subscribe,
                 code,
                 instruments,
+                waited: None,
+                then_release: None,
             })
             .collect()
     }
 
-    /// Decode one market-data message (JSON shape) into events.
-    pub fn normalise(&self, v: &Value) -> Vec<FeedEvent> {
-        let seg = mapping::i(v, "ExchangeSegment");
-        let id = mapping::s(v, "ExchangeInstrumentID");
-        let Some(sub) = self.book.get(&(seg, id.trim().to_string())) else {
+    /// Decode one market-data message (JSON shape) into events, routed by
+    /// `(segment, instrument id)` to its subscription.
+    pub fn normalise(&mut self, v: &Value) -> Vec<FeedEvent> {
+        let mut canonical = None;
+        if self.cfg.hooks.payload_variants {
+            let mut c = variants::canonical(v);
+            let route = sides::route(&c);
+            if self.book.contains_key(&route) {
+                self.sides.complete(route, &mut c);
+            }
+            canonical = Some(c);
+        }
+        let v = canonical.as_ref().unwrap_or(v);
+        let Some(sub) = self.book.get(&sides::route(v)) else {
             return Vec::new();
         };
+        let code = mapping::i(v, "MessageCode");
+        if self.cfg.hooks.oi_events && code == 1510 {
+            return normalise::open_interest(v, sub).into_iter().collect();
+        }
+        if self.cfg.hooks.touchline_by_holding && code == 1501 && sub.mode == FeedMode::Ltp {
+            let mut ltp = v.clone();
+            set_code(&mut ltp, 1512);
+            return normalise_message(&ltp, sub);
+        }
         normalise_message(v, sub)
     }
 
-    fn handle_payload(&self, payload: &Value) -> Vec<FeedEvent> {
-        match payload {
-            Value::String(s) if s.starts_with("t:") => binary::parse_1105(s)
-                .map(|v| self.normalise(&v))
-                .unwrap_or_default(),
-            Value::String(s) => serde_json::from_str::<Value>(s)
-                .map(|v| self.normalise(&v))
-                .unwrap_or_default(),
-            o @ Value::Object(_) => self.normalise(o),
-            _ => Vec::new(),
+    /// One event's payload (a 1105 text packet or a JSON message) with the
+    /// code the member's web client gives it (audit FB-05). `event` is the
+    /// Socket.IO event's name; a subscribe snapshot has none.
+    fn handle_payload(&mut self, event: Option<&str>, payload: &Value) -> Vec<FeedEvent> {
+        let cfg = self.cfg;
+        let hooks = &cfg.hooks;
+        let parsed;
+        let v = match payload {
+            Value::String(s) if s.starts_with("t:") => {
+                let Some(mut v) = binary::parse_1105(s) else {
+                    return Vec::new();
+                };
+                if hooks.text_1105_as_ltp {
+                    set_code(&mut v, 1512);
+                }
+                let mut events = self.normalise(&v);
+                if hooks.text_1105_doubles {
+                    events.iter_mut().for_each(normalise::parsed_as_floats);
+                }
+                return events;
+            }
+            Value::String(s) => match serde_json::from_str::<Value>(s) {
+                Ok(v) => {
+                    parsed = v;
+                    &parsed
+                }
+                Err(_) => return Vec::new(),
+            },
+            o @ Value::Object(_) => o,
+            _ => return Vec::new(),
+        };
+        let from_event = match hooks.event_code {
+            EventCode::Payload => None,
+            EventCode::WhenMissing if v.get("MessageCode").is_some() => None,
+            EventCode::WhenMissing | EventCode::Event => event.and_then(event_code),
+        };
+        match from_event {
+            Some(code) => {
+                let mut v = v.clone();
+                set_code(&mut v, code);
+                self.normalise(&v)
+            }
+            None => self.normalise(v),
         }
     }
 
@@ -699,10 +519,12 @@ impl XtsFeed {
                 ]
             }
             Some(EioPacket::Message(m)) => m,
+            Some(EioPacket::Close) => return self.server_ended("closed"),
             _ => return Vec::new(),
         };
         let (name, args) = match socketio::decode_sio(m) {
             Some(SioPacket::Connect(_)) => return vec![FeedEvent::AuthOk],
+            Some(SioPacket::Disconnect) => return self.server_ended("disconnected"),
             Some(SioPacket::ConnectError(v)) => {
                 tracing::warn!(
                     broker = self.cfg.id,
@@ -736,8 +558,25 @@ impl XtsFeed {
             return Vec::new();
         }
         args.first()
-            .map(|a| self.handle_payload(a))
+            .map(|a| self.handle_payload(Some(name.as_str()), a))
             .unwrap_or_default()
+    }
+
+    /// The server ended the Engine.IO session (`1`) or the Socket.IO
+    /// namespace (`41`) and left the socket open, so no more market data
+    /// comes on it (audit appendix item 6). The feed closes the socket:
+    /// the server's answer to the close ends the session, and the manager
+    /// reconnects with its backoff and subscribes the book again. The
+    /// resync flag bounds a server that never answers the close: the
+    /// manager's stall watchdog reads it.
+    fn server_ended(&self, how: &str) -> Vec<FeedEvent> {
+        tracing::warn!(
+            broker = self.cfg.id,
+            "Market data server {} the session; reconnecting",
+            how
+        );
+        self.resync.store(true, std::sync::atomic::Ordering::SeqCst);
+        vec![FeedEvent::Reply(Message::Close(None))]
     }
 
     /// A binary attachment announced by an `xts-binary-packet` event.
@@ -761,109 +600,6 @@ impl XtsFeed {
             self.book.insert(k, sub);
         }
     }
-}
-
-fn mode_for_code(code: i64) -> Option<u8> {
-    match code {
-        1512 => Some(1),
-        1501 => Some(2),
-        1502 => Some(3),
-        _ => None,
-    }
-}
-
-/// XTS `LastTradedTime` (seconds since 1980-01-01 IST) -> epoch ms.
-pub fn xts_time_ms(t: i64) -> i64 {
-    if t <= 0 {
-        0
-    } else {
-        (t + XTS_EPOCH_OFFSET_SECS) * 1000
-    }
-}
-
-fn depth_side(v: Option<&Value>) -> Vec<DepthLevel> {
-    let mut out: Vec<DepthLevel> = v
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter(|l| l.is_object())
-                .take(20)
-                .map(|l| DepthLevel {
-                    price: mapping::f(l, "Price"),
-                    quantity: mapping::i(l, "Size"),
-                    orders: mapping::i(l, "TotalOrders"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if out.len() < 5 {
-        out.resize(5, DepthLevel::default());
-    }
-    out
-}
-
-/// web `_normalize_market_data` (`adapter.py:970-1104`). A message without
-/// a `MessageCode` (1105 text) is a touchline.
-pub fn normalise_message(v: &Value, sub: &FeedSubscription) -> Vec<FeedEvent> {
-    let mode = match v.get("MessageCode") {
-        None => 2,
-        Some(_) => match mode_for_code(mapping::i(v, "MessageCode")) {
-            Some(m) => m,
-            None => return Vec::new(),
-        },
-    };
-    let t = v.get("Touchline").filter(|t| t.is_object()).unwrap_or(v);
-    let ltq = mapping::num(
-        t.get("LastTradedQunatity")
-            .or_else(|| t.get("LastTradedQuantity")),
-    ) as i64;
-    let avg = mapping::num(
-        t.get("AverageTradedPrice")
-            .or_else(|| t.get("AveragePrice")),
-    );
-    let now = now_ms();
-    let mut tick = NormalizedTick {
-        symbol: sub.symbol.clone(),
-        exchange: sub.exchange.clone(),
-        mode,
-        ltp: mapping::f(t, "LastTradedPrice"),
-        last_quantity: ltq,
-        last_trade_time_ms: xts_time_ms(mapping::i(t, "LastTradedTime")),
-        timestamp_ms: now,
-        ..Default::default()
-    };
-    if mode >= 2 {
-        tick.open = mapping::f(t, "Open");
-        tick.high = mapping::f(t, "High");
-        tick.low = mapping::f(t, "Low");
-        tick.close = mapping::f(t, "Close");
-        tick.volume = mapping::i(t, "TotalTradedQuantity");
-        tick.average_price = avg;
-        tick.total_buy_quantity = mapping::i(t, "TotalBuyQuantity");
-        tick.total_sell_quantity = mapping::i(t, "TotalSellQuantity");
-        tick.derive_change();
-    }
-    if mode == 3 {
-        tick.oi = mapping::i(v, "OpenInterest");
-    }
-    let mut out = Vec::with_capacity(2);
-    let depth = (mode == 3 && v.get("Bids").is_some() && v.get("Asks").is_some()).then(|| {
-        NormalizedDepth {
-            symbol: sub.symbol.clone(),
-            exchange: sub.exchange.clone(),
-            ltp: tick.ltp,
-            buy: depth_side(v.get("Bids")),
-            sell: depth_side(v.get("Asks")),
-            total_buy_quantity: tick.total_buy_quantity,
-            total_sell_quantity: tick.total_sell_quantity,
-            timestamp_ms: now,
-        }
-    });
-    out.push(FeedEvent::Tick(tick));
-    if let Some(d) = depth {
-        out.push(FeedEvent::Depth(d));
-    }
-    out
 }
 
 #[async_trait]
@@ -908,6 +644,7 @@ impl BrokerFeed for XtsFeed {
 
     fn on_connected(&mut self) -> Vec<Message> {
         self.pending_attachments = 0;
+        self.sides.clear();
         while self.snapshots_rx.try_recv().is_ok() {}
         // Web `_on_connect`: silence is measured from the connection.
         self.last_data = Some(now_secs());
@@ -941,11 +678,7 @@ impl BrokerFeed for XtsFeed {
     }
 
     fn subscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
-        for s in subs {
-            if let Some(k) = Self::key(s) {
-                self.book.insert(k, s.clone());
-            }
-        }
+        self.remember(subs);
         for c in self.commands(subs, true) {
             self.enqueue(c);
         }
@@ -953,15 +686,50 @@ impl BrokerFeed for XtsFeed {
     }
 
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
-        for s in subs {
-            if let Some(k) = Self::key(s) {
-                self.book.remove(&k);
-            }
-        }
+        self.forget(subs);
         for c in self.commands(subs, false) {
             self.enqueue(c);
         }
         Vec::new()
+    }
+
+    fn answers_admissions(&self) -> bool {
+        true
+    }
+
+    fn release_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        release::frames(self, subs, release::Kind::Release)
+    }
+
+    fn admission_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        release::frames(self, subs, release::Kind::Admission)
+    }
+
+    fn resync_frames(
+        &mut self,
+        subs: &[FeedSubscription],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        release::frames(self, subs, release::Kind::Sync)
+    }
+
+    fn mode_upgrade_frames(
+        &mut self,
+        changes: &[(FeedSubscription, FeedSubscription)],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        release::upgrade_frames(self, changes)
+    }
+
+    fn mode_downgrade_frames(
+        &mut self,
+        changes: &[(FeedSubscription, FeedSubscription)],
+    ) -> (Vec<Message>, Option<ReleaseAnswer>) {
+        release::downgrade_frames(self, changes)
     }
 
     fn parse(&mut self, msg: &Message) -> Vec<FeedEvent> {

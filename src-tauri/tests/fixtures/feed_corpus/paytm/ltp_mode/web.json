@@ -1,0 +1,183 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "paytm",
+  "inputs_sha256": "eb94c6500c184d0d7769066663c73c436f53b5929e9838909cd86d534bea5682",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE"
+    },
+    {
+      "symbol": "SBIN",
+      "exchange": "NSE",
+      "token": "3045",
+      "brsymbol": "SBIN",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "paytm"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "SBIN",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "paytm"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 11,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "paytm"
+            }
+          ],
+          "failed": [],
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 13,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "SBIN",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "paytm"
+            }
+          ],
+          "failed": [],
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 4,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "ltp": 1500.05,
+            "ltt": 1791000300,
+            "change_absolute": 11.75,
+            "change_percent": 0.79,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "paytm",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "ltp": 1500.1,
+            "ltt": 1791000305,
+            "change_absolute": 11.8,
+            "change_percent": 0.79,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "paytm",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

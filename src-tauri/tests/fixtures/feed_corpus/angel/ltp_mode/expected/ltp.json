@@ -1,0 +1,15 @@
+{
+  "broker": "angel",
+  "data": {
+    "exchange": "NSE",
+    "ltp": 1500.05,
+    "ltt": 1746171226000,
+    "mode": 1,
+    "symbol": "RELIANCE",
+    "timestamp": "<receipt_ms>"
+  },
+  "exchange": "NSE",
+  "mode": 1,
+  "symbol": "RELIANCE",
+  "type": "market_data"
+}

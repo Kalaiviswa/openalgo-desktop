@@ -1,0 +1,163 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "mstock",
+  "inputs_sha256": "539831e1e708190146a5b207450377770cf2c5444db2dc0b222be5987a153d1e",
+  "instruments": [
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "token": "1594",
+      "brsymbol": "INFY-EQ",
+      "brexchange": "NSE"
+    },
+    {
+      "symbol": "OTHER",
+      "exchange": "BSE",
+      "token": "1594",
+      "brsymbol": "OTHER",
+      "brexchange": "BSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "mstock"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "mstock"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "OTHER",
+              "exchange": "BSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "mstock"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "mstock"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_QUOTE",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 2,
+          "data": {
+            "ltp": 1500.5,
+            "last_trade_time": 1730784000000,
+            "ltt": 1730784000000,
+            "exchange_timestamp": 1730784000000,
+            "open": 1490.0,
+            "high": 1505.0,
+            "low": 1485.0,
+            "close": 1495.0,
+            "prev_close": 1495.0,
+            "volume": 1000,
+            "oi": 0,
+            "last_trade_quantity": 25,
+            "last_quantity": 25,
+            "average_price": 1498.0,
+            "total_buy_quantity": 10,
+            "total_sell_quantity": 20,
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "mstock",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "BSE_OTHER_QUOTE",
+          "exchange": "BSE",
+          "symbol": "OTHER",
+          "mode": 2,
+          "data": {
+            "ltp": 1499.0,
+            "last_trade_time": 1730784000000,
+            "ltt": 1730784000000,
+            "exchange_timestamp": 1730784000000,
+            "open": 1490.0,
+            "high": 1505.0,
+            "low": 1485.0,
+            "close": 1495.0,
+            "prev_close": 1495.0,
+            "volume": 400,
+            "oi": 0,
+            "last_trade_quantity": 10,
+            "last_quantity": 10,
+            "average_price": 1497.5,
+            "total_buy_quantity": 10,
+            "total_sell_quantity": 20,
+            "symbol": "OTHER",
+            "exchange": "BSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "mstock",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -2,18 +2,36 @@
 //! told to subscribe and unsubscribe, and that broadcasts normalized updates.
 //!
 //! The server owns per-client bookkeeping and reference counting. A source
-//! sees exactly one `subscribe` per `(instrument, mode, depth)` while at least
-//! one client holds it, and exactly one matching `unsubscribe` when the last
-//! client lets go (explicitly or by disconnecting).
+//! sees one `subscribe` per `(instrument, mode, depth)` while at least one
+//! client holds it, and one matching `unsubscribe` when the last client lets
+//! go (explicitly or by disconnecting). Both answer ([`SourceOp`]): the
+//! server acknowledges a subscribe only once the source took the key, and
+//! an unsubscribe only once the broker let go of it (audit C01, C02).
 //!
 //! Production wires the broker streaming manager through `feed::bridge`;
 //! tests use [`FakeSource`].
 
+use crate::brokers::common::streaming::{BrokerFields, NumberForms, QuoteExtras, TimeText};
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+
+/// A source's answer to a subscription change: `Ok` once it took the key
+/// (subscribe) or the broker let go of it (unsubscribe), else why not, for
+/// the trader.
+pub type SourceOutcome = Result<(), String>;
+
+/// The answer to come, awaited after the server's lock is released.
+pub type SourceOp = Pin<Box<dyn Future<Output = SourceOutcome> + Send>>;
+
+/// An answer known at once.
+pub fn answered(outcome: SourceOutcome) -> SourceOp {
+    Box::pin(std::future::ready(outcome))
+}
 
 /// Subscription mode, numbered as on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -93,12 +111,14 @@ impl InstrumentKey {
     }
 }
 
-/// One price level of the order book.
+/// One price level of the order book. `orders` is `None` where the
+/// broker's book has no order count (Upstox), and the frame then leaves it
+/// out.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct DepthLevel {
     pub price: f64,
     pub quantity: i64,
-    pub orders: i64,
+    pub orders: Option<i64>,
 }
 
 /// Bid and ask ladders, best price first. The server truncates each side to
@@ -107,26 +127,49 @@ pub struct DepthLevel {
 pub struct DepthBook {
     pub buy: Vec<DepthLevel>,
     pub sell: Vec<DepthLevel>,
+    /// The levels the book was streamed at, where the broker has a deeper
+    /// socket beside its main feed: that socket's (Dhan 20, Fyers 50), or
+    /// the main feed's when the book came from there, a subscription at
+    /// the deep levels having fallen back (audit P-10). `None`: the
+    /// holder's depth.
+    pub levels: Option<u8>,
+    /// The book packet's own time, epoch ms, where the broker sends one
+    /// (Fyers TBT `feed_time`).
+    pub time_ms: Option<i64>,
 }
 
-/// Quote-mode fields. OHLC is optional because an index outside market
-/// hours has none; for other instruments a missing value is sent as `0.0`.
+/// The quote fields an update knows, each `None` when the broker's stream
+/// has not carried it: a frame leaves out what is `None` (web openalgo#2376)
+/// and sends a known zero.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QuoteFields {
-    pub volume: i64,
-    pub last_quantity: i64,
-    pub average_price: f64,
-    pub total_buy_quantity: i64,
-    pub total_sell_quantity: i64,
+    pub volume: Option<i64>,
+    pub last_quantity: Option<i64>,
+    pub average_price: Option<f64>,
+    pub total_buy_quantity: Option<i64>,
+    pub total_sell_quantity: Option<i64>,
     pub open: Option<f64>,
     pub high: Option<f64>,
     pub low: Option<f64>,
+    /// Previous close.
     pub close: Option<f64>,
-    /// Open interest; sent as both `oi` and `open_interest` when present.
+    /// Open interest; sent as both `oi` and `open_interest`.
     pub oi: Option<i64>,
-    /// Change since previous close (index instruments).
+    /// Change since the previous close.
     pub price_change: Option<f64>,
     pub price_change_percent: Option<f64>,
+    /// The exchange's trade time the broker sent, epoch ms (`ltt` falls back
+    /// to the receive time; this does not).
+    pub trade_time: Option<i64>,
+    /// The optional shared fields (circuits, 52-week range, best bid and
+    /// ask, ...), sent under the broker's web names only.
+    pub extras: QuoteExtras,
+    /// The broker-only fields of the packet.
+    pub broker_fields: BrokerFields,
+    /// The number forms the packet marked (`NormalizedTick::numbers`).
+    pub numbers: NumberForms,
+    /// The text form of the trade time (`NormalizedTick::time_text`).
+    pub time_text: Option<TimeText>,
 }
 
 /// A normalized update from the broker feed.
@@ -149,6 +192,20 @@ pub struct MarketUpdate {
     /// depth snapshot apart from its tick has already served the lower
     /// modes with the tick).
     pub exact_mode: bool,
+    /// The broker's instrument token, from the symbol master (the web's
+    /// Arrow, HDFC, Rupeezy, Upstox and Fyers adapters send it as `token`).
+    pub token: Option<Arc<str>>,
+    /// The broker's trading symbol, from the symbol master (web Fyers names
+    /// a TBT book by it, `NSE:SBIN-EQ`).
+    pub broker_symbol: Option<Arc<str>>,
+    /// The deeper socket's levels while the instrument's subscription at
+    /// them streams from that socket (Dhan 20, Fyers 50): once `deep_book`
+    /// has come a holder at that depth gets only it, never the main feed's
+    /// shallower book in between (`protocol::book_for`).
+    pub deep_live: Option<u8>,
+    /// The instrument's latest book from the deeper socket on its current
+    /// connection, for holders at its levels (none before the first).
+    pub deep_book: Option<DepthBook>,
 }
 
 impl MarketUpdate {
@@ -163,6 +220,10 @@ impl MarketUpdate {
             quote: None,
             depth: None,
             exact_mode: false,
+            token: None,
+            broker_symbol: None,
+            deep_live: None,
+            deep_book: None,
         }
     }
 }
@@ -171,18 +232,28 @@ impl MarketUpdate {
 ///
 /// `subscribe` / `unsubscribe` must not block: they are called while the
 /// server holds its subscription lock, so an implementation hands the
-/// request to its own task. There is no reply: a subscribe acknowledged
-/// with success means "accepted into the desired set", applied to the
-/// broker now or as soon as its feed (re)connects. The one failure known
-/// up front is [`unavailable`](MarketDataSource::unavailable).
+/// request to its own task and returns its answer to come, which the
+/// server awaits after letting go of the lock.
 pub trait MarketDataSource: Send + Sync + 'static {
     /// Start streaming `key` at `mode`. `depth` is the order-book depth for
-    /// `Mode::Depth` and [`DEFAULT_DEPTH`] otherwise.
-    fn subscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8);
+    /// `Mode::Depth` and [`DEFAULT_DEPTH`] otherwise. The answer says
+    /// whether the source took it (room on the broker connection, its
+    /// depth socket up), not that a tick has come: applied to the broker
+    /// now, or as soon as its feed (re)connects.
+    fn subscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) -> SourceOp;
 
     /// Stop streaming a key previously passed to `subscribe` with the same
-    /// arguments.
-    fn unsubscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8);
+    /// arguments. The answer says whether the broker let go; until it has,
+    /// the server keeps its last owner (web `_unsubscribe_owned_subscription`).
+    /// A disconnect drops the answer, and the source keeps letting go on
+    /// its own.
+    fn unsubscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) -> SourceOp;
+
+    /// The broker refused the release of a key and its owner holds it
+    /// still: keep streaming it for them. A release that comes back refused
+    /// with no owner left is not followed by this, and the source lets go
+    /// on its own (review B1).
+    fn keep(&self, _key: &InstrumentKey, _mode: Mode, _depth: u8) {}
 
     /// A receiver of every normalized update (ticks and depth snapshots).
     fn updates(&self) -> broadcast::Receiver<Arc<MarketUpdate>>;
@@ -206,11 +277,24 @@ pub trait MarketDataSource: Send + Sync + 'static {
         None
     }
 
+    /// Why the connected broker's feed does not stream `exchange`, when it
+    /// does not (`Broker::feed_refusal`): each subscribe item on it is
+    /// answered with this as its error, before the symbol is looked up, as
+    /// the web's adapter refuses it.
+    fn refusal(&self, _exchange: &str) -> Option<String> {
+        None
+    }
+
     /// Where the feed server counts what it could not deliver to its
     /// clients (NEW-REL-05); `None` when nobody reads the counts.
     fn client_losses(&self) -> Option<Arc<ClientLosses>> {
         None
     }
+
+    /// A feed client signed in: a broker feed ended for a reason the
+    /// trader can clear (too many connections on one login) connects
+    /// again (audit P-12; `WebSocketManager::resume`).
+    fn resume(&self) {}
 }
 
 /// What the feed server did not deliver to its clients since it started
@@ -234,9 +318,34 @@ pub enum SourceCall {
 
 type ActiveKey = (InstrumentKey, Mode, u8);
 
+/// What a [`FakeSource`] answers instead of success (tests script it).
+#[derive(Default)]
+struct Script {
+    /// Subscribes of these instruments are refused with this reason.
+    refused: HashMap<InstrumentKey, String>,
+    /// The next unsubscribes of a key, refused with these reasons; the key
+    /// stays active.
+    releases: HashMap<(InstrumentKey, Mode), VecDeque<String>>,
+    /// Most instruments active at once (the broker connection's room).
+    capacity: Option<usize>,
+    /// Keys whose last unsubscribe was not done (an owner joining again
+    /// re-subscribes them).
+    unreleased: HashSet<ActiveKey>,
+    /// Instruments whose subscribes are answered only when the test says
+    /// (`hold_subscribe`, `answer_subscribe`), with the answers waiting.
+    slow: HashSet<InstrumentKey>,
+    waiting: Vec<(InstrumentKey, tokio::sync::oneshot::Sender<SourceOutcome>)>,
+    /// Keys whose next unsubscribe is answered only when the test says
+    /// (`delay_release`, `answer_release`), with the answers waiting.
+    delayed: HashSet<(InstrumentKey, Mode)>,
+    late: Vec<(ActiveKey, tokio::sync::oneshot::Sender<SourceOutcome>)>,
+}
+
 /// In-memory source for tests and the soak harness. Counts active
 /// subscriptions and flags a double subscribe or an unsubscribe of
-/// something not subscribed.
+/// something not subscribed. Answers success at once unless a test
+/// scripted a refusal (`refuse`, `fail_release`,
+/// `set_capacity`).
 pub struct FakeSource {
     tx: broadcast::Sender<Arc<MarketUpdate>>,
     known: Option<HashSet<InstrumentKey>>,
@@ -246,6 +355,8 @@ pub struct FakeSource {
     violations: Mutex<Vec<String>>,
     record_calls: bool,
     client_losses: Arc<ClientLosses>,
+    script: Mutex<Script>,
+    resumes: AtomicU64,
 }
 
 impl FakeSource {
@@ -272,7 +383,98 @@ impl FakeSource {
             violations: Mutex::new(Vec::new()),
             record_calls,
             client_losses: Arc::new(ClientLosses::default()),
+            script: Mutex::new(Script::default()),
+            resumes: AtomicU64::new(0),
         })
+    }
+
+    /// How often a feed client's sign-in asked the source to resume.
+    pub fn resumes(&self) -> u64 {
+        self.resumes.load(Ordering::Relaxed)
+    }
+
+    /// Refuse every subscribe of `key` with `why` (a broker that cannot
+    /// take it).
+    pub fn refuse(&self, key: InstrumentKey, why: &str) {
+        self.script.lock().refused.insert(key, why.to_string());
+    }
+
+    /// Refuse the next unsubscribe of `key` at `mode` with `why`: the
+    /// broker still streams it.
+    pub fn fail_release(&self, key: InstrumentKey, mode: Mode, why: &str) {
+        self.script
+            .lock()
+            .releases
+            .entry((key, mode))
+            .or_default()
+            .push_back(why.to_string());
+    }
+
+    /// Answer the next unsubscribe of `key` at `mode` only once
+    /// `answer_release` is called (a broker that answers late); the key
+    /// stays active until then.
+    pub fn delay_release(&self, key: InstrumentKey, mode: Mode) {
+        self.script.lock().delayed.insert((key, mode));
+    }
+
+    /// Answer the unsubscribes of `key` at `mode` waiting on
+    /// `delay_release` with `outcome`: let go on success, unless a
+    /// subscribe came since; still streamed on a refusal.
+    pub fn answer_release(&self, key: &InstrumentKey, mode: Mode, outcome: SourceOutcome) {
+        let mut active = self.active.lock();
+        let mut script = self.script.lock();
+        let (now, rest): (Vec<_>, Vec<_>) = script
+            .late
+            .drain(..)
+            .partition(|((k, m, _), _)| k == key && *m == mode);
+        script.late = rest;
+        for (k, tx) in now {
+            // A subscribe since the release (an owner joining, or the same
+            // one again) held the key still: it stays.
+            if outcome.is_ok() && script.unreleased.remove(&k) {
+                match active.get_mut(&k) {
+                    Some(n) if *n > 1 => *n -= 1,
+                    _ => {
+                        active.remove(&k);
+                    }
+                }
+            }
+            let _ = tx.send(outcome.clone());
+        }
+    }
+
+    /// Take at most `instruments` distinct instruments at once.
+    pub fn set_capacity(&self, instruments: usize) {
+        self.script.lock().capacity = Some(instruments);
+    }
+
+    /// Answer the subscribes of `key` only once `answer_subscribe` is
+    /// called (a broker that takes its time); prices may flow meanwhile.
+    pub fn hold_subscribe(&self, key: InstrumentKey) {
+        self.script.lock().slow.insert(key);
+    }
+
+    /// Answer the subscribes of `key` waiting on `hold_subscribe`: taken.
+    pub fn answer_subscribe(&self, key: &InstrumentKey) {
+        let mut script = self.script.lock();
+        script.slow.remove(key);
+        let (now, rest): (Vec<_>, Vec<_>) = script.waiting.drain(..).partition(|(k, _)| k == key);
+        script.waiting = rest;
+        for (_, tx) in now {
+            let _ = tx.send(Ok(()));
+        }
+    }
+
+    /// Why a subscribe of `key` is refused now, if it is.
+    fn refusal(&self, active: &HashMap<ActiveKey, usize>, key: &InstrumentKey) -> Option<String> {
+        let script = self.script.lock();
+        if let Some(why) = script.refused.get(key) {
+            return Some(why.clone());
+        }
+        let cap = script.capacity?;
+        let held: HashSet<&InstrumentKey> = active.keys().map(|(k, _, _)| k).collect();
+        (!held.contains(key) && held.len() >= cap)
+            .then(|| format!("You can stream at most {} instruments at once.", cap))
     }
 
     /// Broadcast an update; returns the number of receivers.
@@ -302,9 +504,22 @@ impl FakeSource {
 }
 
 impl MarketDataSource for FakeSource {
-    fn subscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) {
+    fn subscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) -> SourceOp {
+        if self.record_calls {
+            self.calls
+                .lock()
+                .push(SourceCall::Subscribe(key.clone(), mode, depth));
+        }
         let mut active = self.active.lock();
-        let n = active.entry((key.clone(), mode, depth)).or_insert(0);
+        let k = (key.clone(), mode, depth);
+        if self.script.lock().unreleased.remove(&k) {
+            // Held still: an owner joined while its release was refused.
+            return answered(Ok(()));
+        }
+        if let Some(why) = self.refusal(&active, key) {
+            return answered(Err(why));
+        }
+        let n = active.entry(k).or_insert(0);
         *n += 1;
         if *n > 1 {
             self.violations.lock().push(format!(
@@ -312,31 +527,59 @@ impl MarketDataSource for FakeSource {
                 key.exchange, key.symbol, mode, depth
             ));
         }
-        if self.record_calls {
-            self.calls
-                .lock()
-                .push(SourceCall::Subscribe(key.clone(), mode, depth));
+        let mut script = self.script.lock();
+        if script.slow.contains(key) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            script.waiting.push((key.clone(), tx));
+            return Box::pin(async move { rx.await.unwrap_or(Ok(())) });
         }
+        answered(Ok(()))
     }
 
-    fn unsubscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) {
-        let mut active = self.active.lock();
-        let k = (key.clone(), mode, depth);
-        match active.get_mut(&k) {
-            Some(n) if *n > 1 => *n -= 1,
-            Some(_) => {
-                active.remove(&k);
-            }
-            None => self.violations.lock().push(format!(
-                "unsubscribe without subscribe {}:{} {:?} {}",
-                key.exchange, key.symbol, mode, depth
-            )),
-        }
+    fn unsubscribe(&self, key: &InstrumentKey, mode: Mode, depth: u8) -> SourceOp {
         if self.record_calls {
             self.calls
                 .lock()
                 .push(SourceCall::Unsubscribe(key.clone(), mode, depth));
         }
+        let mut active = self.active.lock();
+        let k = (key.clone(), mode, depth);
+        {
+            let mut script = self.script.lock();
+            if script.delayed.remove(&(key.clone(), mode)) {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                script.unreleased.insert(k.clone());
+                script.late.push((k, tx));
+                return Box::pin(async move { rx.await.unwrap_or(Ok(())) });
+            }
+        }
+        let scripted = {
+            let mut script = self.script.lock();
+            let next = script
+                .releases
+                .get_mut(&(key.clone(), mode))
+                .and_then(VecDeque::pop_front);
+            if next.is_some() {
+                script.unreleased.insert(k.clone());
+            }
+            next
+        };
+        if let Some(why) = scripted {
+            return answered(Err(why));
+        }
+        self.script.lock().unreleased.remove(&k);
+        match active.get_mut(&k) {
+            Some(n) if *n > 1 => *n -= 1,
+            Some(_) => {
+                active.remove(&k);
+            }
+            None if self.script.lock().refused.contains_key(key) => {}
+            None => self.violations.lock().push(format!(
+                "unsubscribe without subscribe {}:{} {:?} {}",
+                key.exchange, key.symbol, mode, depth
+            )),
+        }
+        answered(Ok(()))
     }
 
     fn updates(&self) -> broadcast::Receiver<Arc<MarketUpdate>> {
@@ -356,5 +599,9 @@ impl MarketDataSource for FakeSource {
 
     fn client_losses(&self) -> Option<Arc<ClientLosses>> {
         Some(self.client_losses.clone())
+    }
+
+    fn resume(&self) {
+        self.resumes.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -13,7 +13,9 @@ use super::master_contract::*;
 use super::streaming::*;
 use super::*;
 use crate::brokers::common::mapping::{Action, PriceType};
-use crate::brokers::common::streaming::{FeedEvent, FeedMode, FeedSubscription, Message};
+use crate::brokers::common::streaming::{
+    BrokerField, BrokerValue, FeedEvent, FeedMode, FeedSubscription, Message,
+};
 use base64::Engine;
 use chrono::NaiveDate;
 use serde_json::{json, Value};
@@ -24,6 +26,11 @@ macro_rules! fixture {
         include_str!(concat!("../../../tests/fixtures/brokers/fyers/", $name))
     };
 }
+
+/// Web test/test_fyers_hsm_update_merge.py (openalgo#2318, #2323).
+mod hsm_update_merge;
+/// Web test/test_fyers_quote_feed.py (openalgo#2376).
+mod quote_feed;
 
 fn json_fixture(text: &str) -> Value {
     serde_json::from_str(text).unwrap()
@@ -956,6 +963,13 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
         })
         .collect();
     assert_eq!(ticks.len(), 3);
+    // web fyers_adapter.py:464: a full record is a `snapshot`.
+    for t in &ticks {
+        assert_eq!(
+            t.broker_fields.get(BrokerField::UpdateType),
+            Some(BrokerValue::Text("snapshot"))
+        );
+    }
     let s = &ticks[0];
     assert_eq!((s.symbol.as_str(), s.exchange.as_str()), ("SBIN", "NSE"));
     // value / (10^precision * multiplier)
@@ -973,7 +987,8 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
     );
     assert_eq!(s.last_trade_time_ms, 1_790_992_800_000);
     assert_eq!(s.change, 3.45);
-    assert_eq!(s.mode, 3);
+    // A symbol-feed record is a Quote packet (carrier: the packet's mode).
+    assert_eq!(s.mode, 2);
     let n = &ticks[1];
     assert_eq!(
         (n.symbol.as_str(), n.exchange.as_str()),
@@ -986,15 +1001,11 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
     );
     assert_eq!(ticks[2].ltp, 9030.0);
     assert_eq!(ticks[2].symbol, "CRUDEOIL19OCT26FUT");
-    // Index in depth mode: synthetic depth; scrip: dp levels with a price.
-    assert_eq!(depths.len(), 2);
-    let syn = &depths[0];
-    assert_eq!(syn.symbol, "NIFTY");
-    assert_eq!(syn.buy.len(), 5);
-    assert_eq!(syn.buy[0].price, 22501.09);
-    assert_eq!(syn.sell[0].price, 22523.61);
-    assert_eq!((syn.buy[0].quantity, syn.buy[4].quantity), (6000, 2000));
-    let book = &depths[1];
+    // Index in depth mode: its tick only, no book made up around it
+    // (#2318); scrip: dp levels with a price.
+    assert_eq!(depths.len(), 1);
+    assert_eq!(ticks[1].mode, 3, "the index tick serves its depth holders");
+    let book = &depths[0];
     assert_eq!(book.symbol, "SBIN");
     assert_eq!(book.buy.len(), 4);
     assert_eq!(book.sell.len(), 5);
@@ -1014,7 +1025,8 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
             orders: 6
         }
     );
-    assert_eq!(book.ltp, (954.05 + 954.1) / 2.0);
+    // No LTP of its own: the bridge borrows the quote feed's (#2318).
+    assert_eq!(book.ltp, 0.0);
 
     // Update (85): positional values on the stored snapshot; absent values
     // keep the old one; unchanged updates emit nothing.
@@ -1025,6 +1037,11 @@ fn hsm_snapshot_and_update_frames_parse_with_scaling() {
     match &ev[..] {
         [FeedEvent::Tick(t)] => {
             assert_eq!((t.ltp, t.volume, t.open), (954.2, 4_823_200, 951.0));
+            // web fyers_hsm_websocket.py:779: an update is `live`.
+            assert_eq!(
+                t.broker_fields.get(BrokerField::UpdateType),
+                Some(BrokerValue::Text("live"))
+            );
         }
         other => panic!("unexpected {:?}", other),
     }
@@ -1296,7 +1313,8 @@ fn tbt_protobuf_decodes_and_accumulates_50_levels() {
     );
     assert_eq!(d.sell.len(), 2);
     assert_eq!(d.sell[1].price, 954.15);
-    assert_eq!(d.ltp, 954.08);
+    // No midpoint: TBT depth has no LTP of its own (#2318).
+    assert_eq!(d.ltp, 0.0);
     assert_eq!((d.total_buy_quantity, d.total_sell_quantity), (5000, 999));
     // A diff changes only the levels it names.
     let diff = tbt_message("NSE:SBIN-EQ", false, &[pb::level(0, 150, 0, 0)], &[], 0);

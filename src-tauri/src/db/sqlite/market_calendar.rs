@@ -14,6 +14,7 @@ use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
 use chrono_tz::Asia::Kolkata;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Web `SUPPORTED_EXCHANGES`, in the web's order (timings are listed in it).
 pub const SUPPORTED_EXCHANGES: &[&str] = &[
@@ -197,6 +198,145 @@ pub fn seed_holidays(conn: &Connection) -> Result<usize> {
         }
     }
     Ok(added)
+}
+
+/// Web `MUHURAT_2026_SESSION`: Diwali Muhurat, Sunday 8 November 2026, as
+/// NSE, BSE and MCX published it on 19 October (MCX circular
+/// MCX/TRD/590/2026). Trading runs 14:20 to 15:30 IST and equity derivatives
+/// to 15:40; NCO is NSE's commodity segment, which the NSE schedule lists.
+/// Epoch milliseconds, like every window in the holiday tables.
+pub const MUHURAT_2026_DATE: &str = "2026-11-08";
+pub const MUHURAT_2026_SESSION: &[(&str, i64, i64)] = &[
+    ("NSE", 1_794_127_800_000, 1_794_132_000_000), // 14:20 - 15:30
+    ("BSE", 1_794_127_800_000, 1_794_132_000_000),
+    ("NFO", 1_794_127_800_000, 1_794_132_600_000), // 14:20 - 15:40
+    ("BFO", 1_794_127_800_000, 1_794_132_600_000),
+    ("CDS", 1_794_127_800_000, 1_794_132_000_000),
+    ("BCD", 1_794_127_800_000, 1_794_132_000_000),
+    ("MCX", 1_794_127_800_000, 1_794_132_000_000),
+    ("NCO", 1_794_127_800_000, 1_794_132_000_000),
+];
+
+/// Web `_MUHURAT_2026_GUESS`: what the 2026 seed carried before the
+/// exchanges published the timings, 18:00 to 19:15 with MCX to 00:15 the
+/// next morning and no NCO row. A row still holding it moves.
+const MUHURAT_2026_GUESS: &[(&str, i64, i64)] = &[
+    ("NSE", 1_794_141_000_000, 1_794_145_500_000),
+    ("BSE", 1_794_141_000_000, 1_794_145_500_000),
+    ("NFO", 1_794_141_000_000, 1_794_145_500_000),
+    ("BFO", 1_794_141_000_000, 1_794_145_500_000),
+    ("CDS", 1_794_141_000_000, 1_794_145_500_000),
+    ("BCD", 1_794_141_000_000, 1_794_145_500_000),
+    ("MCX", 1_794_141_000_000, 1_794_163_500_000),
+];
+
+/// What moving one exchange of 2026's Muhurat to the published session does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuhuratStep {
+    /// The row holds the shipped guess.
+    Update,
+    /// The row was never shipped (NCO).
+    Insert,
+    /// Already the published session.
+    Current,
+    /// Set or removed by the trader; left alone.
+    Custom,
+}
+
+/// The stored Muhurat holiday's id and one step per published exchange.
+pub type MuhuratPlan = (i64, Vec<(&'static str, MuhuratStep)>);
+
+/// Web `plan_muhurat_2026`: the holiday's id and one step per exchange of the
+/// published session, or `None` when 8 November 2026 is not stored as a
+/// special session, which is left to the trader who changed it.
+pub fn plan_muhurat_2026(conn: &Connection) -> Result<Option<MuhuratPlan>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM market_holidays
+             WHERE COALESCE(holiday_date, date) = ?1 AND holiday_type = 'SPECIAL_SESSION'
+             ORDER BY id LIMIT 1",
+            [MUHURAT_2026_DATE],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else { return Ok(None) };
+    let rows: HashMap<String, Option<(i64, i64)>> = {
+        let mut st = conn.prepare(
+            "SELECT COALESCE(exchange_code, exchange), is_open, start_time, end_time
+             FROM market_holiday_exchanges WHERE holiday_id = ?1 ORDER BY id",
+        )?;
+        let v = st
+            .query_map([id], |r| {
+                let window = match (r.get::<_, bool>(1)?, r.get(2)?, r.get(3)?) {
+                    (true, Some(s), Some(e)) => Some((s, e)),
+                    _ => None,
+                };
+                Ok((r.get::<_, String>(0)?, window))
+            })?
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        v
+    };
+    let guess = |ex: &str| {
+        MUHURAT_2026_GUESS
+            .iter()
+            .find(|(g, _, _)| *g == ex)
+            .map(|(_, s, e)| (*s, *e))
+    };
+    let steps = MUHURAT_2026_SESSION
+        .iter()
+        .map(|(ex, s, e)| {
+            let step = match rows.get(*ex) {
+                None if guess(ex).is_some() => MuhuratStep::Custom,
+                None => MuhuratStep::Insert,
+                Some(Some(w)) if *w == (*s, *e) => MuhuratStep::Current,
+                Some(Some(w)) if Some(*w) == guess(ex) => MuhuratStep::Update,
+                Some(_) => MuhuratStep::Custom,
+            };
+            (*ex, step)
+        })
+        .collect();
+    Ok(Some((id, steps)))
+}
+
+/// Web `migrate_muhurat_2026`: move 2026's Muhurat session from the shipped
+/// guess to the published one. Guarded on the guess, so a session the trader
+/// set on the Holidays page stays as it is. A fresh install is seeded with
+/// the published session and has nothing to move.
+pub fn migrate_muhurat_2026(conn: &Connection) -> Result<()> {
+    let Some((id, steps)) = plan_muhurat_2026(conn)? else {
+        return Ok(());
+    };
+    let mut changed = 0;
+    for (ex, step) in steps {
+        let Some((_, start, end)) = MUHURAT_2026_SESSION.iter().find(|(e, _, _)| *e == ex) else {
+            continue;
+        };
+        match step {
+            MuhuratStep::Insert => {
+                insert_exchange_row(conn, id, ex, true, Some(*start), Some(*end))?;
+                changed += 1;
+            }
+            MuhuratStep::Update => {
+                let Some((_, gs, ge)) = MUHURAT_2026_GUESS.iter().find(|(e, _, _)| *e == ex) else {
+                    continue;
+                };
+                changed += conn.execute(
+                    "UPDATE market_holiday_exchanges SET start_time = ?1, end_time = ?2
+                     WHERE holiday_id = ?3 AND COALESCE(exchange_code, exchange) = ?4
+                       AND start_time = ?5 AND end_time = ?6",
+                    params![start, end, id, ex, gs, ge],
+                )?;
+            }
+            MuhuratStep::Current | MuhuratStep::Custom => {}
+        }
+    }
+    if changed > 0 {
+        tracing::info!(
+            "Market Calendar DB: set the 8 November 2026 Muhurat session to the published timings for {} exchange(s)",
+            changed
+        );
+    }
+    Ok(())
 }
 
 fn insert_holiday_row(
@@ -577,6 +717,122 @@ pub fn timings_for_date(conn: &Connection, date: NaiveDate) -> Result<Vec<OpenWi
     Ok(normal(SUPPORTED_EXCHANGES))
 }
 
+/// One exchange's trading window on a date, epoch ms (web
+/// `get_effective_session_window`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionWindow {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// A special session or a holiday's own window, not the usual hours.
+    pub is_special: bool,
+}
+
+/// What the holiday table says about one exchange on one date.
+enum CalendarDay {
+    Window(SessionWindow),
+    Closed,
+    Usual,
+}
+
+/// Steps 2-5 of [`effective_session_window`].
+fn calendar_day(conn: &Connection, date: NaiveDate, exchange: &str) -> Result<CalendarDay> {
+    let day = date.format("%Y-%m-%d").to_string();
+    let first_of = |kind: &str| -> Result<Option<i64>> {
+        Ok(conn
+            .query_row(
+                "SELECT id FROM market_holidays WHERE holiday_date = ?1 AND holiday_type = ?2
+                 ORDER BY id LIMIT 1",
+                params![day, kind],
+                |r| r.get(0),
+            )
+            .optional()?)
+    };
+    if let Some(id) = first_of("SPECIAL_SESSION")? {
+        let row: Option<(Option<i64>, Option<i64>)> = conn
+            .query_row(
+                "SELECT start_time, end_time FROM market_holiday_exchanges
+                 WHERE holiday_id = ?1 AND exchange_code = ?2 AND is_open = 1 ORDER BY id LIMIT 1",
+                params![id, exchange],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((Some(start_ms), Some(end_ms))) = row {
+            return Ok(CalendarDay::Window(SessionWindow {
+                start_ms,
+                end_ms,
+                is_special: true,
+            }));
+        }
+    }
+    if let Some(id) = first_of("TRADING_HOLIDAY")? {
+        let row: Option<(bool, Option<i64>, Option<i64>)> = conn
+            .query_row(
+                "SELECT is_open, start_time, end_time FROM market_holiday_exchanges
+                 WHERE holiday_id = ?1 AND exchange_code = ?2 ORDER BY id LIMIT 1",
+                params![id, exchange],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match row {
+            Some((false, _, _)) => return Ok(CalendarDay::Closed),
+            Some((true, Some(start_ms), Some(end_ms))) => {
+                return Ok(CalendarDay::Window(SessionWindow {
+                    start_ms,
+                    end_ms,
+                    is_special: true,
+                }))
+            }
+            // Open without times, or not listed on the holiday: the usual
+            // hours, as the web reads it.
+            _ => {}
+        }
+    }
+    if matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+        return Ok(CalendarDay::Closed);
+    }
+    Ok(CalendarDay::Usual)
+}
+
+/// The trading window of `exchange` on `date`, `None` when it is shut
+/// (web `get_effective_session_window`, the one answer the Flow
+/// market-hours gate reads): CRYPTO always open; a special session for the
+/// exchange; a trading holiday that closes it, or keeps it open with its
+/// own times; a weekend; else the configured hours. A trading holiday that
+/// does not list the exchange leaves it open with its usual hours (unlike
+/// [`timings_for_date`]); any read failure counts as shut.
+pub fn effective_session_window(
+    conn: &Connection,
+    date: NaiveDate,
+    exchange: &str,
+) -> Option<SessionWindow> {
+    if exchange.is_empty() {
+        return None;
+    }
+    let ex = exchange.to_uppercase();
+    let midnight = ist_midnight_ms(date);
+    // The web falls back to its defaults when the timings cannot be read.
+    let offs = offsets(conn).unwrap_or_default();
+    let usual = || {
+        offset_for(&offs, &ex).map(|(s, e)| SessionWindow {
+            start_ms: midnight + s,
+            end_ms: midnight + e,
+            is_special: false,
+        })
+    };
+    if CRYPTO_EXCHANGES.contains(&ex.as_str()) {
+        return usual();
+    }
+    match calendar_day(conn, date, &ex) {
+        Ok(CalendarDay::Window(w)) => Some(w),
+        Ok(CalendarDay::Closed) => None,
+        Ok(CalendarDay::Usual) => usual(),
+        Err(e) => {
+            tracing::debug!("effective session window for {} {} failed: {}", date, ex, e);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,5 +947,274 @@ mod tests {
         assert_eq!(sat[0].exchange, "CRYPTO");
         let republic = timings_for_date(&c, NaiveDate::from_ymd_opt(2026, 1, 26).unwrap()).unwrap();
         assert!(republic.is_empty() || republic.iter().all(|w| w.exchange != "NSE"));
+    }
+
+    /// N-marketHours-05/06: the web's `get_effective_session_window` order,
+    /// including the case `timings_for_date` answers differently (a trading
+    /// holiday that does not list the exchange leaves it open).
+    #[test]
+    fn effective_windows_follow_the_web_calendar() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        let at = |m, d, hhmm: &str| ist_midnight_ms(day(m, d)) + parse_hhmm(hhmm).unwrap();
+        let usual = |m, d, s: &str, e: &str| {
+            Some(SessionWindow {
+                start_ms: at(m, d, s),
+                end_ms: at(m, d, e),
+                is_special: false,
+            })
+        };
+        assert_eq!(
+            effective_session_window(&c, day(10, 1), "nse"),
+            usual(10, 1, "09:15", "15:30")
+        );
+        assert_eq!(
+            effective_session_window(&c, day(10, 1), "NFO"),
+            usual(10, 1, "09:15", "15:40")
+        );
+        assert_eq!(
+            effective_session_window(&c, day(10, 1), "MCX"),
+            usual(10, 1, "09:00", "23:55")
+        );
+        // Weekend: shut, CRYPTO aside.
+        assert_eq!(effective_session_window(&c, day(10, 3), "NSE"), None);
+        assert!(effective_session_window(&c, day(10, 3), "CRYPTO").is_some());
+        // A holiday closing the exchange; one keeping MCX open with its times.
+        assert_eq!(effective_session_window(&c, day(1, 26), "NSE"), None);
+        assert_eq!(
+            effective_session_window(&c, day(1, 15), "MCX"),
+            Some(SessionWindow {
+                start_ms: 1_768_476_600_000,
+                end_ms: 1_768_501_500_000,
+                is_special: true,
+            })
+        );
+        // Not listed on the holiday: open with the usual hours (the web's
+        // gate), where timings_for_date leaves it out.
+        assert_eq!(
+            effective_session_window(&c, day(1, 26), "NCO"),
+            usual(1, 26, "09:00", "23:55")
+        );
+        assert!(timings_for_date(&c, day(1, 26))
+            .unwrap()
+            .iter()
+            .all(|w| w.exchange != "NCO"));
+        // A Sunday special session opens the listed exchanges, NCO among
+        // them since the published Muhurat session.
+        let muhurat = effective_session_window(&c, day(11, 8), "NSE").unwrap();
+        assert!(muhurat.is_special);
+        assert_eq!(muhurat.start_ms, 1_794_127_800_000);
+        assert_eq!(
+            effective_session_window(&c, day(11, 8), "NCO").map(|w| (w.start_ms, w.end_ms)),
+            Some((1_794_127_800_000, 1_794_132_000_000))
+        );
+        // The trader's own hours, and an exchange with none.
+        update_timing(&c, "NSE", "09:20", "15:25").unwrap();
+        assert_eq!(
+            effective_session_window(&c, day(10, 1), "NSE"),
+            usual(10, 1, "09:20", "15:25")
+        );
+        assert_eq!(effective_session_window(&c, day(10, 1), "XYZ"), None);
+        assert_eq!(effective_session_window(&c, day(10, 1), ""), None);
+    }
+
+    /// The 8 November 2026 rows as (exchange, window), `None` for a closed row.
+    fn muhurat_rows(c: &Connection) -> HashMap<String, Option<(i64, i64)>> {
+        let mut st = c
+            .prepare(
+                "SELECT e.exchange_code, e.is_open, e.start_time, e.end_time
+                 FROM market_holiday_exchanges e JOIN market_holidays h ON h.id = e.holiday_id
+                 WHERE h.holiday_date = '2026-11-08'",
+            )
+            .unwrap();
+        let v = st
+            .query_map([], |r| {
+                let open: bool = r.get(1)?;
+                let window = if open {
+                    Some((r.get(2)?, r.get(3)?))
+                } else {
+                    None
+                };
+                Ok((r.get::<_, String>(0)?, window))
+            })
+            .unwrap()
+            .collect::<std::result::Result<HashMap<_, _>, _>>()
+            .unwrap();
+        v
+    }
+
+    fn published() -> HashMap<String, Option<(i64, i64)>> {
+        MUHURAT_2026_SESSION
+            .iter()
+            .map(|(ex, s, e)| (ex.to_string(), Some((*s, *e))))
+            .collect()
+    }
+
+    /// An install seeded before the timings were published: the guess, and
+    /// no NCO row.
+    fn as_shipped(c: &Connection) {
+        for (ex, s, e) in MUHURAT_2026_GUESS {
+            c.execute(
+                "UPDATE market_holiday_exchanges SET start_time = ?1, end_time = ?2
+                 WHERE exchange_code = ?3 AND holiday_id =
+                    (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08')",
+                params![s, e, ex],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "DELETE FROM market_holiday_exchanges WHERE exchange_code = 'NCO' AND holiday_id =
+                (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn day(m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, m, d).unwrap()
+    }
+
+    fn steps(c: &Connection) -> HashMap<&'static str, MuhuratStep> {
+        plan_muhurat_2026(c)
+            .unwrap()
+            .unwrap()
+            .1
+            .into_iter()
+            .collect()
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_the_published_session_is_what_the_module_carries:
+    /// 14:20 to 15:30 IST, NFO and BFO to 15:40.
+    #[test]
+    fn the_published_muhurat_session_is_what_the_module_carries() {
+        let at = |ms: i64| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .unwrap()
+                .with_timezone(&Kolkata)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        };
+        for (ex, s, e) in MUHURAT_2026_SESSION {
+            assert_eq!(at(*s), "2026-11-08 14:20", "{ex}");
+            let close = if matches!(*ex, "NFO" | "BFO") {
+                "15:40"
+            } else {
+                "15:30"
+            };
+            assert_eq!(at(*e), format!("2026-11-08 {close}"), "{ex}");
+        }
+        assert_eq!(MUHURAT_2026_SESSION.len(), 8);
+        assert_eq!(MUHURAT_2026_DATE, "2026-11-08");
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_a_new_install_is_seeded_with_the_published_session.
+    #[test]
+    fn a_new_install_is_seeded_with_the_published_muhurat_session() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        assert_eq!(muhurat_rows(&c), published());
+        assert!(steps(&c).values().all(|s| *s == MuhuratStep::Current));
+        let w = effective_session_window(&c, day(11, 8), "NSE").unwrap();
+        assert_eq!(
+            (w.start_ms, w.end_ms),
+            (1_794_127_800_000, 1_794_132_000_000)
+        );
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_an_existing_install_moves_from_the_guess
+    /// and test_rerunning_changes_nothing.
+    #[test]
+    fn an_existing_install_moves_from_the_muhurat_guess_once() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        as_shipped(&c);
+        let mut plan = steps(&c);
+        assert_eq!(plan.remove("NCO"), Some(MuhuratStep::Insert));
+        assert!(plan.values().all(|s| *s == MuhuratStep::Update));
+        let before = effective_session_window(&c, day(11, 8), "MCX").unwrap();
+        assert_eq!(before.end_ms, 1_794_163_500_000, "the guessed 00:15 close");
+
+        migrate_muhurat_2026(&c).unwrap();
+        assert_eq!(muhurat_rows(&c), published());
+        let after = effective_session_window(&c, day(11, 8), "MCX").unwrap();
+        assert_eq!(
+            (after.start_ms, after.end_ms),
+            (1_794_127_800_000, 1_794_132_000_000)
+        );
+
+        migrate_muhurat_2026(&c).unwrap();
+        assert_eq!(muhurat_rows(&c), published());
+        assert!(steps(&c).values().all(|s| *s == MuhuratStep::Current));
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_what_an_admin_set_is_left_alone.
+    #[test]
+    fn a_muhurat_session_the_trader_set_is_left_alone() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        as_shipped(&c);
+        let own = (1_794_142_800_000_i64, 1_794_146_400_000_i64); // 18:30 - 19:30 IST
+        c.execute(
+            "UPDATE market_holiday_exchanges SET start_time = ?1, end_time = ?2 WHERE exchange_code = 'NSE'
+                AND holiday_id = (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08')",
+            params![own.0, own.1],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE market_holiday_exchanges SET is_open = 0, start_time = NULL, end_time = NULL
+             WHERE exchange_code = 'CDS'
+                AND holiday_id = (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "DELETE FROM market_holiday_exchanges WHERE exchange_code = 'MCX'
+                AND holiday_id = (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08')",
+            [],
+        )
+        .unwrap();
+        let plan = steps(&c);
+        for ex in ["NSE", "CDS", "MCX"] {
+            assert_eq!(plan[ex], MuhuratStep::Custom, "{ex}");
+        }
+
+        migrate_muhurat_2026(&c).unwrap();
+        let rows = muhurat_rows(&c);
+        assert_eq!(rows["NSE"], Some(own));
+        assert_eq!(rows["CDS"], None);
+        assert!(!rows.contains_key("MCX"));
+        assert_eq!(rows["NFO"], Some((1_794_127_800_000, 1_794_132_600_000)));
+        assert_eq!(rows["NCO"], Some((1_794_127_800_000, 1_794_132_000_000)));
+        // A special session opens only the exchanges it lists.
+        assert_eq!(effective_session_window(&c, day(11, 8), "MCX"), None);
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_a_removed_special_session_is_not_recreated.
+    #[test]
+    fn a_removed_muhurat_session_is_not_recreated() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        c.execute_batch(
+            "DELETE FROM market_holiday_exchanges WHERE holiday_id =
+                (SELECT id FROM market_holidays WHERE holiday_date = '2026-11-08');
+             DELETE FROM market_holidays WHERE holiday_date = '2026-11-08';",
+        )
+        .unwrap();
+        assert!(plan_muhurat_2026(&c).unwrap().is_none());
+        migrate_muhurat_2026(&c).unwrap();
+        assert!(muhurat_rows(&c).is_empty());
+    }
+
+    /// Web test/test_migrate_muhurat_2026.py::test_the_app_applies_it_at_startup and
+    /// test_the_migration_is_registered: the app's own migrations move an install
+    /// on the guess when it next starts.
+    #[test]
+    fn the_app_moves_the_muhurat_guess_when_it_starts() {
+        let c = legacy_db();
+        migrate(&c).unwrap();
+        as_shipped(&c);
+        crate::db::sqlite::migrations::run_migrations(&c).unwrap();
+        assert_eq!(muhurat_rows(&c), published());
     }
 }

@@ -221,10 +221,14 @@ fn cookie_from(headers: &axum::http::HeaderMap) -> Option<String> {
 
 // Findings of the 2026-10-09 security review, one test group per finding.
 mod security;
+// A login from before the daily boundary is not a current one (web e2bdd061e).
+mod session_rollover;
 // Every catalogue broker's sign-in, started the way the broker page does.
 mod sign_in;
 // Broker Configuration and Select Broker: keys per broker, one logged in.
 mod broker_config;
+// Select Broker shows no text from its address (web eec700046).
+mod sign_in_failure;
 // Codex review evaluation B: sign-out, revocation, keys, broker settings.
 mod credentials_lifecycle;
 // KEY-01: no OS keychain; the keys locked with the password in openalgo.db.
@@ -249,6 +253,20 @@ mod agent_chatgpt_search;
 mod agent_audit;
 // The Agent's external data routes (the MCP part of blueprints/agent.py).
 mod agent_external;
+// Flow's workflow routes (blueprints/flow.py).
+mod flow;
+// Flow's editor lookups (blueprints/flow.py index-symbols, symbol-lotsizes, option-strikes).
+mod flow_lookups;
+// Flow's trigger routes and public webhooks (blueprints/flow.py).
+mod flow_triggers;
+// Flow's legacy node upgrade at import and replace, and nowhere else.
+mod flow_migrations;
+// Flow's import, export, replace and run rules the audit asked to pin.
+mod flow_rules;
+// Flow's read routes when the database fails, and a PUT with nothing to write.
+mod flow_reads;
+// Flow's route rules the wave-6 sweep asked to pin.
+mod flow_rules_w6;
 
 // ------------------------------------------------------------------ fixtures
 
@@ -688,6 +706,8 @@ fn api_namespaces_are_told_apart_from_pages() {
         "/agent/api",
         "/agent/api/x",
         "/scalping/api/nope",
+        "/flow/api/workflows/abc",
+        "/flow/webhook/token/a/b",
     ] {
         assert!(super::is_api_path(path), "{}", path);
     }
@@ -701,6 +721,8 @@ fn api_namespaces_are_told_apart_from_pages() {
         "/trading",
         "//api",
         "/a/b/api",
+        "/flow",
+        "/flow/editor/3",
     ] {
         assert!(!super::is_api_path(path), "{}", path);
     }
@@ -745,6 +767,10 @@ async fn public_route_list_is_exactly_the_reviewed_one() {
             "POST /openscript/runner/host/{run}/ended",
             // Secret-verified Chartink webhook (the URL id is the credential).
             "POST /chartink/webhook/{webhook_id}",
+            // Secret-verified Flow webhook (the URL token is the credential,
+            // plus the secret when the workflow's auth type asks for it).
+            "POST /flow/webhook/{token}",
+            "POST /flow/webhook/{token}/{symbol}",
         ]
     );
 }
@@ -1414,6 +1440,18 @@ fn location(headers: &axum::http::HeaderMap) -> String {
     headers[header::LOCATION].to_str().unwrap().to_string()
 }
 
+/// The `error` of a Select Broker address, `/broker?error=<id>&broker=<id>`:
+/// the reason itself stays in OpenAlgo, read once from
+/// `/api/broker/sign-in-failure/<id>` (`session::sign_in_failures`).
+fn sign_in_failure_id(loc: &str) -> String {
+    let u = url::Url::parse(&format!("http://127.0.0.1{}", loc)).unwrap();
+    assert_eq!(u.path(), "/broker", "{}", loc);
+    u.query_pairs()
+        .find(|(k, _)| k == "error")
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default()
+}
+
 fn state_from_kite_url(url: &str) -> String {
     let u = url::Url::parse(url).unwrap();
     let rp = u
@@ -1657,13 +1695,21 @@ async fn aliceblue_callback_for_another_account_is_refused() {
     let (_, headers, _) = h
         .send(with_session(get(ALICE_CALLBACK), &cookie, None))
         .await;
-    let loc = urlencoding::decode(&location(&headers))
-        .unwrap()
-        .into_owned();
+    // The reason is read from OpenAlgo, never from the address.
+    let id = sign_in_failure_id(&location(&headers));
+    let (_, body) = h
+        .json(with_session(
+            get(&format!("/api/broker/sign-in-failure/{}", id)),
+            &cookie,
+            None,
+        ))
+        .await;
     assert!(
-        loc.contains("Add your Alice Blue User ID on the Broker Configuration page"),
+        body["data"]["message"].as_str().is_some_and(
+            |m| m.contains("Add your Alice Blue User ID on the Broker Configuration page")
+        ),
         "{}",
-        loc
+        body
     );
     assert!(!h.ctx().is_broker_connected());
     assert!(h.mock.last_auth.lock().is_none());
@@ -2064,12 +2110,18 @@ async fn first_state_less_sign_in_needs_the_saved_client_id() {
         with_session(get("/arrow/callback?request_token=r1"), &cookie, None),
     )
     .await;
-    let loc = urlencoding::decode(&location(&h)).unwrap().into_owned();
+    let loc = location(&h);
     assert!(loc.starts_with("/broker?error="), "{}", loc);
+    // The reason is read from OpenAlgo, never from the address.
+    let id = sign_in_failure_id(&loc);
+    let reason = format!("/api/broker/sign-in-failure/{}", id);
+    let (_, _, body) = send_to(ctx, with_session(get(&reason), &cookie, None)).await;
     assert!(
-        loc.contains("Add your Arrow Client ID on the Broker Configuration page"),
+        body["data"]["message"].as_str().is_some_and(
+            |m| m.contains("Add your Arrow Client ID on the Broker Configuration page")
+        ),
         "{}",
-        loc
+        body
     );
     assert!(ctx.get_broker_session().is_none());
 

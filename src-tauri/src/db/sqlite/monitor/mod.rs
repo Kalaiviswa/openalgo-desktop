@@ -230,8 +230,10 @@ fn applied(conn: &Connection, name: &str) -> Result<bool> {
 }
 
 /// Paths whose next segment is the credential itself (the strategy webhook
-/// token, the Chartink webhook id).
-const SECRET_PATH_PREFIXES: [&str; 2] = ["/strategy/webhook/", "/chartink/webhook/"];
+/// token, the Chartink webhook id, the Flow webhook token; a Flow symbol
+/// segment after it is kept).
+const SECRET_PATH_PREFIXES: [&str; 3] =
+    ["/strategy/webhook/", "/chartink/webhook/", "/flow/webhook/"];
 pub const REDACTED: &str = "<redacted>";
 
 /// `text` (a path, or a stored list of paths) with every webhook secret
@@ -278,7 +280,7 @@ fn redact_stored_paths(conn: &Connection) -> Result<()> {
             let rows: Vec<(i64, String)> = {
                 let mut st = conn.prepare(&format!(
                     "SELECT id, {c} FROM {t} WHERE {c} LIKE '%/strategy/webhook/%' \
-                     OR {c} LIKE '%/chartink/webhook/%'",
+                     OR {c} LIKE '%/chartink/webhook/%' OR {c} LIKE '%/flow/webhook/%'",
                     c = column,
                     t = table
                 ))?;
@@ -675,13 +677,15 @@ mod tests {
         c.execute(
             "INSERT INTO traffic_logs (timestamp, client_ip, method, path, status_code, duration_ms)
              VALUES ('t', '1.2.3.4', 'POST', '/strategy/webhook/oaws_SECRET123', 200, 1.0),
-                    ('t', '1.2.3.4', 'POST', '/api/v1/placeorder', 200, 1.0)",
+                    ('t', '1.2.3.4', 'POST', '/api/v1/placeorder', 200, 1.0),
+                    ('t', '1.2.3.4', 'POST', '/flow/webhook/tokFLOWSECRET/SBIN', 200, 1.0)",
             [],
         )
         .unwrap();
         c.execute(
             "INSERT INTO error_404_tracker (ip_address, first_error_at, last_error_at, paths_attempted)
-             VALUES ('5.6.7.8', 't', 't', '[\"/chartink/webhook/abc-SECRET\", \"/x\"]')",
+             VALUES ('5.6.7.8', 't', 't', '[\"/chartink/webhook/abc-SECRET\", \"/x\", \"/flow/webhook/tokSECRET/NIFTY\"]'),
+                    ('5.6.7.9', 't', 't', '[\"/flow/webhook/onlyFLOWSECRET\"]')",
             [],
         )
         .unwrap();
@@ -694,17 +698,38 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
+        // T-108: rows whose only secret path is a Flow one are scrubbed too
+        // (the Flow clause of the LIKE, not a Chartink path beside it).
         assert_eq!(
             paths,
-            vec!["/strategy/webhook/<redacted>", "/api/v1/placeorder"]
+            vec![
+                "/strategy/webhook/<redacted>",
+                "/api/v1/placeorder",
+                "/flow/webhook/<redacted>/SBIN"
+            ]
         );
+        let flow_only: String = c
+            .query_row(
+                "SELECT paths_attempted FROM error_404_tracker WHERE ip_address = '5.6.7.9'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flow_only, "[\"/flow/webhook/<redacted>\"]");
         let tried: String = c
-            .query_row("SELECT paths_attempted FROM error_404_tracker", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT paths_attempted FROM error_404_tracker WHERE ip_address = '5.6.7.8'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(!tried.contains("SECRET"), "{}", tried);
         assert!(tried.contains("/chartink/webhook/<redacted>"));
+        assert!(
+            tried.contains("/flow/webhook/<redacted>/NIFTY"),
+            "{}",
+            tried
+        );
         assert!(tried.contains("/x"));
     }
 
@@ -908,6 +933,10 @@ mod tests {
             "/chartink/webhook/"
         );
         assert_eq!(redact_secret_paths("/api/v1/funds"), "/api/v1/funds");
+        assert_eq!(
+            redact_secret_paths("/flow/webhook/abcDEF_-123/SBIN"),
+            "/flow/webhook/<redacted>/SBIN"
+        );
     }
 
     fn db() -> Connection {

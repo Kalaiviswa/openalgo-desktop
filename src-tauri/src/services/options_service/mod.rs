@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 
 mod chain_answer;
 mod greeks;
-pub use chain_answer::{option_chain_answer, ChainAnswer};
+pub use chain_answer::{option_chain_answer, option_chain_structure, ChainAnswer};
 pub use greeks::*;
 
 const MONTHS: [&str; 12] = [
@@ -187,7 +187,11 @@ const NSE_INDICES: &[&str] = &[
     "INDIAVIX",
 ];
 const BSE_INDICES: &[&str] = &["SENSEX", "BANKEX", "SENSEX50"];
-const NO_SPOT: &[&str] = &["MCX", "CDS", "BCD", "NCDEX", "NCO"];
+/// Exchanges with no spot instrument (web `NO_SPOT_EXCHANGES`): an option
+/// on one is priced against the near-month future, and the future, the
+/// option and the quote all live on the exchange itself. The one list:
+/// the tools service and Flow's options nodes read it from here.
+pub const NO_SPOT: &[&str] = &["MCX", "CDS", "BCD", "NCDEX", "NCO"];
 
 /// Where an underlying is quoted.
 pub fn quote_exchange(base: &str, exchange: &str) -> String {

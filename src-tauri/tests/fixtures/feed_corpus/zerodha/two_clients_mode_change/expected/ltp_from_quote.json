@@ -1,0 +1,14 @@
+{
+  "broker": "zerodha",
+  "data": {
+    "exchange": "NSE",
+    "ltp": 1500.0,
+    "mode": "ltp",
+    "symbol": "INFY",
+    "timestamp": "<receipt_ms>"
+  },
+  "exchange": "NSE",
+  "mode": 1,
+  "symbol": "INFY",
+  "type": "market_data"
+}

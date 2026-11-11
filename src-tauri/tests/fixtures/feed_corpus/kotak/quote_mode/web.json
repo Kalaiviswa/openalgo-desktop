@@ -1,0 +1,138 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "kotak",
+  "inputs_sha256": "b37d8edde8c869ad41ab75100702e56ee9b159e44c9f0c029c5b790888e02577",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 6,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1300.5,
+            "volume": 40000,
+            "open": 1290.0,
+            "high": 1310.0,
+            "low": 1285.0,
+            "close": 1280.5,
+            "average_price": 1298.25,
+            "percent_change": 1.56,
+            "last_quantity": 25,
+            "total_buy_quantity": 9000,
+            "total_sell_quantity": 7000,
+            "oi": 0,
+            "ltt": 1762666200000,
+            "last_trade_time": 1762666200000,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "kotak",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1301.0,
+            "volume": 40000,
+            "open": 1290.0,
+            "high": 1310.0,
+            "low": 1285.0,
+            "close": 1280.5,
+            "average_price": 1298.25,
+            "percent_change": 1.6,
+            "last_quantity": 10,
+            "total_buy_quantity": 9000,
+            "total_sell_quantity": 7000,
+            "oi": 0,
+            "ltt": 1762666205000,
+            "last_trade_time": 1762666205000,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "kotak",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

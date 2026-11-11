@@ -1,0 +1,213 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "zerodha",
+  "inputs_sha256": "f37fc569594a478de3b15b3e30f1e655f66079f56f24d5236ee1b815b7bf65fa",
+  "instruments": [
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "token": "408065",
+      "brsymbol": "INFY",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "zerodha"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "zerodha"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "zerodha"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "zerodha"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "zerodha"
+            }
+          ],
+          "failed": [],
+          "broker": "zerodha"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 13,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "zerodha"
+            }
+          ],
+          "failed": [],
+          "broker": "zerodha"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_QUOTE",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 2,
+          "data": {
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1500.0,
+            "ltt": "<receipt_ms>",
+            "timestamp": "<receipt_ms>",
+            "volume": 5000,
+            "last_quantity": 10,
+            "average_price": 1499.5,
+            "total_buy_quantity": 1,
+            "total_sell_quantity": 2,
+            "open": 1490.0,
+            "high": 1510.0,
+            "low": 1480.0,
+            "close": 1495.0
+          }
+        },
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_LTP",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 1,
+          "data": {
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": "ltp",
+            "ltp": 1500.0,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 2,
+          "broker": "zerodha",
+          "serves": []
+        },
+        {
+          "client": "b",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "zerodha",
+          "serves": [
+            2
+          ]
+        },
+        {
+          "client": "a",
+          "publication": 1,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "zerodha",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 10,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_LTP",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 1,
+          "data": {
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": "ltp",
+            "ltp": 1500.5,
+            "ltt": "<receipt_ms>",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "zerodha",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

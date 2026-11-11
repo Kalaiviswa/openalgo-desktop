@@ -1,0 +1,156 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "indmoney",
+  "inputs_sha256": "e7a16f328287423fbc6e2f6d77cb3f7cf16c325f4307c5d350b4186aad80c42e",
+  "instruments": [
+    {
+      "symbol": "NIFTY24NOV26FUT",
+      "exchange": "NFO",
+      "token": "52345",
+      "brsymbol": "NIFTY 24 NOV 26 FUT",
+      "brexchange": "NSE",
+      "lotsize": 75,
+      "instrumenttype": "FUT",
+      "expiry": "24-NOV-26",
+      "name": "NIFTY"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "indmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 7,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY24NOV26FUT",
+              "exchange": "NFO",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "indmoney"
+            }
+          ],
+          "failed": [],
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY24NOV26FUT_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY24NOV26FUT",
+          "mode": 2,
+          "data": {
+            "ltp": 24510.5,
+            "ltt": 1794302700777,
+            "open": 24400.5,
+            "high": 24550.25,
+            "low": 24380.75,
+            "close": 24390.5,
+            "volume": 125000,
+            "bid_price": 24510.25,
+            "bid_qty": 75,
+            "ask_price": 24511.5,
+            "ask_qty": 150,
+            "average_price": 24470.25,
+            "oi": 13456725,
+            "oi_change": -12500,
+            "symbol": "NIFTY24NOV26FUT",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": 1794302700777
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "indmoney",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY24NOV26FUT_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY24NOV26FUT",
+          "mode": 2,
+          "data": {
+            "ltp": 24512.75,
+            "ltt": 1794302701999,
+            "open": 24400.5,
+            "high": 24550.25,
+            "low": 24380.75,
+            "close": 24390.5,
+            "volume": 125150,
+            "bid_price": 24510.25,
+            "bid_qty": 75,
+            "ask_price": 24511.5,
+            "ask_qty": 150,
+            "average_price": 24470.25,
+            "oi": 13456725,
+            "oi_change": -12500,
+            "symbol": "NIFTY24NOV26FUT",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": 1794302701999
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "indmoney",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

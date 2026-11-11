@@ -1,0 +1,114 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "iiflcapital",
+  "inputs_sha256": "e8d1181d6363a5bc3d911d121d3368c35be26b958206d7c7f76704ceed7d597e",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSEEQ"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 2,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "iiflcapital"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "iiflcapital"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "iiflcapital"
+            }
+          ],
+          "failed": [],
+          "broker": "iiflcapital"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 1,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 4,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "ltp": 1500.05,
+            "ltt": 1791000300,
+            "timestamp": "<receipt_ms>",
+            "open": 1492.5,
+            "high": 1510.2,
+            "low": 1485.1000000000001,
+            "close": 1488.3,
+            "volume": 3456789,
+            "last_quantity": 25,
+            "average_price": 1498.76,
+            "total_buy_quantity": 120000,
+            "total_sell_quantity": 98000,
+            "bid": 1500.0,
+            "ask": 1500.1000000000001,
+            "bid_quantity": 100,
+            "ask_quantity": 200,
+            "mode": "quote"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "iiflcapital",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

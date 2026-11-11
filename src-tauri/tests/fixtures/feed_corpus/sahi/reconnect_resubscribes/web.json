@@ -1,0 +1,126 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "sahi",
+  "inputs_sha256": "c99cddaf7fa77243ec56a6063baac65429791e08b27d6bd5b20ff8dad574f36f",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 2,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "sahi"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "sahi"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 4,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 6,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1290.5,
+            "timestamp": "<receipt_ms>",
+            "ltt": 1761700000123,
+            "last_trade_time": 1761700000123,
+            "volume": 987654,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 1419.5,
+            "lower_circuit": 1161.5
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 13,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": "quote",
+            "ltp": 1292.0,
+            "timestamp": "<receipt_ms>",
+            "ltt": 1761700005123,
+            "last_trade_time": 1761700005123,
+            "volume": 990000,
+            "oi": 0,
+            "open_interest": 0,
+            "upper_circuit": 1419.5,
+            "lower_circuit": 1161.5
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "sahi",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

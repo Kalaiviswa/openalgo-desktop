@@ -1,0 +1,49 @@
+{
+  "broker": "zerodha",
+  "summary": "Two clients on one instrument: an LTP holder, then a Quote holder moves Kite's mode to quote; one quote packet serves both, each at its mode; the Quote holder leaving moves Kite back to ltp, and the last one leaving unsubscribes.",
+  "scenarios": [
+    "subscription-lifecycle",
+    "mode-change"
+  ],
+  "instruments": [
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "token": "408065",
+      "brsymbol": "INFY",
+      "brexchange": "NSE"
+    }
+  ],
+  "provenance": {
+    "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+    "method": "by-hand",
+    "sources": [
+      "broker/zerodha/streaming/zerodha_websocket.py::ZerodhaWebSocket._parse_packet",
+      "broker/zerodha/streaming/zerodha_adapter.py::ZerodhaWebSocketAdapter._handle_ticks",
+      "broker/zerodha/streaming/zerodha_adapter.py::ZerodhaWebSocketAdapter._transform_regular_tick"
+    ],
+    "notes": [
+      "Worked by hand from zerodha_adapter.py:530-559 (a quote tick is published on the QUOTE topic, and an LTP copy is published when mode 1 is held)."
+    ]
+  },
+  "deviations": [
+    {
+      "key": "fan-out",
+      "kind": "desktop-decision",
+      "reason": "The web's server also sends this client a richer mode's publication of the instrument, beyond the modes it holds; the desktop sends one frame per held mode.",
+      "ref": "websocket_proxy/server.py zmq_listener (for m in range(1, mode + 1))",
+      "approval": "one-frame-per-held-mode",
+      "allows": [
+        [
+          {
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": 2,
+            "client": "a"
+          },
+          "<absent>"
+        ]
+      ]
+    }
+  ]
+}

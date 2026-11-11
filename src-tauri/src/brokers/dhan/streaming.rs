@@ -14,14 +14,21 @@
 //!   - 4 quote: `f32 ltp @0, u16 ltq @4, u32 ltt @6, f32 atp @10,
 //!     u32 volume @14, u32 total sell @18, u32 total buy @22, f32 open @26,
 //!     f32 close @30, f32 high @34, f32 low @38`
-//!   - 5 OI: `u32 oi @0`; 6 previous close: `f32 prev close @0, u32 prev oi @4`
-//!     (kept and folded into later ticks, not published on their own)
+//!   - 5 OI: `u32 oi @0`; 6 previous close: `f32 prev close @0, u32 prev oi @4`,
+//!     sent once on every subscribe (kept and folded into later ticks, not
+//!     published on their own)
 //!   - 8 full: quote fields with `u32 oi @26, oi high @30, oi low @34`, then
 //!     `f32 open @38, close @42, high @46, low @50`, then five 20-byte levels
 //!     from @54: `u32 bid qty, u32 ask qty, u16 bid orders, u16 ask orders,
 //!     f32 bid price, f32 ask price`
+//!   - A quote's close is today's, which Dhan fills only after the market
+//!     closes. OpenAlgo's close is the previous day's, so it comes from the
+//!     previous-close packet, and is left out until that has come (web
+//!     openalgo#2377).
 //!   - 50 disconnect: `u16 reason @0` (805: too many connections); 0 is a
 //!     heartbeat.
+//! * A deliberate close (a logout, a broker switch) first sends
+//!   `{"RequestCode": 12}`, on this socket and the 20-level one.
 //!
 //! 20-level depth (`wss://depth-api-feed.dhan.co/twentydepth?...`, NSE and
 //! NFO only): 12-byte header `u16 length @0, u8 code @2, u8 segment @3,
@@ -34,9 +41,9 @@
 
 use super::mapping::data_segment;
 use crate::brokers::common::streaming::{
-    now_ms, ping, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, OrderUpdate, WsRequest, WEB_ORDER_PING_INTERVAL, WEB_PING_INTERVAL,
-    WEB_PING_TIMEOUT,
+    now_ms, ping, AbsentFields, BrokerFeed, BrokerField, BrokerValue, FeedEvent, FeedMode,
+    FeedSubscription, Message, NormalizedDepth, NormalizedTick, OrderUpdate, QuoteField, WsRequest,
+    WEB_ORDER_PING_INTERVAL, WEB_PING_INTERVAL, WEB_PING_TIMEOUT,
 };
 use crate::brokers::common::symbols::SymbolResolver;
 use crate::brokers::types::DepthLevel;
@@ -130,7 +137,40 @@ struct SubInfo {
     symbol: String,
     exchange: String,
     oi: i64,
-    prev_close: f64,
+    /// The previous day's close from the previous-close packet; `None`
+    /// until it has come on this connection.
+    prev_close: Option<f64>,
+    /// The previous day's OI from the same packet (web `prev_oi`).
+    prev_oi: Option<i64>,
+}
+
+impl SubInfo {
+    fn new(s: &FeedSubscription) -> Self {
+        Self {
+            symbol: s.symbol.clone(),
+            exchange: s.exchange.clone(),
+            oi: 0,
+            prev_close: None,
+            prev_oi: None,
+        }
+    }
+}
+
+/// What a quote lacks before its previous-close packet: the close, and so
+/// the change against it.
+const NO_PREVIOUS_CLOSE: AbsentFields = AbsentFields::of(&[QuoteField::Close, QuoteField::Change]);
+
+/// A subscription's instrument on the market feed: segment name, header
+/// segment code and security id.
+fn instrument(s: &FeedSubscription) -> Option<(&'static str, u8, u32)> {
+    match (
+        data_segment(&s.exchange),
+        segment_code(&s.exchange),
+        s.token.trim().parse::<u32>(),
+    ) {
+        (Some(seg), Some(code), Ok(id)) => Some((seg, code, id)),
+        _ => None,
+    }
 }
 
 fn instrument_frames(code: u8, list: &[(&str, &str)], batch: usize) -> Vec<Message> {
@@ -178,30 +218,35 @@ impl DhanFeed {
         }
     }
 
+    /// Register (or forget) the instruments, then the frames that ask for
+    /// them.
     fn frames(&mut self, subs: &[FeedSubscription], subscribe: bool) -> Vec<Message> {
-        let mut by_mode: Vec<(FeedMode, Vec<(&'static str, String)>)> = Vec::new();
         for s in subs {
-            let (Some(seg), Some(code), Ok(id)) = (
-                data_segment(&s.exchange),
-                segment_code(&s.exchange),
-                s.token.trim().parse::<u32>(),
-            ) else {
-                tracing::warn!("No Dhan security id for {}:{}", s.exchange, s.symbol);
+            let Some((_, code, id)) = instrument(s) else {
                 continue;
             };
             if subscribe {
-                self.subs.insert(
-                    (code, id),
-                    SubInfo {
-                        symbol: s.symbol.clone(),
-                        exchange: s.exchange.clone(),
-                        oi: 0,
-                        prev_close: 0.0,
-                    },
-                );
+                // A subscribe again on a new connection keeps the entry;
+                // `on_connected` has already cleared what it stored.
+                self.subs
+                    .entry((code, id))
+                    .or_insert_with(|| SubInfo::new(s));
             } else {
                 self.subs.remove(&(code, id));
             }
+        }
+        Self::request_frames(subs, subscribe)
+    }
+
+    /// The subscribe or unsubscribe frames for `subs`, one request code per
+    /// mode.
+    fn request_frames(subs: &[FeedSubscription], subscribe: bool) -> Vec<Message> {
+        let mut by_mode: Vec<(FeedMode, Vec<(&'static str, String)>)> = Vec::new();
+        for s in subs {
+            let Some((seg, _, id)) = instrument(s) else {
+                tracing::warn!("No Dhan security id for {}:{}", s.exchange, s.symbol);
+                continue;
+            };
             match by_mode.iter_mut().find(|(m, _)| *m == s.mode) {
                 Some((_, v)) => v.push((seg, id.to_string())),
                 None => by_mode.push((s.mode, vec![(seg, id.to_string())])),
@@ -262,7 +307,8 @@ impl DhanFeed {
                 }
                 6 if p.len() >= 8 => {
                     if let Some(s) = self.find(segment, token) {
-                        s.prev_close = le_f32(p, 0);
+                        s.prev_close = Some(le_f32(p, 0));
+                        s.prev_oi = Some(i64::from(le_u32(p, 4)));
                     }
                 }
                 50 => {
@@ -311,59 +357,14 @@ impl DhanFeed {
             timestamp_ms: now,
             ..Default::default()
         };
-        match code {
-            2 => {
-                t.mode = FeedMode::Ltp.code();
-                t.last_trade_time_ms = i64::from(le_u32(p, 4)) * 1000;
-                t.oi = sub.oi;
-                t.close = sub.prev_close;
-            }
-            _ => {
-                t.mode = if code == 4 {
-                    FeedMode::Quote.code()
-                } else {
-                    FeedMode::Depth.code()
-                };
-                t.last_quantity = i64::from(le_u16(p, 4));
-                t.last_trade_time_ms = i64::from(le_u32(p, 6)) * 1000;
-                t.average_price = le_f32(p, 10);
-                t.volume = i64::from(le_u32(p, 14));
-                t.total_sell_quantity = i64::from(le_u32(p, 18));
-                t.total_buy_quantity = i64::from(le_u32(p, 22));
-                let base = if code == 4 {
-                    t.oi = sub.oi;
-                    26
-                } else {
-                    t.oi = i64::from(le_u32(p, 26));
-                    sub.oi = t.oi;
-                    38
-                };
-                t.open = le_f32(p, base);
-                t.close = le_f32(p, base + 4);
-                t.high = le_f32(p, base + 8);
-                t.low = le_f32(p, base + 12);
-                if t.close == 0.0 {
-                    t.close = sub.prev_close;
-                }
-            }
+        quote_body(&mut t, sub, code, p);
+        match sub.prev_close {
+            Some(close) => t.close = close,
+            None => t.absent = NO_PREVIOUS_CLOSE,
         }
         t.derive_change();
         if code == 8 {
-            let mut buy = Vec::with_capacity(5);
-            let mut sell = Vec::with_capacity(5);
-            for i in 0..5 {
-                let o = 54 + 20 * i;
-                buy.push(DepthLevel {
-                    price: le_f32(p, o + 12),
-                    quantity: i64::from(le_u32(p, o)),
-                    orders: i64::from(le_u16(p, o + 8)),
-                });
-                sell.push(DepthLevel {
-                    price: le_f32(p, o + 16),
-                    quantity: i64::from(le_u32(p, o + 4)),
-                    orders: i64::from(le_u16(p, o + 10)),
-                });
-            }
+            let (buy, sell) = full_book(p);
             let depth = NormalizedDepth {
                 symbol: t.symbol.clone(),
                 exchange: t.exchange.clone(),
@@ -373,6 +374,7 @@ impl DhanFeed {
                 total_buy_quantity: t.total_buy_quantity,
                 total_sell_quantity: t.total_sell_quantity,
                 timestamp_ms: now,
+                ..Default::default()
             };
             out.push(FeedEvent::Tick(t));
             out.push(FeedEvent::Depth(depth));
@@ -380,6 +382,81 @@ impl DhanFeed {
             out.push(FeedEvent::Tick(t));
         }
     }
+}
+
+/// A market packet's fields after its LTP (web `_parse_ticker_packet`,
+/// `_parse_quote_packet`, `_parse_full_packet`), by response code.
+fn quote_body(t: &mut NormalizedTick, sub: &mut SubInfo, code: u8, p: &[u8]) {
+    match code {
+        2 => {
+            t.mode = FeedMode::Ltp.code();
+            t.last_trade_time_ms = i64::from(le_u32(p, 4)) * 1000;
+            t.oi = sub.oi;
+        }
+        _ => {
+            t.mode = if code == 4 {
+                FeedMode::Quote.code()
+            } else {
+                FeedMode::Depth.code()
+            };
+            t.last_quantity = i64::from(le_u16(p, 4));
+            t.last_trade_time_ms = i64::from(le_u32(p, 6)) * 1000;
+            t.average_price = le_f32(p, 10);
+            t.volume = i64::from(le_u32(p, 14));
+            t.total_sell_quantity = i64::from(le_u32(p, 18));
+            t.total_buy_quantity = i64::from(le_u32(p, 22));
+            let base = if code == 4 {
+                t.oi = sub.oi;
+                26
+            } else {
+                t.oi = i64::from(le_u32(p, 26));
+                sub.oi = t.oi;
+                38
+            };
+            t.open = le_f32(p, base);
+            t.high = le_f32(p, base + 8);
+            t.low = le_f32(p, base + 12);
+            // The packet's close (`base + 4`) is today's, which Dhan
+            // fills only after the market closes: it goes out as
+            // `day_close` (web `_normalize_5depth_data`), never as close.
+            let day_close = le_f32(p, base + 4);
+            if day_close != 0.0 {
+                t.extras.day_close = Some(day_close);
+            }
+            if code == 8 {
+                t.broker_fields.set(
+                    BrokerField::OiHigh,
+                    BrokerValue::Int(i64::from(le_u32(p, 30))),
+                );
+                t.broker_fields.set(
+                    BrokerField::OiLow,
+                    BrokerValue::Int(i64::from(le_u32(p, 34))),
+                );
+                t.extras.previous_oi = sub.prev_oi;
+            }
+        }
+    }
+}
+
+/// A full packet's five 20-byte book levels from byte 54: bid and ask
+/// quantity (u32), orders (u16) and price (f32).
+fn full_book(p: &[u8]) -> (Vec<DepthLevel>, Vec<DepthLevel>) {
+    let mut buy = Vec::with_capacity(5);
+    let mut sell = Vec::with_capacity(5);
+    for i in 0..5 {
+        let o = 54 + 20 * i;
+        buy.push(DepthLevel {
+            price: le_f32(p, o + 12),
+            quantity: i64::from(le_u32(p, o)),
+            orders: i64::from(le_u16(p, o + 8)),
+        });
+        sell.push(DepthLevel {
+            price: le_f32(p, o + 16),
+            quantity: i64::from(le_u32(p, o + 4)),
+            orders: i64::from(le_u16(p, o + 10)),
+        });
+    }
+    (buy, sell)
 }
 
 impl BrokerFeed for DhanFeed {
@@ -397,6 +474,32 @@ impl BrokerFeed for DhanFeed {
 
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
         self.frames(subs, false)
+    }
+
+    /// Dhan drops the whole instrument on an unsubscribe and sends its
+    /// previous close again after the subscribe that follows; what this
+    /// connection stored stays meanwhile, as the web keeps it while another
+    /// mode of the instrument is subscribed (openalgo#2377).
+    fn mode_change_frames(
+        &mut self,
+        old: &FeedSubscription,
+        new: &FeedSubscription,
+    ) -> Vec<Message> {
+        let mut v = Self::request_frames(std::slice::from_ref(old), false);
+        v.extend(Self::request_frames(std::slice::from_ref(new), true));
+        v
+    }
+
+    /// A previous close or OI from the last connection never stands in for
+    /// the ones Dhan sends again on every subscribe (web openalgo#2377
+    /// clears them on disconnect).
+    fn on_connected(&mut self) -> Vec<Message> {
+        for s in self.subs.values_mut() {
+            s.prev_close = None;
+            s.prev_oi = None;
+            s.oi = 0;
+        }
+        Vec::new()
     }
 
     fn parse(&mut self, msg: &Message) -> Vec<FeedEvent> {
@@ -427,6 +530,18 @@ impl BrokerFeed for DhanFeed {
     fn supported_depth_levels(&self) -> &'static [u8] {
         &[5]
     }
+
+    fn farewell_frames(&self) -> Vec<Message> {
+        vec![farewell()]
+    }
+}
+
+/// What the web's `DhanWebSocket.disconnect` sends on a socket still
+/// connected before it closes it, on the market and the 20-level sockets
+/// alike (dhan_websocket.py:247-262, `REQUEST_CODES["DISCONNECT"]`, written
+/// by `json.dumps`).
+fn farewell() -> Message {
+    Message::Text(r#"{"RequestCode": 12}"#.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -538,15 +653,21 @@ impl Dhan20DepthFeed {
                     }
                     if entry.0.is_some() && entry.1.is_some() {
                         if let Some((Some(buy), Some(sell))) = self.pending.remove(&key) {
+                            // A 20-level packet has no LTP and no book totals
+                            // (web `_on_data_20depth` sends none): a sum of the
+                            // visible levels is not the exchange's total.
                             out.push(FeedEvent::Depth(NormalizedDepth {
                                 symbol,
                                 exchange,
-                                ltp: 0.0,
-                                total_buy_quantity: buy.iter().map(|l| l.quantity).sum(),
-                                total_sell_quantity: sell.iter().map(|l| l.quantity).sum(),
                                 buy,
                                 sell,
                                 timestamp_ms: now_ms(),
+                                absent: AbsentFields::of(&[
+                                    QuoteField::Ltp,
+                                    QuoteField::TotalBuyQuantity,
+                                    QuoteField::TotalSellQuantity,
+                                ]),
+                                ..Default::default()
                             }));
                         }
                     }
@@ -601,6 +722,10 @@ impl BrokerFeed for Dhan20DepthFeed {
 
     fn supported_depth_levels(&self) -> &'static [u8] {
         &[20]
+    }
+
+    fn farewell_frames(&self) -> Vec<Message> {
+        vec![farewell()]
     }
 }
 

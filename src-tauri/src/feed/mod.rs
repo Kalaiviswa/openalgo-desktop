@@ -15,18 +15,27 @@
 //! * [`outbox`]: per-client bounded queue (latest-per-symbol for slow
 //!   clients).
 //! * [`orders`]: `order.update` bus topic to `order_update` frames.
+//! * `refusals`: what each broker's web adapter refuses before it
+//!   subscribes, in its words, for every consumer of the feed.
 //! * [`FeedService`]: what the app starts, restarts on a port change and
 //!   stops on exit.
+//! * `testkit` (tests only): the frames a broker feed's events make, for
+//!   the brokers' own feed tests.
 
 pub mod auth;
 pub mod bridge;
 mod dialect;
+#[cfg(test)]
+mod fanout_tests;
 pub mod orders;
 pub mod outbox;
 pub mod protocol;
+pub(crate) mod refusals;
 pub mod registry;
 pub mod server;
 pub mod source;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 pub use server::{start, FeedConfig, FeedDeps, FeedHandle, StartError};
 pub use source::{ClientLosses, FakeSource, InstrumentKey, MarketDataSource, MarketUpdate, Mode};

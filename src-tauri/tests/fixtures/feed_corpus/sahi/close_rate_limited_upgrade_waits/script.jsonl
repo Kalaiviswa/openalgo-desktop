@@ -1,0 +1,7 @@
+{"step": "send", "client": "a", "message": {"action": "subscribe", "symbols": [{"symbol": "RELIANCE", "exchange": "NSE"}], "mode": 2}, "reply": {"type": "subscribe", "status": "success", "subscriptions": [{"symbol": "RELIANCE", "exchange": "NSE", "status": "success", "mode": "Quote", "depth": 5, "broker": "sahi"}], "message": "Subscription processing complete", "broker": "sahi"}}
+{"step": "upstream_receives", "frames": [{"hex": "0a0608021202c516"}], "connection": 1}
+{"step": "push", "frame": "frames/quote.hex"}
+{"step": "receive", "client": "a", "frame": "expected/quote.json"}
+{"step": "refuse_upgrades", "status": 429, "times": 1}
+{"step": "drop_upstream", "code": 1000, "reason": "normal"}
+{"step": "upstream_connections", "count": 1, "refused": 1, "ms": 300, "note": "one refused attempt, no second within 30 s"}

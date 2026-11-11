@@ -13,7 +13,7 @@ use super::{auth, funds, WindowLimiter};
 use crate::brokers::common::mapping::{Action, Exchange, PriceType, Product, Validity};
 use crate::brokers::common::relay::{Session, READY};
 use crate::brokers::common::streaming::{
-    BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message,
+    BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedTick, QuoteField,
 };
 use crate::brokers::common::symbols::{SymToken, SymbolResolver};
 use crate::brokers::types::*;
@@ -659,6 +659,24 @@ fn quote_snapshot_merges_tf_onto_tk() {
     assert_eq!(q.bid, 812.3);
 }
 
+/// AliceBlue's `tf` is a partial update (docs/port/market-data-frames.md,
+/// "Partial-update feeds"): a new price without its own `ft` keeps the
+/// last feed time, as on the web, until a packet brings one.
+#[test]
+fn a_partial_update_keeps_the_feed_time() {
+    let mut s = FeedSnap::default();
+    s.apply(&json!({"t":"tk","e":"NSE","tk":"2885","lp":"1295.50","ft":"1794302700"}));
+    assert_eq!((s.ltp, s.ft_ms), (1295.5, 1_794_302_700_000));
+    s.apply(&json!({"t":"tf","e":"NSE","tk":"2885","lp":"1296.00"}));
+    assert_eq!(
+        (s.ltp, s.ft_ms),
+        (1296.0, 1_794_302_700_000),
+        "a new price without ft keeps the last one"
+    );
+    s.apply(&json!({"t":"tf","e":"NSE","tk":"2885","lp":"1296.50","ft":"1794302712"}));
+    assert_eq!((s.ltp, s.ft_ms), (1296.5, 1_794_302_712_000));
+}
+
 #[test]
 fn depth_snapshot_merges_levels() {
     // Keys per web alicebluewebsocket.py:616-741.
@@ -714,6 +732,69 @@ fn feed() -> AliceBlueFeed {
     )
 }
 
+/// The web only forwards AliceBlue's `pc`: with none known on the
+/// connection there is no change, though the close is known (lead rule
+/// no-derived-change); once one has come a partial update keeps it.
+#[test]
+fn the_change_is_only_the_pc_aliceblue_sent() {
+    let mut f = feed();
+    f.subscribe_frames(&[sub("SBIN", "NSE", "3045", FeedMode::Quote)]);
+    f.parse(&Message::Text(READY.into()));
+    let mut tick = |packet: Value| {
+        let events = f.parse(&Message::Text(packet.to_string()));
+        match events.into_iter().next() {
+            Some(FeedEvent::Tick(t)) => t,
+            other => panic!("tick expected, got {other:?}"),
+        }
+    };
+    let t = tick(json!({"t":"tk","e":"NSE","tk":"3045","lp":"812.35","c":"808.1"}));
+    assert!(!t.knows(QuoteField::Change), "no pc, no change");
+    let t = tick(json!({"t":"tf","e":"NSE","tk":"3045","lp":"813","pc":"0.53"}));
+    assert!(t.knows(QuoteField::Change));
+    assert_eq!(t.change_percent, 0.53);
+    let t = tick(json!({"t":"tf","e":"NSE","tk":"3045","lp":"814"}));
+    assert!(t.knows(QuoteField::Change));
+    assert_eq!(t.change_percent, 0.53, "a partial update keeps it");
+}
+
+/// No feed time yet on this connection: `ltt` is left out, never a receipt
+/// time passed off as one (lead ruling, do-not-invent-data). A packet with a
+/// time brings it, a partial update keeps it, a new connection starts
+/// without.
+#[test]
+fn ltt_waits_for_the_connections_first_feed_time() {
+    fn tick(f: &mut AliceBlueFeed, packet: Value) -> NormalizedTick {
+        let events = f.parse(&Message::Text(packet.to_string()));
+        match events.into_iter().next() {
+            Some(FeedEvent::Tick(t)) => t,
+            other => panic!("tick expected, got {other:?}"),
+        }
+    }
+    let left_out = |t: &NormalizedTick| t.absent.contains(QuoteField::LastTradeTime);
+    let mut f = feed();
+    f.subscribe_frames(&[sub("SBIN", "NSE", "3045", FeedMode::Quote)]);
+    f.parse(&Message::Text(READY.into()));
+
+    let t = tick(
+        &mut f,
+        json!({"t":"tk","e":"NSE","tk":"3045","lp":"812.35"}),
+    );
+    assert!(left_out(&t), "no time yet on this connection");
+    let t = tick(
+        &mut f,
+        json!({"t":"tf","e":"NSE","tk":"3045","lp":"813","ft":"1794302765"}),
+    );
+    assert!(!left_out(&t));
+    assert_eq!(t.last_trade_time_ms, 1_794_302_765_000);
+    let t = tick(&mut f, json!({"t":"tf","e":"NSE","tk":"3045","lp":"814"}));
+    assert!(!left_out(&t), "a partial update keeps it");
+    assert_eq!(t.last_trade_time_ms, 1_794_302_765_000);
+
+    f.on_connected();
+    let t = tick(&mut f, json!({"t":"tk","e":"NSE","tk":"3045","lp":"815"}));
+    assert!(left_out(&t), "a new connection starts without one");
+}
+
 #[test]
 fn live_feed_frames_and_retention() {
     let mut f = feed();
@@ -750,6 +831,10 @@ fn live_feed_frames_and_retention() {
     assert_eq!(t.close, 808.1);
     assert_eq!(t.change_percent, 0.53);
     assert_eq!(t.last_trade_time_ms, 1_759_290_300_000);
+    // A touchline's OI (toi) is carried in Quote, the web's total_oi; the
+    // book totals it did not send are absent, not 0 (audit C03, C05).
+    assert!(t.knows(QuoteField::OpenInterest));
+    assert!(!t.knows(QuoteField::TotalBuyQuantity));
     let ev = f.parse(&Message::Text(
         json!({"t":"tf","e":"NSE","tk":"3045","lp":"813","o":"0","v":"1200"}).to_string(),
     ));
@@ -757,7 +842,9 @@ fn live_feed_frames_and_retention() {
         panic!("tick expected")
     };
     assert_eq!((t.ltp, t.open, t.volume), (813.0, 805.0, 1200));
-    // LTP subscription carries only the price.
+    // An LTP subscription's touchline is still a Quote packet (the
+    // packet's mode, not the subscription's); what it did not send is
+    // absent.
     let ev = f.parse(&Message::Text(
         json!({"t":"tk","e":"NSE","tk":"26000","lp":"25000.5","o":"24900"}).to_string(),
     ));
@@ -766,9 +853,10 @@ fn live_feed_frames_and_retention() {
     };
     assert_eq!(
         (t.symbol.as_str(), t.exchange.as_str(), t.mode),
-        ("NIFTY", "NSE_INDEX", 1)
+        ("NIFTY", "NSE_INDEX", 2)
     );
-    assert_eq!((t.ltp, t.open), (25000.5, 0.0));
+    assert_eq!((t.ltp, t.open), (25000.5, 24900.0));
+    assert!(!t.knows(QuoteField::Volume));
     // Depth.
     let ev = f.parse(&Message::Text(
         json!({"t":"dk","e":"NSE","tk":"1594","lp":"1500","bp1":"1499.9","bq1":"10","bo1":"2",
@@ -780,7 +868,8 @@ fn live_feed_frames_and_retention() {
         panic!("depth expected")
     };
     assert_eq!(d.buy.len(), 1);
-    assert_eq!(d.buy[0].orders, 0);
+    // AliceBlue's own order count; the web publishes 0 for every level.
+    assert_eq!(d.buy[0].orders, 2);
     assert_eq!(d.total_sell_quantity, 90);
     // Unknown instruments are ignored; unsubscribe cleans state.
     assert!(f
@@ -866,4 +955,58 @@ fn identity() {
     ));
     let _ = streaming::HEARTBEAT;
     let _ = mapping::s;
+}
+
+/// Audit appendix item 9: the order stream names OpenAlgo's products (CNC,
+/// NRML, MIS), as the REST order book does through the web's
+/// `transform_data.py::reverse_map_product_type`; the web's stream passes
+/// AliceBlue's code raw. A code AliceBlue has not documented passes as it
+/// came rather than as a guessed MIS.
+#[test]
+fn order_feed_names_openalgo_products() {
+    let r = resolver();
+    for (pcode, want) in [
+        ("INTRADAY", "MIS"),
+        ("LONGTERM", "CNC"),
+        ("MTF", "CNC"),
+        ("NRML", "NRML"),
+        ("MIS", "MIS"),
+        ("CNC", "CNC"),
+        ("BO", "BO"),
+    ] {
+        let v = json!({"t":"om","norenordno":"1","tsym":"SBIN-EQ","exch":"NSE",
+            "trantype":"B","qty":"1","prctyp":"MKT","pcode":pcode,"status":"OPEN"});
+        assert_eq!(
+            order_update_from(&v, &r).unwrap().product,
+            want,
+            "{}",
+            pcode
+        );
+    }
+}
+
+/// Web test/test_aliceblue_order_adapter.py and `aliceblue_order_adapter.py`
+/// `get_ws_url`: an answer without an order token is tried again, at the
+/// web's order-update spacing (1, 2, 5, 10 s), and the fifth in a row stops
+/// the feed. Before the first failure nothing waits.
+#[test]
+fn order_token_failures_retry_at_the_webs_spacing_then_stop() {
+    use super::order_feed::{TokenFailures, MAX_TOKEN_FAILURES};
+    use std::time::Duration;
+    let t0 = tokio::time::Instant::now();
+    let mut f = TokenFailures::default();
+    assert_eq!(f.wait(t0), Duration::ZERO);
+    let mut now = t0;
+    for (n, spacing) in [1, 2, 5, 10].into_iter().enumerate() {
+        assert!(!f.record(now), "failure {} must not stop the feed", n + 1);
+        assert_eq!(f.wait(now), Duration::from_secs(spacing));
+        assert_eq!(
+            f.wait(now + Duration::from_millis(500)),
+            Duration::from_secs(spacing) - Duration::from_millis(500)
+        );
+        now += Duration::from_secs(spacing);
+        assert_eq!(f.wait(now), Duration::ZERO);
+    }
+    assert!(f.record(now), "the fifth failure in a row stops the feed");
+    assert_eq!(f.count(), MAX_TOKEN_FAILURES);
 }

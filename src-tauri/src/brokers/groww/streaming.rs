@@ -27,16 +27,23 @@
 //! hold several); protocol replies go back as `FeedEvent::Reply`, and the
 //! manager treats the session as accepted after 2 s without `+OK`.
 //! Subjects: `/ld/{eq|fo}/{nse|bse}/price.{token}` (LTP/quote) and
-//! `.../book.{token}` (depth). NSE indices use the OpenAlgo symbol as the
-//! token, BSE indices the numeric token; depth on an index falls back to
-//! price. Depth subscriptions add a shadow price subscription because the
+//! `.../book.{token}` (depth); indices `/ld/indices/{nse|bse}/price.{token}`
+//! (growwapi `FeedConstants.get_live_index_topic`, web openalgo#2341), NSE
+//! indices with the OpenAlgo symbol as the token, BSE indices the numeric
+//! token; depth on an index falls back to price. Groww publishes no other
+//! exchange: a subscribe on one is refused (`refusal`) and never sent.
+//! Depth subscriptions add a shadow price subscription because the
 //! book carries no LTP/OHLC, and a per-instrument merge cache joins them.
+//! Every tick is published from that cache (web openalgo#2377): Groww
+//! leaves out a value that did not change, so a field keeps its last
+//! value, and one Groww never sent is left out of the frame.
 
 use super::nkeys::KeyPair;
 use super::proto;
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, PrepareError, WsRequest,
+    now_ms, AbsentFields, BrokerFeed, BrokerField, BrokerValue, ExtraField, FeedEvent, FeedMode,
+    FeedSubscription, Message, NormalizedDepth, NormalizedTick, PrepareError, QuoteExtras,
+    QuoteField, WsRequest,
 };
 use crate::brokers::types::DepthLevel;
 use crate::error::{AppError, Result};
@@ -152,27 +159,22 @@ pub fn next_op(buf: &[u8]) -> Option<(Op, usize)> {
     }
 }
 
-/// Web `create_connect`.
+/// Web `create_connect` (groww_nats.py:65-97), byte for byte: the web's
+/// key order and `json.dumps`' default `", "` and `": "` separators.
 pub fn connect_frame(jwt: &str, nkey: Option<&str>, sig: Option<&str>) -> String {
-    let mut o = json!({
-        "verbose": false,
-        "pedantic": false,
-        "tls_required": true,
-        "jwt": jwt,
-        "protocol": 1,
-        "version": "2.10.18",
-        "lang": "python3",
-        "name": "nats.py",
-        "headers": true,
-        "no_responders": true,
-    });
-    if let (Some(k), Some(map)) = (nkey, o.as_object_mut()) {
-        map.insert("nkey".into(), json!(k));
+    let text = |v: &str| Value::from(v).to_string();
+    let mut o = format!(
+        "{{\"verbose\": false, \"pedantic\": false, \"tls_required\": true, \"jwt\": {}, \
+         \"protocol\": 1, \"version\": \"2.10.18\", \"lang\": \"python3\", \"name\": \"nats.py\", \
+         \"headers\": true, \"no_responders\": true",
+        text(jwt)
+    );
+    for (key, v) in [("nkey", nkey), ("sig", sig)] {
+        if let Some(v) = v.filter(|v| !v.is_empty()) {
+            o.push_str(&format!(", \"{}\": {}", key, text(v)));
+        }
     }
-    if let (Some(s), Some(map)) = (sig, o.as_object_mut()) {
-        map.insert("sig".into(), json!(s));
-    }
-    format!("CONNECT {}\r\n", o)
+    format!("CONNECT {}}}\r\n", o)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,20 +307,32 @@ enum Kind {
     Book,
 }
 
-/// Merged state of one instrument (LTP topic + book topic).
+/// Merged state of one instrument (LTP topic + book topic). A field Groww
+/// has not sent yet is `None`.
 #[derive(Debug, Clone, Default)]
 struct Merged {
     ltp: f64,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: i64,
+    open: Option<f64>,
+    high: Option<f64>,
+    low: Option<f64>,
+    close: Option<f64>,
+    volume: Option<i64>,
+    /// The day's traded value (`value`, rupees).
+    value: Option<f64>,
     ltt: i64,
     buy: Vec<DepthLevel>,
     sell: Vec<DepthLevel>,
-    seen: bool,
 }
+
+/// What Groww's live feed never carries (web `groww_adapter.py` publishes
+/// none of them): trade quantities, the average price, book totals, OI.
+const NOT_ON_THE_FEED: AbsentFields = AbsentFields::of(&[
+    QuoteField::LastQuantity,
+    QuoteField::AveragePrice,
+    QuoteField::TotalBuyQuantity,
+    QuoteField::TotalSellQuantity,
+    QuoteField::OpenInterest,
+]);
 
 struct Inst {
     sub: FeedSubscription,
@@ -358,9 +372,25 @@ pub fn subjects(sub: &FeedSubscription) -> Vec<String> {
         .collect()
 }
 
+/// Why Groww's live feed refuses `exchange`, when it does (web
+/// openalgo#2341): it publishes NSE and BSE cash, F&O and indices only,
+/// and answers a commodity or currency topic with a NATS "Permissions
+/// Violation".
+pub fn refusal(exchange: &str) -> Option<String> {
+    (!super::mapping::has_market_data(exchange)).then(|| {
+        format!(
+            "Groww does not provide live streaming for {}. Live prices are available for NSE, BSE, NFO, BFO and indices.",
+            exchange
+        )
+    })
+}
+
 fn subjects_with_kind(sub: &FeedSubscription) -> Vec<(String, Kind)> {
     let ex = super::mapping::groww_exchange(&sub.exchange).to_ascii_lowercase();
-    let seg = if matches!(sub.exchange.as_str(), "NFO" | "BFO") {
+    let seg = if is_index(&sub.exchange) {
+        // Indices are not published under `/ld/eq` at all.
+        "indices"
+    } else if matches!(sub.exchange.as_str(), "NFO" | "BFO") {
         "fo"
     } else {
         "eq"
@@ -372,9 +402,11 @@ fn subjects_with_kind(sub: &FeedSubscription) -> Vec<(String, Kind)> {
     };
     let price = (format!("/ld/{}/{}/price.{}", seg, ex, token), Kind::Price);
     if sub.mode == FeedMode::Depth && !is_index(&sub.exchange) {
+        // The book first, then its price, in the web's order (its Depth
+        // spec, then the shadow LTP spec: groww_adapter.py:478-538).
         vec![
-            price,
             (format!("/ld/{}/{}/book.{}", seg, ex, token), Kind::Book),
+            price,
         ]
     } else {
         vec![price]
@@ -399,11 +431,15 @@ fn levels(side: &[proto::DepthLevel]) -> Vec<DepthLevel> {
 /// Fold one decoded message into an instrument's merged state: a price
 /// (LTP or index value) and a book are each kept as they arrive. Answers
 /// whether it carried a price and a book.
+/// A 0 is a value the tick left out (a protobuf default is not on the
+/// wire), so the field keeps its last one.
 fn merge(m: &mut Merged, data: &proto::LiveData) -> (bool, bool) {
     let mut is_price = false;
     if let Some(p) = &data.ltp_data {
         is_price = true;
-        m.ltp = p.ltp;
+        if p.ltp != 0.0 {
+            m.ltp = p.ltp;
+        }
         for (dst, v) in [
             (&mut m.open, p.open),
             (&mut m.high, p.high),
@@ -411,24 +447,27 @@ fn merge(m: &mut Merged, data: &proto::LiveData) -> (bool, bool) {
             (&mut m.close, p.close),
         ] {
             if v != 0.0 {
-                *dst = v;
+                *dst = Some(v);
             }
         }
         if p.volume != 0.0 {
-            m.volume = p.volume as i64;
+            m.volume = Some(p.volume as i64);
+        }
+        if p.value != 0.0 {
+            m.value = Some(p.value);
         }
         if p.ts_in_millis > 0.0 {
             m.ltt = p.ts_in_millis as i64;
         }
-        m.seen = true;
     }
     if let Some(i) = &data.index_data {
         is_price = true;
-        m.ltp = i.value;
+        if i.value != 0.0 {
+            m.ltp = i.value;
+        }
         if i.ts_in_millis > 0.0 {
             m.ltt = i.ts_in_millis as i64;
         }
-        m.seen = true;
     }
     let mut is_book = false;
     if let Some(d) = &data.depth_data {
@@ -438,9 +477,115 @@ fn merge(m: &mut Merged, data: &proto::LiveData) -> (bool, bool) {
         if d.ts_in_millis > 0.0 {
             m.ltt = d.ts_in_millis as i64;
         }
-        m.seen = true;
     }
     (is_price, is_book)
+}
+
+/// A tick of an instrument's merged state, with what Groww has not sent
+/// marked absent (web openalgo#2377: a quote is the merged cache, never a
+/// 0 placeholder).
+///
+/// A message that carried no price (a book) has no trade: its tick marks
+/// the LTP absent, so the bridge only keeps what it brought. No LTP of 0 is
+/// published before the first price, and LTP and Quote holders get nothing
+/// for a book, as on the web (groww_adapter.py:966-967).
+fn merged_tick(sub: &FeedSubscription, m: &Merged, now: i64, priced: bool) -> NormalizedTick {
+    let mut t = quote_tick(sub, m, now);
+    if !priced || m.ltp == 0.0 {
+        t.mark_absent(QuoteField::Ltp);
+    }
+    if sub.mode == FeedMode::Ltp {
+        // The web sends LTP subscribers its Quote normalisation of the tick
+        // (groww_adapter.py:918-919, :975).
+        for (field, known) in [
+            (QuoteField::Open, m.open.is_some()),
+            (QuoteField::High, m.high.is_some()),
+            (QuoteField::Low, m.low.is_some()),
+            (QuoteField::Close, m.close.is_some()),
+            (QuoteField::Volume, m.volume.is_some()),
+        ] {
+            if known {
+                t.mark_carried(field);
+            }
+        }
+    }
+    // The web's merged cache keeps the traded value with the quote
+    // (groww_adapter.py:43, :1115-1116) and sends it in every mode.
+    if let Some(v) = m.value {
+        t.broker_fields
+            .set(BrokerField::TradedValue, BrokerValue::Float(v));
+    }
+    if sub.mode == FeedMode::Depth && !is_index(&sub.exchange) {
+        best_bid_ask(&mut t.extras, m);
+    }
+    t
+}
+
+/// The web lifts the top of the book a Depth subscriber gets into flat
+/// fields, each only when it is not 0 (groww_adapter.py:1020-1048). It
+/// builds them afresh from that book on every publish, so a value the book
+/// does not have (a side it emptied, a level without a price) is gone, not
+/// the last book's: cleared, where a `None` would keep it.
+fn best_bid_ask(x: &mut QuoteExtras, m: &Merged) {
+    use ExtraField as X;
+    (x.bid_price, x.bid_quantity) = best(&m.buy);
+    (x.ask_price, x.ask_quantity) = best(&m.sell);
+    for (field, known) in [
+        (X::BidPrice, x.bid_price.is_some()),
+        (X::BidQuantity, x.bid_quantity.is_some()),
+        (X::AskPrice, x.ask_price.is_some()),
+        (X::AskQuantity, x.ask_quantity.is_some()),
+    ] {
+        if !known {
+            x.clear(field);
+        }
+    }
+}
+
+/// A book side's best price and quantity, each where it is not 0.
+fn best(side: &[DepthLevel]) -> (Option<f64>, Option<i64>) {
+    side.first().map_or((None, None), |l| {
+        (
+            (l.price != 0.0).then_some(l.price),
+            (l.quantity != 0).then_some(l.quantity),
+        )
+    })
+}
+
+/// The merged quote as a tick: what Groww has not sent yet marked absent.
+fn quote_tick(sub: &FeedSubscription, m: &Merged, now: i64) -> NormalizedTick {
+    use QuoteField as F;
+    let mut t = NormalizedTick {
+        symbol: sub.symbol.clone(),
+        exchange: sub.exchange.clone(),
+        mode: sub.mode.code(),
+        ltp: m.ltp,
+        last_trade_time_ms: m.ltt,
+        timestamp_ms: now,
+        ..Default::default()
+    };
+    let mut absent = NOT_ON_THE_FEED;
+    for (slot, v, field) in [
+        (&mut t.open, m.open, F::Open),
+        (&mut t.high, m.high, F::High),
+        (&mut t.low, m.low, F::Low),
+        (&mut t.close, m.close, F::Close),
+    ] {
+        match v {
+            Some(v) => *slot = v,
+            None => absent = absent.with(field),
+        }
+    }
+    match m.volume {
+        Some(v) => t.volume = v,
+        None => absent = absent.with(F::Volume),
+    }
+    if m.close.is_none() {
+        absent = absent.with(F::Change);
+    }
+    t.absent = absent;
+    t.derive_change();
+    t
 }
 
 impl GrowwFeed {
@@ -485,8 +630,7 @@ impl GrowwFeed {
         };
         let (is_price, is_book) = merge(&mut inst.merged, &data);
         let m = &inst.merged;
-        let mode = inst.sub.mode;
-        let depth_mode = mode == FeedMode::Depth && !is_index(&inst.sub.exchange);
+        let depth_mode = inst.sub.mode == FeedMode::Depth && !is_index(&inst.sub.exchange);
         if !depth_mode && !is_price {
             // LTP / quote subscriptions ignore book ticks.
             return Vec::new();
@@ -495,48 +639,21 @@ impl GrowwFeed {
             return Vec::new();
         }
         let now = now_ms();
-        let effective = if is_index(&inst.sub.exchange) && mode == FeedMode::Depth {
-            FeedMode::Ltp
-        } else {
-            mode
-        };
-        let mut tick = NormalizedTick {
-            symbol: inst.sub.symbol.clone(),
-            exchange: inst.sub.exchange.clone(),
-            mode: mode.code(),
+        let tick = merged_tick(&inst.sub, m, now, is_price);
+        if !depth_mode {
+            return vec![FeedEvent::Tick(tick)];
+        }
+        // The book has no totals (the tick marks them absent).
+        let depth = NormalizedDepth {
+            symbol: tick.symbol.clone(),
+            exchange: tick.exchange.clone(),
             ltp: m.ltp,
-            last_trade_time_ms: m.ltt,
+            buy: m.buy.clone(),
+            sell: m.sell.clone(),
             timestamp_ms: now,
             ..Default::default()
         };
-        if effective != FeedMode::Ltp {
-            tick.open = m.open;
-            tick.high = m.high;
-            tick.low = m.low;
-            tick.close = m.close;
-            tick.volume = m.volume;
-            tick.derive_change();
-        }
-        let mut out = Vec::with_capacity(2);
-        if depth_mode {
-            tick.total_buy_quantity = m.buy.iter().map(|l| l.quantity).sum();
-            tick.total_sell_quantity = m.sell.iter().map(|l| l.quantity).sum();
-            let depth = NormalizedDepth {
-                symbol: tick.symbol.clone(),
-                exchange: tick.exchange.clone(),
-                ltp: m.ltp,
-                buy: m.buy.clone(),
-                sell: m.sell.clone(),
-                total_buy_quantity: tick.total_buy_quantity,
-                total_sell_quantity: tick.total_sell_quantity,
-                timestamp_ms: now,
-            };
-            out.push(FeedEvent::Tick(tick));
-            out.push(FeedEvent::Depth(depth));
-        } else {
-            out.push(FeedEvent::Tick(tick));
-        }
-        out
+        vec![FeedEvent::Tick(tick), FeedEvent::Depth(depth)]
     }
 
     /// Use these credentials for the next handshake (tests drive the NATS
@@ -692,9 +809,15 @@ impl BrokerFeed for GrowwFeed {
         matches!(http_status, Some(401) | Some(403))
     }
 
+    /// One frame per `SUB`, then one `PING` for the batch, as the web sends
+    /// them (nats_websocket.py:861-897).
     fn subscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
-        let mut text = String::new();
+        let mut frames = Vec::new();
         for s in subs {
+            if refusal(&s.exchange).is_some() {
+                tracing::debug!("Groww streams no {} prices; not subscribing", s.exchange);
+                continue;
+            }
             let key = s.instrument_key();
             self.forget(&key);
             let mut sids = Vec::new();
@@ -703,7 +826,7 @@ impl BrokerFeed for GrowwFeed {
                 self.next_sid += 1;
                 self.sids.insert(sid, (key.clone(), kind));
                 sids.push(sid);
-                text.push_str(&format!("SUB {} {}\r\n", subject, sid));
+                frames.push(Message::Text(format!("SUB {} {}\r\n", subject, sid)));
             }
             self.instruments.insert(
                 key,
@@ -714,27 +837,25 @@ impl BrokerFeed for GrowwFeed {
                 },
             );
         }
-        if text.is_empty() {
-            return Vec::new();
+        if !frames.is_empty() {
+            frames.push(Message::Text("PING\r\n".into()));
         }
-        text.push_str("PING\r\n");
-        vec![Message::Text(text)]
+        frames
     }
 
+    /// One frame per `UNSUB`, the book's before its price's, as the web
+    /// unsubscribes a Depth subscription and then its shadow LTP
+    /// (groww_adapter.py:610-622, nats_websocket.py:1015-1038).
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
-        let mut text = String::new();
+        let mut frames = Vec::new();
         for s in subs {
             if let Some(inst) = self.forget(&s.instrument_key()) {
                 for sid in inst.sids {
-                    text.push_str(&format!("UNSUB {}\r\n", sid));
+                    frames.push(Message::Text(format!("UNSUB {}\r\n", sid)));
                 }
             }
         }
-        if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![Message::Text(text)]
-        }
+        frames
     }
 
     fn parse(&mut self, msg: &Message) -> Vec<FeedEvent> {
@@ -748,5 +869,18 @@ impl BrokerFeed for GrowwFeed {
 
     fn supported_depth_levels(&self) -> &'static [u8] {
         &[5]
+    }
+
+    /// Before a deliberate close the web's client unsubscribes every live
+    /// sid, one frame each, in the order it subscribed them
+    /// (nats_websocket.py:1097-1112). The web then waits 0.2 s; the manager
+    /// sends these within its farewell bound and then closes the socket, so
+    /// the close follows them in order.
+    fn farewell_frames(&self) -> Vec<Message> {
+        let mut sids: Vec<u64> = self.sids.keys().copied().collect();
+        sids.sort_unstable();
+        sids.into_iter()
+            .map(|sid| Message::Text(format!("UNSUB {}\r\n", sid)))
+            .collect()
     }
 }

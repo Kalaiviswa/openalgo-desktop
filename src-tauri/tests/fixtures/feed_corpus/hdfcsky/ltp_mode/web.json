@@ -1,0 +1,77 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "hdfcsky",
+  "inputs_sha256": "2407b09aa2f33a35bf7539c88ca587e5d84d3d6c1eaa6de239842640f976fc5f",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": null,
+              "broker": "hdfcsky"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "hdfcsky"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "token": "2885",
+            "ltp": 1500.5,
+            "last_price": 1500.5,
+            "ltt": 1700000000,
+            "timestamp": 1700000000000,
+            "close": 0.0,
+            "prev_close": 0.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "hdfcsky",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

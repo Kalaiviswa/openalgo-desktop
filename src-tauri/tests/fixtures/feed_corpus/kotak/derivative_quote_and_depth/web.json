@@ -1,0 +1,287 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "kotak",
+  "inputs_sha256": "3d01f5fc7c5d62a1f8d6a2c4ee2c948ba05c3dd9f81dd829c1f7d39e1b56b813",
+  "instruments": [
+    {
+      "symbol": "NIFTY25NOV26FUT",
+      "exchange": "NFO",
+      "token": "53001",
+      "brsymbol": "NIFTY25NOVFUT",
+      "brexchange": "nse_fo",
+      "lotsize": 75,
+      "instrumenttype": "FUTIDX",
+      "expiry": "25-NOV-26"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY25NOV26FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY25NOV26FUT",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Depth",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 11,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY25NOV26FUT",
+              "exchange": "NFO",
+              "mode": "Depth",
+              "status": "success",
+              "broker": "kotak"
+            }
+          ],
+          "failed": [],
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 8,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV26FUT_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV26FUT",
+          "mode": 2,
+          "data": {
+            "ltp": 24450.3,
+            "volume": 1234500,
+            "open": 24400.0,
+            "high": 24520.0,
+            "low": 24360.5,
+            "close": 24380.0,
+            "average_price": 24435.15,
+            "percent_change": 0.29,
+            "last_quantity": 75,
+            "total_buy_quantity": 456000,
+            "total_sell_quantity": 398250,
+            "oi": 13456725,
+            "ltt": 1762666200000,
+            "last_trade_time": 1762666200000,
+            "symbol": "NIFTY25NOV26FUT",
+            "exchange": "NFO",
+            "timestamp": "<receipt_ms>"
+          }
+        },
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV26FUT_DEPTH",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV26FUT",
+          "mode": 3,
+          "data": {
+            "ltp": 24450.3,
+            "volume": 1234500,
+            "open": 24400.0,
+            "high": 24520.0,
+            "low": 24360.5,
+            "close": 24380.0,
+            "average_price": 24435.15,
+            "percent_change": 0.29,
+            "last_quantity": 75,
+            "total_buy_quantity": 456000,
+            "total_sell_quantity": 398250,
+            "oi": 13456725,
+            "depth": {
+              "buy": [
+                {
+                  "price": 24450.0,
+                  "quantity": 150,
+                  "orders": 3
+                },
+                {
+                  "price": 24449.5,
+                  "quantity": 300,
+                  "orders": 5
+                },
+                {
+                  "price": 24449.0,
+                  "quantity": 450,
+                  "orders": 6
+                },
+                {
+                  "price": 24448.5,
+                  "quantity": 600,
+                  "orders": 8
+                },
+                {
+                  "price": 24448.0,
+                  "quantity": 750,
+                  "orders": 9
+                }
+              ],
+              "sell": [
+                {
+                  "price": 24450.5,
+                  "quantity": 75,
+                  "orders": 1
+                },
+                {
+                  "price": 24451.0,
+                  "quantity": 225,
+                  "orders": 2
+                },
+                {
+                  "price": 24451.5,
+                  "quantity": 375,
+                  "orders": 4
+                },
+                {
+                  "price": 24452.0,
+                  "quantity": 525,
+                  "orders": 5
+                },
+                {
+                  "price": 24452.5,
+                  "quantity": 675,
+                  "orders": 7
+                }
+              ]
+            },
+            "totalbuyqty": 456000,
+            "totalsellqty": 398250,
+            "ltt": 1762666200000,
+            "last_trade_time": 1762666200000,
+            "symbol": "NIFTY25NOV26FUT",
+            "exchange": "NFO",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "kotak",
+          "serves": [
+            2
+          ]
+        },
+        {
+          "client": "a",
+          "publication": 1,
+          "mode": 2,
+          "topic_mode": 3,
+          "broker": "kotak",
+          "serves": []
+        },
+        {
+          "client": "b",
+          "publication": 1,
+          "mode": 3,
+          "topic_mode": 3,
+          "broker": "kotak",
+          "serves": [
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV26FUT_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV26FUT",
+          "mode": 2,
+          "data": {
+            "ltp": 24451.0,
+            "volume": 1235250,
+            "open": 24400.0,
+            "high": 24520.0,
+            "low": 24360.5,
+            "close": 24380.0,
+            "average_price": 24435.2,
+            "percent_change": 0.29,
+            "last_quantity": 75,
+            "total_buy_quantity": 455000,
+            "total_sell_quantity": 399000,
+            "oi": 13460000,
+            "ltt": 1762666202000,
+            "last_trade_time": 1762666202000,
+            "symbol": "NIFTY25NOV26FUT",
+            "exchange": "NFO",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "kotak",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -14,6 +14,7 @@ pub mod data_migrations;
 mod durability;
 pub mod key_vault;
 pub mod logs;
+mod manager;
 pub mod market_calendar;
 pub mod master_contract_status;
 mod master_swap;
@@ -30,12 +31,13 @@ pub mod tunnel;
 pub mod user;
 pub mod watchlist;
 pub mod webui;
+mod writer_turn;
 
 use crate::error::Result;
 pub use durability::Durability;
+use manager::SqliteConnectionManager;
 use models::Settings;
 use r2d2::{Pool, PooledConnection};
-use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +53,7 @@ thread_local! {
 
 /// Take a connection from `pool`, counted against this thread.
 pub(crate) fn checkout(pool: &Pool<SqliteConnectionManager>) -> Result<DbConn> {
+    writer_turn::give_way();
     let started = std::time::Instant::now();
     let conn = pool.get();
     let waited = started.elapsed();
@@ -88,26 +91,65 @@ pub fn open_pool(
     max_size: u32,
     durability: Durability,
 ) -> Result<Pool<SqliteConnectionManager>> {
-    let manager = SqliteConnectionManager::file(path).with_init(move |c| {
-        c.execute_batch("PRAGMA journal_mode=WAL;")?;
-        c.execute_batch(durability.pragma())?;
-        c.execute_batch("PRAGMA foreign_keys=ON;")?;
-        c.busy_handler(Some(retry_busy))
-    });
-    let pool = build_pool(manager, max_size, POOL_WAIT, FIRST_CONNECTION_LIMIT)?;
+    switch_to_wal(path)?;
+    let manager =
+        SqliteConnectionManager::file(path).with_init(move |c| init_connection(c, durability));
+    let file = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let pool = build_pool(manager, file, max_size, POOL_WAIT, FIRST_CONNECTION_LIMIT)?;
     crate::security::fsperm::restrict_db_files(path)?;
     Ok(pool)
 }
 
-/// Why a connection the pool tried to open failed: logged, and kept for
-/// [`build_pool`]'s wait for the first one.
+/// Put the file in WAL mode, on one connection, before the pool opens any.
+/// A pool opens its first two connections at once on its own threads (one
+/// for `min_idle`, one for the first checkout); on a new file both switched
+/// it to WAL, and SQLite refuses one of them at once, without a busy wait
+/// (each held the read lock the other needed gone): "database is locked" on
+/// every start with a new data folder. The mode is kept in the file, so a
+/// pooled connection's own pragma then only reads it.
+fn switch_to_wal(path: &Path) -> Result<()> {
+    let mut c = rusqlite::Connection::open(path)?;
+    c.busy_handler(Some(retry_busy))?;
+    c.execute_batch("PRAGMA journal_mode=WAL;")?;
+    Ok(())
+}
+
+/// Every pooled connection's set-up, its busy handler first so the set-up
+/// waits for a held file the way every later statement does.
+fn init_connection(c: &mut rusqlite::Connection, durability: Durability) -> rusqlite::Result<()> {
+    c.busy_handler(Some(retry_busy))?;
+    c.execute_batch("PRAGMA journal_mode=WAL;")?;
+    c.execute_batch(durability.pragma())?;
+    c.execute_batch("PRAGMA foreign_keys=ON;")
+}
+
+/// The files a connection failed to open on in this test process.
+#[cfg(test)]
+static FAILED_OPENS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+
+/// Why a connection the pool tried to open failed: logged with its file,
+/// and kept for [`build_pool`]'s wait for the first one.
 #[derive(Debug)]
-struct ConnectFailure(Arc<parking_lot::Mutex<Option<rusqlite::Error>>>);
+struct ConnectFailure {
+    why: Arc<parking_lot::Mutex<Option<rusqlite::Error>>>,
+    file: String,
+}
 
 impl r2d2::HandleError<rusqlite::Error> for ConnectFailure {
     fn handle_error(&self, error: rusqlite::Error) {
-        tracing::error!("A database connection could not be opened: {}", error);
-        *self.0.lock() = Some(error);
+        #[cfg(test)]
+        FAILED_OPENS
+            .lock()
+            .push(format!("{}: {}", self.file, error));
+        tracing::error!(
+            "A database connection could not be opened ({}): {}",
+            self.file,
+            error
+        );
+        *self.why.lock() = Some(error);
     }
 }
 
@@ -132,6 +174,7 @@ fn workers() -> Arc<scheduled_thread_pool::ScheduledThreadPool> {
 /// opened, up to `limit`, and a failure to open it ends the wait.
 fn build_pool(
     manager: SqliteConnectionManager,
+    file: String,
     max_size: u32,
     wait: Duration,
     limit: Duration,
@@ -142,7 +185,10 @@ fn build_pool(
         .min_idle(Some(1))
         .connection_timeout(wait)
         .idle_timeout(Some(Duration::from_secs(300)))
-        .error_handler(Box::new(ConnectFailure(failure.clone())))
+        .error_handler(Box::new(ConnectFailure {
+            why: failure.clone(),
+            file,
+        }))
         .thread_pool(workers())
         .build_unchecked(manager);
     let started = std::time::Instant::now();
@@ -208,6 +254,7 @@ fn retry_busy(attempt: i32) -> bool {
         static WAITING_SINCE: std::cell::Cell<Option<std::time::Instant>> =
             const { std::cell::Cell::new(None) };
     }
+    writer_turn::note_poll();
     let now = std::time::Instant::now();
     let since = WAITING_SINCE.with(|s| {
         if attempt == 0 || s.get().is_none() {
@@ -316,12 +363,13 @@ mod tests {
     #[test]
     fn a_first_connection_slower_than_a_checkout_is_waited_for() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SqliteConnectionManager::file(dir.path().join("slow.db")).with_init(|_| {
+        let manager = SqliteConnectionManager::file(&dir.path().join("slow.db")).with_init(|_| {
             std::thread::sleep(Duration::from_millis(300));
             Ok(())
         });
         let pool = build_pool(
             manager,
+            "slow.db".into(),
             2,
             Duration::from_millis(50),
             Duration::from_secs(60),
@@ -334,10 +382,11 @@ mod tests {
     #[test]
     fn a_first_connection_that_fails_fails_the_open_at_once() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SqliteConnectionManager::file(dir.path().join("missing").join("x.db"));
+        let manager = SqliteConnectionManager::file(&dir.path().join("missing").join("x.db"));
         let started = std::time::Instant::now();
         let refused = build_pool(
             manager,
+            "x.db".into(),
             2,
             Duration::from_millis(50),
             Duration::from_secs(60),
@@ -351,6 +400,59 @@ mod tests {
             started.elapsed()
         );
         assert!(e.to_string().contains("unable to open"), "{}", e);
+    }
+
+    /// The opens refused because another connection held the file, as
+    /// `file: reason`.
+    fn locked_opens() -> Vec<String> {
+        FAILED_OPENS
+            .lock()
+            .iter()
+            .filter(|f| f.contains("locked") || f.contains("busy"))
+            .cloned()
+            .collect()
+    }
+
+    /// A pool on a new file opens its first two connections at once; both
+    /// switched the file to WAL and SQLite refused one, without a wait.
+    #[test]
+    fn a_new_file_opens_its_first_connections_first_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<String> = (0..20).map(|i| format!("new-{}.db", i)).collect();
+        for f in &files {
+            let pool = open_pool(&dir.path().join(f), 4, Durability::MAIN).unwrap();
+            let c = pool.get().unwrap();
+            let mode: String = c
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            // The pool's second connection has finished opening.
+            let _second = pool.get().unwrap();
+        }
+        let ours: Vec<String> = locked_opens()
+            .into_iter()
+            .filter(|f| files.iter().any(|n| f.starts_with(&format!("{}: ", n))))
+            .collect();
+        assert_eq!(ours, Vec::<String>::new());
+    }
+
+    /// The app's start on a new data folder opens every database
+    /// connection the first time (the e2e lane saw "database is locked"
+    /// logged on every start on a temporary folder).
+    #[tokio::test]
+    async fn a_fresh_app_start_opens_every_connection_first_time() {
+        let mut files = Vec::new();
+        for _ in 0..5 {
+            let t = crate::state::testing::build(
+                crate::brokers::BrokerRegistry::new(),
+                chrono::Utc::now(),
+            );
+            assert!(t.ctx.sqlite.get_settings().is_ok());
+            for e in std::fs::read_dir(t.dir.path()).unwrap().flatten() {
+                files.push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+        assert_eq!(locked_opens(), Vec::<String>::new(), "files: {:?}", files);
     }
 
     /// DB-01: a write waiting behind a transaction gets in during the

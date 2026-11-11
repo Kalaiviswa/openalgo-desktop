@@ -12,8 +12,11 @@ name: CI
 #   (a release ships tauri-build's bundles of its master run, signed for
 #   in-app updates by release.yml, not rebuilt: scripts/ci/release_bundles.py)
 #   e2e (Playwright against vite preview)
+#   e2e-flow (Flow's journeys in Playwright against the real Rust server:
+#             e2e-flow.yml)
 #   secret-scan (gitleaks, full history)
 #   code-health (size, dead code and suppression ratchet; CLAUDE.md "Code health")
+#   web-oracle (the feed corpus's web.json against the web at its pinned commit)
 #
 #   ci-ok needs every job above and fails unless all of them succeeded.
 #   Branch protection should require only the "ci-ok" check
@@ -126,7 +129,7 @@ jobs:
           workspaces: src-tauri -> target
           shared-key: rust-test-${{ matrix.os }}
           cache-on-failure: true
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
       - name: Unit and integration tests (nextest)
@@ -152,6 +155,20 @@ jobs:
           | test(/^server::tests::credentials_lifecycle::sec0[234]/)
           | test(=db::sqlite::data_migrations::tests::upgrade_from_previous_build_keeps_every_secret_readable)
           | test(/^cache::tests::/) | test(/^services::apikey_service::tests::/)'
+      - name: Flow triggers leak nothing, measured alone
+        # Decision 27 (T-111, X-346): the fd-audit measurement, activating
+        # and deactivating every trigger kind 100 times, in its own step
+        # and process with nothing else running, so the descriptor, task
+        # and RSS counts are its own. Ignored in the full suite for that
+        # reason. Windows has no /dev/fd or ps, so there it checks the
+        # registrations and tasks only. It runs even when the full suite
+        # failed, so the measurement is always in the log.
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri
+        run: >-
+          cargo nextest run --locked --lib --config-file ../.github/nextest.toml
+          --run-ignored only --no-tests=fail --no-capture
+          -E 'test(=server::tests::flow_triggers::triggers_do_not_leak)'
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7
@@ -182,7 +199,7 @@ jobs:
           workspaces: src-tauri -> target
           shared-key: rust-coverage-ubuntu-22.04
           cache-on-failure: true
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov,cargo-nextest
       - name: Run tests with coverage instrumentation
@@ -299,6 +316,12 @@ jobs:
         run: npx biome ci --reporter=github ./src
       - name: Type check
         run: npx tsc -b
+      - name: Type check tests
+        # tsc -b checks tsconfig.app.json alone, which leaves out every test
+        # file and src/test/, and vitest strips types without checking them,
+        # so a test could keep passing against a field or prop that no longer
+        # exists (docs/audit/2026-10-03/06-build-ci.md, 6.4).
+        run: npx tsc -p tsconfig.test.json --noEmit
       - name: Chart engine references match the pinned openalgo-charts
         # The web's chart-indicator-skill job: a version bump that leaves the
         # chart-indicator skill's export index or the generated drawing-tool
@@ -403,6 +426,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Flow's journeys against the app's real server (the e2e_server example,
+  # scripted broker, analyzer mode): e2e-flow.yml.
+  e2e-flow:
+    name: e2e-flow
+    uses: ./.github/workflows/e2e-flow.yml
+
   # ------------------------------------------------------------ Secrets
   secret-scan:
     name: secret-scan (gitleaks)
@@ -444,8 +473,46 @@ jobs:
             args=(--base-ref FETCH_HEAD)
           fi
           python3 scripts/ci/code_health.py "${args[@]}"
+      - name: Feed parity matrix is current
+        run: python3 scripts/feed_corpus/parity_matrix.py --check
+      - name: Feed parity release gate (review R107-15)
+        # Fails while a corpus deviation names no approval rule, a case
+        # declares an open gap, a capability the web offers has no case, or a
+        # harness module does not build its broker. A pull request may not
+        # raise a ceiling on the steps the web replay does not model without a
+        # rule in approvals.json.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          args=(--check)
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF"
+            args+=(--base-ref FETCH_HEAD)
+          fi
+          python3 scripts/feed_corpus/release_gate.py "${args[@]}"
 
   # ------------------------------------------------------- Tauri bundles
+  web-oracle:
+    name: web-oracle (feed corpus against the web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: The web commit the corpus is pinned to
+        id: pin
+        run: python3 scripts/feed_corpus/web_expected.py --print-pin >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: marketcalls/openalgo
+          ref: ${{ steps.pin.outputs.web_sha }}
+          path: web-tree
+          persist-credentials: false
+      - name: Every web.json is the web's output at that commit
+        run: python3 scripts/feed_corpus/web_expected.py --web web-tree --check
+      - name: The oracle's probes
+        run: python3 scripts/feed_corpus/test_oracle.py --web web-tree
+
   tauri-build:
     name: tauri-build (${{ matrix.name }})
     needs: [rust-lint, rust-test, frontend, frontend-test]
@@ -598,8 +665,10 @@ jobs:
       - frontend
       - frontend-test
       - e2e
+      - e2e-flow
       - secret-scan
       - code-health
+      - web-oracle
       - tauri-build
       - install-smoke
       - native-e2e

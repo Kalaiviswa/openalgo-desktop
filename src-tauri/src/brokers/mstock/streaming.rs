@@ -30,9 +30,10 @@
 //!
 //! mStock has no order-update stream.
 
+use crate::brokers::common::mapping::Exchange;
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedSubscription, Message, NormalizedDepth, NormalizedTick,
-    WsRequest,
+    now_ms, AbsentFields, BrokerFeed, FeedEvent, FeedSubscription, Message, NormalizedDepth,
+    NormalizedTick, QuoteField, WsRequest,
 };
 use crate::brokers::types::DepthLevel;
 use crate::error::{AppError, Result};
@@ -193,6 +194,55 @@ pub fn parse_frame(data: &[u8]) -> Vec<Packet> {
         .collect()
 }
 
+/// The trade time a packet carries, epoch ms (web `_normalize_market_data`,
+/// openalgo#2383): a full packet's last traded timestamp, or the exchange
+/// timestamp of the shorter ones, which have no other. The packet's own
+/// mode decides, since a Quote subscriber is sent the full packet while
+/// Depth is open on the instrument. A full packet with no trade yet (0) has
+/// none, rather than its feed time passed off as one. The last traded
+/// timestamp is epoch seconds as the SmartAPI layout mStock follows sends
+/// it; one already in milliseconds is kept.
+fn trade_time_ms(q: &Packet) -> Option<i64> {
+    epoch_ms(if q.mode == 3 {
+        q.last_traded_timestamp
+    } else {
+        q.exchange_timestamp
+    })
+}
+
+/// A packet time in epoch ms, or none for 0 (not sent). A time below
+/// 10^12 is epoch seconds and is scaled.
+fn epoch_ms(raw: u64) -> Option<i64> {
+    let raw = i64::try_from(raw).ok().filter(|t| *t > 0)?;
+    Some(if raw < 1_000_000_000_000 {
+        raw * 1000
+    } else {
+        raw
+    })
+}
+
+/// An index has no trades of its own, so mStock's fixed packet fills its
+/// last quantity, average price and book totals with 0, which the web
+/// sends on (mstock_adapter.py:362-375). A 0 there is no value: it is left
+/// out, and nothing kept from an earlier packet stands in for it (lead
+/// ruling 2026-11-09, the web's zeros an approved web defect); a value the
+/// packet does carry is sent, as the web sends it.
+fn clear_unfilled_order_flow(t: &mut NormalizedTick) {
+    use QuoteField as F;
+    if t.last_quantity == 0 {
+        t.mark_cleared(F::LastQuantity);
+    }
+    if t.average_price == 0.0 {
+        t.mark_cleared(F::AveragePrice);
+    }
+    if t.total_buy_quantity == 0 {
+        t.mark_cleared(F::TotalBuyQuantity);
+    }
+    if t.total_sell_quantity == 0 {
+        t.mark_cleared(F::TotalSellQuantity);
+    }
+}
+
 /// `{"action": 1|0, "params": {"mode", "tokenList"}}` per mode.
 pub fn sub_frames(subs: &[(u8, u8, String)], subscribe: bool) -> Vec<Message> {
     let mut by_mode: BTreeMap<u8, BTreeMap<u8, Vec<String>>> = BTreeMap::new();
@@ -241,6 +291,8 @@ pub fn feed_url(base: &str, private_key: &str, jwt: &str) -> String {
 struct SubInfo {
     symbol: String,
     exchange: String,
+    /// An index (NSE_INDEX, BSE_INDEX): no trades of its own.
+    index: bool,
 }
 
 pub struct MstockFeed {
@@ -280,6 +332,7 @@ impl MstockFeed {
                     SubInfo {
                         symbol: s.symbol.clone(),
                         exchange: s.exchange.clone(),
+                        index: s.exchange.parse::<Exchange>().is_ok_and(Exchange::is_index),
                     },
                 );
             } else {
@@ -298,15 +351,25 @@ impl MstockFeed {
             let Some(sub) = self.subs.get(&(q.exchange_type, q.token.clone())) else {
                 continue;
             };
+            let trade_time = trade_time_ms(&q);
             let mut t = NormalizedTick {
                 symbol: sub.symbol.clone(),
                 exchange: sub.exchange.clone(),
                 mode: q.mode.clamp(1, 3),
                 ltp: q.ltp,
-                last_trade_time_ms: i64::try_from(q.exchange_timestamp).unwrap_or(0),
+                last_trade_time_ms: trade_time.unwrap_or(0),
                 timestamp_ms: now,
+                absent: if trade_time.is_none() {
+                    AbsentFields::of(&[QuoteField::LastTradeTime])
+                } else {
+                    AbsentFields::default()
+                },
                 ..Default::default()
             };
+            // The web sends the packet's exchange time as
+            // `exchange_timestamp` in every mode, when it is not 0
+            // (mstock_adapter.py:357-358).
+            t.extras.exchange_time_ms = epoch_ms(q.exchange_timestamp);
             if q.mode >= 2 {
                 t.last_quantity = i64::try_from(q.last_traded_qty).unwrap_or(0);
                 t.average_price = q.avg_price;
@@ -319,6 +382,16 @@ impl MstockFeed {
                 t.close = q.close;
                 t.oi = i64::try_from(q.oi).unwrap_or(0);
                 t.derive_change();
+                if sub.index {
+                    clear_unfilled_order_flow(&mut t);
+                }
+            }
+            if q.mode == 3 {
+                // Only the full packet has the circuit limits, and the web
+                // sends them from it as they are, 0.0 included
+                // (mstock_adapter.py:425-426).
+                t.extras.upper_circuit = Some(q.upper_circuit);
+                t.extras.lower_circuit = Some(q.lower_circuit);
             }
             let depth = (q.mode == 3 && !q.bids.is_empty()).then(|| NormalizedDepth {
                 symbol: t.symbol.clone(),
@@ -329,6 +402,7 @@ impl MstockFeed {
                 total_buy_quantity: t.total_buy_quantity,
                 total_sell_quantity: t.total_sell_quantity,
                 timestamp_ms: now,
+                ..Default::default()
             });
             out.push(FeedEvent::Tick(t));
             if let Some(d) = depth {

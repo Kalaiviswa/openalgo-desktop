@@ -1,0 +1,72 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "rmoney",
+  "inputs_sha256": "79174fad4e26b71bdd2dd82f5e388d312734a55a67c4d7fecd8dd6713999d93e",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSECM"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "partial",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "error",
+              "message": "Invalid depth level 30. Must be 5 or 20",
+              "broker": "rmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "rmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "partial",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "error",
+              "message": "Invalid depth level 50. Must be 5 or 20",
+              "broker": "rmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "rmoney"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 4,
+      "published": [],
+      "deliveries": []
+    }
+  ]
+}

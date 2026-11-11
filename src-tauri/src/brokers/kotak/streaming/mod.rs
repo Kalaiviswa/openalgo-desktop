@@ -1,0 +1,555 @@
+//! Kotak Neo market feed (SFeed `native_batch`; web
+//! `streaming/sfeed_protocol.py`, `sfeed_websocket.py`, `kotak_adapter.py`).
+//! Which host a data centre streams from is `feed_config`; order updates are
+//! `order_feed`.
+//!
+//! SFeed control plane is JSON text:
+//! * after connect: `{"user": <UCC>, "auth": <trading sid>, "format":
+//!   "native_batch", "source": "NEOTRADEAPI", ...}`; the answer carries
+//!   `message_code` 1117 or 1119 and per-exchange price `divider`s;
+//!   `"format": "native_fallback"` means the server refused the binary
+//!   format.
+//! * `{"event": "subscribeScrips"|"subscribeDepth"|"subscribeIndices",
+//!   "inputtoken": "nse_cm|11536,nse_cm|1594", "ack_symbol": true}` and the
+//!   `unsubscribe*` twins; acks (1109) map `seg|token` to trading symbols.
+//! * keepalive: a WebSocket ping every 30 s, answered within 10 s.
+//!
+//! What a packet does not carry is left out of the frames, never sent as 0
+//! (web openalgo#2376): a mini touch line before the first market picture
+//! has only a price, the previous close and the last trade; an index packet
+//! has no volume, average price, traded quantity, totals or OI; nothing has
+//! a trade time before the first trade. A depth packet replaces the book. An
+//! index tick reaches every OpenAlgo symbol subscribed under its name
+//! (NIFTY and NIFTY50), and the name's feed stays until the last goes.
+//!
+//! The binary packets are decoded in `decode` (re-exported here); what each
+//! packet says, as ticks and books, is `ticks`.
+
+mod decode;
+mod ticks;
+
+pub use decode::*;
+use ticks::{depth_event, packet_tick, Book};
+
+use super::data::{index_candidates, is_index, kotak_segment};
+use super::feed_config::{lookup_feed_url, FeedLookup};
+use crate::brokers::common::streaming::{
+    now_ms, ping, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, PrepareError,
+    WsRequest, WEB_PING_INTERVAL, WEB_PING_TIMEOUT,
+};
+use crate::brokers::common::symbols::SymbolResolver;
+use crate::error::{AppError, Result};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+pub const MSG_AUTH_RESPONSE: [u64; 2] = [1117, 1119];
+pub const MSG_SUBSCRIBE_ACK: u64 = 1109;
+/// Subscribed tokens per connection (web `MAX_SUBSCRIPTIONS`).
+pub const MAX_SUBSCRIPTIONS: usize = 3000;
+/// How long the login waits for its answer (web `AUTH_TIMEOUT_SECONDS`).
+const SFEED_LOGIN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The feed's segment for an OpenAlgo exchange. BSE currency derivatives
+/// stream as `bse_cd` (SFeed exchange id 7, web `kotak_mapping.py`); the
+/// REST map has no BCD, so BCD was never subscribed.
+fn feed_segment(exchange: &str) -> Option<&'static str> {
+    match exchange {
+        "BCD" => Some("bse_cd"),
+        other => kotak_segment(other),
+    }
+}
+
+/// An SFeed stream a subscription runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    Depth,
+    Scrips,
+    Indices,
+}
+
+impl Stream {
+    /// The streams a subscription asks for, in the web's order: an index
+    /// its index feed; Depth the depth stream and then the scrip stream for
+    /// the price (Kotak sends them apart; `subscribe` calls
+    /// `subscribe_depth` before `subscribe_quote`); the quote modes the
+    /// scrip stream.
+    fn of(index: bool, mode: FeedMode) -> &'static [Stream] {
+        if index {
+            &[Stream::Indices]
+        } else if mode == FeedMode::Depth {
+            &[Stream::Depth, Stream::Scrips]
+        } else {
+            &[Stream::Scrips]
+        }
+    }
+
+    fn event(self, add: bool) -> &'static str {
+        match (self, add) {
+            (Stream::Depth, true) => "subscribeDepth",
+            (Stream::Scrips, true) => "subscribeScrips",
+            (Stream::Indices, true) => "subscribeIndices",
+            (Stream::Depth, false) => "unsubscribeDepth",
+            (Stream::Scrips, false) => "unsubscribeScrips",
+            (Stream::Indices, false) => "unsubscribeIndices",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SubInfo {
+    symbol: String,
+    exchange: String,
+    mode: FeedMode,
+    /// The key the subscription was sent under (`seg|token` or
+    /// `seg|<index name>`).
+    input: String,
+    /// Aliases an inbound packet may carry (token, every index name).
+    aliases: Vec<(String, String)>,
+}
+
+/// The Kotak SFeed market-data feed.
+pub struct KotakFeed {
+    url: String,
+    lookup: Option<FeedLookup>,
+    user: String,
+    sid: String,
+    dividers: HashMap<i8, f64>,
+    /// `seg|token` -> trading symbol from subscribe acks (subscribed keys only).
+    trading_symbols: HashMap<String, String>,
+    subs: HashMap<String, SubInfo>,
+    /// Inbound alias -> every subscription key under it: NIFTY and NIFTY50
+    /// both subscribe "Nifty 50".
+    aliases: HashMap<(String, String), Vec<String>>,
+    /// The book of each subscription whose depth packets have filled one.
+    books: HashMap<String, Book>,
+}
+
+impl KotakFeed {
+    pub fn new(url: &str, sid: &str, ucc: String, _symbols: SymbolResolver) -> Self {
+        Self {
+            url: url.to_string(),
+            lookup: None,
+            user: if ucc.is_empty() { "neome".into() } else { ucc },
+            sid: sid.to_string(),
+            dividers: HashMap::new(),
+            trading_symbols: HashMap::new(),
+            subs: HashMap::new(),
+            aliases: HashMap::new(),
+            books: HashMap::new(),
+        }
+    }
+
+    /// Look the data centre's feed host up in `prepare` (once), `fallback`
+    /// where the config names none or cannot be read, and remember it in
+    /// the broker's `cache`.
+    pub fn with_lookup(
+        mut self,
+        http: reqwest::Client,
+        config_url: String,
+        fallback: String,
+        data_center: String,
+        cache: std::sync::Arc<parking_lot::Mutex<Option<(String, String)>>>,
+    ) -> Self {
+        self.lookup = Some(FeedLookup {
+            http,
+            config_url,
+            fallback,
+            data_center,
+            cache,
+        });
+        self
+    }
+
+    /// The address the next connect uses.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The `native_batch` authentication frame (web `_build_auth_frame`).
+    pub fn auth_frame(&self) -> Value {
+        json!({
+            "user": self.user,
+            "auth": if self.sid.is_empty() { "1" } else { self.sid.as_str() },
+            "format": "native_batch",
+            "source": "NEOTRADEAPI",
+            "platform": "Web",
+            "version": "1.2.3",
+            "sdk_version": 2,
+            "sdk_date": "2026-08-07T09:41:17.667Z",
+            "conn_req_time": now_ms(),
+            "sessionValidation": false,
+        })
+    }
+
+    fn sub_key(s: &FeedSubscription) -> String {
+        format!("{}:{}", s.exchange, s.symbol)
+    }
+
+    /// Register (or drop) a subscription and its aliases; returns the
+    /// `inputtoken` entry it is sent as.
+    fn register(&mut self, s: &FeedSubscription, add: bool) -> Option<(bool, String)> {
+        let seg = feed_segment(&s.exchange)?;
+        let key = Self::sub_key(s);
+        let index = is_index(&s.exchange);
+        let names = if index {
+            index_candidates(&s.symbol)
+        } else {
+            Vec::new()
+        };
+        let input = if index {
+            format!("{}|{}", seg, names.first().cloned().unwrap_or_default())
+        } else {
+            if s.token.trim().is_empty() {
+                return None;
+            }
+            format!("{}|{}", seg, s.token.trim())
+        };
+        if add {
+            let mut aliases: Vec<(String, String)> = Vec::new();
+            if !s.token.trim().is_empty() {
+                aliases.push((seg.to_string(), s.token.trim().to_string()));
+            }
+            for n in &names {
+                aliases.push((seg.to_string(), n.clone()));
+                aliases.push((seg.to_string(), n.to_ascii_uppercase()));
+            }
+            if index {
+                aliases.push((seg.to_string(), s.symbol.clone()));
+            }
+            for a in &aliases {
+                let keys = self.aliases.entry(a.clone()).or_default();
+                if !keys.contains(&key) {
+                    keys.push(key.clone());
+                }
+            }
+            self.subs.insert(
+                key,
+                SubInfo {
+                    symbol: s.symbol.clone(),
+                    exchange: s.exchange.clone(),
+                    mode: s.mode,
+                    input: input.clone(),
+                    aliases,
+                },
+            );
+        } else if let Some(old) = self.subs.remove(&key) {
+            for a in &old.aliases {
+                if let Some(keys) = self.aliases.get_mut(a) {
+                    keys.retain(|k| k != &key);
+                    if keys.is_empty() {
+                        self.aliases.remove(a);
+                    }
+                }
+            }
+            self.books.remove(&key);
+            if !self.input_in_use(&old.input) {
+                self.trading_symbols.remove(&old.input);
+            }
+        }
+        Some((index, input))
+    }
+
+    /// Whether a subscription still streams under `input` (NIFTY50 under
+    /// "Nifty 50" once NIFTY has gone).
+    fn input_in_use(&self, input: &str) -> bool {
+        self.subs.values().any(|s| s.input == input)
+    }
+
+    fn event_frame(event: &str, inputs: &[String], ack: bool) -> Message {
+        let mut v = json!({"event": event, "inputtoken": inputs.join(",")});
+        if ack {
+            v["ack_symbol"] = json!(true);
+        }
+        Message::Text(v.to_string())
+    }
+
+    /// The subscribe (or unsubscribe) frames for `subs`, as the web's
+    /// adapter batches them: one frame per stream, the streams in the order
+    /// their first subscription asks for them (`_process_batch_subscriptions`).
+    fn frames(&mut self, subs: &[FeedSubscription], add: bool) -> Vec<Message> {
+        let mut batch: Vec<(Stream, Vec<String>)> = Vec::new();
+        for s in subs {
+            if add
+                && !self.subs.contains_key(&Self::sub_key(s))
+                && self.subs.len() >= MAX_SUBSCRIPTIONS
+            {
+                tracing::warn!(
+                    "Kotak feed is at its {} instrument limit; {} not subscribed",
+                    MAX_SUBSCRIPTIONS,
+                    s.symbol
+                );
+                continue;
+            }
+            let Some((index, input)) = self.register(s, add) else {
+                tracing::warn!("No Kotak feed key for {}:{}", s.exchange, s.symbol);
+                continue;
+            };
+            // The broker feed for a key stays until the last subscription
+            // under it goes (web openalgo#2376).
+            if !add && self.input_in_use(&input) {
+                continue;
+            }
+            for stream in Stream::of(index, s.mode) {
+                let at = match batch.iter().position(|(st, _)| st == stream) {
+                    Some(i) => i,
+                    None => {
+                        batch.push((*stream, Vec::new()));
+                        batch.len() - 1
+                    }
+                };
+                // NIFTY and NIFTY50 name one index feed: one entry a frame.
+                let inputs = &mut batch[at].1;
+                if !inputs.contains(&input) {
+                    inputs.push(input.clone());
+                }
+            }
+        }
+        batch
+            .into_iter()
+            .map(|(st, inputs)| Self::event_frame(st.event(add), &inputs, add))
+            .collect()
+    }
+
+    /// Every subscription a packet names, by its token, else its name: an
+    /// index tick reaches each OpenAlgo symbol subscribed under the name
+    /// (NIFTY and NIFTY50), each with its own state.
+    fn lookup(&self, exchange: &str, token: &str, name: &str) -> Vec<String> {
+        let get = |k: &str| self.aliases.get(&(exchange.to_string(), k.to_string()));
+        get(token)
+            .or_else(|| (!name.is_empty()).then(|| get(name)).flatten())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// One packet: a tick for each subscription it names (every OpenAlgo
+    /// symbol under an index's name), and for a Depth subscription whose
+    /// book has arrived, that book with the packet's price. Kotak sends the
+    /// price and the book in separate packets; the web republishes the
+    /// depth with its cached book on every packet
+    /// (`kotak_adapter._on_data_received`, mode 3), so the option chain, the
+    /// order dialog and every Depth holder see the price move between book
+    /// updates.
+    fn on_packet(&mut self, pkt: Sfeed, out: &mut Vec<FeedEvent>) {
+        let keys = match &pkt {
+            Sfeed::Scrip {
+                exchange, token, ..
+            }
+            | Sfeed::Lite {
+                exchange, token, ..
+            } => self.lookup(exchange, token, ""),
+            Sfeed::Index {
+                exchange,
+                token,
+                name,
+                ..
+            } => {
+                // An index answers with a token of Kotak's choosing; its name
+                // is the identity it was subscribed under.
+                let keys = self.lookup(exchange, token, name);
+                if keys.is_empty() {
+                    self.lookup(exchange, "", &name.to_ascii_uppercase())
+                } else {
+                    keys
+                }
+            }
+            Sfeed::MarketStatus { exchange, code } => {
+                tracing::info!("Kotak market status: {} code {}", exchange, code);
+                return;
+            }
+            Sfeed::Cas { .. } => return,
+        };
+        let now = now_ms();
+        for key in keys {
+            let Some(sub) = self.subs.get(&key) else {
+                continue;
+            };
+            let Some(tick) = packet_tick(sub, &pkt, now) else {
+                continue;
+            };
+            if let Sfeed::Scrip {
+                level: 8 | 16,
+                buy,
+                sell,
+                ..
+            } = &pkt
+            {
+                self.books.insert(key.clone(), Book::of(buy, sell));
+            }
+            out.push(FeedEvent::Tick(tick));
+            if sub.mode == FeedMode::Depth && !is_index(&sub.exchange) {
+                if let Some(book) = self.books.get(&key) {
+                    out.push(FeedEvent::Depth(depth_event(sub, book, &pkt, now)));
+                }
+            }
+        }
+    }
+
+    /// Decode one binary frame.
+    pub fn parse_binary(&mut self, frame: &[u8]) -> Vec<FeedEvent> {
+        let mut out = Vec::new();
+        let packets: Vec<Sfeed> = split_batch(frame)
+            .into_iter()
+            .filter_map(|p| decode_packet(p, &self.dividers))
+            .collect();
+        for p in packets {
+            self.on_packet(p, &mut out);
+        }
+        out
+    }
+
+    /// One JSON control frame.
+    pub fn parse_text(&mut self, text: &str) -> Vec<FeedEvent> {
+        let Ok(v) = serde_json::from_str::<Value>(text) else {
+            tracing::debug!("Kotak feed non-JSON text frame");
+            return Vec::new();
+        };
+        let code = v.get("message_code").and_then(Value::as_u64);
+        match code {
+            Some(c) if MSG_AUTH_RESPONSE.contains(&c) => {
+                if v.get("format").and_then(Value::as_str) == Some("native_fallback") {
+                    tracing::error!("Kotak SFeed downgraded the connection to native_fallback");
+                    return vec![FeedEvent::AuthFailed(
+                        "Kotak's live market data refused this connection. Log in to Kotak again; if it keeps happening, contact Kotak support."
+                            .into(),
+                    )];
+                }
+                self.dividers = parse_dividers(&v);
+                vec![FeedEvent::AuthOk]
+            }
+            Some(MSG_SUBSCRIBE_ACK) => {
+                let map = v
+                    .get("trading_symbols")
+                    .or_else(|| v.get("tradingSymbols"))
+                    .and_then(Value::as_object);
+                if let Some(m) = map {
+                    for (k, sym) in m {
+                        // Only for keys we subscribed: bounded by the subs.
+                        if self.subs.values().any(|s| &s.input == k) {
+                            if let Some(sym) = sym.as_str() {
+                                self.trading_symbols.insert(k.clone(), sym.to_string());
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Instruments currently registered (tests and diagnostics).
+    pub fn subscription_count(&self) -> usize {
+        self.subs.len()
+    }
+
+    /// Books kept (bounded by subscriptions).
+    pub fn state_len(&self) -> usize {
+        self.books.len()
+    }
+}
+
+#[async_trait::async_trait]
+impl BrokerFeed for KotakFeed {
+    fn broker(&self) -> &'static str {
+        "kotak"
+    }
+
+    async fn prepare(&mut self) -> std::result::Result<(), PrepareError> {
+        if let Some(l) = self.lookup.take() {
+            let url = lookup_feed_url(&l.http, &l.config_url, &l.fallback, &l.data_center).await;
+            *l.cache.lock() = Some((l.data_center.clone(), url.clone()));
+            self.url = url;
+        }
+        Ok(())
+    }
+
+    fn ws_request(&self) -> Result<WsRequest> {
+        self.url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| AppError::Internal("Kotak feed address is invalid".into()))
+    }
+
+    fn on_connected(&mut self) -> Vec<Message> {
+        // A new connection authenticates again; old dividers and partial
+        // state do not carry over.
+        self.dividers.clear();
+        self.books.clear();
+        vec![Message::Text(self.auth_frame().to_string())]
+    }
+
+    fn awaits_auth_ack(&self) -> bool {
+        true
+    }
+
+    /// The web closes a login left unanswered for 15 s and reconnects
+    /// (`sfeed_websocket.py` `_watch_auth`, `AUTH_TIMEOUT_SECONDS`): the
+    /// socket stays open on a rejected login, which looks like a quiet
+    /// market.
+    fn auth_ack_deadline(&self) -> Option<Duration> {
+        Some(SFEED_LOGIN_TIMEOUT)
+    }
+
+    /// The web pings the feed every 30 s and drops a socket that has not
+    /// answered 10 s later (`sfeed_websocket.py`: `run_forever(
+    /// ping_interval=30, ping_timeout=10)`).
+    fn heartbeat(&self) -> Option<(Duration, Message)> {
+        Some((WEB_PING_INTERVAL, ping()))
+    }
+
+    fn heartbeat_reply_timeout(&self) -> Option<Duration> {
+        Some(WEB_PING_TIMEOUT)
+    }
+
+    fn subscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
+        self.frames(subs, true)
+    }
+
+    fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
+        self.frames(subs, false)
+    }
+
+    /// A mode change as the web's adapter makes it: a higher mode is a new
+    /// subscription, so it asks again for every stream that mode runs on
+    /// (`subscribe`: the depth stream and the scrip stream for Depth); a
+    /// lower one drops only the depth stream, the quote modes still holding
+    /// the scrip stream (`unsubscribe_depth`, `unsubscribe_quote`).
+    fn mode_change_frames(
+        &mut self,
+        old: &FeedSubscription,
+        new: &FeedSubscription,
+    ) -> Vec<Message> {
+        let index = is_index(&new.exchange);
+        self.register(new, true);
+        let Some(input) = self.subs.get(&Self::sub_key(new)).map(|s| s.input.clone()) else {
+            return Vec::new();
+        };
+        if new.mode > old.mode {
+            return Stream::of(index, new.mode)
+                .iter()
+                .map(|st| Self::event_frame(st.event(true), std::slice::from_ref(&input), true))
+                .collect();
+        }
+        if old.mode == FeedMode::Depth && !index {
+            // The book goes with the depth stream; the quote stays with the
+            // bridge.
+            self.books.remove(&Self::sub_key(new));
+            return vec![Self::event_frame(
+                Stream::Depth.event(false),
+                &[input],
+                false,
+            )];
+        }
+        Vec::new()
+    }
+
+    fn parse(&mut self, msg: &Message) -> Vec<FeedEvent> {
+        match msg {
+            Message::Binary(b) => self.parse_binary(b),
+            Message::Text(t) => self.parse_text(t),
+            _ => Vec::new(),
+        }
+    }
+}

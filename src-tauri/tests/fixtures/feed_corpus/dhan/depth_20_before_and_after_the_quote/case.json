@@ -1,0 +1,177 @@
+{
+  "broker": "dhan",
+  "summary": "A Depth 20 subscription on NSE: the book goes to Dhan's twentydepth socket and the quote to the market feed; a book made of both halves before any quote has no quote fields, and the next one carries the quote that came meanwhile.",
+  "scenarios": [
+    "depth-update",
+    "absent-field"
+  ],
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE_EQ"
+    }
+  ],
+  "provenance": {
+    "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+    "method": "by-hand",
+    "sources": [
+      "broker/dhan/streaming/dhan_websocket.py::DhanWebSocket._parse_20_depth_packet",
+      "broker/dhan/streaming/dhan_adapter.py::DhanWebSocketAdapter._on_data_20depth"
+    ],
+    "notes": [
+      "Worked by hand from dhan_websocket.py:889-912 (20 rows of f64 price, u32 quantity, u32 orders; code 41 bids, 51 asks) and dhan_adapter.py:791-859 (each half kept until the other comes, then one DEPTH publish)."
+    ]
+  },
+  "deviations": [
+    {
+      "key": "ltp",
+      "kind": "desktop-decision",
+      "reason": "A depth frame keeps ltp, which the SDK's Depth callback reads: 0 before the instrument's first quote, its last traded price after; the web's 20-level frame has no ltp.",
+      "ref": "CLAUDE.md, the absent-field rule; feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          0.0
+        ],
+        [
+          "<absent>",
+          1300.5
+        ]
+      ]
+    },
+    {
+      "key": "total_buy_quantity",
+      "kind": "desktop-decision",
+      "reason": "A 20-level packet has no totals, so the book frame takes them from the instrument's latest quote on the market feed (1.0.6 decision, kept: the depth frame carries the latest quote); before any quote they are left out, as on the web.",
+      "ref": "decisions.md (Kept: depth frame keeps ltp + timestamp + latest quote); feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          9000
+        ]
+      ]
+    },
+    {
+      "key": "total_sell_quantity",
+      "kind": "desktop-decision",
+      "reason": "A 20-level packet has no totals, so the book frame takes them from the instrument's latest quote on the market feed (1.0.6 decision, kept: the depth frame carries the latest quote); before any quote they are left out, as on the web.",
+      "ref": "decisions.md (Kept: depth frame keeps ltp + timestamp + latest quote); feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          7000
+        ]
+      ]
+    },
+    {
+      "key": "ltt",
+      "kind": "desktop-decision",
+      "reason": "The desktop's Depth frame carries the instrument's latest quote, its trade time included (1.0.6 decision, kept for 1.0.7: the depth frame keeps ltp, timestamp and the latest quote); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "decisions.md (Kept: depth frame keeps ltp + timestamp + latest quote); feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1761700000000
+        ]
+      ]
+    },
+    {
+      "key": "volume",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          40000
+        ]
+      ]
+    },
+    {
+      "key": "last_quantity",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          25
+        ]
+      ]
+    },
+    {
+      "key": "average_price",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1298.25
+        ]
+      ]
+    },
+    {
+      "key": "open",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1290.0
+        ]
+      ]
+    },
+    {
+      "key": "high",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1310.0
+        ]
+      ]
+    },
+    {
+      "key": "low",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1285.0
+        ]
+      ]
+    },
+    {
+      "key": "last_trade_time",
+      "kind": "desktop-decision",
+      "reason": "The desktop's depth frame carries the instrument's latest quote from the market feed (feed::bridge::depth_update), as the web's Fyers adapter borrows it (openalgo#2318); the web's Dhan 20-level frame carries the book alone.",
+      "ref": "feed::bridge::depth_update",
+      "approval": "per-broker-wire-shape",
+      "allows": [
+        [
+          "<absent>",
+          1761700000
+        ]
+      ]
+    }
+  ]
+}

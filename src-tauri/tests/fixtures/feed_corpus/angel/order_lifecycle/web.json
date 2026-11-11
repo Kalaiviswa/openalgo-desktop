@@ -1,0 +1,226 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "angel",
+  "inputs_sha256": "a65807bb85fae1a8a2ee4ee6a16b46849d0ef9ee6c8990dc098d25aaa0d38d8b",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe_orders",
+          "status": "success",
+          "message": "Subscribed to order updates"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "order",
+          "frame": {
+            "type": "order_update",
+            "user_id": "<USER_ID>",
+            "mode": "live",
+            "broker": "angel",
+            "orderid": "261109000000101",
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "action": "BUY",
+            "quantity": 10,
+            "price": 1300.5,
+            "trigger_price": 0.0,
+            "pricetype": "LIMIT",
+            "product": "CNC",
+            "order_status": "open",
+            "filled_quantity": 0,
+            "pending_quantity": 10,
+            "average_price": 0.0,
+            "rejection_reason": ""
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "order": true,
+          "serves": [
+            "order"
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "order",
+          "frame": {
+            "type": "order_update",
+            "user_id": "<USER_ID>",
+            "mode": "live",
+            "broker": "angel",
+            "orderid": "261109000000101",
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "action": "BUY",
+            "quantity": 10,
+            "price": 1300.5,
+            "trigger_price": 0.0,
+            "pricetype": "LIMIT",
+            "product": "CNC",
+            "order_status": "open",
+            "filled_quantity": 4,
+            "pending_quantity": 6,
+            "average_price": 1300.4,
+            "rejection_reason": ""
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "order": true,
+          "serves": [
+            "order"
+          ]
+        }
+      ]
+    },
+    {
+      "line": 9,
+      "published": [
+        {
+          "kind": "order",
+          "frame": {
+            "type": "order_update",
+            "user_id": "<USER_ID>",
+            "mode": "live",
+            "broker": "angel",
+            "orderid": "261109000000101",
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "action": "BUY",
+            "quantity": 10,
+            "price": 1300.5,
+            "trigger_price": 0.0,
+            "pricetype": "LIMIT",
+            "product": "CNC",
+            "order_status": "complete",
+            "filled_quantity": 10,
+            "pending_quantity": 0,
+            "average_price": 1300.45,
+            "rejection_reason": ""
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "order": true,
+          "serves": [
+            "order"
+          ]
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "published": [
+        {
+          "kind": "order",
+          "frame": {
+            "type": "order_update",
+            "user_id": "<USER_ID>",
+            "mode": "live",
+            "broker": "angel",
+            "orderid": "261109000000102",
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "action": "BUY",
+            "quantity": 10,
+            "price": 1300.5,
+            "trigger_price": 0.0,
+            "pricetype": "LIMIT",
+            "product": "CNC",
+            "order_status": "rejected",
+            "filled_quantity": 0,
+            "pending_quantity": 0,
+            "average_price": 0.0,
+            "rejection_reason": "Insufficient funds for this order"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "order": true,
+          "serves": [
+            "order"
+          ]
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "published": [
+        {
+          "kind": "order",
+          "frame": {
+            "type": "order_update",
+            "user_id": "<USER_ID>",
+            "mode": "live",
+            "broker": "angel",
+            "orderid": "261109000000103",
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "action": "BUY",
+            "quantity": 10,
+            "price": 1300.5,
+            "trigger_price": 0.0,
+            "pricetype": "LIMIT",
+            "product": "CNC",
+            "order_status": "cancelled",
+            "filled_quantity": 0,
+            "pending_quantity": 10,
+            "average_price": 0.0,
+            "rejection_reason": ""
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "order": true,
+          "serves": [
+            "order"
+          ]
+        }
+      ]
+    }
+  ]
+}

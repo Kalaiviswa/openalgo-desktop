@@ -1,0 +1,260 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "indmoney",
+  "inputs_sha256": "f081605c209b97f81fe4f3cc95666ff1036fb91d2c9d89facf020761514bcccb",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "indmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "indmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 7,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "indmoney"
+            }
+          ],
+          "failed": [],
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 10,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "indmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 11,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "indmoney"
+            }
+          ],
+          "failed": [],
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 16,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "indmoney"
+            }
+          ],
+          "failed": [],
+          "broker": "indmoney"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "ltp": 1426.5,
+            "ltt": 1794302700123,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": 1794302700123
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "indmoney",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1426.5,
+            "ltt": 1794302700123,
+            "open": 1410.5,
+            "high": 1430.25,
+            "low": 1400.75,
+            "close": 1418.5,
+            "volume": 5000,
+            "bid_price": 1426.4,
+            "bid_qty": 10,
+            "ask_price": 1426.6,
+            "ask_qty": 20,
+            "average_price": 1420.5,
+            "oi": 0,
+            "oi_change": 0,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": 1794302700123
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "b",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "indmoney",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "ltp": 1427.75,
+            "ltt": 1794302703999,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": 1794302703999
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "indmoney",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

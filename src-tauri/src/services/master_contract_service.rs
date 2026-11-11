@@ -994,7 +994,12 @@ mod tests {
         .await;
         until("day one's market feed", || ctx.websocket.is_connected()).await;
         let sbin = InstrumentKey::new("SBIN", "NSE");
-        MarketDataSource::subscribe(&*ctx.bridge, &sbin, Mode::Ltp, 5);
+        drop(MarketDataSource::subscribe(
+            &*ctx.bridge,
+            &sbin,
+            Mode::Ltp,
+            5,
+        ));
         until("SBIN subscribed", || subs.load(Ordering::SeqCst) >= 1).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let day_one = subs.load(Ordering::SeqCst);
@@ -1029,7 +1034,13 @@ mod tests {
             subs.load(Ordering::SeqCst) > day_one
         })
         .await;
-        assert_eq!(ctx.bridge.applied().len(), 1);
+        // The broker hears the subscribe before the bridge records it as
+        // taken (`settle_admissions`): wait for the record too. More than
+        // one entry never settles back to one, so it still fails.
+        until("the bridge to hold SBIN", || {
+            ctx.bridge.applied().len() == 1
+        })
+        .await;
         ctx.runtime.teardown(ctx).await;
         server.abort();
         orders_server.abort();

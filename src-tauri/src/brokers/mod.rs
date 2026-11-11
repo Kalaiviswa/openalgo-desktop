@@ -583,6 +583,52 @@ pub trait Broker: Send + Sync {
     fn feed_depth_levels(&self, _exchange: &str) -> Vec<u8> {
         self.capabilities().depth_levels.to_vec()
     }
+
+    /// Why the live feed does not stream `exchange`, when it does not: a
+    /// feed subscribe on it is refused with this, for the trader, instead
+    /// of reaching a topic the broker never serves (Groww streams NSE and
+    /// BSE cash, F&O and indices only, web openalgo#2341). Default: every
+    /// exchange streams.
+    fn feed_refusal(&self, _exchange: &str) -> Option<String> {
+        None
+    }
+
+    /// The step the live feed awaits before it subscribes an instrument no
+    /// consumer holds yet (`common::streaming::Presubscribe`): Samco looks
+    /// a cold index's streaming id up over REST, as the web does when
+    /// subscribing (its REST lookup needs the session's `auth`, as
+    /// `create_feed` gets it; the broker keeps no token). Default: none,
+    /// every subscription streams as the master describes it.
+    fn feed_presubscribe(&self, _auth: &AuthToken) -> Option<common::streaming::Presubscribe> {
+        None
+    }
+
+    /// What the session hears when no consumer holds an instrument any
+    /// more (`common::streaming::FeedLetGo`). Default: nothing; a feed
+    /// hears of the releases its socket carries.
+    fn feed_let_go(&self) -> Option<common::streaming::FeedLetGo> {
+        None
+    }
+
+    /// What the session hears when the manager has placed an instrument
+    /// (`common::streaming::FeedHeld`). Default: nothing.
+    fn feed_held(&self) -> Option<common::streaming::FeedHeld> {
+        None
+    }
+
+    /// An update from the broker's order socket, completed before it is
+    /// published: IndMoney's stream names an order it did not see placed
+    /// by its id alone, and the web looks it up in the order book (bk-b
+    /// RB-11). `auth` is the session's, as `create_feed` gets it (the
+    /// broker keeps no token). The relay awaits it within a deadline and
+    /// holds no lock meanwhile. Default: as it came.
+    async fn complete_order_update(
+        &self,
+        _auth: &AuthToken,
+        update: common::streaming::OrderUpdate,
+    ) -> common::streaming::OrderUpdate {
+        update
+    }
 }
 
 /// One API plan of a broker (`Broker::rate_plans`).

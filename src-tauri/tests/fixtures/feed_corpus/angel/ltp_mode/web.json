@@ -1,0 +1,74 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "angel",
+  "inputs_sha256": "3559a25aa43bdb061430eb7cbe778be138c71ce7d396774662584ae427741222",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "angel"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "angel"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "ltp": 1500.05,
+            "ltt": 1746171226000,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "angel",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "motilal",
+  "inputs_sha256": "f7c1d4f8a7876e50bdcc45733da0b28215d67c422ed12ca793a760dd44621d16",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "motilal"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "motilal"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 0,
+            "ltq": 0,
+            "volume": 0,
+            "open": 1290.0,
+            "high": 1310.0,
+            "low": 1285.0,
+            "close": 1280.5,
+            "average_price": 0,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "motilal",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1300.5,
+            "ltq": 25,
+            "volume": 40000,
+            "open": 1290.0,
+            "high": 1310.0,
+            "low": 1285.0,
+            "close": 1280.5,
+            "average_price": 1298.25,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "motilal",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

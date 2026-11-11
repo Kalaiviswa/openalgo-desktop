@@ -10,7 +10,9 @@ use super::orders::*;
 use super::streaming::*;
 use super::*;
 use crate::brokers::common::mapping::{Action, PriceType, Product, Validity};
-use crate::brokers::common::streaming::{FeedEvent, FeedMode, FeedSubscription, Message};
+use crate::brokers::common::streaming::{
+    FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth, QuoteField,
+};
 use crate::brokers::common::symbols::{SymToken, SymbolResolver};
 use serde_json::{json, Value};
 
@@ -898,19 +900,42 @@ fn live_feed_frames_and_events() {
     let last = ticks.last().unwrap();
     assert_eq!(
         (last.symbol.as_str(), last.exchange.as_str(), last.mode),
-        ("RELIANCE", "NSE", 3)
+        ("RELIANCE", "NSE", 2)
     );
     assert_eq!(
         (last.ltp, last.open, last.close, last.oi),
         (2410.5, 2400.0, 2398.0, 1200)
     );
-    assert_eq!(last.change, 12.5);
+    // The m packet's OI counts for a cash scrip too; Motilal sends no
+    // change, book totals or trade time.
+    assert!(last.knows(QuoteField::OpenInterest));
+    for field in [
+        QuoteField::Change,
+        QuoteField::TotalBuyQuantity,
+        QuoteField::LastTradeTime,
+    ] {
+        assert!(!last.knows(field), "{:?}", field);
+    }
+    // The W packet's price band (audit C06).
+    assert_eq!(
+        (last.extras.upper_circuit, last.extras.lower_circuit),
+        (Some(2600.0), Some(2200.0))
+    );
     let d = depths.last().unwrap();
-    assert_eq!((d.buy.len(), d.sell.len(), d.buy[0].price), (5, 5, 2410.0));
+    // Only the level Motilal sent, and no book totals it never sends.
+    assert_eq!((d.buy.len(), d.sell.len(), d.buy[0].price), (1, 1, 2410.0));
+    assert!(d.absent.contains(QuoteField::TotalBuyQuantity));
 
-    // A second frame does not announce the session again.
+    // A second frame does not announce the session again. A last trade
+    // before the day OHLC packet carries no open, high, low or close; a
+    // derivative's A packet carries its OI.
     let ev = feed.parse(&Message::Binary(pkt(b'N', 35001, b'A', &f(101.0))));
-    assert!(matches!(&ev[0], FeedEvent::Tick(t) if t.mode == 1 && t.ltp == 101.0 && t.open == 0.0));
+    let FeedEvent::Tick(t) = &ev[0] else {
+        panic!("{:?}", ev)
+    };
+    assert_eq!(t.ltp, 101.0);
+    assert!(t.knows(QuoteField::Ltp) && t.knows(QuoteField::OpenInterest));
+    assert!(!t.knows(QuoteField::Open) && !t.knows(QuoteField::Close));
 
     // Mode change is local; unsubscribe drops state.
     let old = sub("NIFTY28OCT26FUT", "NFO", "35001", FeedMode::Ltp);
@@ -919,6 +944,407 @@ fn live_feed_frames_and_events() {
     let un = feed.unsubscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Depth), new]);
     assert!(matches!(&un[0], Message::Binary(b) if b[9] == 0));
     assert_eq!((feed.registered(), feed.cached()), (0, 0));
+}
+
+/// A new connection keeps the registrations and forgets the scrip data
+/// the old one delivered (the Upstox ruling; the web keeps
+/// `last_quotes` across `on_close`).
+#[test]
+fn a_new_connection_reports_nothing_from_before_it() {
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1");
+    feed.subscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Quote)]);
+    let ohlc = [f(2400.0), f(2420.0), f(2390.0), f(2398.0)].concat();
+    feed.parse(&Message::Binary(pkt(b'N', 2885, b'G', &ohlc)));
+    let trade = pkt(b'N', 2885, b'A', &f(2410.5));
+    let before = feed.parse(&Message::Binary(trade.clone()));
+    assert!(matches!(&before[0], FeedEvent::Tick(t) if t.knows(QuoteField::Open)));
+
+    feed.on_connected();
+    assert_eq!((feed.registered(), feed.cached()), (1, 0));
+    let after = feed.parse(&Message::Binary(trade));
+    let Some(FeedEvent::Tick(t)) = after.iter().find(|e| matches!(e, FeedEvent::Tick(_))) else {
+        panic!("{:?}", after)
+    };
+    assert_eq!(t.ltp, 2410.5);
+    assert!(!t.knows(QuoteField::Open) && !t.knows(QuoteField::Close));
+}
+
+/// Audit RB-09: no Depth frame before Motilal has sent a book level, and
+/// only the levels it sent. A book before the first trade still reaches a
+/// Depth holder, with LTP 0 (the 1.0.6 rule), and every packet after it
+/// carries the book.
+#[test]
+fn depth_waits_for_a_book_level() {
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1");
+    feed.subscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Depth)]);
+    let depths = |ev: Vec<FeedEvent>| -> Vec<NormalizedDepth> {
+        ev.into_iter()
+            .filter_map(|e| match e {
+                FeedEvent::Depth(d) => Some(d),
+                _ => None,
+            })
+            .collect()
+    };
+    // Level 1: bid 2410.0 x 100 (3 orders); the ask side left at 0.
+    let mut level = Vec::new();
+    level.extend(f(2410.0));
+    level.extend(i(100));
+    level.extend(3i16.to_le_bytes());
+    let trade = pkt(
+        b'N',
+        2885,
+        b'A',
+        &[f(2410.5), i(4), i(75937), f(2405.25), i(0)].concat(),
+    );
+    assert!(depths(feed.parse(&Message::Binary(trade.clone()))).is_empty());
+    let book = depths(feed.parse(&Message::Binary(pkt(b'N', 2885, b'B', &level))));
+    assert_eq!(book.len(), 1);
+    assert_eq!((book[0].buy.len(), book[0].ltp), (1, 2410.5));
+    let again = depths(feed.parse(&Message::Binary(trade)));
+    assert_eq!(again.len(), 1, "a trade after the book carries it");
+
+    let mut cold = MotilalFeed::new("wss://example.invalid/feed", "C1");
+    cold.subscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Depth)]);
+    let ohlc = [f(2400.0), f(2420.0), f(2390.0), f(2398.0)].concat();
+    assert!(depths(cold.parse(&Message::Binary(pkt(b'N', 2885, b'G', &ohlc)))).is_empty());
+    let first = depths(cold.parse(&Message::Binary(pkt(b'N', 2885, b'B', &level))));
+    assert_eq!((first.len(), first[0].buy.len(), first[0].ltp), (1, 1, 0.0));
+}
+
+/// Motilal's packet header carries only the wire character and the scrip,
+/// so NSE cash and NSE F&O share `('N', scrip)`: the first registration
+/// receives the packets, as on the web (`motilal_websocket.py:942-966`). A
+/// conditional identity risk shared with the web, met only when a cash
+/// and an F&O contract have the same scrip code. The broker keeps the two
+/// registrations apart (`N C` and `N D`), so letting go of either leaves
+/// the other streaming: the first keeps its route and data, and the second
+/// takes the wire key when the first goes.
+#[test]
+fn a_wire_key_shared_by_cash_and_fo_goes_to_the_first_registration() {
+    let cash = sub("RELIANCE", "NSE", "2885", FeedMode::Quote);
+    let fo = sub("NIFTY28OCT26FUT", "NFO", "2885", FeedMode::Quote);
+    let trade = pkt(
+        b'N',
+        2885,
+        b'A',
+        &[f(1300.5), i(1), i(10), f(1300.0), i(0)].concat(),
+    );
+    let ticks = |ev: Vec<FeedEvent>| -> Vec<(String, String)> {
+        ev.into_iter()
+            .filter_map(|e| match e {
+                FeedEvent::Tick(t) => Some((t.symbol, t.exchange)),
+                _ => None,
+            })
+            .collect()
+    };
+    let to = |s: &str, e: &str| vec![(s.to_string(), e.to_string())];
+    let segment = |m: &Message, add: u8| {
+        matches!(m, Message::Binary(b) if b[3] == b'N' && b[9] == add).then(|| match m {
+            Message::Binary(b) => b[4],
+            _ => 0,
+        })
+    };
+
+    // Both register at the broker; the first one gets the packets.
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1");
+    let frames = feed.subscribe_frames(&[cash.clone(), fo.clone()]);
+    assert_eq!(
+        frames.iter().map(|m| segment(m, 1)).collect::<Vec<_>>(),
+        [Some(b'C'), Some(b'D')]
+    );
+    assert_eq!(
+        ticks(feed.parse(&Message::Binary(trade.clone()))),
+        to("RELIANCE", "NSE")
+    );
+
+    // Letting go of the second leaves the first its route and its data.
+    let un = feed.unsubscribe_frames(std::slice::from_ref(&fo));
+    assert_eq!(
+        un.iter().map(|m| segment(m, 0)).collect::<Vec<_>>(),
+        [Some(b'D')]
+    );
+    assert_eq!((feed.registered(), feed.cached()), (1, 1));
+    assert_eq!(
+        ticks(feed.parse(&Message::Binary(trade.clone()))),
+        to("RELIANCE", "NSE")
+    );
+
+    // Letting go of the first hands the wire key to the second, still
+    // registered at the broker, with none of the first's data.
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1");
+    feed.subscribe_frames(&[cash.clone(), fo]);
+    feed.parse(&Message::Binary(trade.clone()));
+    let un = feed.unsubscribe_frames(std::slice::from_ref(&cash));
+    assert_eq!(
+        un.iter().map(|m| segment(m, 0)).collect::<Vec<_>>(),
+        [Some(b'C')]
+    );
+    assert_eq!((feed.registered(), feed.cached()), (1, 0));
+    let after = feed.parse(&Message::Binary(trade));
+    assert_eq!(ticks(after), to("NIFTY28OCT26FUT", "NFO"));
+}
+
+fn colliding_pair() -> (FeedSubscription, FeedSubscription) {
+    (
+        sub("RELIANCE", "NSE", "2885", FeedMode::Quote),
+        sub("NIFTY28OCT26FUT", "NFO", "2885", FeedMode::Quote),
+    )
+}
+
+const COLLISION: &str = "NIFTY28OCT26FUT on NFO cannot be streamed at the same time as \
+RELIANCE on NSE: Motilal sends both under one code";
+
+/// Both instruments of a shared wire key in one subscribe: the first is
+/// claimed, the second refused in words a trader can act on.
+#[test]
+fn a_second_instrument_on_a_wire_key_is_refused() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    let answers = keys.claim(vec![cash.clone(), fo]);
+    assert_eq!(answers[0], Ok(cash));
+    assert_eq!(answers[1], Err(COLLISION.to_string()));
+    // The same instrument again (another mode) is its own.
+    assert!(keys
+        .claim(vec![colliding_pair().0])
+        .iter()
+        .all(|r| r.is_ok()));
+}
+
+/// CLAUDE.md "claim under the same lock that checks": two subscribes of
+/// the colliding pair at once, from two clients, and exactly one passes.
+#[test]
+fn colliding_subscribes_at_once_let_exactly_one_through() {
+    for _ in 0..50 {
+        let keys = super::wire_keys::WireKeys::default();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (cash, fo) = colliding_pair();
+        let runs: Vec<_> = [cash, fo]
+            .into_iter()
+            .map(|s| {
+                let (keys, barrier) = (keys.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    keys.claim(vec![s]).remove(0).is_ok()
+                })
+            })
+            .collect();
+        let passed = runs
+            .into_iter()
+            .map(|r| r.join().unwrap_or(false))
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(passed, 1);
+    }
+}
+
+/// A reservation that never became a registration (its subscribe was
+/// refused for room afterwards) is dropped once older than the TTL; a
+/// registered one stays until the feed lets go or goes.
+#[test]
+fn a_reservation_without_a_registration_is_released() {
+    use super::wire_keys::{WireKeys, RESERVATION_TTL};
+    let (cash, fo) = colliding_pair();
+    let keys = WireKeys::default();
+    let t0 = std::time::Instant::now();
+    assert!(keys.claim_at(vec![cash.clone()], t0)[0].is_ok());
+    let soon = t0 + std::time::Duration::from_secs(1);
+    assert!(keys.claim_at(vec![fo.clone()], soon)[0].is_err());
+    let later = t0 + RESERVATION_TTL + std::time::Duration::from_secs(1);
+    assert!(keys.claim_at(vec![fo.clone()], later)[0].is_ok());
+    assert_eq!(keys.len(), 1);
+
+    // Registered: no expiry; released by the feed letting go, or going.
+    let keys = WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+    assert!(keys.claim_at(vec![cash.clone()], t0)[0].is_ok());
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+    assert!(keys.claim_at(vec![fo.clone()], later)[0].is_err());
+    drop(feed);
+    assert_eq!(keys.len(), 0);
+    assert!(keys.claim_at(vec![fo], later)[0].is_ok());
+}
+
+/// Refused, then the first instrument goes: the second subscribes and
+/// gets the packets.
+#[test]
+fn the_second_instrument_streams_once_the_first_goes() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+    feed.unsubscribe_frames(std::slice::from_ref(&cash));
+    assert!(keys.claim(vec![fo.clone()])[0].is_ok());
+    let frames = feed.subscribe_frames(std::slice::from_ref(&fo));
+    assert!(matches!(&frames[0], Message::Binary(b) if b[3] == b'N' && b[4] == b'D'));
+    let trade = pkt(b'N', 2885, b'A', &f(25010.5));
+    let ev = feed.parse(&Message::Binary(trade));
+    assert!(ev.iter().any(
+        |e| matches!(e, FeedEvent::Tick(t) if t.symbol == "NIFTY28OCT26FUT" && t.exchange == "NFO")
+    ));
+}
+
+/// RELIANCE is registered, the socket drops and the client lets it go:
+/// the release never reaches the feed, so the manager tells the keys
+/// (`Broker::feed_let_go`). The code is free at once, before any new
+/// session, and the next session routes its packets to the NFO contract:
+/// the feed's old route does not shadow it.
+#[test]
+fn a_release_during_an_outage_frees_the_wire_key() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+
+    keys.let_go(std::slice::from_ref(&cash));
+    assert_eq!(keys.len(), 0);
+    assert!(keys.claim(vec![fo.clone()])[0].is_ok());
+
+    feed.on_connected();
+    assert!(feed.on_authenticated().is_empty());
+    feed.subscribe_frames(std::slice::from_ref(&fo));
+    assert_eq!((feed.registered(), keys.len()), (1, 1));
+    assert!(a_trade_reaches(&mut feed, "NIFTY28OCT26FUT", "NFO"));
+}
+
+/// Letting go of one instrument never frees a code another instrument
+/// holds or has reserved.
+#[test]
+fn letting_go_of_an_instrument_leaves_another_holders_key() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    keys.let_go(std::slice::from_ref(&fo));
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+    keys.let_go(std::slice::from_ref(&fo));
+    assert_eq!(keys.claim(vec![fo])[0], Err(COLLISION.to_string()));
+}
+
+/// An instrument subscribed and let go of within one outage was only ever
+/// reserved: its code is free at once, not when the reservation expires.
+#[test]
+fn letting_go_of_a_reserved_instrument_frees_its_key_at_once() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    keys.let_go(std::slice::from_ref(&cash));
+    assert_eq!(keys.len(), 0);
+    assert!(keys.claim(vec![fo])[0].is_ok());
+}
+
+/// Placed: the key stays the instrument's until the last consumer lets
+/// go, past a reservation's life, however long no socket registers it.
+#[test]
+fn a_placed_instrument_keeps_its_key_past_a_reservations_life() {
+    use super::wire_keys::{WireKeys, RESERVATION_TTL};
+    let (cash, fo) = colliding_pair();
+    let keys = WireKeys::default();
+    let t0 = std::time::Instant::now();
+    assert!(keys.claim_at(vec![cash.clone()], t0)[0].is_ok());
+    keys.held(std::slice::from_ref(&cash));
+    let later = t0 + RESERVATION_TTL + std::time::Duration::from_secs(1);
+    assert!(keys.claim_at(vec![fo.clone()], later)[0].is_err());
+    keys.let_go(std::slice::from_ref(&cash));
+    assert!(keys.claim_at(vec![fo], later)[0].is_ok());
+}
+
+/// The manager's word that an instrument is held stands even for a key a
+/// racing release just freed, and takes no key from another holder.
+#[test]
+fn being_held_restores_a_freed_key_and_leaves_another_holders() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    keys.held(std::slice::from_ref(&cash));
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+    keys.held(std::slice::from_ref(&fo));
+    assert_eq!(keys.claim(vec![fo])[0], Err(COLLISION.to_string()));
+}
+
+/// The session's steps are the wire keys: what the manager names held is
+/// held, and what it names let go of is free.
+#[test]
+fn the_session_let_go_step_is_the_wire_keys() {
+    let broker = MotilalBroker::with_urls(
+        SymbolResolver::new(),
+        "http://example.invalid",
+        "wss://example.invalid/feed",
+        "wss://example.invalid/ws",
+    );
+    let (cash, fo) = colliding_pair();
+    let held = broker.feed_held().expect("Motilal's held step");
+    held(std::slice::from_ref(&cash));
+    assert_eq!(
+        broker.wire_keys.claim(vec![fo.clone()])[0],
+        Err(COLLISION.to_string())
+    );
+    let let_go = broker.feed_let_go().expect("Motilal's let-go step");
+    let_go(std::slice::from_ref(&cash));
+    assert!(broker.wire_keys.claim(vec![fo])[0].is_ok());
+}
+
+/// Whether a last-trade packet on the colliding wire key is reported as
+/// `symbol` on `exchange`.
+fn a_trade_reaches(feed: &mut MotilalFeed, symbol: &str, exchange: &str) -> bool {
+    let trade = pkt(b'N', 2885, b'A', &f(1300.5));
+    feed.parse(&Message::Binary(trade))
+        .iter()
+        .any(|e| matches!(e, FeedEvent::Tick(t) if t.symbol == symbol && t.exchange == exchange))
+}
+
+/// An instrument a client still holds keeps its wire key through the
+/// login round trip and the replay: a colliding subscribe cannot take the
+/// code while the new socket is being signed in, and the packets are
+/// still its own afterwards.
+#[test]
+fn a_held_instrument_keeps_its_wire_key_across_a_reconnect() {
+    let (cash, fo) = colliding_pair();
+    let keys = super::wire_keys::WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+
+    feed.on_connected();
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+    feed.on_authenticated();
+    // Between the session's acceptance and the replay too.
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+
+    assert_eq!(keys.claim(vec![fo])[0], Err(COLLISION.to_string()));
+    assert_eq!((feed.registered(), keys.len()), (1, 1));
+    assert!(a_trade_reaches(&mut feed, "RELIANCE", "NSE"));
+}
+
+/// A subscribe made while the socket is down reserves its wire key and is
+/// placed in the replay. The new session leaves the keys alone, so the
+/// reservation stays and the colliding contract is still refused; the code
+/// of an instrument let go of in the outage was freed when the manager
+/// said so.
+#[test]
+fn a_reservation_made_while_the_socket_is_down_survives_the_new_session() {
+    let (cash, fo) = colliding_pair();
+    let released = sub("INFY", "NSE", "1594", FeedMode::Quote);
+    let keys = super::wire_keys::WireKeys::default();
+    let mut feed = MotilalFeed::new("wss://example.invalid/feed", "C1").sharing(keys.clone());
+    assert!(keys.claim(vec![released.clone()])[0].is_ok());
+    feed.subscribe_frames(std::slice::from_ref(&released));
+
+    keys.let_go(std::slice::from_ref(&released));
+    assert!(keys.claim(vec![cash.clone()])[0].is_ok());
+    feed.on_connected();
+    assert!(feed.on_authenticated().is_empty());
+
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys.claim(vec![fo.clone()])[0], Err(COLLISION.to_string()));
+    feed.subscribe_frames(std::slice::from_ref(&cash));
+    assert_eq!(keys.claim(vec![fo])[0], Err(COLLISION.to_string()));
+    assert_eq!((feed.registered(), keys.len()), (1, 1));
 }
 
 #[test]
@@ -1003,6 +1429,22 @@ fn order_stream_frames_and_updates() {
         json!({"errorcode":"MO1001","message":"x"}).to_string(),
     ));
     assert!(matches!(&ev[0], FeedEvent::AuthFailed(_)));
+}
+
+/// Both sockets say Motilal's logout before a deliberate close (web
+/// `motilal_order_adapter.py:131-139` and `motilal_websocket.py:272-287`).
+#[test]
+fn both_sockets_log_out_before_a_deliberate_close() {
+    let logout = json!({"clientid": "<USER_ID>", "action": "logout"});
+    let s = MotilalSession::parse(&auth()).unwrap();
+    let orders = MotilalOrderFeed::new("wss://example.invalid/ws", &s, master());
+    let market = MotilalFeed::new("wss://example.invalid/feed", "<USER_ID>");
+    for frames in [orders.farewell_frames(), market.farewell_frames()] {
+        let [Message::Text(t)] = frames.as_slice() else {
+            panic!("{:?}", frames)
+        };
+        assert_eq!(serde_json::from_str::<Value>(t).unwrap(), logout);
+    }
 }
 
 #[test]

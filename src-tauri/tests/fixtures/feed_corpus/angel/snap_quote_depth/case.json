@@ -1,0 +1,34 @@
+{
+  "broker": "angel",
+  "summary": "A Depth subscription: the 379-byte SNAP_QUOTE packet gives the quote, OI and the best five, buy levels flagged 1 and sell levels flagged 0.",
+  "scenarios": [
+    "first-full-packet",
+    "depth-update"
+  ],
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "upstream_ignore": [
+    "ping"
+  ],
+  "provenance": {
+    "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+    "method": "web-test",
+    "sources": [
+      "broker/angel/streaming/smartWebSocketV2.py::SmartWebSocketV2._parse_binary_data",
+      "broker/angel/streaming/angel_adapter.py::AngelWebSocketAdapter._on_data",
+      "broker/angel/streaming/angel_adapter.py::AngelWebSocketAdapter._normalize_market_data",
+      "broker/angel/streaming/angel_adapter.py::AngelWebSocketAdapter._extract_depth_data",
+      "test/test_angel_quote_feed.py::test_snap_quote_keeps_quote_fields",
+      "test/test_angel_quote_feed.py::test_snap_quote_publishes_ohlc_from_parser_keys"
+    ],
+    "notes": []
+  },
+  "deviations": []
+}

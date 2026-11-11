@@ -1,0 +1,141 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "groww",
+  "inputs_sha256": "829bbffe8f90a06c6cca73a7a7bd099b7efb6a5c6fd642c22f76296137f02c53",
+  "instruments": [
+    {
+      "symbol": "SBIN",
+      "exchange": "NSE",
+      "token": "3045",
+      "brsymbol": "SBIN"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 4,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "SBIN",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "groww"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "groww"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 1,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 3,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 6,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_SBIN_QUOTE",
+          "exchange": "NSE",
+          "symbol": "SBIN",
+          "mode": 2,
+          "data": {
+            "ltp": 812.5,
+            "open": 805.0,
+            "high": 815.0,
+            "low": 801.0,
+            "close": 803.2,
+            "volume": 1200000.0,
+            "ltt": 1730790000000.0,
+            "symbol": "SBIN",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>",
+            "broker": "groww",
+            "topic": "NSE_SBIN_QUOTE",
+            "subscription_mode": 2
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "groww",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 10,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 11,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 13,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_SBIN_QUOTE",
+          "exchange": "NSE",
+          "symbol": "SBIN",
+          "mode": 2,
+          "data": {
+            "ltp": 813.0,
+            "open": 805.0,
+            "high": 815.0,
+            "low": 801.0,
+            "close": 803.2,
+            "volume": 1210000.0,
+            "ltt": 1730800000000.0,
+            "symbol": "SBIN",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>",
+            "broker": "groww",
+            "topic": "NSE_SBIN_QUOTE",
+            "subscription_mode": 2
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "groww",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

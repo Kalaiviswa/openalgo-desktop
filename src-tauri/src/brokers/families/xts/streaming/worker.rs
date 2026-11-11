@@ -2,7 +2,8 @@
 //! feed's subscription commands in order (`run_command`) and sends a batch
 //! that failed for a passing reason again (BF-03).
 
-use super::{run_command, Command, SubscriptionTarget, SUBSCRIBE_GAP};
+use super::release::Waited;
+use super::{run_command, Command, CommandReport, SubscriptionTarget, SUBSCRIBE_GAP};
 use crate::security::Secret;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -62,10 +63,32 @@ pub(crate) async fn run_commands(
         for p in pending.iter_mut().filter(|p| p.cmd.code == cmd.code) {
             p.cmd.instruments.retain(|i| !cmd.instruments.contains(i));
         }
-        pending.retain(|p| !p.cmd.instruments.is_empty());
+        drop_replaced(&mut pending);
         let report = run_command(t, &cmd, snapshots, &mut first).await;
         if report.reconnect {
             reconnect.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let release = old_code_to_release(&cmd, &report);
+        let released_for_a_caller = release.as_ref().is_some_and(|r| r.waited.is_some());
+        let sent_again =
+            cmd.waited.as_ref().is_some_and(Waited::admits) && !report.retry.is_empty();
+        if let Some(waited) = &cmd.waited {
+            waited.ran(&report, released_for_a_caller || sent_again);
+        }
+        if let Some(release) = release {
+            let due = tokio::time::Instant::now();
+            schedule(
+                &mut pending,
+                Pending {
+                    cmd: release,
+                    attempt: 0,
+                    due,
+                },
+            );
+        }
+        if cmd.waited.as_ref().is_some_and(|w| !w.admits()) {
+            // Its caller keeps the subscription and asks again (C01).
+            continue;
         }
         if report.retry.is_empty() {
             continue;
@@ -74,9 +97,16 @@ pub(crate) async fn run_commands(
             tracing::warn!(
                 broker = t.broker,
                 instruments = report.retry.len(),
-                "Subscription still failing after {} retries; the next reconnect sends it again",
+                "Subscription still failing after {} retries; giving it up",
                 RETRY_ATTEMPTS
             );
+            if cmd
+                .waited
+                .as_ref()
+                .is_some_and(|w| w.gave_up(&report.retry))
+            {
+                let_go(&mut pending, cmd.code, report.retry);
+            }
             continue;
         }
         let wait = retry_base
@@ -87,16 +117,83 @@ pub(crate) async fn run_commands(
                 subscribe: cmd.subscribe,
                 code: cmd.code,
                 instruments: report.retry,
+                // A retry report is not an answer: the waiter goes with it.
+                waited: cmd.waited.clone(),
+                then_release: cmd.then_release,
             },
             attempt: attempt + 1,
             due: tokio::time::Instant::now() + wait,
         };
-        let at = pending
-            .iter()
-            .position(|q| q.due > p.due)
-            .unwrap_or(pending.len());
-        pending.insert(at, p);
+        schedule(&mut pending, p);
     }
+}
+
+/// Forget the retries a newer command replaced whole; a waiter on one is
+/// told nothing was refused (the newer command decides).
+fn drop_replaced(pending: &mut std::collections::VecDeque<Pending>) {
+    for p in pending.iter().filter(|p| p.cmd.instruments.is_empty()) {
+        if let Some(waited) = &p.cmd.waited {
+            waited.ran(&CommandReport::default(), false);
+        }
+    }
+    pending.retain(|p| !p.cmd.instruments.is_empty());
+}
+
+/// `p` among what waits, in the order it falls due.
+fn schedule(pending: &mut std::collections::VecDeque<Pending>, p: Pending) {
+    let at = pending
+        .iter()
+        .position(|q| q.due > p.due)
+        .unwrap_or(pending.len());
+    pending.insert(at, p);
+}
+
+/// An admission gave up on `instruments` and its owner was told they were
+/// not started, but the broker may have taken them all the same (only its
+/// answers were lost). Nobody owns them now, so it is told to let go; a
+/// newer subscribe of them replaces this like any other retry.
+fn let_go(
+    pending: &mut std::collections::VecDeque<Pending>,
+    code: u16,
+    instruments: Vec<serde_json::Value>,
+) {
+    let due = tokio::time::Instant::now();
+    let cmd = Command {
+        subscribe: false,
+        code,
+        instruments,
+        waited: None,
+        then_release: None,
+    };
+    schedule(
+        pending,
+        Pending {
+            cmd,
+            attempt: 0,
+            due,
+        },
+    );
+}
+
+/// A mode change's release of its old message code, for the instruments
+/// the broker took at the new one: what it refused keeps the old code, and
+/// what is to be sent again goes when that send is taken (review X2). A
+/// release's caller waits on this step too (a downgrade, review B3).
+fn old_code_to_release(cmd: &Command, report: &CommandReport) -> Option<Command> {
+    let code = cmd.then_release?;
+    let instruments: Vec<serde_json::Value> = cmd
+        .instruments
+        .iter()
+        .filter(|i| !report.retry.contains(i) && !report.refused.iter().any(|(r, _)| r == *i))
+        .cloned()
+        .collect();
+    (!instruments.is_empty()).then_some(Command {
+        subscribe: false,
+        code,
+        instruments,
+        waited: cmd.waited.clone().filter(|w| !w.admits()),
+        then_release: None,
+    })
 }
 
 /// What the worker task owns: where its calls go, and where it hands the

@@ -1,0 +1,22 @@
+{"step": "send", "client": "a", "message": {"action": "subscribe_orders"}, "reply": {"type": "subscribe_orders", "status": "success", "message": "Subscribed to order updates"}}
+{"step": "http_polled", "path": "/order/orderBook", "note": "The poller has read the empty book: its silent baseline."}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_open.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_open.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_partial.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_partial.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_complete.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_complete.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_rejected.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_rejected.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_cancelled.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_cancelled.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_rms_rejected.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_rms_rejected.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_manual.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_manual.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_mcx.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_mcx.json"}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_comma_prices.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_comma_prices.json", "web": false}
+{"step": "http_serve", "path": "/order/orderBook", "body": "frames/book_comma_cancelled.json"}
+{"step": "receive", "client": "a", "frame": "expected/book_comma_cancelled.json", "web": false}

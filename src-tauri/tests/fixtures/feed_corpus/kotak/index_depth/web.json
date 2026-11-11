@@ -1,0 +1,92 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "kotak",
+  "inputs_sha256": "2264824b14e95f70f44030cf165fe05373acb09106575ebc9d3085311cce46f4",
+  "instruments": [
+    {
+      "symbol": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "token": "26000",
+      "brsymbol": "NIFTY",
+      "brexchange": "NSE_INDEX",
+      "instrumenttype": "INDEX"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "Depth",
+              "depth": 5,
+              "broker": "kotak"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "kotak"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_DEPTH",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 3,
+          "data": {
+            "ltp": 21350.0,
+            "volume": 0,
+            "open": 21000.0,
+            "high": 21500.0,
+            "low": 20900.0,
+            "close": 21100.0,
+            "percent_change": 1.18,
+            "depth": {
+              "buy": [],
+              "sell": []
+            },
+            "totalbuyqty": 0,
+            "totalsellqty": 0,
+            "ltt": 1762666200000,
+            "last_trade_time": 1762666200000,
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 3,
+          "topic_mode": 3,
+          "broker": "kotak",
+          "serves": [
+            3
+          ]
+        }
+      ]
+    }
+  ]
+}

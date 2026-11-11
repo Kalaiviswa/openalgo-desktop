@@ -1,0 +1,134 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "mstock",
+  "inputs_sha256": "57cf7cb8ecd15ed690df7d8e88ce607a096145a0aa535f77237b414fef1672d7",
+  "instruments": [
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "token": "1594",
+      "brsymbol": "INFY-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "mstock"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "mstock"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_QUOTE",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 2,
+          "data": {
+            "ltp": 1500.5,
+            "last_trade_time": 1730784000000,
+            "ltt": 1730784000000,
+            "exchange_timestamp": 1730784000000,
+            "open": 1490.0,
+            "high": 1505.0,
+            "low": 1485.0,
+            "close": 1495.0,
+            "prev_close": 1495.0,
+            "volume": 1000,
+            "oi": 0,
+            "last_trade_quantity": 25,
+            "last_quantity": 25,
+            "average_price": 1498.0,
+            "total_buy_quantity": 10,
+            "total_sell_quantity": 20,
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "mstock",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_QUOTE",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 2,
+          "data": {
+            "ltp": 1502.25,
+            "last_trade_time": 1730784060000,
+            "ltt": 1730784060000,
+            "exchange_timestamp": 1730784060000,
+            "open": 1490.0,
+            "high": 1505.0,
+            "low": 1485.0,
+            "close": 1495.0,
+            "prev_close": 1495.0,
+            "volume": 1200,
+            "oi": 0,
+            "last_trade_quantity": 5,
+            "last_quantity": 5,
+            "average_price": 1498.4,
+            "total_buy_quantity": 12,
+            "total_sell_quantity": 18,
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "mstock",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

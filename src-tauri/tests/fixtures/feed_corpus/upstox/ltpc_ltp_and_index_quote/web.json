@@ -1,0 +1,142 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "upstox",
+  "inputs_sha256": "a30916687229ecf4beb2f8a869f851b9e97d565bcef3b2792cc9f3f5ac5c6dc1",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "NSE_EQ|INE002A01018",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE_EQ"
+    },
+    {
+      "symbol": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "token": "NSE_INDEX|Nifty 50",
+      "brsymbol": "Nifty 50",
+      "brexchange": "NSE_INDEX",
+      "instrumenttype": "INDEX"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "upstox"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "upstox"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY",
+              "exchange": "NSE_INDEX",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "upstox"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "upstox"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_LTP",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 1,
+          "data": {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "token": "NSE_EQ|INE002A01018",
+            "ltp": 1301.25,
+            "ltq": 5,
+            "ltt": 1740729560000,
+            "cp": 1295.0
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "upstox",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INDEX_NIFTY_QUOTE",
+          "exchange": "NSE_INDEX",
+          "symbol": "NIFTY",
+          "mode": 2,
+          "data": {
+            "symbol": "NIFTY",
+            "exchange": "NSE_INDEX",
+            "token": "NSE_INDEX|Nifty 50",
+            "ltp": 24350.5,
+            "open": 24310.0,
+            "high": 24400.25,
+            "low": 24290.75,
+            "close": 24300.0,
+            "ltt": 1740729561000,
+            "last_trade_time": 1740729561000,
+            "timestamp": 1740729566500
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "b",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "upstox",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -38,8 +38,8 @@ async fn s01_account_reset_is_not_reachable_over_http() {
     assert_eq!(s, StatusCode::OK, "API key kept");
 }
 
-/// S-07: a reset leaves nothing usable behind: MCP tokens, strategy and
-/// Chartink webhook secrets, Telegram and WhatsApp links.
+/// S-07: a reset leaves nothing usable behind: MCP tokens, strategy,
+/// Chartink and Flow webhook secrets, Telegram and WhatsApp links.
 #[tokio::test]
 async fn s07_account_reset_revokes_every_outside_credential() {
     let h = H::new();
@@ -81,6 +81,13 @@ async fn s07_account_reset_revokes_every_outside_credential() {
             [],
         )
         .unwrap();
+        c.execute(
+            "INSERT INTO flow_workflows (name, is_active, webhook_token, webhook_secret,
+                 webhook_secret_nonce, webhook_enabled)
+             VALUES ('flow', 1, 'flow-token', 'ct', 'nonce', 1)",
+            [],
+        )
+        .unwrap();
         (mcp_token, strategy_hash)
     };
 
@@ -105,6 +112,17 @@ async fn s07_account_reset_revokes_every_outside_credential() {
         .unwrap();
     assert_ne!(id, "11111111-1111-4111-8111-111111111111");
     assert!(uuid::Uuid::parse_str(&id).is_ok());
+    // D-19: every Flow webhook address and secret stops working, and every
+    // workflow stops; the workflow itself is kept.
+    let flow: (String, Option<String>, bool, bool) = c
+        .query_row(
+            "SELECT webhook_token, webhook_secret, webhook_enabled, is_active FROM flow_workflows",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_ne!(flow.0, "flow-token");
+    assert_eq!((flow.1, flow.2, flow.3), (None, false, false));
     drop(c);
     assert_eq!(count(&h, "SELECT COUNT(*) FROM telegram_users"), 0);
     assert_eq!(count(&h, "SELECT COUNT(*) FROM whatsapp_users"), 0);
@@ -1020,7 +1038,7 @@ async fn s03_spoofed_forwarded_address_does_not_pass_the_webhook_allowlist() {
 
 // ------------------------------------------- S-09 live updates after logout
 
-type Ws =
+pub(super) type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The app served on an ephemeral loopback port, as the trader's browser
@@ -1058,7 +1076,7 @@ pub(super) async fn serve(h: &H) -> Served {
 
 /// A live update connection for the browser session `cookie`, joined to
 /// the default namespace. `None` when the server refuses it.
-async fn live_updates(s: &Served, cookie: &str) -> Option<Ws> {
+pub(super) async fn live_updates(s: &Served, cookie: &str) -> Option<Ws> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
     let mut req = format!(
@@ -1099,7 +1117,7 @@ async fn live_updates(s: &Served, cookie: &str) -> Option<Ws> {
 
 /// Whether the server closes the connection (a namespace disconnect or a
 /// closed socket) within `secs`.
-async fn closed_within(ws: &mut Ws, secs: u64) -> bool {
+pub(super) async fn closed_within(ws: &mut Ws, secs: u64) -> bool {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);

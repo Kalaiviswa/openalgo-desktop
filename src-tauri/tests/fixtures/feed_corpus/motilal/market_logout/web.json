@@ -1,0 +1,90 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "motilal",
+  "inputs_sha256": "d9d393016347ead3138357815f472cee12985657c8969f15373f22078c98fc7c",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [
+    {
+      "line": 7,
+      "step": "disconnect"
+    }
+  ],
+  "replies": [
+    {
+      "line": 3,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "motilal"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "motilal"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 5,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1300.5,
+            "ltq": 25,
+            "volume": 40000,
+            "open": 0,
+            "high": 0,
+            "low": 0,
+            "close": 0,
+            "average_price": 1298.25,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "motilal",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

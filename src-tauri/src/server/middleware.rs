@@ -459,6 +459,9 @@ fn csrf_exempt(path: &str) -> bool {
         // The OpenScript runner page: each call carries its run's secret.
         || path.starts_with("/openscript/runner/host/")
         || path.starts_with("/chartink/webhook/")
+        // Flow's webhook: its token and secret (the web exempts both views,
+        // `app.py` 452-453).
+        || path.starts_with("/flow/webhook/")
         // MCP: bearer token, never the browser session.
         || path == "/mcp"
         // Broker form-POST redirects (state-verified in the handler).
@@ -547,9 +550,8 @@ pub async fn session_layer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let now = ctx.now();
-    let session =
-        cookie_value(req.headers(), COOKIE_NAME).and_then(|id| ctx.sessions.get(&id, now));
+    let session = cookie_value(req.headers(), COOKIE_NAME)
+        .and_then(|id| crate::session::web_session(&ctx, &id));
     let path = req.uri().path().to_string();
 
     if is_mutating(req.method()) && !csrf_exempt(&path) {
@@ -753,12 +755,13 @@ fn credential_route(path: &str) -> bool {
         || path == "/mcp"
         || path.starts_with("/strategy/webhook/")
         || path.starts_with("/chartink/webhook/")
+        || path.starts_with("/flow/webhook/")
 }
 
 /// Whether the request's session cookie names a signed-in session.
 fn signed_in_cookie(ctx: &AppState, headers: &HeaderMap) -> bool {
     cookie_value(headers, COOKIE_NAME)
-        .and_then(|id| ctx.sessions.get(&id, ctx.now()))
+        .and_then(|id| crate::session::web_session(ctx, &id))
         .is_some_and(|s| s.user.is_some())
 }
 

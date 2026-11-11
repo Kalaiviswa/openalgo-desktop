@@ -1,0 +1,93 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "rmoney",
+  "inputs_sha256": "8cf564a6ea3c9c6eaafaee8eba32b73b85ef55430ff7c14f4b87ea6a03ff135d",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSECM"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "rmoney"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "rmoney"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 4,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 7,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 2501.5,
+            "ltt": 1478686530,
+            "volume": 4500123,
+            "open": 2490.0,
+            "high": 2510.5,
+            "low": 2485.0,
+            "close": 2487.6,
+            "last_quantity": 7,
+            "average_price": 2495.8,
+            "total_buy_quantity": 150000,
+            "total_sell_quantity": 160000,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "rmoney",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

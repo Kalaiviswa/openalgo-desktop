@@ -37,10 +37,28 @@ import { useBrokerStore } from '@/stores/brokerStore'
  * and ends that session before the new sign-in starts.
  */
 
+/**
+ * Shown for a refused sign-in whose reason OpenAlgo no longer holds (read
+ * already, expired, another session's) or never issued: the address is
+ * built by whoever sent the link, so its text never reaches the page (as
+ * on the web).
+ */
+const LOGIN_FAILED = 'The broker login did not complete. Try again.'
+
 /** Brokers whose market data needs a paid data subscription (as on the web). */
 const DATA_SUBSCRIPTION_NOTE: Record<string, string> = {
   zerodha: 'Zerodha requires an active Kite Connect data subscription for market data access.',
   dhan: 'Dhan requires an active Data API subscription for market data access.',
+}
+
+/**
+ * Brokers whose live prices OpenAlgo makes up (maintainer, 2026-11-09): said
+ * on the card itself, configured or not, so a trader never picks the feed
+ * without seeing it (R107-18).
+ */
+const SIMULATED_PRICES_NOTE: Record<string, string> = {
+  dhan_sandbox:
+    'Simulated prices, not market prices: the Dhan sandbox streams none, so OpenAlgo makes them up as OpenAlgo web does.',
 }
 
 function StatusBadge({ broker }: { broker: BrokerEntry }) {
@@ -70,17 +88,33 @@ export default function BrokerSelect() {
     retry: false,
   })
 
-  // A broker sign-in that failed comes back here with the reason
-  // (`/broker?error=...&broker=...`).
+  // A broker sign-in that failed comes back here as
+  // `/broker?error=<id>&broker=<id>`. Desktop: the id names the reason the
+  // server kept for this browser session (the broker's own words), read
+  // once; the web maps a fixed code to a fixed sentence instead.
+  const [failure, setFailure] = useState<{ id: string; broker: string | null } | null>(null)
   useEffect(() => {
-    const message = searchParams.get('error')
-    if (!message) return
-    const broker = searchParams.get('broker')
-    if (broker) setCardError({ broker, message })
-    else setPageError(message)
+    const id = searchParams.get('error')
+    if (!id) return
+    setFailure({ id, broker: searchParams.get('broker') })
     // Shown once: a reload does not bring the old reason back.
     setSearchParams({}, { replace: true })
   }, [searchParams, setSearchParams])
+
+  useEffect(() => {
+    if (!failure) return
+    let current = true
+    void brokerConfigApi.signInFailure(failure.id).then((kept) => {
+      if (!current) return
+      const broker = kept?.broker ?? failure.broker
+      const message = kept?.message ?? LOGIN_FAILED
+      if (broker) setCardError({ broker, message })
+      else setPageError(message)
+    })
+    return () => {
+      current = false
+    }
+  }, [failure])
 
   useEffect(() => {
     if (list.error instanceof BrokerConfigError && list.error.status === 401) {
@@ -95,6 +129,14 @@ export default function BrokerSelect() {
     return brokers.filter((b) => b.name.toLowerCase().includes(q) || b.id.includes(q))
   }, [brokers, filter])
   const nameOf = (id: string) => brokers.find((b) => b.id === id)?.name ?? id
+
+  // A card error for a broker that is not listed shows at the top instead.
+  useEffect(() => {
+    if (cardError && list.data && !list.data.brokers.some((b) => b.id === cardError.broker)) {
+      setPageError(cardError.message)
+      setCardError(null)
+    }
+  }, [cardError, list.data])
 
   // Start a sign-in the way the server says this broker signs in.
   const startSignIn = async (broker: BrokerEntry) => {
@@ -234,6 +276,7 @@ export default function BrokerSelect() {
           {shown.map((broker) => {
             const error = cardError?.broker === broker.id ? cardError.message : null
             const note = DATA_SUBSCRIPTION_NOTE[broker.id]
+            const simulated = SIMULATED_PRICES_NOTE[broker.id]
             return (
               <Card
                 key={broker.id}
@@ -252,6 +295,12 @@ export default function BrokerSelect() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="mt-auto space-y-3">
+                  {simulated && (
+                    <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+                      <Info className="h-4 w-4 shrink-0" />
+                      {simulated}
+                    </p>
+                  )}
                   {note && (broker.configured || broker.active) && (
                     <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                       <Info className="h-4 w-4 shrink-0" />

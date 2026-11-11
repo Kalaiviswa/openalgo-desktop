@@ -70,6 +70,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
     history_window_secs: None,
     eod_index_names: &[],
     history_repair: false,
+    day_end_repair: false,
     eod_widen: false,
     strict_candles: false,
     today_bar_utc: true,
@@ -87,6 +88,7 @@ pub static CONFIG: NorenConfig = NorenConfig {
     tradebook_time_only: false,
     orderbook_price_fallback: true,
     depth_oi: true,
+    feed_oi: FeedOi::NativeFromQuote,
     // Web `broker/tradesmart/api/rate_limiter.py`: orders, history, books
     // and funds share one non-quote budget; quotes have their own (BRL-07).
     rate: RateLimits {

@@ -48,6 +48,14 @@ impl std::fmt::Debug for WebSession {
 }
 
 impl WebSession {
+    /// Whether it was signed in (or, anonymous, created) at or after
+    /// `boundary`: what a daily boundary keeps (SES-02).
+    pub fn since(&self, boundary: DateTime<Utc>) -> bool {
+        self.authenticated_at
+            .or(self.created_at)
+            .is_some_and(|t| t >= boundary)
+    }
+
     /// Forget a sign-in waiting for its authenticator code, and the keys
     /// its password opened (KEY-01: they leave memory with it).
     pub fn forget_pending_sign_in(&mut self) {
@@ -71,6 +79,9 @@ pub struct WebSessionStore {
     /// update connections of ended sessions are closed (security review
     /// S-09).
     ended: tokio::sync::watch::Sender<u64>,
+    /// Why a broker sign-in that came back to Select Broker failed, read
+    /// once by the session it belongs to; cleared with the sessions.
+    pub(crate) sign_in_failures: super::sign_in_failures::SignInFailures,
 }
 
 impl Default for WebSessionStore {
@@ -78,6 +89,7 @@ impl Default for WebSessionStore {
         Self {
             map: Mutex::new(HashMap::new()),
             ended: tokio::sync::watch::channel(0).0,
+            sign_in_failures: Default::default(),
         }
     }
 }
@@ -187,6 +199,7 @@ impl WebSessionStore {
     /// password change).
     pub fn clear(&self) {
         self.map.lock().clear();
+        self.sign_in_failures.clear();
         self.signal_ended();
     }
 
@@ -197,11 +210,7 @@ impl WebSessionStore {
         let n = {
             let mut map = self.map.lock();
             let before = map.len();
-            map.retain(|_, s| {
-                s.authenticated_at
-                    .or(s.created_at)
-                    .is_some_and(|t| t >= boundary)
-            });
+            map.retain(|_, s| s.since(boundary));
             before - map.len()
         };
         if n > 0 {

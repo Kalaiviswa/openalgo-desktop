@@ -1,0 +1,92 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "groww",
+  "inputs_sha256": "9478ad99f11a6db000663d1ee0b526777b237e19686deced87daac31b8cdd6b9",
+  "instruments": [
+    {
+      "symbol": "SBIN",
+      "exchange": "NSE",
+      "token": "3045",
+      "brsymbol": "SBIN"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 4,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "SBIN",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "groww"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "groww"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 1,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 3,
+      "published": [],
+      "deliveries": []
+    },
+    {
+      "line": 6,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_SBIN_LTP",
+          "exchange": "NSE",
+          "symbol": "SBIN",
+          "mode": 1,
+          "data": {
+            "ltp": 812.5,
+            "ltt": 1730790000000.0,
+            "open": 805.0,
+            "high": 815.0,
+            "low": 801.0,
+            "close": 803.2,
+            "volume": 1200000.0,
+            "value": 974250000.0,
+            "symbol": "SBIN",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": "<receipt_ms>",
+            "broker": "groww",
+            "topic": "NSE_SBIN_LTP",
+            "subscription_mode": 1
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "groww",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,233 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "dhan_sandbox",
+  "inputs_sha256": "904d37ad7965dddb5ac2f37924492289e69b26bddaff956bcc1d352fdcb3733b",
+  "instruments": [
+    {
+      "symbol": "NIFTY25NOV2624800CE",
+      "exchange": "NFO",
+      "token": "24800",
+      "brexchange": "NSE_FNO",
+      "expiry": "25-NOV-26",
+      "strike": 24800.0,
+      "instrumenttype": "CE",
+      "lotsize": 75
+    },
+    {
+      "symbol": "NIFTY25NOV2624900CE",
+      "exchange": "NFO",
+      "token": "24900",
+      "brexchange": "NSE_FNO",
+      "expiry": "25-NOV-26",
+      "strike": 24900.0,
+      "instrumenttype": "CE",
+      "lotsize": 75
+    },
+    {
+      "symbol": "NIFTY25NOV2625000CE",
+      "exchange": "NFO",
+      "token": "25000",
+      "brexchange": "NSE_FNO",
+      "expiry": "25-NOV-26",
+      "strike": 25000.0,
+      "instrumenttype": "CE",
+      "lotsize": 75
+    },
+    {
+      "symbol": "NIFTY25NOV2625100CE",
+      "exchange": "NFO",
+      "token": "25100",
+      "brexchange": "NSE_FNO",
+      "expiry": "25-NOV-26",
+      "strike": 25100.0,
+      "instrumenttype": "CE",
+      "lotsize": 75
+    },
+    {
+      "symbol": "NIFTY25NOV2625200CE",
+      "exchange": "NFO",
+      "token": "25200",
+      "brexchange": "NSE_FNO",
+      "expiry": "25-NOV-26",
+      "strike": 25200.0,
+      "instrumenttype": "CE",
+      "lotsize": 75
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "NIFTY25NOV2625000CE",
+              "exchange": "NFO",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "dhan_sandbox"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "dhan_sandbox"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "NIFTY25NOV2625000CE",
+              "exchange": "NFO",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "dhan_sandbox"
+            }
+          ],
+          "failed": [],
+          "broker": "dhan_sandbox"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 2,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV2625000CE_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV2625000CE",
+          "mode": 2,
+          "data": {
+            "symbol": "NIFTY25NOV2625000CE",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": "<receipt_ms>",
+            "ltp": 146.75,
+            "ltt": "<receipt_ms>",
+            "volume": 39095,
+            "oi": 411776,
+            "open": 139.41,
+            "high": 154.08,
+            "low": 132.07,
+            "close": 143.81,
+            "last_trade_quantity": 94,
+            "average_price": 146.75,
+            "total_buy_quantity": 91218,
+            "total_sell_quantity": 60742
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "dhan_sandbox",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 4,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV2625000CE_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV2625000CE",
+          "mode": 2,
+          "data": {
+            "symbol": "NIFTY25NOV2625000CE",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": "<receipt_ms>",
+            "ltp": 147.23,
+            "ltt": "<receipt_ms>",
+            "volume": 21249,
+            "oi": 82255,
+            "open": 139.87,
+            "high": 154.59,
+            "low": 132.51,
+            "close": 144.28,
+            "last_trade_quantity": 55,
+            "average_price": 147.23,
+            "total_buy_quantity": 76300,
+            "total_sell_quantity": 21243
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "dhan_sandbox",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 6,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NFO_NIFTY25NOV2625000CE_QUOTE",
+          "exchange": "NFO",
+          "symbol": "NIFTY25NOV2625000CE",
+          "mode": 2,
+          "data": {
+            "symbol": "NIFTY25NOV2625000CE",
+            "exchange": "NFO",
+            "mode": 2,
+            "timestamp": "<receipt_ms>",
+            "ltp": 146.23,
+            "ltt": "<receipt_ms>",
+            "volume": 39954,
+            "oi": 28218,
+            "open": 138.92,
+            "high": 153.54,
+            "low": 131.61,
+            "close": 143.3,
+            "last_trade_quantity": 91,
+            "average_price": 146.23,
+            "total_buy_quantity": 91448,
+            "total_sell_quantity": 41745
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "dhan_sandbox",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

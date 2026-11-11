@@ -86,6 +86,8 @@ desktop:
 
 - Strategies (each gets a new webhook URL; update your TradingView alerts)
 - Chartink strategies and their webhook URLs
+- Flow workflows: export each from the web's editor and import it here (see
+  [Flow workflows](#flow-workflows)); each gets a new webhook URL and secret
 - Telegram bot token, WhatsApp pairing, SMTP settings
 - Sandbox capital and settings (the sandbox starts fresh at 1 crore)
 - Historify data (download it again from the Historify page)
@@ -106,7 +108,7 @@ OpenAlgo Desktop has ngrok built in, so there is nothing to install:
 
 Your Host Server URL is then `https://<your domain>`, as `HOST_SERVER` was
 on the web, whether the tunnel is online or not: the webhook addresses on
-the TradingView, GoCharting, Chartink and strategy pages use it, and so
+the TradingView, GoCharting, Chartink, strategy and Flow pages use it, and so
 does the automatic broker redirect URL
 (`https://<your domain>/<broker>/callback`, which you may already have
 registered with your broker for the web). The tunnel opens
@@ -122,6 +124,29 @@ tunnel makes the login page reachable from the internet, so use a strong
 password and turn on two-factor login on the **TOTP** tab in Profile.
 
 Your own scripts, Amibroker and Excel on the same computer need no tunnel.
+
+## Flow workflows
+
+Flow is in the desktop from 1.0.5, natively (no Python), and reads the same
+workflow JSON as the web. To move a workflow:
+
+1. In OpenAlgo web, open it in the Flow editor, then **...**, **Export
+   Workflow**.
+2. In OpenAlgo Desktop, open the profile menu, **Flow Editor**, **Import**,
+   and pick the file. It arrives inactive as `<name> (imported)`.
+3. Open its **Webhook** settings, switch the webhook on, and put the new URL
+   and secret into TradingView or Chartink. The web's address does not carry
+   over.
+4. Run it once in analyzer mode, then activate it.
+
+What behaves differently, in short: every time is IST whatever the
+computer's time zone; schedules run only while the app is open and you are
+signed in (a missed run is skipped, not replayed); a **Daily** schedule honours its ticked days; every webhook needs
+its secret; the workflow uses the app's current API key, never a stored one;
+Flow's `.env` settings (history cache, run history, webhook limits) are
+fixed at the web's defaults. The full list:
+[21 - Flow Visual Builder](../userguide/21-flow-visual-builder/README.md#import-and-export-moving-workflows-to-and-from-openalgo-web)
+and the [import format](../prompt/flow-import-format.md).
 
 ## The market data feed
 
@@ -149,16 +174,25 @@ differently, it is on purpose:
   the frames, not from the answer.
 - **Field names.** Quote and Depth data carry the names OpenAlgo web
   sends with Zerodha (`last_quantity`, `average_price`, `price_change`,
-  `price_change_percent`) for every broker, and next to them, with the
-  same values, the names your broker's web adapter uses:
-  `last_trade_quantity` (Angel, Fyers, Upstox, 5paisa, mstock, Paytm,
-  Pocketful, Samco), `ltq` (Definedge, Motilal), `avg_trade_price`
-  (Fyers), `change` (Fyers, Arrow, HDFC, Tradejini, Samco),
-  `change_absolute` (Paytm), `change_percent` (Fyers, AliceBlue, Arrow,
-  HDFC, Definedge, Paytm, Tradejini), `percent_change` (Shoonya,
-  Flattrade, Zebu, TradeSmart), `change_percentage` (Samco). A script
-  written for either name works. The change fields come with indices
-  only, as recorded from the web.
+  `price_change_percent`, `oi`, `open_interest`) for every broker, and next
+  to them, with the same values, every key your broker's web adapter sends:
+  its own names (`last_trade_quantity`, `ltq`, `avg_trade_price`, `change`,
+  `change_percent`, `percent_change`, `change_absolute`,
+  `change_percentage`, `prev_close`, `last_price`, `totalbuyqty`, ...),
+  circuit limits, the 52-week range, the best bid and ask, previous OI and
+  OI change where your broker's feed carries them, and `last_trade_time`
+  beside `ltt` (Fyers and Dhan in seconds). A key your broker's web adapter
+  sends in LTP frames is in the desktop's LTP frames too. A script written
+  for either name works. `data.mode` is written as your broker's web
+  adapter writes it (`"quote"` with Zerodha, 2 with most brokers, no key
+  with Upstox, Kotak and a few others). The full list per broker is in
+  `docs/port/market-data-frames.md`.
+- **Field values.** A field your broker's feed did not send is left out,
+  not sent as 0 (the web sends some as 0), and a value from earlier in the
+  same connection is kept when a broker message does not repeat it. The
+  change since the previous close comes with equities and futures too,
+  where your broker's web adapter sends one. Times are epoch milliseconds
+  in `ltt`, where some web adapters send seconds or text.
 - **A message budget.** A connection that sends thousands of messages a
   second, or megabytes of them, is closed (code 1008) before they are
   read. Subscribing every instrument in one message, or one per message
@@ -173,8 +207,9 @@ differently, it is on purpose:
 - Python strategies written by the Agent: the desktop's Agent writes
   OpenScript instead, and does not offer models on Amazon Bedrock,
   SageMaker or Google Vertex AI.
-- Flow (planned for 1.0.5), and the pandas backtesters (Portfolio
-  Backtester, SIP Backtester, Portfolio Analyzer).
+- The pandas backtesters (Portfolio Backtester, SIP Backtester, Portfolio
+  Analyzer). Flow is in the desktop from 1.0.5: see
+  [Flow workflows](#flow-workflows).
 - The Socket.IO `/market` namespace of the web's WebSocket example page.
   It needs a signed-in browser session and no SDK, trading platform or
   page of the app uses it; the market data feed on port 8765 serves the

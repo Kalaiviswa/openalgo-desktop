@@ -1,0 +1,103 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "mstock",
+  "inputs_sha256": "375c77250c5db052486629e5095f2c9779d4bef91546374607531238fe68e15c",
+  "instruments": [
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "token": "1594",
+      "brsymbol": "INFY-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "LTP",
+              "depth": 5,
+              "broker": "mstock"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "mstock"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "mode": "LTP",
+              "status": "success",
+              "broker": "mstock"
+            }
+          ],
+          "failed": [],
+          "broker": "mstock"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 4,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_INFY_LTP",
+          "exchange": "NSE",
+          "symbol": "INFY",
+          "mode": 1,
+          "data": {
+            "ltp": 1500.5,
+            "last_trade_time": 1730784000000,
+            "ltt": 1730784000000,
+            "exchange_timestamp": 1730784000000,
+            "symbol": "INFY",
+            "exchange": "NSE",
+            "mode": 1,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 1,
+          "topic_mode": 1,
+          "broker": "mstock",
+          "serves": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "published": [],
+      "deliveries": []
+    }
+  ]
+}

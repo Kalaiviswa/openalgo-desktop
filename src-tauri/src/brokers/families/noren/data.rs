@@ -13,6 +13,8 @@ use chrono::{NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Asia::Kolkata;
 use serde_json::{json, Value};
 
+mod day_end;
+
 fn lookup(b: &NorenBroker, key: &QuoteKey) -> Result<SymToken> {
     b.resolver().by_symbol(&key.exchange, &key.symbol).ok_or_else(|| {
         AppError::Validation(format!(
@@ -408,49 +410,15 @@ pub async fn get_history(
         .find(|((e, sym), _)| *e == req.key.exchange && *sym == req.key.symbol)
         .map(|(_, n)| n.to_string())
         .unwrap_or_else(|| row.br_symbol().to_string());
-    let window = b
-        .cfg
-        .history_window_secs
-        .map(|w| w(&req.interval))
-        .unwrap_or(i64::MAX / 4);
-    let endpoint = if daily { "/EODChartData" } else { "/TPSeries" };
-    let mut raw = Vec::new();
-    let (mut attempted, mut failed, mut last_err) = (0usize, 0usize, String::new());
-    let mut cur = start_ts;
-    while cur <= end_ts {
-        let chunk_end = cur.saturating_add(window).min(end_ts);
-        attempted += 1;
-        let body = if daily {
-            json!({"sym": format!("{}:{}", exch, eod_symbol), "from": cur.to_string(), "to": chunk_end.to_string()})
-        } else {
-            json!({"exch": exch, "token": row.token, "st": cur.to_string(), "et": chunk_end.to_string(), "intrv": intrv})
-        };
-        match b.post_raw(endpoint, body, &s, Category::Data).await {
-            Ok(Value::Array(a)) => raw.extend(a),
-            Ok(other) => {
-                let e = emsg(&other);
-                if is_session_error(&e) {
-                    return Err(noren_error(b.cfg.name, &e));
-                }
-                if !is_no_data(&e) && !other.is_null() {
-                    failed += 1;
-                    last_err = e;
-                }
-            }
-            Err(e) => {
-                if matches!(e, AppError::Auth(_)) {
-                    return Err(e);
-                }
-                failed += 1;
-                last_err = e.client_message();
-            }
-        }
-        cur = chunk_end + 1;
-    }
-    if attempted > 0 && failed == attempted {
-        tracing::warn!(broker = b.cfg.id, "History failed: {}", last_err);
-        return Err(noren_error(b.cfg.name, &last_err));
-    }
+    let chart = Chart {
+        exch: &exch,
+        token: &row.token,
+        eod_symbol: &eod_symbol,
+        intrv,
+    };
+    let raw = fetch_chart(b, &s, &chart, &req.interval, (start_ts, end_ts))
+        .await?
+        .rows;
     let mut candles = parse_history(b.cfg, &raw, daily, &exch);
     if daily {
         let today_ts = today_bar_ts(b.cfg);
@@ -471,10 +439,95 @@ pub async fn get_history(
         }
     }
     let mut out = sort_dedupe_last(candles);
+    if b.cfg.day_end_repair && !daily && req.interval != "1m" {
+        day_end::repair(b, &s, &chart, &req.key, &mut out).await;
+    }
     if b.cfg.history_repair {
         repair_bars(b.cfg, &mut out);
     }
     Ok(out)
+}
+
+/// One instrument on a chart endpoint: `TPSeries` by token and `intrv`,
+/// or `EODChartData` (`intrv` `D`) by name.
+struct Chart<'a> {
+    exch: &'a str,
+    token: &'a str,
+    eod_symbol: &'a str,
+    intrv: &'a str,
+}
+
+/// What [`fetch_chart`] read: the raw rows, unparsed, and the epoch range
+/// of each chunk that failed, so a caller can tell which part is missing.
+struct ChartRows {
+    rows: Vec<Value>,
+    failed: Vec<(i64, i64)>,
+}
+
+/// `[start_ts, end_ts]` of `chart` in the broker's per-request windows for
+/// `interval` (web shoonya `_fetch_chart_frame`). A dead session refuses at
+/// once; a chunk answering "no data" is an empty success, and one failed
+/// chunk inside a long range is tolerated (and reported in
+/// [`ChartRows::failed`]), but every chunk failing is an error, never an
+/// empty history.
+async fn fetch_chart(
+    b: &NorenBroker,
+    s: &Session,
+    chart: &Chart<'_>,
+    interval: &str,
+    (start_ts, end_ts): (i64, i64),
+) -> Result<ChartRows> {
+    let daily = chart.intrv == "D";
+    let window = b
+        .cfg
+        .history_window_secs
+        .map(|w| w(interval))
+        .unwrap_or(i64::MAX / 4);
+    let endpoint = if daily { "/EODChartData" } else { "/TPSeries" };
+    let mut raw = Vec::new();
+    let mut failed_ranges = Vec::new();
+    let (mut attempted, mut failed, mut last_err) = (0usize, 0usize, String::new());
+    let mut cur = start_ts;
+    while cur <= end_ts {
+        let chunk_end = cur.saturating_add(window).min(end_ts);
+        attempted += 1;
+        let body = if daily {
+            json!({"sym": format!("{}:{}", chart.exch, chart.eod_symbol), "from": cur.to_string(), "to": chunk_end.to_string()})
+        } else {
+            json!({"exch": chart.exch, "token": chart.token, "st": cur.to_string(), "et": chunk_end.to_string(), "intrv": chart.intrv})
+        };
+        match b.post_raw(endpoint, body, s, Category::Data).await {
+            Ok(Value::Array(a)) => raw.extend(a),
+            Ok(other) => {
+                let e = emsg(&other);
+                if is_session_error(&e) {
+                    return Err(noren_error(b.cfg.name, &e));
+                }
+                if !is_no_data(&e) && !other.is_null() {
+                    failed += 1;
+                    failed_ranges.push((cur, chunk_end));
+                    last_err = e;
+                }
+            }
+            Err(e) => {
+                if matches!(e, AppError::Auth(_)) {
+                    return Err(e);
+                }
+                failed += 1;
+                failed_ranges.push((cur, chunk_end));
+                last_err = e.client_message();
+            }
+        }
+        cur = chunk_end + 1;
+    }
+    if attempted > 0 && failed == attempted {
+        tracing::warn!(broker = b.cfg.id, "History failed: {}", last_err);
+        return Err(noren_error(b.cfg.name, &last_err));
+    }
+    Ok(ChartRows {
+        rows: raw,
+        failed: failed_ranges,
+    })
 }
 
 /// The history rows as candles: strictly parsed where the broker's rows

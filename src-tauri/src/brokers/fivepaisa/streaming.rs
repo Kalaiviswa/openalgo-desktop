@@ -11,13 +11,22 @@
 //!   "ScripCode"}]}`, up to 50 scrips per frame. LTP and Quote ride
 //!   `MarketFeedV3`; Depth subscribes `MarketDepthService` and also
 //!   `MarketFeedV3`, because depth frames carry no traded price.
-//! * Frames are a JSON object or an array of objects keyed by `Token`.
-//!   Quote frames: `LastRate, OpenRate, High, Low, PClose, TotalQty, LastQty,
-//!   AvgRate, TBidQ, TOffQ, BidRate, OffRate, TickDt` (`/Date(ms)/`). Depth
-//!   frames: `TBidQ, TOffQ, Details[{BbBuySellFlag 66|83, Price, Quantity,
-//!   NumberOfOrders}]`.
+//! * Frames are a JSON object or an array of objects, each naming its
+//!   instrument by `Exch`, `ExchType` and `Token` together (one token can
+//!   be two instruments). Routed by kind (web openalgo#2396): MarketFeedV3
+//!   frames (`LastRate, OpenRate, High, Low, PClose, TotalQty, LastQty,
+//!   AvgRate, TBidQ, TOffQ, BidRate, OffRate, TickDt` as `/Date(ms)/`,
+//!   `ChgPcnt`) make the quote tick; MarketDepthService frames (`TBidQ,
+//!   TOffQ, Details[{BbBuySellFlag 66|83, Price, Quantity,
+//!   NumberOfOrders}]`) the book, which the bridge joins to the last quote;
+//!   any other frame (OI) makes nothing.
 //! * A zero `LastRate/OpenRate/High/Low/PClose/BidRate/OffRate/AvgRate`
-//!   keeps the last non-zero value seen for the instrument (snapshot merge).
+//!   keeps the last non-zero value seen for the instrument (snapshot merge),
+//!   kept only while it is subscribed and only on the connection that sent
+//!   it; a zero with none held is a price 5paisa does not have and is left
+//!   out (no frame at all without a traded price), never sent as 0. The
+//!   web keeps its snapshot across a reconnect, so it sends pre-outage
+//!   prices as current there: a web defect the desktop does not copy.
 //! * WebSocket ping every 10 s.
 //!
 //! The order-confirmation stream is not used: 5paisa allows one feed
@@ -25,8 +34,8 @@
 
 use super::mapping::{ms_date_epoch, num, text};
 use crate::brokers::common::streaming::{
-    now_ms, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message, NormalizedDepth,
-    NormalizedTick, WsRequest,
+    now_ms, AbsentFields, BrokerFeed, FeedEvent, FeedMode, FeedSubscription, Message,
+    NormalizedDepth, NormalizedTick, Number, NumberForm, QuoteField, WsRequest,
 };
 use crate::brokers::types::DepthLevel;
 use crate::error::{AppError, Result};
@@ -106,12 +115,46 @@ struct SubInfo {
     scrip: Value,
 }
 
+/// One instrument on the feed. The scrip code alone is not unique: NSE
+/// cash and derivatives, or NSE and BSE, can share one, and each is another
+/// instrument (web openalgo#2396 and #2397, `_scrip_key`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScripKey {
+    exch: String,
+    exch_type: String,
+    token: String,
+}
+
+impl ScripKey {
+    fn new(exch: &str, exch_type: &str, token: &str) -> Self {
+        Self {
+            exch: exch.trim().to_ascii_uppercase(),
+            exch_type: exch_type.trim().to_ascii_uppercase(),
+            token: token.trim().to_string(),
+        }
+    }
+
+    fn of_subscription(s: &FeedSubscription) -> Self {
+        let (exch, exch_type) = feed_codes(&s.brexchange);
+        Self::new(exch, exch_type, &s.token)
+    }
+
+    /// A frame's `Exch`, `ExchType` and `Token`; none without a token.
+    fn of_frame(frame: &Value) -> Option<Self> {
+        let token = text(frame, "Token");
+        (!token.is_empty())
+            .then(|| Self::new(&text(frame, "Exch"), &text(frame, "ExchType"), &token))
+    }
+}
+
 pub struct FivepaisaFeed {
     /// Carries the access token in its query.
     url: Secret,
     client_code: String,
-    subs: HashMap<String, SubInfo>,
-    snapshots: HashMap<String, Map<String, Value>>,
+    subs: HashMap<ScripKey, SubInfo>,
+    /// The held prices of each subscribed instrument's last MarketFeedV3
+    /// frame; removed with the subscription and on every new connection.
+    snapshots: HashMap<ScripKey, Map<String, Value>>,
 }
 
 fn scrip(s: &FeedSubscription) -> Value {
@@ -122,6 +165,197 @@ fn scrip(s: &FeedSubscription) -> Value {
         .map(Value::from)
         .unwrap_or_else(|_| json!(s.token));
     json!({"Exch": e, "ExchType": t, "ScripCode": code})
+}
+
+/// What a 5paisa frame is (web openalgo#2396, `_on_data`): a
+/// MarketDepthService frame (`Details`) feeds Depth subscribers, a
+/// MarketFeedV3 frame (`LastRate`) the quote; anything else (an OI frame)
+/// is published on its own to nobody.
+enum FrameKind {
+    Depth,
+    Feed,
+    Other,
+}
+
+fn frame_kind(frame: &Value) -> FrameKind {
+    if frame.get("Details").is_some() {
+        FrameKind::Depth
+    } else if frame.get("LastRate").is_some() {
+        FrameKind::Feed
+    } else {
+        FrameKind::Other
+    }
+}
+
+/// The tick a MarketFeedV3 frame (its prices already held) makes for `sub`:
+/// a Quote packet whatever the subscription (the LTP frame is cut from
+/// it). 5paisa sends 0 for a price it does not have; with no earlier value
+/// held (a new subscription, or the first frame on a new connection) such a
+/// price is left out, not sent as 0, and without a traded price the bridge
+/// publishes nothing for the frame. 5paisa's own `ChgPcnt` is the percent
+/// change when it is sent. OI is not on this stream, so it is left out, and
+/// so is the trade time when `TickDt` is not one: the feed sends
+/// `/Date(-62135596800000)/` (DateTime.MinValue) when it has none, and only
+/// a positive epoch is a time (web openalgo#2396, `_parse_fivepaisa_time`),
+/// never the receive time.
+fn quote_tick(sub: &SubInfo, m: &Value) -> NormalizedTick {
+    let mut t = NormalizedTick {
+        symbol: sub.symbol.clone(),
+        exchange: sub.exchange.clone(),
+        mode: FeedMode::Quote.code(),
+        ltp: num(m, "LastRate"),
+        open: num(m, "OpenRate"),
+        high: num(m, "High"),
+        low: num(m, "Low"),
+        close: num(m, "PClose"),
+        volume: num(m, "TotalQty") as i64,
+        last_quantity: num(m, "LastQty") as i64,
+        average_price: num(m, "AvgRate"),
+        total_buy_quantity: num(m, "TBidQ") as i64,
+        total_sell_quantity: num(m, "TOffQ") as i64,
+        last_trade_time_ms: ms_date_epoch(&text(m, "TickDt")),
+        timestamp_ms: now_ms(),
+        absent: AbsentFields::of(&[QuoteField::OpenInterest]),
+        ..Default::default()
+    };
+    if t.last_trade_time_ms <= 0 {
+        t.mark_absent(QuoteField::LastTradeTime);
+    }
+    // A quantity the frame does not carry (a frame repeating only what
+    // changed, the price) is not a 0: the bridge keeps the known one until
+    // 5paisa sends another, and a 0 it sends replaces it (review R107-08;
+    // the web reads it as 0).
+    let quantities = [
+        ("TotalQty", QuoteField::Volume),
+        ("LastQty", QuoteField::LastQuantity),
+        ("TBidQ", QuoteField::TotalBuyQuantity),
+        ("TOffQ", QuoteField::TotalSellQuantity),
+    ];
+    for (key, field) in quantities {
+        if m.get(key).is_none_or(Value::is_null) {
+            t.mark_absent(field);
+        }
+    }
+    let prices = [
+        (QuoteField::Ltp, t.ltp),
+        (QuoteField::Open, t.open),
+        (QuoteField::High, t.high),
+        (QuoteField::Low, t.low),
+        (QuoteField::Close, t.close),
+        (QuoteField::AveragePrice, t.average_price),
+    ];
+    for (field, price) in prices {
+        if price == 0.0 {
+            t.mark_absent(field);
+        }
+    }
+    // An index has no trades and no book: the 0 5paisa sends for its last
+    // quantity and book totals is no value either, left out where the web
+    // passes it on (lead: web sends zero; docs say leave out).
+    if sub.exchange.ends_with("_INDEX") {
+        let flow = [
+            (QuoteField::LastQuantity, t.last_quantity),
+            (QuoteField::TotalBuyQuantity, t.total_buy_quantity),
+            (QuoteField::TotalSellQuantity, t.total_sell_quantity),
+        ];
+        for (field, quantity) in flow {
+            if quantity == 0 {
+                t.mark_absent(field);
+            }
+        }
+    }
+    t.derive_change();
+    if m.get("ChgPcnt").is_some_and(|v| !v.is_null()) {
+        t.change_percent = num(m, "ChgPcnt");
+    } else {
+        // The web's `percent_change` only forwards 5paisa's ChgPcnt
+        // (`_quote_fields`): without one there is none, not a change the
+        // desktop works out (lead rule no-derived-change).
+        t.mark_absent(QuoteField::Change);
+    }
+    // The best bid and ask the web's Quote publishes (`bid_price`,
+    // `bid_quantity`, `ask_price`, `ask_quantity`), each only when the
+    // frame has it.
+    t.extras.bid_price = price_of(m, "BidRate");
+    t.extras.bid_quantity = quantity_of(m, "BidQty");
+    t.extras.ask_price = price_of(m, "OffRate");
+    t.extras.ask_quantity = quantity_of(m, "OffQty");
+    mark_whole_prices(&mut t, m);
+    t
+}
+
+/// The web passes 5paisa's JSON numbers on as they came, so a price 5paisa
+/// writes as a whole number (`"OpenRate": 445`) goes out as an integer and
+/// one with a fraction as a double; a held price keeps the form it came in.
+fn mark_whole_prices(t: &mut NormalizedTick, m: &Value) {
+    const PRICES: [(&str, Number); 9] = [
+        ("LastRate", Number::Ltp),
+        ("OpenRate", Number::Open),
+        ("High", Number::High),
+        ("Low", Number::Low),
+        ("PClose", Number::Close),
+        ("AvgRate", Number::AveragePrice),
+        ("BidRate", Number::BidPrice),
+        ("OffRate", Number::AskPrice),
+        ("ChgPcnt", Number::ChangePercent),
+    ];
+    for (key, number) in PRICES {
+        if m.get(key).is_some_and(|v| v.is_i64() || v.is_u64()) {
+            t.numbers.set(number, NumberForm::Integer);
+        }
+    }
+}
+
+/// A price the frame (its prices already held) carries: none for a missing
+/// key, or for the 0 5paisa sends for a price it does not have.
+fn price_of(m: &Value, key: &str) -> Option<f64> {
+    m.get(key)
+        .filter(|v| !v.is_null())
+        .map(num_of)
+        .filter(|p| *p != 0.0)
+}
+
+/// A quantity the frame carries, a real 0 included.
+fn quantity_of(m: &Value, key: &str) -> Option<i64> {
+    m.get(key)
+        .filter(|v| !v.is_null())
+        .map(|v| num_of(v) as i64)
+}
+
+/// The book of a MarketDepthService frame (`BbBuySellFlag` 66 buy, 83
+/// sell), up to five levels a side as sent, with its own totals. A side
+/// sent without levels is an empty side, never rows of zeros (web
+/// `_extract_depth_data`). The frame carries no traded price: the depth
+/// frame takes the quote's (MarketFeedV3, subscribed beside it).
+fn depth_book(sub: &SubInfo, frame: &Value) -> NormalizedDepth {
+    let details = frame
+        .get("Details")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let side = |flag: i64| -> Vec<DepthLevel> {
+        details
+            .iter()
+            .filter(|d| num(d, "BbBuySellFlag") as i64 == flag)
+            .map(|d| DepthLevel {
+                price: num(d, "Price"),
+                quantity: num(d, "Quantity") as i64,
+                orders: num(d, "NumberOfOrders") as i64,
+            })
+            .take(5)
+            .collect()
+    };
+    NormalizedDepth {
+        symbol: sub.symbol.clone(),
+        exchange: sub.exchange.clone(),
+        buy: side(66),
+        sell: side(83),
+        total_buy_quantity: num(frame, "TBidQ") as i64,
+        total_sell_quantity: num(frame, "TOffQ") as i64,
+        timestamp_ms: now_ms(),
+        absent: AbsentFields::of(&[QuoteField::Ltp]),
+        ..Default::default()
+    }
 }
 
 impl FivepaisaFeed {
@@ -156,96 +390,56 @@ impl FivepaisaFeed {
         out
     }
 
-    /// Merge zero values from the snapshot; remember non-zero ones.
-    fn merge(&mut self, token: &str, frame: &Map<String, Value>) -> Map<String, Value> {
-        let snap = self.snapshots.entry(token.to_string()).or_default();
-        let mut merged = frame.clone();
+    /// A MarketFeedV3 frame with each zero price replaced by the last
+    /// non-zero one seen for the instrument; quantities follow the frame.
+    fn hold_prices(&mut self, key: &ScripKey, frame: &Value) -> Value {
+        let snap = self.snapshots.entry(key.clone()).or_default();
+        let mut merged = frame.as_object().cloned().unwrap_or_default();
         for f in SNAPSHOT_FIELDS {
             let v = frame.get(*f).map(num_of).unwrap_or(0.0);
             if v == 0.0 {
                 if let Some(prev) = snap.get(*f) {
                     merged.insert((*f).to_string(), prev.clone());
                 }
-            } else {
-                snap.insert((*f).to_string(), json!(v));
+            } else if let Some(sent) = frame.get(*f) {
+                // As 5paisa wrote it, so a held price keeps its JSON form.
+                snap.insert((*f).to_string(), sent.clone());
             }
         }
-        merged
+        Value::Object(merged)
     }
 
-    fn item(&mut self, item: &Map<String, Value>) -> Vec<FeedEvent> {
-        let obj = Value::Object(item.clone());
-        let token = text(&obj, "Token");
-        let Some(sub) = self.subs.get(&token).cloned() else {
+    /// The events of one frame, for the subscription of its own exchange,
+    /// segment and token only. Nothing is kept for an instrument no one
+    /// subscribes (web openalgo#2397): a late frame after an unsubscribe
+    /// must not bring its snapshot back.
+    fn item(&mut self, frame: &Value) -> Vec<FeedEvent> {
+        let Some(key) = ScripKey::of_frame(frame) else {
             return Vec::new();
         };
-        let m = Value::Object(self.merge(&token, item));
-        let now = now_ms();
-        if let Some(details) = m.get("Details").and_then(Value::as_array) {
-            if sub.mode != FeedMode::Depth {
-                return Vec::new();
+        let Some(sub) = self.subs.get(&key).cloned() else {
+            return Vec::new();
+        };
+        match frame_kind(frame) {
+            FrameKind::Depth if sub.mode == FeedMode::Depth => {
+                vec![FeedEvent::Depth(depth_book(&sub, frame))]
             }
-            let level = |d: &Value| DepthLevel {
-                price: num(d, "Price"),
-                quantity: num(d, "Quantity") as i64,
-                orders: num(d, "NumberOfOrders") as i64,
-            };
-            let side = |flag: i64| {
-                let mut v: Vec<DepthLevel> = details
-                    .iter()
-                    .filter(|d| num(d, "BbBuySellFlag") as i64 == flag)
-                    .map(level)
-                    .take(5)
-                    .collect();
-                v.resize(5, DepthLevel::default());
-                v
-            };
-            return vec![FeedEvent::Depth(NormalizedDepth {
-                symbol: sub.symbol,
-                exchange: sub.exchange,
-                ltp: num(&m, "LastRate"),
-                buy: side(66),
-                sell: side(83),
-                total_buy_quantity: num(&m, "TBidQ") as i64,
-                total_sell_quantity: num(&m, "TOffQ") as i64,
-                timestamp_ms: now,
-            })];
+            FrameKind::Feed => {
+                let m = self.hold_prices(&key, frame);
+                vec![FeedEvent::Tick(quote_tick(&sub, &m))]
+            }
+            FrameKind::Depth | FrameKind::Other => Vec::new(),
         }
-        if m.get("LastRate").is_none() {
-            return Vec::new();
-        }
-        let mut t = NormalizedTick {
-            symbol: sub.symbol,
-            exchange: sub.exchange,
-            mode: sub.mode.code(),
-            ltp: num(&m, "LastRate"),
-            last_trade_time_ms: ms_date_epoch(&text(&m, "TickDt")),
-            timestamp_ms: now,
-            ..Default::default()
-        };
-        if sub.mode != FeedMode::Ltp {
-            t.open = num(&m, "OpenRate");
-            t.high = num(&m, "High");
-            t.low = num(&m, "Low");
-            t.close = num(&m, "PClose");
-            t.volume = num(&m, "TotalQty") as i64;
-            t.last_quantity = num(&m, "LastQty") as i64;
-            t.average_price = num(&m, "AvgRate");
-            t.total_buy_quantity = num(&m, "TBidQ") as i64;
-            t.total_sell_quantity = num(&m, "TOffQ") as i64;
-            t.derive_change();
-        }
-        vec![FeedEvent::Tick(t)]
     }
 
     /// Decode one text frame.
     pub fn parse_text(&mut self, frame: &str) -> Vec<FeedEvent> {
         match serde_json::from_str::<Value>(frame) {
-            Ok(Value::Object(m)) => self.item(&m),
+            Ok(v @ Value::Object(_)) => self.item(&v),
             Ok(Value::Array(a)) => a
                 .iter()
-                .filter_map(Value::as_object)
-                .flat_map(|m| self.item(m))
+                .filter(|v| v.is_object())
+                .flat_map(|v| self.item(v))
                 .collect(),
             _ => Vec::new(),
         }
@@ -254,7 +448,7 @@ impl FivepaisaFeed {
     fn register(&mut self, s: &FeedSubscription) -> Value {
         let sc = scrip(s);
         self.subs.insert(
-            s.token.clone(),
+            ScripKey::of_subscription(s),
             SubInfo {
                 symbol: s.symbol.clone(),
                 exchange: s.exchange.clone(),
@@ -305,12 +499,13 @@ impl BrokerFeed for FivepaisaFeed {
     fn unsubscribe_frames(&mut self, subs: &[FeedSubscription]) -> Vec<Message> {
         let mut by: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
         for s in subs {
+            let key = ScripKey::of_subscription(s);
             let sc = self
                 .subs
-                .remove(&s.token)
+                .remove(&key)
                 .map(|i| i.scrip)
                 .unwrap_or_else(|| scrip(s));
-            self.snapshots.remove(&s.token);
+            self.snapshots.remove(&key);
             for m in methods(s.mode) {
                 by.entry(m).or_default().push(sc.clone());
             }

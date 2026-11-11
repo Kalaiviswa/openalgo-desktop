@@ -23,7 +23,7 @@ fn depth_update(key: InstrumentKey, ltp: f64, levels: usize) -> MarketUpdate {
     let lv = |p: f64| DepthLevel {
         price: p,
         quantity: 100,
-        orders: 3,
+        orders: Some(3),
     };
     MarketUpdate {
         key,
@@ -32,7 +32,7 @@ fn depth_update(key: InstrumentKey, ltp: f64, levels: usize) -> MarketUpdate {
         ltt: Some(1_791_000_000_000),
         timestamp: 1_791_000_000_000,
         quote: Some(QuoteFields {
-            volume: 1000,
+            volume: Some(1000),
             open: Some(1.0),
             high: Some(2.0),
             low: Some(0.5),
@@ -42,8 +42,13 @@ fn depth_update(key: InstrumentKey, ltp: f64, levels: usize) -> MarketUpdate {
         depth: Some(DepthBook {
             buy: (0..levels).map(|i| lv(ltp - i as f64 * 0.05)).collect(),
             sell: (0..levels).map(|i| lv(ltp + i as f64 * 0.05)).collect(),
+            ..Default::default()
         }),
         exact_mode: false,
+        token: None,
+        broker_symbol: None,
+        deep_live: None,
+        deep_book: None,
     }
 }
 

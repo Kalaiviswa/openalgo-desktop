@@ -188,7 +188,9 @@ pub fn direct_access_token(token: &str) -> Result<String> {
 }
 
 /// web `test_auth_token`: `GET /v2/fundlimit` must not be an auth error.
-pub async fn validate_token(b: &DhanBroker, session: &DhanSession) -> Result<()> {
+/// Answers the account the fund limits name (`dhanClientId`, web
+/// `get_client_id`), which is the account the token belongs to.
+pub async fn validate_token(b: &DhanBroker, session: &DhanSession) -> Result<Option<String>> {
     let (status, v) = b
         .send(
             Method::GET,
@@ -219,7 +221,48 @@ pub async fn validate_token(b: &DhanBroker, session: &DhanSession) -> Result<()>
                 .into(),
         ));
     }
-    Ok(())
+    Ok(s(&v, "dhanClientId"))
+}
+
+/// What a Live sign-in refuses when Dhan named no account for the token:
+/// a token that works for an account nobody confirmed is not stored (web
+/// `_dhan_account_mismatch`, marketcalls/openalgo#2337).
+const ACCOUNT_UNVERIFIED: &str =
+    "Dhan did not confirm which account this login is for, so it was not stored. Log in again.";
+
+/// A Live sign-in's access token, with the account and name Dhan's consent
+/// answer gave. The account is the one Dhan names for the token (the
+/// consent's `dhanClientId`, else the fund limits' read after it), never
+/// the client id saved here: a token for another account must come back
+/// as that account, so the sign-in refuses it (`BrokerAuthService`).
+async fn live_token(
+    b: &DhanBroker,
+    creds: &BrokerCredentials,
+    code: Option<&str>,
+    redirected: bool,
+) -> Result<(String, Option<String>, Option<String>)> {
+    match code {
+        // Dhan's redirect carries only its consent tokenId: a ready access
+        // token is taken from the login form, never from an address anyone
+        // could send the trader to (web brlogin.py,
+        // marketcalls/openalgo#2337).
+        Some(c) if c.len() > 100 && redirected => {
+            tracing::warn!("Dhan sign-in refused: an access token arrived on the callback");
+            Err(AppError::Auth(
+                "This Dhan login did not come back from Dhan's login page. Start the Dhan login again from Select Broker, or paste your access token in the login form."
+                    .into(),
+            ))
+        }
+        Some(c) if c.len() > 100 => Ok((direct_access_token(c)?, None, None)),
+        Some(c) => {
+            let s = consume_consent(b, creds, c).await?;
+            Ok((s.access_token, s.client_id, s.client_name))
+        }
+        None => Err(AppError::Validation(
+            "Dhan did not return a login code. Start the Dhan login again, or paste an access token."
+                .into(),
+        )),
+    }
 }
 
 pub async fn authenticate(b: &DhanBroker, creds: BrokerCredentials) -> Result<AuthResponse> {
@@ -235,6 +278,12 @@ pub async fn authenticate(b: &DhanBroker, creds: BrokerCredentials) -> Result<Au
         .or(creds.auth_code.clone())
         .or(creds.password.clone())
         .filter(|c| !c.trim().is_empty());
+    // The code came from the callback's address rather than the login form.
+    let redirected = creds
+        .request_token
+        .as_deref()
+        .or(creds.auth_code.as_deref())
+        .is_some_and(|c| !c.trim().is_empty());
 
     let (access_token, client_id, user_name) = match b.variant {
         Variant::Sandbox => {
@@ -260,26 +309,23 @@ pub async fn authenticate(b: &DhanBroker, creds: BrokerCredentials) -> Result<Au
                 }
             }
         }
-        Variant::Live => match code.as_deref() {
-            Some(c) if c.len() > 100 => (direct_access_token(c)?, cfg_client_id, None),
-            Some(c) => {
-                let s = consume_consent(b, &creds, c).await?;
-                (s.access_token, s.client_id.or(cfg_client_id), s.client_name)
-            }
-            None => {
-                return Err(AppError::Validation(
-                    "Dhan did not return a login code. Start the Dhan login again, or paste an access token."
-                        .into(),
-                ))
-            }
-        },
+        Variant::Live => live_token(b, &creds, code.as_deref(), redirected).await?,
     };
     let session = DhanSession {
         client_id: client_id.clone(),
         access_token: access_token.clone(),
     };
-    validate_token(b, &session).await?;
-    let cid = client_id.unwrap_or_default();
+    let reported = validate_token(b, &session).await?;
+    let cid = match b.variant {
+        Variant::Sandbox => client_id.unwrap_or_default(),
+        Variant::Live => match client_id.or(reported) {
+            Some(id) => id,
+            None => {
+                tracing::warn!("Dhan sign-in refused: Dhan did not name the token's account");
+                return Err(AppError::Auth(ACCOUNT_UNVERIFIED.into()));
+            }
+        },
+    };
     Ok(AuthResponse {
         auth_token: format!("{}:::{}", cid, access_token),
         feed_token: None,

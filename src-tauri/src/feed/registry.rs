@@ -5,19 +5,30 @@
 //!   holds (with the depth it asked for);
 //! * per instrument: the clients holding it and at which modes, which is
 //!   what a tick fans out to;
-//! * per source key `(instrument, mode, depth)`: a reference count. The
-//!   source is told to subscribe on 0 -> 1 and to unsubscribe on 1 -> 0.
+//! * per source key `(instrument, mode, depth)`: its owners and the source's
+//!   answer to the first one (`lifecycle`). The source is told to subscribe
+//!   on 0 -> 1 and to unsubscribe on 1 -> 0; the last owner of an explicit
+//!   unsubscribe stays until the source says the broker let go (audit C01).
+//!
+//! A subscription's prices reach its client only once the client was sent
+//! the subscribe reply (`acknowledged`): until then the latest frame for it
+//! is held, one per subscription, as the web streams a symbol only after
+//! its subscribe returned.
 //!
 //! Every entry a client creates is removed by `remove_client`, which the
 //! connection's drop guard calls on every exit path (clean close, error,
 //! abrupt disconnect, task abort), so nothing outlives the socket.
 
-use super::outbox::Outbox;
+use super::outbox::{MarketKey, Outbox};
 use super::protocol;
 use super::source::{InstrumentKey, MarketDataSource, MarketUpdate, Mode, DEFAULT_DEPTH};
+use lifecycle::SourceRef;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+mod lifecycle;
+pub use lifecycle::{Admission, Answer, Release};
 
 pub type ClientId = u64;
 
@@ -41,6 +52,9 @@ impl ModeSlots {
 struct Held {
     depth: u8,
     seq: u64,
+    /// The depth this subscription moves from, still held until the source
+    /// answers the new one.
+    replacing: Option<u8>,
 }
 
 struct ClientRec {
@@ -49,6 +63,9 @@ struct ClientRec {
     broker: Arc<str>,
     orders: bool,
     subs: HashMap<(InstrumentKey, Mode), Held>,
+    /// New subscriptions whose reply the client has not been sent yet,
+    /// each with the latest frame held back for it.
+    unacked: HashMap<(InstrumentKey, Mode), Option<(MarketKey, String)>>,
 }
 
 struct InstrumentRec {
@@ -62,7 +79,7 @@ type SourceKey = (InstrumentKey, Mode, u8);
 struct Inner {
     clients: HashMap<ClientId, ClientRec>,
     instruments: HashMap<InstrumentKey, InstrumentRec>,
-    refcounts: HashMap<SourceKey, usize>,
+    refcounts: HashMap<SourceKey, SourceRef>,
     next_instrument: u64,
     seq: u64,
 }
@@ -113,6 +130,7 @@ impl Registry {
                 broker: Arc::from(""),
                 orders: false,
                 subs: HashMap::new(),
+                unacked: HashMap::new(),
             },
         );
     }
@@ -127,39 +145,6 @@ impl Registry {
     pub fn set_orders(&self, id: ClientId, on: bool) {
         if let Some(c) = self.inner.lock().clients.get_mut(&id) {
             c.orders = on;
-        }
-    }
-
-    fn acquire(&self, inner: &mut Inner, key: &InstrumentKey, mode: Mode, depth: u8) {
-        let sk = (key.clone(), mode, source_depth(mode, depth));
-        let n = inner.refcounts.entry(sk).or_insert(0);
-        *n += 1;
-        if *n == 1 {
-            self.source.subscribe(key, mode, source_depth(mode, depth));
-        }
-    }
-
-    fn release(&self, inner: &mut Inner, key: &InstrumentKey, mode: Mode, depth: u8) {
-        let sk = (key.clone(), mode, source_depth(mode, depth));
-        let last = match inner.refcounts.get_mut(&sk) {
-            Some(n) if *n > 1 => {
-                *n -= 1;
-                false
-            }
-            Some(_) => true,
-            None => {
-                tracing::error!(
-                    "Feed refcount missing for {}:{} {:?}",
-                    key.exchange,
-                    key.symbol,
-                    mode
-                );
-                false
-            }
-        };
-        if last {
-            inner.refcounts.remove(&sk);
-            self.source.unsubscribe(key, mode, sk.2);
         }
     }
 
@@ -187,16 +172,18 @@ impl Registry {
         }
     }
 
-    /// Hold `key` at `mode` for client `id`. Subscribing again replaces the
-    /// depth (the old source key is released). Errors carry the per-symbol
-    /// message for the ack.
+    /// Hold `key` at `mode` for client `id`, and what to wait on before
+    /// acknowledging it: the source's answer for the key. Subscribing again
+    /// at another depth moves the subscription, keeping the old depth until
+    /// the new one is answered (`settle_subscribe`). Errors carry the
+    /// per-symbol message for the ack.
     pub fn subscribe(
         &self,
         id: ClientId,
         key: &InstrumentKey,
         mode: Mode,
         depth: u8,
-    ) -> Result<(), String> {
+    ) -> Result<Admission, String> {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         inner.seq += 1;
@@ -212,7 +199,7 @@ impl Registry {
                     h.depth = depth;
                 }
                 Self::set_slot(inner, id, key, mode, Some(depth));
-                return Ok(());
+                return Ok(self.own_admission(inner, key, mode, depth));
             }
             Some(_) => {}
             None => {
@@ -224,79 +211,71 @@ impl Registry {
                 }
             }
         }
-        client.subs.insert(map_key, Held { depth, seq });
-        self.acquire(inner, key, mode, depth);
-        if let Some(old) = previous {
-            self.release(inner, key, mode, old.depth);
+        let replacing = previous.map(|h| h.depth);
+        if previous.is_none() {
+            client.unacked.insert(map_key.clone(), None);
         }
+        client.subs.insert(
+            map_key,
+            Held {
+                depth,
+                seq,
+                replacing,
+            },
+        );
+        let op = self.acquire(inner, id, key, mode, depth);
         Self::set_slot(inner, id, key, mode, Some(depth));
-        Ok(())
+        Ok(Admission::new(op, replacing))
     }
 
-    /// Release `key` at `mode` for client `id`; a key the client does not
-    /// hold is a successful no-op, as on the web.
-    pub fn unsubscribe(&self, id: ClientId, key: &InstrumentKey, mode: Mode) {
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        let held = inner
-            .clients
-            .get_mut(&id)
-            .and_then(|c| c.subs.remove(&(key.clone(), mode)));
-        if let Some(h) = held {
-            self.release(inner, key, mode, h.depth);
-            Self::set_slot(inner, id, key, mode, None);
-        }
-    }
-
-    /// Release everything client `id` holds; returns what was released in
-    /// subscription order.
-    pub fn unsubscribe_all(&self, id: ClientId) -> Vec<(InstrumentKey, Mode)> {
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        let mut held: Vec<((InstrumentKey, Mode), Held)> = match inner.clients.get_mut(&id) {
-            Some(c) => c.subs.drain().collect(),
-            None => return Vec::new(),
-        };
-        held.sort_by_key(|(_, h)| h.seq);
-        let mut out = Vec::with_capacity(held.len());
-        for ((key, mode), h) in held {
-            self.release(inner, &key, mode, h.depth);
-            Self::set_slot(inner, id, &key, mode, None);
-            out.push((key, mode));
-        }
-        out
-    }
-
-    /// Forget client `id` and release every source key it held.
+    /// Forget client `id` and release every source key it held: the
+    /// terminal path, which drops the owner whatever the source answers
+    /// (web `cleanup_client`); a release the broker refuses is the
+    /// source's to retry.
     pub fn remove_client(&self, id: ClientId) {
-        self.unsubscribe_all(id);
-        let mut inner = self.inner.lock();
-        if let Some(c) = inner.clients.remove(&id) {
-            c.outbox.finish();
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some(mut client) = inner.clients.remove(&id) else {
+            return;
+        };
+        let mut held: Vec<_> = client.subs.drain().collect();
+        held.sort_by_key(|(_, h)| h.seq);
+        for ((key, mode), h) in held {
+            self.drop_owner(inner, id, &key, mode, h.depth);
+            if let Some(old) = h.replacing {
+                self.drop_owner(inner, id, &key, mode, old);
+            }
+            Self::set_slot(inner, id, &key, mode, None);
         }
+        client.outbox.finish();
     }
 
     /// Fan an update out to every holder, one frame per held mode not above
     /// `update.mode`, highest mode first.
     pub fn dispatch(&self, update: &MarketUpdate) {
-        let inner = self.inner.lock();
-        let Some(rec) = inner.instruments.get(&update.key) else {
+        let mut guard = self.inner.lock();
+        let Inner {
+            clients,
+            instruments,
+            ..
+        } = &mut *guard;
+        let Some(rec) = instruments.get(&update.key) else {
             return;
         };
         // Frames differ only by (mode, depth, broker); render each once.
         let mut rendered: Vec<(Mode, u8, Arc<str>, String)> = Vec::new();
         for (cid, slots) in &rec.holders {
-            let Some(client) = inner.clients.get(cid) else {
+            let Some(client) = clients.get_mut(cid) else {
                 continue;
             };
             for mode in Mode::ALL.iter().rev().copied() {
-                if mode > update.mode || (update.exact_mode && mode != update.mode) {
-                    continue;
-                }
                 let Some(depth) = slots.get(mode) else {
                     continue;
                 };
                 let depth = if mode == Mode::Depth { depth } else { 0 };
+                if !protocol::reaches(update, mode, depth, &client.broker) {
+                    continue;
+                }
                 let frame = match rendered
                     .iter()
                     .find(|(m, d, b, _)| *m == mode && *d == depth && **b == *client.broker)
@@ -308,7 +287,33 @@ impl Registry {
                         f
                     }
                 };
-                client.outbox.push_market((rec.id, mode.as_u8()), frame);
+                let slot = (rec.id, mode.as_u8());
+                if !client.unacked.is_empty() {
+                    if let Some(held) = client.unacked.get_mut(&(update.key.clone(), mode)) {
+                        *held = Some((slot, frame));
+                        continue;
+                    }
+                }
+                client.outbox.push_market(slot, frame);
+            }
+        }
+    }
+
+    /// Client `id` was sent the reply to its subscribe of `keys` at `mode`:
+    /// their prices flow from now on, the frame held back meanwhile first
+    /// for each one it still holds. The reply goes on the control lane,
+    /// which the outbox drains first, so it precedes them.
+    pub fn acknowledged(&self, id: ClientId, mode: Mode, keys: &[InstrumentKey]) {
+        let mut inner = self.inner.lock();
+        let Some(client) = inner.clients.get_mut(&id) else {
+            return;
+        };
+        for key in keys {
+            let k = (key.clone(), mode);
+            if let Some(Some((slot, frame))) = client.unacked.remove(&k) {
+                if client.subs.contains_key(&k) {
+                    client.outbox.push_market(slot, frame);
+                }
             }
         }
     }
@@ -360,6 +365,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::feed::source::{FakeSource, SourceCall};
+    use futures_util::FutureExt;
 
     fn key(s: &str) -> InstrumentKey {
         InstrumentKey::new(s, "NSE")
@@ -375,7 +381,10 @@ mod tests {
             r.subscribe(id, &key("A"), Mode::Ltp, 5).unwrap();
         }
         assert_eq!(src.active_count(), 1);
-        r.unsubscribe(1, &key("A"), Mode::Ltp);
+        assert!(matches!(
+            r.begin_unsubscribe(1, &key("A"), Mode::Ltp),
+            Release::Done
+        ));
         r.remove_client(2);
         assert_eq!(src.active_count(), 1);
         r.remove_client(3);
@@ -398,9 +407,21 @@ mod tests {
         let r = Registry::new(src.clone(), 10);
         r.add_client(1, Arc::new(Outbox::new(8, 8)));
         r.subscribe(1, &key("A"), Mode::Depth, 5).unwrap();
-        r.subscribe(1, &key("A"), Mode::Depth, 20).unwrap();
+        let moved = r.subscribe(1, &key("A"), Mode::Depth, 20).unwrap();
+        assert_eq!(moved.replacing(), Some(5));
+        let outcome = moved.answer().now_or_never().expect("answered at once");
+        r.settle_subscribe(1, &key("A"), Mode::Depth, 20, Some(5), &outcome);
         assert_eq!(src.active(), vec![(key("A"), Mode::Depth, 20)]);
-        assert_eq!(r.unsubscribe_all(1), vec![(key("A"), Mode::Depth)]);
+        let all = r.begin_unsubscribe_all(1);
+        assert_eq!(all.len(), 1);
+        for (k, mode, release) in all {
+            assert_eq!((&k, mode), (&key("A"), Mode::Depth));
+            let Release::Waiting { answer, ticket } = release else {
+                panic!("the last owner waits for the source")
+            };
+            let outcome = answer.now_or_never().expect("answered at once");
+            r.finish_unsubscribe(1, &k, mode, ticket, &outcome);
+        }
         assert_eq!(src.active_count(), 0);
     }
 

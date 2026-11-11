@@ -301,7 +301,7 @@ fn feed_url_frames_and_ticks() {
         "wss://socket.firstock.in/V2/ws?userId=AB1234&jKey=jk%2F1&source=developer-api"
     );
     assert!(f.on_connected().is_empty());
-    assert!(!f.awaits_auth_ack());
+    assert!(f.awaits_auth_ack());
     let frames = f.subscribe_frames(&[
         sub("SBIN", "NSE", "3045", FeedMode::Quote),
         sub("NIFTY27OCT26FUT", "NFO", "54321", FeedMode::Depth),
@@ -327,11 +327,10 @@ fn feed_url_frames_and_ticks() {
     let FeedEvent::Depth(d) = &ev[1] else {
         panic!()
     };
-    assert_eq!(
-        (d.buy[0].price, d.sell[0].quantity, d.sell[1].price),
-        (25079.9, 150, 0.0)
-    );
-    assert_eq!(d.buy.len(), 5);
+    assert_eq!((d.buy[0].price, d.sell[0].quantity), (25079.9, 150));
+    // The sentinel ask is dropped and no zero level is added: a side has
+    // the levels Firstock sent (lead rule 2026-11-09).
+    assert_eq!((d.buy.len(), d.sell.len()), (1, 1));
     assert!(matches!(
         f.parse_text(&resp("feed_failed").to_string())[0],
         FeedEvent::AuthFailed(_)
@@ -402,4 +401,169 @@ fn unsubscribe_retires_only_its_instrument_from_a_batch() {
     assert_eq!(f.cached(), 1);
     assert!(f.on_connected().is_empty());
     assert_eq!(f.cached(), 0);
+}
+
+/// Audit FB-01 (web `firstock_websocket.py::_on_message`, which queues every
+/// subscription until `{"status":"success"}`): the feed waits for Firstock's
+/// answer to the address's credentials, and that answer is what lets the
+/// subscriptions go; a refusal stops it.
+#[test]
+fn subscriptions_wait_for_firstocks_login_answer() {
+    use crate::brokers::common::streaming::BrokerFeed;
+    let mut f = FirstockFeed::new(WS_URL, "AB1234", "jk");
+    assert!(f.awaits_auth_ack());
+    assert_eq!(
+        f.parse_text(r#"{"status":"success","message":"Authentication successful"}"#),
+        vec![FeedEvent::AuthOk]
+    );
+    assert!(matches!(
+        f.parse_text(&resp("feed_failed").to_string())[..],
+        [FeedEvent::AuthFailed(_)]
+    ));
+}
+
+/// Audit FB-02 (web `firstock_adapter.py::_filter_depth_data` and
+/// `_update_market_snapshot`): a level whose price, quantity or orders is
+/// the "no value" sentinel, or with neither a price nor a quantity, is
+/// dropped before the side is stored, and a side with no valid level keeps
+/// the previous one. The audit's case: a valid bid of 100.00 x 10 (1 order),
+/// then a side of sentinels, keeps 100.00 x 10.
+#[test]
+fn an_invalid_depth_side_keeps_the_valid_book() {
+    use crate::brokers::common::streaming::BrokerFeed;
+    use crate::brokers::types::DepthLevel;
+    const S: u64 = super::streaming::SENTINEL;
+    let mut f = FirstockFeed::new(WS_URL, "AB1234", "jk");
+    f.subscribe_frames(&[sub("SBIN", "NSE", "3045", FeedMode::Depth)]);
+    let book = |ev: Vec<FeedEvent>| match ev.into_iter().nth(1) {
+        Some(FeedEvent::Depth(d)) => d,
+        other => panic!("no book: {other:?}"),
+    };
+    let side = |l: &[DepthLevel]| {
+        l.iter()
+            .map(|x| (x.price, x.quantity, x.orders))
+            .collect::<Vec<_>>()
+    };
+    let tick = |buy: Value, sell: Value| {
+        json!({"NSE:3045": {"i_last_traded_price": 10000, "best_buy": buy, "best_sell": sell}})
+            .to_string()
+    };
+    let valid = json!([{"price": 10000, "quantity": 10, "orders": 1}]);
+    let d = book(f.parse_text(&tick(valid.clone(), valid.clone())));
+    assert_eq!(side(&d.buy)[0], (100.0, 10, 1));
+
+    let sentinels = json!([
+        {"price": S, "quantity": S, "orders": S},
+        {"price": "9223372036854775808", "quantity": 5, "orders": 1}
+    ]);
+    let zeros = json!([{"price": 0, "quantity": 0, "orders": 0}]);
+    let d = book(f.parse_text(&tick(sentinels, zeros)));
+    assert_eq!(
+        side(&d.buy)[0],
+        (100.0, 10, 1),
+        "a side of sentinels keeps the bid"
+    );
+    assert_eq!(
+        side(&d.sell)[0],
+        (100.0, 10, 1),
+        "a side of zero levels keeps the ask"
+    );
+
+    let mixed = json!([
+        {"price": 10005, "quantity": 7, "orders": 2},
+        {"price": S, "quantity": 0, "orders": 0},
+        {"price": 9995, "quantity": 3, "orders": 1},
+        {"price": 9990, "quantity": S, "orders": 1}
+    ]);
+    let d = book(f.parse_text(&tick(mixed, valid)));
+    assert_eq!(
+        side(&d.buy),
+        vec![(100.05, 7, 2), (99.95, 3, 1)],
+        "invalid levels drop out instead of pushing valid ones down, and no zero level is added"
+    );
+}
+
+/// The trade time of a Firstock quote tick for RELIANCE.
+fn ltp_and_trade_time(f: &mut FirstockFeed, data: Value) -> (f64, i64) {
+    let events = f.parse_text(&json!({ "NSE:2885": data }).to_string());
+    match &events[..] {
+        [FeedEvent::Tick(t)] => (t.ltp, t.last_trade_time_ms),
+        other => panic!("no tick: {other:?}"),
+    }
+}
+
+/// Firstock's ticks are partial updates (docs/port/market-data-frames.md,
+/// "Partial-update feeds"): a new price without `i_last_trade_time` keeps
+/// the cached time, as on the web, until a tick brings its own (the "no
+/// value" sentinel is not one); a new connection starts afresh.
+#[test]
+fn a_partial_tick_keeps_the_trade_time_for_its_connection() {
+    use crate::brokers::common::streaming::BrokerFeed;
+    let mut f = FirstockFeed::new(WS_URL, "AB1234", "jk");
+    f.subscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Quote)]);
+    let first = json!({"i_last_traded_price": 129600, "i_last_trade_time": 1794302702});
+    assert_eq!(
+        ltp_and_trade_time(&mut f, first),
+        (1296.0, 1_794_302_702_000)
+    );
+    assert_eq!(
+        ltp_and_trade_time(&mut f, json!({"i_last_traded_price": 129700})),
+        (1297.0, 1_794_302_702_000),
+        "a new price without a time keeps the last one"
+    );
+    let sentinel = json!({
+        "i_last_traded_price": 129710,
+        "i_last_trade_time": super::streaming::SENTINEL
+    });
+    assert_eq!(
+        ltp_and_trade_time(&mut f, sentinel),
+        (1297.1, 1_794_302_702_000),
+        "the no-value sentinel is no new time"
+    );
+    let timed = json!({"i_last_traded_price": 129750, "i_last_trade_time": 1794302712});
+    assert_eq!(
+        ltp_and_trade_time(&mut f, timed),
+        (1297.5, 1_794_302_712_000)
+    );
+    f.on_connected();
+    assert_eq!(
+        ltp_and_trade_time(&mut f, json!({"i_last_traded_price": 129800})),
+        (1298.0, 0),
+        "a new connection starts afresh"
+    );
+}
+
+/// No trade time yet on this connection: `ltt` is left out, never a receipt
+/// time passed off as one (lead ruling, do-not-invent-data). A tick with a
+/// time brings it, a partial tick keeps it, a new connection starts without.
+#[test]
+fn ltt_waits_for_the_connections_first_trade_time() {
+    use crate::brokers::common::streaming::{BrokerFeed, NormalizedTick, QuoteField};
+    fn tick(f: &mut FirstockFeed, data: Value) -> NormalizedTick {
+        let events = f.parse_text(&json!({ "NSE:2885": data }).to_string());
+        match events.into_iter().next() {
+            Some(FeedEvent::Tick(t)) => t,
+            other => panic!("no tick: {other:?}"),
+        }
+    }
+    let left_out = |t: &NormalizedTick| t.absent.contains(QuoteField::LastTradeTime);
+    let mut f = FirstockFeed::new(WS_URL, "AB1234", "jk");
+    f.subscribe_frames(&[sub("RELIANCE", "NSE", "2885", FeedMode::Quote)]);
+
+    let t = tick(&mut f, json!({"i_last_traded_price": 129600}));
+    assert!(left_out(&t), "no time yet on this connection");
+    let zero = json!({"i_last_traded_price": 129650, "i_last_trade_time": 0});
+    assert!(left_out(&tick(&mut f, zero)), "a time of 0 is none");
+
+    let timed = json!({"i_last_traded_price": 129700, "i_last_trade_time": 1794302702});
+    let t = tick(&mut f, timed);
+    assert!(!left_out(&t));
+    assert_eq!(t.last_trade_time_ms, 1_794_302_702_000);
+    let t = tick(&mut f, json!({"i_last_traded_price": 129750}));
+    assert!(!left_out(&t), "a partial tick keeps it");
+    assert_eq!(t.last_trade_time_ms, 1_794_302_702_000);
+
+    f.on_connected();
+    let t = tick(&mut f, json!({"i_last_traded_price": 129800}));
+    assert!(left_out(&t), "a new connection starts without one");
 }

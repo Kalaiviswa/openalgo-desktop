@@ -1,0 +1,109 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "paytm",
+  "inputs_sha256": "ef045ac532c64f7c393583b4b1910070483e11fb15ac1fe5f7c9ca15b560be0d",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "paytm"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 5,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "paytm"
+            }
+          ],
+          "failed": [],
+          "broker": "paytm"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 3,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1500.05,
+            "ltt": 0,
+            "volume": 3456789,
+            "open": 1492.5,
+            "high": 1510.2,
+            "low": 1485.1,
+            "close": 1488.3,
+            "last_trade_quantity": 25,
+            "average_price": 1498.75,
+            "total_buy_quantity": 120000,
+            "total_sell_quantity": 98000,
+            "change_absolute": 11.75,
+            "change_percent": 0.79,
+            "52_week_high": 1608.95,
+            "52_week_low": 1201.5,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "paytm",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

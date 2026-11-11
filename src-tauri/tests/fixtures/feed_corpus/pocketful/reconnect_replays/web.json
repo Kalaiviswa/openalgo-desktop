@@ -1,0 +1,148 @@
+{
+  "generated_by": "scripts/feed_corpus/web_expected.py",
+  "web_sha": "a1b9e32506bce21403a8614dddeed0ab61fd519a",
+  "adapter": "pocketful",
+  "inputs_sha256": "9e2e483e16d3504a616146f33a70b8c8aff298710c852379d95379c3b5aa8429",
+  "instruments": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "token": "2885",
+      "brsymbol": "RELIANCE-EQ",
+      "brexchange": "NSE"
+    }
+  ],
+  "uncompared": [],
+  "replies": [
+    {
+      "line": 1,
+      "frames": [
+        {
+          "type": "subscribe",
+          "status": "success",
+          "subscriptions": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "status": "success",
+              "mode": "Quote",
+              "depth": 5,
+              "broker": "pocketful"
+            }
+          ],
+          "message": "Subscription processing complete",
+          "broker": "pocketful"
+        }
+      ],
+      "from_adapter": true
+    },
+    {
+      "line": 11,
+      "frames": [
+        {
+          "type": "unsubscribe",
+          "status": "success",
+          "message": "Unsubscription processing complete",
+          "successful": [
+            {
+              "symbol": "RELIANCE",
+              "exchange": "NSE",
+              "mode": "Quote",
+              "status": "success",
+              "broker": "pocketful"
+            }
+          ],
+          "failed": [],
+          "broker": "pocketful"
+        }
+      ],
+      "from_adapter": true
+    }
+  ],
+  "pushes": [
+    {
+      "line": 4,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1500.25,
+            "ltt": 1762656900,
+            "volume": 1234567,
+            "open": 1490.0,
+            "high": 1510.0,
+            "low": 1485.0,
+            "close": 1488.0,
+            "last_trade_quantity": 25,
+            "average_price": 1498.76,
+            "total_buy_quantity": 500000,
+            "total_sell_quantity": 600000,
+            "oi": 0,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "pocketful",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "line": 9,
+      "published": [
+        {
+          "kind": "market",
+          "topic": "NSE_RELIANCE_QUOTE",
+          "exchange": "NSE",
+          "symbol": "RELIANCE",
+          "mode": 2,
+          "data": {
+            "ltp": 1501.25,
+            "ltt": 1762657000,
+            "volume": 1240000,
+            "open": 1490.0,
+            "high": 1510.0,
+            "low": 1485.0,
+            "close": 1488.0,
+            "last_trade_quantity": 30,
+            "average_price": 1498.76,
+            "total_buy_quantity": 500000,
+            "total_sell_quantity": 600000,
+            "oi": 0,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "mode": 2,
+            "timestamp": "<receipt_ms>"
+          }
+        }
+      ],
+      "deliveries": [
+        {
+          "client": "a",
+          "publication": 0,
+          "mode": 2,
+          "topic_mode": 2,
+          "broker": "pocketful",
+          "serves": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}
